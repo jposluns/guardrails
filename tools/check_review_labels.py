@@ -3,6 +3,9 @@
 
   check_review_labels.py [--protected REF] [--head REV]   exit 0 clean (a NOTE line may precede the
                                                          PASS), 1 finding, 2 cannot evaluate
+  check_review_labels.py --write-baseline [--protected REF] [--head REV]
+                                                         print the proposed baseline (stdout) and its
+                                                         review listing (stderr); exit 1 when it grows
   check_review_labels.py --self-test                     fixture repositories, each row with its flip
   check_review_labels.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
@@ -15,7 +18,8 @@ file, staged or not) unless --head names a commit, in which case it is that comm
 already sits on the merge base, a line the change deletes, and a file the change only renames are not
 judged. An added line whose bytes are exactly those of a line the same diff deletes, in any file but an
 excluded one (whose deleted lines credit nothing), is a
-moved or reordered line and is not charged either: each deleted line credits one identical added line,
+moved or reordered line and is not charged either (a line deleted from a file whose baseline entry has
+its digest credits only that same file; see BASELINE): each deleted line credits one identical added line,
 so a line copied more times than it is deleted is charged for each extra copy, and an edited label line
 (any byte changed, its indentation included) is charged. Every other added line is searched for each
 label shape in .aiqt/review-labels.toml (a tracked TOML file: a test name numbered after a review cycle,
@@ -83,7 +87,8 @@ zip archive) is read as raw lines like any other and counted in the summary, so 
 uncompressed is caught, but compressed or encoded content (UTF-16 aside) is not readable and a shape
 that happens to appear in its bytes is a false positive; the excluded paths above are not judged at
 all; a moved line is credited by exact bytes, so deleting a label line from any judged file lets the
-same line be added once anywhere else; an untracked file is not judged; a label outside the configured
+same line be added once anywhere else (in that same file only, when the baseline has an entry for the
+line there); an untracked file is not judged; a label outside the configured
 shapes is not matched, among them a look-alike letter outside the CONFUSABLES table, punctuation the
 shapes do not allow, a parenthesised tag with nothing after its number or with a comma after it, a
 lower-case backlog id, a number written as a word, a cycle tag written after the word review (an
@@ -108,6 +113,179 @@ updated) puts the merge base further back, so lines the upstream main added sinc
 based on the newer main holds, are charged to it, a false positive that updating that main or the same
 --protected settles. Commit
 messages and pull request text are outside this gate.
+
+BASELINE (shrink-only). .aiqt/review-label-baseline.toml grandfathers imported finding lines; it adds an
+exemption source and replaces nothing, and an absent file is the empty baseline, which behaves exactly
+as the gate did without one. A grandfathered line is not the only line it lets pass: the partition below
+counts the lines its file holds, so the moved-line credit is pinned to keep one deleted line from
+counting twice. Its closed schema is byte-exact to its own canonical render: the fixed
+header, format-version = 1, source-commit (a full lower-case commit id) and one [[entry]] table per key
+with path, line-sha256, shape and count, sorted by (path, line-sha256, shape), no duplicate, no comment,
+LF line ends. A path must be normalized (the exclude-paths rules), printable ASCII without a quote or
+backslash, and neither an excluded file nor the baseline itself; a shape must be a shape id of the
+configuration; a count is an integer of at least 1. The digest is sha256 of the exact bytes the gate
+judges: the line after the diff sigil in git's clean form, its LF excluded, a CR and any NUL byte kept,
+never a folded or decoded view. It is read from the working tree (lstat a regular file, opened without
+blocking or following a link, at most MAX_BASELINE_BYTES) or, with --head, from that commit's blob (mode
+100644 or 100755), and the merge base's copy from the merge-base commit. A present file that is
+malformed, non-canonical, not a regular file, oversized or not UTF-8 is cannot-evaluate at either
+revision. The merge base's copy is checked for structure only: its shapes and paths are not held to the
+candidate's configuration, so a change that retires a shape or excludes a baselined path while dropping
+those entries is judged (RELEASED), not refused; the candidate's copy is held to that configuration.
+PINNED MOVE CREDIT: a line deleted from a file for which the candidate baseline has an entry with that
+line's digest (under any shape) credits only an identical line added to that same file, never one in
+another file, and an added line takes such a same-file credit before an unpinned one; every other
+deleted line credits as described above. Without the pin one deletion counts twice: as the move credit
+for a copy added elsewhere, and as room under the entry (m(k) falls by one) for a copy added again in its
+own file, so an extra copy of a baselined line passes. With it, a deleted baselined line either credits
+a copy added to its own file (m(k) unchanged) or is left unspent, which happens only when every
+identical line added to its file was credited, so no charged copy can use the room it leaves. Dropping
+the entry in the same change unpins the line, so a baselined line moved to another file with its entry
+dropped is still a credited move. After the moved-line credit and the allow-marker, for each key m(k) is
+the number of finding lines with that digest and shape in the candidate file (one diff from the empty
+tree with the gate's own diff options and parser, so core.autocrlf and filters give the same clean
+bytes) and n(k) the candidate entry's count:
+  - STALE: m(k) < n(k) is a finding (exit 1) for every entry, changed path or not;
+  - GROWTH: a candidate count above the merge base's count for the same key (0 when absent there) is a
+    finding (exit 1), key by key and never netted across keys; the header and source-commit are outside
+    the comparison, deleting the file or lowering a count is a shrink (RELEASED), and a nonempty file
+    where the merge base has none is growth;
+  - PARTITION: of the a(k) added findings with key k, min(a(k), max(0, m(k) - n(k))) are charged, the
+    last ones in diff order, and the rest are grandfathered (a NOTE line each); a line matching two
+    shapes is charged for each shape that has no entry;
+  - SOURCE COMMIT: only when the candidate baseline bytes differ from the merge base's, it must be the
+    candidate commit or an ancestor of it, else cannot-evaluate, the message naming the --write-baseline
+    run that records the candidate; an unchanged baseline is not checked, so a squash merge that drops
+    it from history blocks no later change.
+The review listing prints a BASELINE header, then for each growing key GROWTH path:line: shape
+(description): excerpt [digest count old to new] once per current occurrence, or, when the candidate
+file holds no finding line with that key (an entry written for a line that is not there, also STALE),
+one GROWTH path: shape [digest count old to new], no such line in the file, with no line number,
+description or excerpt; then STALE and RELEASED lines; a digest is never shown alone. In every listing
+line (the gate's FAIL, PASS, GROWTH, STALE, RELEASED and NOTE lines, the protected ref in the summary and
+the NOTE line included, and --write-baseline's) and every CANNOT EVALUATE message (git's stderr and a
+path decoded from the diff included) each byte below 0x20 (a tab and a carriage return included) and
+DEL is printed as \\xNN and every non-ASCII character as its backslash escape, so a terminal control
+sequence in a line cannot hide the path or the label the maintainer authorizes from.
+--write-baseline reads committed objects only (B..C, C's blobs and C's tree; the configuration, like the
+gate's, from the working tree) and proposes the fixed point of the pinned move credit, not C's own pins,
+judged on the candidate as it is with that proposal committed. One evaluation of a candidate runs passes.
+A pass starts from no pinned line; each round credits moves with the lines the proposal so far has
+entries for, then adds to the proposal each key with a finding on a charged line the diff adds (none for
+a line of the baseline file itself, which no entry can name), at its count in C, and every carried entry,
+at the least of its count, its count in C and its count at the merge base (zeros dropped, so a carried
+entry is never stale and never growth); a round only adds a key or raises a count, and the pass ends
+when a round adds nothing. The first pass carries the candidate's baseline; each later pass carries the
+proposal of the pass before it, and the passes stop when one proposes the same entries as the pass
+before it. The first evaluation reads B..C. Committing a proposal replaces the baseline file, which
+changes the lines the diff deletes and adds there and so the move credits left, so each later
+evaluation reads B..C', the diff from the merge base to C' (C's tree with the last proposal's canonical
+render as its baseline file, built in a temporary object store outside the repository's worktrees and
+git directories, removed when the writer returns or raises (a killed process leaves it, R17); each
+object's id is computed without writing and the object is written into the store only when neither the
+store nor the repository holds it, so no object file of the repository is written or has its
+modification time refreshed; a checkout whose object directory path holds ':', which git splits
+alternates on, is cannot-evaluate before anything is created; the store's parent is the first of
+TMPDIR, TEMP, TMP, the platform defaults and the current directory, in tempfile's order, that is a
+writable directory, tested by creating the store in it, never by tempfile's probe file; each
+candidate's real path is checked against every worktree of the repository (git worktree list) and the
+git directory, whose paths git prints read as the filesystem's bytes, before anything is created under
+it, and one inside them is cannot-evaluate; real paths only, R18), carrying that proposal as
+a writer run on it committed would; the writer stops when an evaluation of C' proposes the entries
+substituted in it. For K candidate keys of an evaluation (the keys
+of the findings on the lines its diff adds and of its candidate baseline) a pass runs at most 2K+1 rounds
+and an evaluation at most K+2 passes (writer_round_bound and writer_pass_bound give the reasoning), and
+the writer runs at most K+2 evaluations of C' for the K of its first evaluation (writer_settle_bound), a
+cap rather than a proof that every layout settles, since a substitution can add a key or drop one; when
+it also evaluates from an empty starting proposal (below), that start adds one evaluation (B..C' with
+the empty render substituted) and at most K_e+2 evaluations of C' for the K_e of that evaluation, so a
+writer run makes at most K+K_e+6 evaluations in all, the first included. A pass or the passes still
+changing at their bound is cannot-evaluate naming that bound. When the evaluations of C' are still
+changing at theirs (a layout whose proposals can swap between two sets of entries for good), the writer
+evaluates from an empty starting proposal as on R8 below and proposes that start's settled proposal
+when the gate's predicate accepts it; else it is cannot-evaluate naming that bound, why the empty
+start does not pass, and only the way out that applies, then to run the writer on that commit:
+removing the stale entries the gate reports in the candidate's baseline, when there are any, and the
+way out of the empty start's own R8 refusal, when it has one; else it names none.
+The settled proposal is then judged by the gate's own predicate (baseline_verdict, the function
+the gate calls) with its entries as the candidate baseline, on the B..C' diff it settled on, where the
+proposal's render is the baseline file: its lines are judged with the move credit C' leaves (not at all
+when the configuration excludes that file, as the gate then judges none of them), and a charged finding
+or a stale entry is cannot-evaluate. When the charged line is the baseline file's own (R8), the
+writer first evaluates from an empty starting proposal as well, as a writer run on a commit of an empty
+baseline would (the first evaluation reads B..C' with the empty render substituted and carries
+nothing, then the evaluations of C' as above), and proposes that start's settled proposal when the
+gate's predicate accepts it, so a layout where a moved line's move credit alternates between the
+proposal's own line and the file's copy is not refused while an empty baseline passes; else the
+refusal names R8, the entry, why the empty start does not pass, and the way out built from the empty
+start's own refusal, as that start is what a writer run on a commit of an empty baseline would refuse:
+every file whose entry puts a charged line into the baseline file on that start, each once, with
+renaming that file to a path no shape matches when its path line is charged, or removing from it
+every finding line that needs an entry there, each listed; none for a header line, or when the empty
+start is not refused as R8. C' is the tree of a commit of the
+printed bytes on top of C with nothing else changed, so a
+proposal is printed only when, committed so, it leaves the gate's predicate only the growth it lists,
+and a writer run on that commit proposes the same entries in its first evaluation, which reads that same
+tree (R16). A ROUND TRIP line on stderr says so, with the most passes and rounds an evaluation ran, the
+most candidate keys and the bounds they give, and the evaluations of C' against their bound. The
+proposal is not guaranteed minimal: a key a round adds stays even when the final pins no longer need
+it, so a smaller baseline that passes can exist and the GROWTH listing then asks for more than the
+change needs (R15). Its canonical render with source-commit = C goes to stdout only when it is at most
+MAX_BASELINE_BYTES (the gate's own read limit), else cannot-evaluate with nothing printed; no file is
+written in the repository. BOOTSTRAP: commit
+the import at C, run python3 -I -B tools/check_review_labels.py --write-baseline --head C, redirect its
+stdout into the baseline and commit it; the gate then fails on the pull request with GROWTH lines, which
+are the review artefact, and the maintainer records an authorization naming the baseline's sha256 and
+entry count before the change merges by the recorded override path; later changes pass. A second commit
+on the same branch does not move the merge base, so no step inside a branch can authorize growth.
+
+BASELINE RESIDUALS, disclosed rather than closed: (R1) identical lines within one key are
+interchangeable, so one copy can be deleted and another added in the same file; (R2) a missing final LF
+is not distinguished; (R3) a pure rename of a file with entries adds no line, so nothing is charged but
+the old path's entries are stale; --write-baseline drops them (RELEASED) and the gate then passes, the
+allowance lost, while writing the allowance under the new path is growth and needs authorization; a
+path that is not printable ASCII (or holds a quote or backslash) cannot be baselined; (R4)
+source-commit is provenance, checked only for ancestry when the file changes, so a hand-edited canonical
+file that does not grow passes; (R5) growth authorization depends on an override mechanism outside the
+repository, which this gate does not name or check; (R6) exclude-paths can still be widened inside a
+change; (R7) a working-tree baseline with CRLF line ends is non-canonical, so cannot-evaluate; (R8) the
+baseline file is judged like any other, so an entry whose path matches a shape is charged there, unless
+a line the change deletes credits that line as a move, and such a file cannot be grandfathered;
+--write-baseline judges its proposal's render as the baseline file on B..C' and refuses such a proposal
+(exit 2, nothing printed) unless the settled proposal of an empty starting proposal passes, which it
+then proposes (as it does for evaluations of C' still changing at their bound); (R9) digests are not secret: a known label line can be hashed and matched;
+(R10) editing a shape's regex can make entries stale, forcing a baseline shrink in the same
+change; (R11) the gate's trust in origin/main carries over to the merge-base baseline; (R12) a malformed
+baseline on main is cannot-evaluate for every branch based on it; (R13) the cost of the extra diff is
+unmeasured; (R14) the pinned move credit makes a baselined line moved to another file with its entry
+kept a charged line there as well as a stale entry, until the entry is dropped in the same change;
+--write-baseline drops it once its file holds no copy of the line, but carries it while the file still
+holds copies, so a move of some of a file's copies to another file is proposed as growth there; (R15)
+the writer's proposal is not guaranteed minimal (see --write-baseline above), and a chain of moves can
+turn one new copy into one GROWTH key per file in the chain: when N files each move an unbaselined
+identical line within themselves and one new copy is added in diff order before them, every pin moves
+the charge to the previous file, so the proposal has N+1 keys for one added line; (R16) the
+source-commit line names the commit the writer ran on, so a writer run on the committed proposal
+proposes the same entries in its first evaluation by construction, then checks them on its own C', which
+differs from that commit only in the commit id of that line; the predicate reads that line like any
+other, so a configured shape matching it under one id and not the other, or git's rename detection
+pairing a baseline file new since the merge base with a file the change deletes across a similarity
+threshold the id change moves, could make that run propose other entries or refuse. No shipped shape
+matches a source-commit line (its id is lower-case hex), and a move credit for it would need the merge
+base to hold a line naming a commit that descends from the merge base; (R17) --write-baseline removes
+its temporary object store when it returns or raises, but a process killed while the store exists
+(SIGKILL, or a signal such as SIGTERM that Python does not turn into an exception) leaves that
+review-label-writer-* directory in the temporary directory, outside the repository, for the caller to
+delete; no later run reads it; (R18) the store's containment check compares real paths
+(os.path.realpath) only: a temporary directory that reaches the repository through a bind mount has
+another real path and is accepted, a path component swapped between the check and the store's
+creation is not detected, when the writer runs in a submodule the superproject's worktree is not
+checked, and on a case-insensitive filesystem (the macOS default) a TMPDIR inside the repository
+spelled with other letter case is not detected, as os.path.realpath does not fold case there (inferred
+from the code, not run); a temporary directory whose real path cannot be compared with the
+repository's (on Windows, another drive) is cannot-evaluate, and when the repository's own areas lie
+on different drives (a linked worktree on one drive, its git directory on another) no temporary
+directory can be compared with all of them, so the writer cannot run there and says so.
 """
 import sys
 
@@ -124,6 +302,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import contextlib
+import hashlib
 import io
 import os
 import re
@@ -195,7 +374,30 @@ Config = namedtuple("Config", ("marker", "shapes", "excluded"))
 # credit compares.
 Added = namedtuple("Added", ("path", "number", "text", "kind", "raw"))
 Diff = namedtuple("Diff", ("added", "deleted", "nul_paths"))
-Finding = namedtuple("Finding", ("path", "number", "shape", "description", "text"))
+# raw is the added line's exact bytes, whose sha256 keys the finding in the baseline.
+Finding = namedtuple("Finding", ("path", "number", "shape", "description", "text", "raw"))
+
+# The shrink-only finding baseline (see the docstring's BASELINE section).
+BASELINE_RELPATH = ".aiqt/review-label-baseline.toml"
+MAX_BASELINE_BYTES = 1048576
+BASELINE_KEYS = frozenset(("format-version", "source-commit", "entry"))
+BASELINE_ENTRY_KEYS = frozenset(("path", "line-sha256", "shape", "count"))
+DIGEST_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+COMMIT_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}", re.ASCII)
+BASELINE_HEADER = (
+    "# The shrink-only finding baseline of tools/check_review_labels.py: each entry grandfathers up to count",
+    "# added lines of the named file whose exact bytes have that sha256 and match that shape. Print it with",
+    "# python3 -I -B tools/check_review_labels.py --write-baseline --head COMMIT; never edit it by hand.",
+)
+Baseline = namedtuple("Baseline", ("source", "entries", "data"))
+# One finding line of the candidate file a baseline key names: the m(k) the gate counts.
+Occurrence = namedtuple("Occurrence", ("path", "number", "shape", "description", "text"))
+# growth: (key, old count, new count, occurrences); stale: (key, count, found); released: (key, old, new).
+Ledger = namedtuple("Ledger", ("header", "growth", "stale", "released", "grandfathered"))
+# The gate's predicate on a candidate baseline (baseline_verdict): the added lines the move credit leaves
+# and the number it credits, the findings on those lines, their partition, and the growing and stale keys.
+Verdict = namedtuple("Verdict", ("lines", "moved", "findings", "charged", "grandfathered", "growth", "stale"))
+Evaluation = namedtuple("Evaluation", ("findings", "summary", "marker", "note", "ledger"))
 
 
 class CannotEvaluate(Exception):
@@ -330,12 +532,18 @@ def _git_env():
 
 
 def _git(root, *args):
+    return _run_git(root, _git_env(), None, *args)
+
+
+def _run_git(root, env, data, *args):
+    """git with `args` in `root` under `env`, `data` on its stdin (none when it is None)."""
     try:
         # The auto-maintenance pins ride the argv in option position, so no read here can start a
         # detached gc or maintenance child that outlives the gate.
         return subprocess.run([GIT, "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
                                "-c", "maintenance.auto=false", *args], capture_output=True,
-                              timeout=TIMEOUT, env=_git_env(), stdin=subprocess.DEVNULL)
+                              timeout=TIMEOUT, env=env, input=data,
+                              stdin=subprocess.DEVNULL if data is None else None)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("git {} could not run ({})".format(args[0], exc)) from None
 
@@ -439,7 +647,7 @@ def _position_note(ref, protected_sha, base, head_sha, head, added):
     judged = ("the commit --head names is judged on no line" if head is not None
               else "only the working tree's uncommitted edits are judged, against {}".format(base[:12]))
     return "the candidate {} is {} {}, so it has no committed line of its own and {}{}".format(
-        head_sha[:12], where, ref, judged,
+        head_sha[:12], where, _shown_ref(ref), judged,
         "; no line is added, so there is nothing to judge" if head is None and not added else "")
 
 
@@ -571,6 +779,12 @@ def _excluded(path, excluded):
     return path in excluded
 
 
+def _judged_lines(added, config):
+    """The added lines that are judged: every one outside the excluded files. The gate and the writer
+    (on every tree it evaluates, the baseline file's own lines included) share this filter."""
+    return [line for line in added if not _excluded(line.path, config.excluded)]
+
+
 def _credits(deleted, excluded):
     """The moved-line credits: a Counter of the exact bytes of every deleted line outside the excluded
     files, so a line deleted from an excluded file cannot credit the same line added elsewhere."""
@@ -581,14 +795,45 @@ def _credits(deleted, excluded):
     return credits
 
 
+def _pinned_lines(baseline):
+    """The (path, line-sha256) pairs the candidate baseline has an entry for, under any shape: a line
+    deleted from such a file with such a digest is a pinned credit (see _move_credits)."""
+    if baseline is None:
+        return frozenset()
+    return frozenset((path, digest) for path, digest, _shape in baseline.entries)
+
+
+def _move_credits(deleted, excluded, pinned):
+    """The moved-line credits with the baseline's pin applied. A deleted line whose (path, digest) the
+    candidate baseline has an entry for credits only an added line of exactly the same bytes in that same
+    file (a Counter key (path, bytes)); every other deleted line outside the excluded files credits one
+    in any file (a key of the bytes alone, from _credits). The partition counts a baselined file's
+    deleted line as room under its entry, so the pin keeps one deletion from being spent twice: once as
+    a move credit for a copy in another file and again as room for a copy in its own file."""
+    free = Counter({key: count for key, count in deleted.items()
+                    if (key[0], _line_digest(key[1])) not in pinned})
+    credits = _credits(free, excluded)
+    for (path, raw), count in deleted.items():
+        if (path, _line_digest(raw)) in pinned and not _excluded(path, excluded):
+            credits[(path, raw)] += count
+    return credits
+
+
 def credit_moves(added, deleted):
     """(charged, moved): the added lines left after each deleted line credits one added line of exactly
-    the same bytes, in diff order, and the number credited (a moved or reordered line)."""
+    the same bytes, in diff order, and the number credited (a moved or reordered line). A credit keyed
+    (path, bytes) is pinned to that file and is taken before an unpinned credit of the same bytes, so a
+    pinned credit is never left unspent while an identical line added to its file is charged."""
     left, charged, moved = Counter(deleted), [], 0
     for line in added:
-        if line.kind == "+" and left[line.raw] > 0:
-            left[line.raw] -= 1
-            moved += 1
+        if line.kind == "+":
+            for key in ((line.path, line.raw), line.raw):
+                if left[key] > 0:
+                    left[key] -= 1
+                    moved += 1
+                    break
+            else:
+                charged.append(line)
             continue
         charged.append(line)
     return charged, moved
@@ -625,18 +870,1016 @@ def _unmarked_views(line, marker):
     return tuple(view for view in _line_views(line) if not _allowed(view, marker))
 
 
+def _shapes_of(line, config):
+    """The shapes an added line is a finding for: each shape some unmarked view of it matches."""
+    views = _unmarked_views(line, config.marker)
+    return [shape for shape in config.shapes if any(shape.pattern.search(view) for view in views)]
+
+
 def judge(added, config):
     findings = []
     for line in added:
-        views = _unmarked_views(line, config.marker)
-        for shape in config.shapes:
-            if any(shape.pattern.search(view) for view in views):
-                findings.append(Finding(line.path, line.number, shape.id, shape.description, line.text))
+        for shape in _shapes_of(line, config):
+            findings.append(Finding(line.path, line.number, shape.id, shape.description, line.text, line.raw))
     return findings
 
 
+# --- baseline ----------------------------------------------------------------------------------------
+def _line_digest(raw):
+    """The baseline digest of a line: sha256 of the exact bytes the gate judges (the line after the diff
+    sigil in git's clean form, its LF excluded, a CR and any NUL byte kept), never a decoded view."""
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _finding_key(item):
+    return (item.path, _line_digest(item.raw), item.shape)
+
+
+def _baseline_path_ok(path):
+    """Whether a path can be written in the baseline: printable ASCII with no quote or backslash."""
+    return all(0x20 <= ord(ch) <= 0x7E and ch not in "\"\\" for ch in path)
+
+
+def render_baseline(source, entries):
+    """The canonical bytes of a baseline: the fixed header, the version, the source commit and one
+    [[entry]] table per key, sorted by (path, line-sha256, shape)."""
+    lines = list(BASELINE_HEADER) + ["format-version = 1", "source-commit = \"{}\"".format(source)]
+    for key in sorted(entries):
+        path, digest, shape = key
+        lines += ["", "[[entry]]", "path = \"{}\"".format(path), "line-sha256 = \"{}\"".format(digest),
+                  "shape = \"{}\"".format(shape), "count = {}".format(entries[key])]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def parse_baseline(data, where, config):
+    """The Baseline held in the bytes `data`; CannotEvaluate on anything off its closed schema or not
+    byte-exact to its own canonical render. With `config` None (the merge base's copy) the checks that
+    read a configuration (a shape id of it, a path it excludes) are skipped: structure only."""
+    if len(data) > MAX_BASELINE_BYTES:
+        raise CannotEvaluate("{} is larger than {} bytes".format(where, MAX_BASELINE_BYTES))
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("{} is not UTF-8 ({})".format(where, exc)) from None
+    try:
+        doc = tomllib.loads(text)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} cannot be parsed as TOML ({!r})".format(where, exc)) from None
+    unknown = sorted(set(doc) - BASELINE_KEYS)
+    if unknown:
+        raise CannotEvaluate("{}: unknown key(s) {}".format(where, ", ".join(unknown)))
+    version = doc.get("format-version")
+    if type(version) is not int or version != 1:
+        raise CannotEvaluate("{}: format-version must be the integer 1".format(where))
+    source = doc.get("source-commit")
+    if not isinstance(source, str) or not COMMIT_RE.fullmatch(source):
+        raise CannotEvaluate("{}: source-commit must be a full lower-case commit id".format(where))
+    rows = doc.get("entry", [])
+    if not isinstance(rows, list):
+        raise CannotEvaluate("{}: entry must be an array of [[entry]] tables".format(where))
+    shape_ids = None if config is None else {shape.id for shape in config.shapes}
+    excluded = frozenset() if config is None else config.excluded
+    entries = {}
+    for index, row in enumerate(rows, 1):
+        label = "{}: entry {}".format(where, index)
+        if not isinstance(row, dict):
+            raise CannotEvaluate("{} is not a table".format(label))
+        if set(row) != BASELINE_ENTRY_KEYS:
+            raise CannotEvaluate("{}: unknown key(s) {} and missing key(s) {}".format(
+                label, sorted(set(row) - BASELINE_ENTRY_KEYS) or "none",
+                sorted(BASELINE_ENTRY_KEYS - set(row)) or "none"))
+        path, digest, shape, count = row["path"], row["line-sha256"], row["shape"], row["count"]
+        if not isinstance(path, str) or not _baseline_path_ok(path):
+            raise CannotEvaluate("{}: path must be printable ASCII with no quote or backslash".format(label))
+        _parse_excluded([path], label)
+        if path in excluded or path == BASELINE_RELPATH:
+            raise CannotEvaluate("{}: path {!r} names an excluded file or the baseline itself".format(
+                label, path))
+        if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+            raise CannotEvaluate("{}: line-sha256 must be 64 lower-case hex digits".format(label))
+        if not isinstance(shape, str) or not SHAPE_ID_RE.fullmatch(shape):
+            raise CannotEvaluate("{}: shape {!r} is not a shape id".format(label, shape))
+        if shape_ids is not None and shape not in shape_ids:
+            raise CannotEvaluate("{}: shape {!r} names no shape of the configuration".format(label, shape))
+        if type(count) is not int or count < 1:
+            raise CannotEvaluate("{}: count must be an integer of at least 1".format(label))
+        if (path, digest, shape) in entries:
+            raise CannotEvaluate("{}: duplicate entry for {} {} {}".format(label, path, digest[:12], shape))
+        entries[(path, digest, shape)] = count
+    if render_baseline(source, entries) != data:
+        raise CannotEvaluate("{} is not the canonical render of its own entries (the fixed header, no "
+                             "comment, entries sorted by path, line-sha256 and shape, LF line ends); "
+                             "print it with --write-baseline".format(where))
+    return Baseline(source, entries, data)
+
+
+def _absent_baseline(where):
+    """An absent baseline file is the empty baseline."""
+    return None
+
+
+def _nofollow_opener(path, flags):
+    return os.open(path, flags | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+
+
+def _read_worktree_baseline(root, config):
+    path = Path(root) / BASELINE_RELPATH
+    where = "{} in the working tree".format(BASELINE_RELPATH)
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return _absent_baseline(where)
+    except OSError as exc:
+        raise CannotEvaluate("{} cannot be read ({})".format(where, exc)) from None
+    if not stat.S_ISREG(mode):
+        raise CannotEvaluate("{} is not a regular file (a symlink, a directory or a FIFO, say)".format(where))
+    try:
+        with open(path, "rb", opener=_nofollow_opener) as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise CannotEvaluate("{} is not a regular file".format(where))
+            data = handle.read(MAX_BASELINE_BYTES + 1)
+    except OSError as exc:
+        raise CannotEvaluate("{} cannot be read ({})".format(where, exc)) from None
+    return parse_baseline(data, where, config)
+
+
+def _read_committed_baseline(root, revision, config):
+    where = "{} at {}".format(BASELINE_RELPATH, revision[:12])
+    proc = _git(root, "ls-tree", "-z", "--full-tree", revision, "--", BASELINE_RELPATH)
+    if proc.returncode != 0:
+        raise CannotEvaluate("{}: git ls-tree exited {} ({})".format(where, proc.returncode, _stderr(proc)))
+    records = [record for record in proc.stdout.split(b"\x00") if record]
+    if not records:
+        return _absent_baseline(where)
+    meta, _tab, name = records[0].partition(b"\t")
+    parts = meta.split(b" ")
+    if len(records) != 1 or name != BASELINE_RELPATH.encode("ascii") or len(parts) != 3:
+        raise CannotEvaluate("{}: unexpected git ls-tree output {!r}".format(where, proc.stdout[:120]))
+    mode, kind, oid = parts
+    if kind != b"blob" or mode not in (b"100644", b"100755"):
+        raise CannotEvaluate("{} is not a regular file (mode {}, {})".format(
+            where, mode.decode("ascii", "replace"), kind.decode("ascii", "replace")))
+    size = _git_lines(root, "{}: its size cannot be read".format(where), "cat-file", "-s",
+                      oid.decode("ascii", "replace"))
+    if len(size) != 1 or not size[0].isdigit():
+        raise CannotEvaluate("{}: git cat-file -s printed {!r}".format(where, size))
+    if int(size[0]) > MAX_BASELINE_BYTES:
+        raise CannotEvaluate("{} is larger than {} bytes".format(where, MAX_BASELINE_BYTES))
+    proc = _git(root, "cat-file", "blob", oid.decode("ascii", "replace"))
+    if proc.returncode != 0:
+        raise CannotEvaluate("{}: git cat-file exited {} ({})".format(where, proc.returncode, _stderr(proc)))
+    return parse_baseline(proc.stdout, where, config)
+
+
+def read_baseline(root, revision, config):
+    """The Baseline at the commit `revision`, or in the working tree when it is None; None when absent."""
+    if revision is None:
+        return _read_worktree_baseline(root, config)
+    return _read_committed_baseline(root, revision, config)
+
+
+def _empty_tree(root):
+    lines = _git_lines(root, "the empty tree id cannot be computed", "hash-object", "-t", "tree", "--stdin")
+    if len(lines) != 1:
+        raise CannotEvaluate("git hash-object printed {!r} for the empty tree".format(lines))
+    return lines[0]
+
+
+def _occurrence_revision(base, head_sha, head):
+    """The revision m(k) is counted at: the candidate (the working tree when --head is not given)."""
+    return None if head is None else head_sha
+
+
+def occurrences(root, revision, paths, config):
+    """{key: [Occurrence]}: every finding line of the candidate files `paths`, at the commit `revision` or
+    in the working tree when it is None, read as one diff from the empty tree with the gate's own diff
+    options and parser, so the bytes counted are the clean-form bytes judged."""
+    found = {}
+    if not paths:
+        return found
+    args = ["-c", "core.quotePath=true", "diff", *DIFF_OPTIONS, _empty_tree(root)]
+    if revision is not None:
+        args.append(revision)
+    proc = _git(root, *args, "--", *(":(literal)" + path for path in sorted(paths)))
+    _require_diff_ok(proc)
+    for line in added_lines(proc.stdout).added:
+        for shape in _shapes_of(line, config):
+            found.setdefault((line.path, _line_digest(line.raw), shape.id), []).append(
+                Occurrence(line.path, line.number, shape.id, shape.description, line.text))
+    return found
+
+
+def _occurrence_count(items):
+    return len(items)
+
+
+def baseline_growth(candidate, prior):
+    """The keys whose candidate count exceeds their merge-base count (0 when absent there), key by key:
+    no sum is ever taken across keys."""
+    return sorted(key for key, count in candidate.items() if count > prior.get(key, 0))
+
+
+def stale_entries(entries, counts, findings):
+    """The keys whose candidate file holds fewer finding lines with that digest than the entry's count.
+    `findings` is unused here; a flip reads it."""
+    return sorted(key for key, count in entries.items() if counts.get(key, 0) < count)
+
+
+def partition(findings, entries, counts):
+    """(charged, grandfathered): for each key, min(a, max(0, m - n)) of its a added findings are charged,
+    the last ones in diff order, and the rest are grandfathered; a key with no entry is charged whole."""
+    by_key = {}
+    for item in findings:
+        by_key.setdefault(_finding_key(item), []).append(item)
+    exempt = set()
+    for key, items in by_key.items():
+        granted = entries.get(key, 0)
+        if not granted:
+            continue
+        charged = min(len(items), max(0, counts.get(key, 0) - granted))
+        exempt.update(id(item) for item in items[:len(items) - charged])
+    return ([item for item in findings if id(item) not in exempt],
+            [item for item in findings if id(item) in exempt])
+
+
+def _baseline_changed(candidate, prior):
+    return (None if candidate is None else candidate.data) != (None if prior is None else prior.data)
+
+
+def _require_source_ancestor(root, source, head_sha):
+    """CannotEvaluate unless the baseline's source commit is the candidate commit or an ancestor of it."""
+    rewrite = ("; print the baseline again with python3 -I -B tools/check_review_labels.py --write-baseline "
+               "--head {}, which records the candidate as its source-commit".format(head_sha[:12]))
+    proc = _git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", source + "^{commit}")
+    if proc.returncode != 0:
+        raise CannotEvaluate("{} names source-commit {} that is not a commit here{}".format(
+            BASELINE_RELPATH, source[:12], rewrite))
+    proc = _git(root, "merge-base", "--is-ancestor", source, head_sha)
+    if proc.returncode == 1:
+        raise CannotEvaluate("{} names source-commit {} that is not an ancestor of the candidate {}{}".format(
+            BASELINE_RELPATH, source[:12], head_sha[:12], rewrite))
+    if proc.returncode != 0:
+        raise CannotEvaluate("git merge-base --is-ancestor exited {} ({})".format(
+            proc.returncode, _stderr(proc)))
+
+
+def _merge_base_config(config):
+    """The configuration the merge base's baseline is checked against: none, so it is checked for
+    structure only (schema, canonical render, paths, digests, counts). Its shapes and paths are not held
+    to the candidate's configuration, so a change that retires a shape or excludes a baselined path
+    while dropping those entries is judged rather than refused."""
+    return None
+
+
+def baseline_verdict(judged, deleted, config, entries, before, counts):
+    """The gate's predicate on the candidate baseline entries `entries` (the docstring's PINNED MOVE
+    CREDIT and BASELINE steps), as a Verdict: the move credit pinned by those entries, the findings on the
+    added lines it leaves, their partition, and the keys that grow against `before` (the merge base's
+    entries) or are stale against `counts` (m(k)). The gate judges a candidate with this function and
+    --write-baseline checks its proposal with it, so there is one copy of the predicate, not two."""
+    lines, moved = credit_moves(judged, _move_credits(deleted, config.excluded,
+                                                      _pinned_lines(Baseline(None, entries, None))))
+    findings = judge(lines, config)
+    charged, grandfathered = partition(findings, entries, counts)
+    return Verdict(lines, moved, findings, charged, grandfathered, baseline_growth(entries, before),
+                   stale_entries(entries, counts, findings))
+
+
+def apply_baseline(root, config, base, head_sha, head, judged, deleted, candidate):
+    """(Verdict, Ledger): the moved-line credit and the baseline steps of the gate (the docstring's
+    BASELINE section) on the judged added lines and the deleted lines of the diff, given the candidate's
+    baseline as read."""
+    prior = read_baseline(root, base, _merge_base_config(config))
+    changed = _baseline_changed(candidate, prior)
+    if candidate is not None and changed:
+        _require_source_ancestor(root, candidate.source, head_sha)
+    entries = {} if candidate is None else candidate.entries
+    before = {} if prior is None else prior.entries
+    found = occurrences(root, _occurrence_revision(base, head_sha, head), {key[0] for key in entries}, config)
+    counts = {key: _occurrence_count(items) for key, items in found.items()}
+    verdict = baseline_verdict(judged, deleted, config, entries, before, counts)
+    growth = [(key, before.get(key, 0), entries[key], found.get(key, [])) for key in verdict.growth]
+    stale = [(key, entries[key], counts.get(key, 0)) for key in verdict.stale]
+    released = [(key, count, entries.get(key, 0)) for key, count in sorted(before.items())
+                if entries.get(key, 0) < count]
+    header = None
+    if changed or entries:
+        header = "{} source-commit {}, {} entr(ies) in the candidate, {} at the merge base".format(
+            BASELINE_RELPATH, "none" if candidate is None else candidate.source[:12], len(entries),
+            len(before))
+    return verdict, Ledger(header, growth, stale, released, verdict.grandfathered)
+
+
+def _review_lines(ledger):
+    """The review listing of the baseline: each growing key once per current occurrence (path, line,
+    shape and excerpt beside its digest), or once with its path and shape alone ("no such line in the
+    file") when the file holds none, each stale entry and each released count. Every text field is
+    escaped (_escaped), so a control byte in a line, a path or a description cannot rewrite the listing."""
+    lines = []
+    for (path, digest, shape), old, new, items in ledger.growth:
+        for item in items:
+            lines.append("  GROWTH {}:{}: {} ({}): {} [{} count {} to {}]".format(
+                _printable(item.path), item.number, _escaped(item.shape), _escaped(item.description),
+                _printable(item.text), digest[:12], old, new))
+        if not items:
+            lines.append("  GROWTH {}: {} [{} count {} to {}], no such line in the file".format(
+                _escaped(path), _escaped(shape), digest[:12], old, new))
+    for (path, digest, shape), count, found in ledger.stale:
+        lines.append("  STALE {}: {} {} count {}, {} found: lower to {} or drop the entry".format(
+            _escaped(path), _escaped(shape), digest[:12], count, found, found))
+    for (path, digest, shape), old, new in ledger.released:
+        lines.append("  RELEASED {}: {} {} {} to {}".format(_escaped(path), _escaped(shape), digest[:12],
+                                                             old, new))
+    return lines
+
+
+def _grandfathered_lines(ledger):
+    return ["NOTE: review-label gate: grandfathered by {}: {}:{}: {} ({}): {}".format(
+        BASELINE_RELPATH, _printable(item.path), item.number, _escaped(item.shape),
+        _escaped(item.description), _printable(item.text)) for item in ledger.grandfathered]
+
+
+def _write_revision(head_sha):
+    """The revision the writer reads: the candidate commit, never the working tree."""
+    return head_sha
+
+
+def _carried(old, before, counts):
+    """The entries of C's baseline the writer carries: each at the least of its count, the finding lines
+    with its key in C and its count at the merge base, zeros dropped. A carried entry therefore never goes
+    stale and never grows; a key a finding needs is set by the round instead (see _writer_round)."""
+    carried = {key: min(count, counts.get(key, 0), before.get(key, 0)) for key, count in old.items()}
+    return {key: count for key, count in carried.items() if count > 0}
+
+
+def _writer_round(judged, deleted, config, proposal, by_line, counts, carried):
+    """One round of the writer: the move credit pinned by the lines `proposal` has entries for, then the
+    carried entries with each key a charged finding has set to its count in C, zeros dropped. A charged
+    finding on a line of the baseline file adds no key (no entry can name that file); the gate's predicate
+    judges those lines once the proposal settles (R8)."""
+    charged, _moved = credit_moves(judged, _move_credits(deleted, config.excluded,
+                                                         _pinned_lines(Baseline(None, proposal, None))))
+    out = dict(carried)
+    for line in charged:
+        for item in by_line[id(line)]:
+            if item.path == BASELINE_RELPATH:
+                continue
+            if not _baseline_path_ok(item.path):
+                raise CannotEvaluate("{}:{} cannot be baselined (a path that is not printable ASCII, or "
+                                     "holds a quote or backslash)".format(_printable(item.path), item.number))
+            out[_finding_key(item)] = counts.get(_finding_key(item), 0)
+    return {key: count for key, count in out.items() if count > 0}
+
+
+def _merged(proposal, found):
+    """The proposal with every key of `found` added, each count the larger of the two: a key never leaves
+    and a count never falls from one round to the next, so the rounds settle. The keys keep the order
+    they were first found in (the render sorts them; nothing else reads the order)."""
+    merged = dict(proposal)
+    for key, count in found.items():
+        merged[key] = max(merged.get(key, 0), count)
+    return merged
+
+
+def writer_round_bound(keys):
+    """The most rounds one pass of --write-baseline runs for `keys` candidate keys (the keys of the
+    findings on the judged added lines and of C's baseline): 2 * keys + 1. Within a pass a key's proposed
+    count only rises, and only from 0 to its carried count and then to its count in C, so each round that
+    changes the proposal takes one of at most 2 * keys steps, and one more round finds no change."""
+    return 2 * keys + 1
+
+
+def writer_pass_bound(keys):
+    """The most passes --write-baseline runs for `keys` candidate keys: keys + 2. Each pass after the
+    first carries the entries of the proposal before it (_carried); a key's carried count never falls
+    from one pass to the next and can rise only once, to the least of its count in C and at the merge
+    base, so after the first pass and at most `keys` rises a pass carries what the one before it carried
+    and proposes the same entries."""
+    return keys + 2
+
+
+def _writer_pass(judged, deleted, config, by_line, counts, carried, limit):
+    """(proposal, rounds run): one pass of the writer, from no pinned line, _writer_round repeated
+    (_merged) until a round adds nothing; CannotEvaluate when the proposal still changes after `limit`
+    rounds."""
+    proposal = {}
+    for done in range(1, limit + 1):
+        following = _merged(proposal, _writer_round(judged, deleted, config, proposal, by_line, counts,
+                                                    carried))
+        if following == proposal:
+            return proposal, done
+        proposal = following
+    raise CannotEvaluate("the proposal still changed after {} rounds of the pinned move credit; no "
+                         "baseline is proposed".format(limit))
+
+
+def _writer_run(root, config, revision, raw, old, before):
+    """A WriterRun: one evaluation of a candidate by --write-baseline, given the raw diff `raw` from the
+    merge base and the candidate baseline's entries `old`. Passes (_writer_pass) from no pinned line,
+    the first carrying `old` and each later one the proposal of the pass before it, until a pass
+    proposes what the one before it did. m(k) is counted at `revision` for every path but the baseline
+    file, which no key names (C' differs from C only there)."""
+    diff = added_lines(raw)
+    judged = _judged_lines(diff.added, config)
+    by_line = {id(line): judge([line], config) for line in judged}
+    paths = {item.path for items in by_line.values() for item in items} | {key[0] for key in old}
+    found = occurrences(root, revision, paths - {BASELINE_RELPATH}, config)
+    counts = {key: _occurrence_count(items) for key, items in found.items()}
+    keys = len({_finding_key(item) for items in by_line.values() for item in items} | set(old))
+    rounds, passes = writer_round_bound(keys), writer_pass_bound(keys)
+    proposal, most = None, 0
+    for done in range(1, passes + 1):
+        carried = _carried(old if proposal is None else proposal, before, counts)
+        following, used = _writer_pass(judged, diff.deleted, config, by_line, counts, carried, rounds)
+        most = max(most, used)
+        if following == proposal:
+            break
+        proposal = following
+    else:
+        raise CannotEvaluate("a writer run with the proposal committed as the candidate's baseline still "
+                             "proposed other entries after {} passes; no baseline is proposed".format(passes))
+    return WriterRun(proposal, judged, diff.deleted, found, counts, keys, done, most)
+
+
+def writer_settle_bound(keys):
+    """The most evaluations of the candidate with a proposal substituted for its baseline (the tree C'
+    of _substituted_tree) --write-baseline runs for `keys` candidate keys of its run on C: keys + 2, the
+    run on C's own proposal, one per candidate key and one that finds no change. It is a cap that keeps
+    the writer finite, not a proof that every layout settles within it: the substitution changes which
+    baseline lines the diff deletes and adds, and so which move credits are left, which can add a key or
+    drop one. It bounds one settlement attempt: a start from the candidate's baseline still changing at
+    the cap is followed by the start from an empty proposal (_empty_start, with its own cap from its own
+    first run), and the writer refuses (cannot-evaluate) only when that start does not pass either."""
+    return keys + 2
+
+
+Store = namedtuple("Store", ("objects", "alternates"))
+WriterRun = namedtuple("WriterRun", ("proposal", "judged", "deleted", "found", "counts", "keys", "passes",
+                                     "rounds"))
+
+
+def _current_worktree_areas(root):
+    """(object directory, areas): the repository's object directory as git rev-parse prints it, and the
+    real paths of the worktree `root` lies in, its git directory, its common git directory and that
+    object directory (each resolved by git rev-parse, then os.path.realpath, so a symbolic link is
+    followed). git prints the paths as the filesystem's bytes, one per line; they are read as bytes and
+    decoded with os.fsdecode, so a path holding a byte that is not UTF-8 names the same directory it
+    names on disk (decoded as text with escapes, it would name another path and pass the containment
+    check)."""
+    proc = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--absolute-git-dir",
+                "--git-common-dir", "--git-path", "objects")
+    if proc.returncode != 0:
+        raise CannotEvaluate("the repository's directories cannot be found: git exited {} ({})".format(
+            proc.returncode, _stderr(proc)))
+    lines = proc.stdout.split(b"\n")
+    if len(lines) != 5 or lines[4] != b"" or not all(lines[:4]):
+        raise CannotEvaluate("git rev-parse printed {!r} for the worktree, the git directory, the common "
+                             "git directory and the object directory".format(proc.stdout))
+    paths = [os.fsdecode(line) for line in lines[:4]]
+    return paths[3], [os.path.realpath(path) for path in paths]
+
+
+def _repository_areas(root):
+    """(object directory, areas): _current_worktree_areas, with the real path of every worktree of the
+    repository (the main worktree and each linked one, as git worktree list --porcelain -z prints them,
+    read as the filesystem's bytes and decoded with os.fsdecode) added, so a temporary directory inside
+    another worktree of the same repository is refused like one inside the worktree `root` lies in."""
+    objects, areas = _current_worktree_areas(root)
+    proc = _git(root, "worktree", "list", "--porcelain", "-z")
+    if proc.returncode != 0:
+        raise CannotEvaluate("the repository's worktrees cannot be listed: git exited {} ({})".format(
+            proc.returncode, _stderr(proc)))
+    prefix = b"worktree "
+    worktrees = [field[len(prefix):] for field in proc.stdout.split(b"\0") if field.startswith(prefix)]
+    if not worktrees or not all(worktrees):
+        raise CannotEvaluate("git worktree list printed {!r}, naming no worktree".format(proc.stdout[:200]))
+    return objects, areas + [os.path.realpath(os.fsdecode(path)) for path in worktrees]
+
+
+def _temporary_candidates():
+    """(source, path) for each directory tempfile would try for its temporary directory, in the order
+    its documentation gives: the TMPDIR, TEMP and TMP environment variables (each when set and not
+    empty), the platform's defaults, then the current directory. Only names are read; nothing is
+    created or probed."""
+    candidates = [(name, os.environ[name]) for name in ("TMPDIR", "TEMP", "TMP") if os.environ.get(name)]
+    if os.name == "nt":
+        defaults = [os.path.expanduser(r"~\AppData\Local\Temp"), os.path.expandvars(r"%SYSTEMROOT%\Temp"),
+                    r"c:\temp", r"c:\tmp", r"\temp", r"\tmp"]
+    else:
+        defaults = ["/tmp", "/var/tmp", "/usr/tmp"]
+    candidates += [("a platform default", path) for path in defaults]
+    try:
+        candidates.append(("the current directory", os.getcwd()))
+    except OSError:
+        candidates.append(("the current directory", os.curdir))
+    return candidates
+
+
+def _drive_refusal(areas, own):
+    """None when every one of `areas` (_repository_areas) lies on one drive (os.path.splitdrive, compared
+    after os.path.normcase); else the cannot-evaluate message, checked before any temporary directory
+    candidate, as no directory on any one drive can be compared with all of them (os.path.commonpath
+    raises ValueError on Windows for paths on different drives), so no TMPDIR setting avoids it. `own`
+    are the areas of the checkout the writer runs in (_current_worktree_areas). When those lie on one
+    drive, the way out is to remove the repository's other worktrees on other drives (each named), or to
+    run from a separate clone; when they span drives, only a checkout whose worktree, git directory and
+    every other worktree lie on one drive avoids it."""
+    def drive(path):
+        return os.path.normcase(os.path.splitdrive(path)[0])
+
+    if len({drive(item) for item in areas}) < 2:
+        return None
+    listed = ", ".join(dict.fromkeys(areas))
+    head = ("the repository's own areas lie on different drives ({}), so no temporary directory on any one "
+            "drive can be compared with all of them, whether it lies inside the repository is unknown and no "
+            "baseline is proposed; no TMPDIR setting avoids this: ".format(listed))
+    drives = {drive(item) for item in own}
+    if len(drives) == 1:
+        others = [item for item in dict.fromkeys(areas) if drive(item) not in drives]
+        return head + ("this checkout's worktree and git directory lie on {}, so remove the repository's "
+                       "worktree(s) on another drive ({}) with git worktree remove (git worktree prune for one "
+                       "whose directory is gone), or run the writer from a separate clone with no worktree on "
+                       "another drive".format(
+                           os.path.splitdrive(own[0])[0], ", ".join(others)))
+    return head + ("run the writer from a separate clone whose worktree, git directory and every other "
+                   "worktree lie on one drive")
+
+
+def _store_directory(areas, own=None):
+    """A tempfile.TemporaryDirectory (not yet entered) for the writer's temporary object store, created
+    under the real path of the first of _temporary_candidates that is a writable directory. Areas on more
+    than one drive are CannotEvaluate before any candidate is read (_drive_refusal, `own` the current
+    checkout's areas, all of `areas` when None), so a candidate inside one of them is not advised to move
+    to another TMPDIR that could not be compared either. Each
+    candidate's real path is checked against `areas` (_repository_areas) before anything is created
+    under it: one that is an area or lies inside one is CannotEvaluate, even when a later candidate
+    would serve, so a temporary directory the caller named inside the repository is refused, not
+    passed over. Writability is tested by creating the store's directory itself (no probe file, unlike
+    tempfile.gettempdir); a candidate where that fails is passed over, and none left is
+    CannotEvaluate. A candidate whose real path cannot be compared with an area (os.path.commonpath
+    raises ValueError, as on Windows for a candidate on another drive than the repository's areas) is
+    CannotEvaluate too, naming both paths, rather than a traceback."""
+    refusal = _drive_refusal(areas, areas if own is None else own)
+    if refusal is not None:
+        raise CannotEvaluate(refusal)
+    for source, candidate in _temporary_candidates():
+        parent = os.path.realpath(candidate)
+        for area in areas:
+            try:
+                common = os.path.commonpath([parent, area])
+            except ValueError as exc:
+                raise CannotEvaluate("the temporary directory {} ({}) cannot be compared with the repository's "
+                                     "{} ({}; on Windows, paths on different drives), so whether it lies "
+                                     "inside the repository is unknown and no baseline is proposed; set TMPDIR "
+                                     "to a directory outside the repository on the drive the repository is "
+                                     "on".format(parent, source, area, exc)) from None
+            if common == area:
+                raise CannotEvaluate("the temporary directory {} ({}) lies inside the repository ({}); the "
+                                     "writer builds its object store outside the repository's worktrees and "
+                                     "its git directory only, so no baseline is proposed; set TMPDIR to a "
+                                     "directory "
+                                     "outside the repository".format(parent, source, area))
+        try:
+            return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
+        except OSError:
+            continue
+    raise CannotEvaluate("no temporary directory (TMPDIR, TEMP, TMP, the platform defaults, the current "
+                         "directory) is a writable directory outside the repository, so no baseline is "
+                         "proposed; set TMPDIR to one")
+
+
+def _alternate_entry(objects):
+    """`objects` as one entry of GIT_ALTERNATE_OBJECT_DIRECTORIES, which git splits on os.pathsep (':'):
+    CannotEvaluate when the path holds that separator, as the quoted form git may accept for it is not
+    confirmed here, so such a path is refused rather than read as several alternates."""
+    if os.pathsep in objects:
+        raise CannotEvaluate("the repository's object directory {} holds {!r}, which git splits "
+                             "GIT_ALTERNATE_OBJECT_DIRECTORIES on; the writer cannot read the repository's "
+                             "objects through its temporary store, so no baseline is proposed; run it from a "
+                             "checkout whose path holds no {!r}".format(objects, os.pathsep, os.pathsep))
+    return objects
+
+
+@contextlib.contextmanager
+def _scratch_store(root):
+    """A Store: an empty temporary object directory outside the repository's worktrees and git
+    directories, which the repository's own object directory backs as an alternate, removed when the
+    block ends (returning or raising; a process killed while the block runs leaves it in place, R17).
+    The writer builds C' there and writes an object only when neither the store nor the repository
+    holds it (_store_object), so it writes no object file of the repository and refreshes the
+    modification time of none. Before anything is created, the object directory is checked against the
+    alternates separator (_alternate_entry), and each temporary directory candidate's real path against
+    the real paths of every worktree of the repository, the git directory, the common git directory and
+    the object directory before anything is created under it (_store_directory; real paths only, R18);
+    either refusal is CannotEvaluate."""
+    objects, areas = _repository_areas(root)
+    alternates = _alternate_entry(objects)
+    # The first four areas are the current checkout's own (_current_worktree_areas); the rest are the
+    # repository's worktrees as git worktree list names them.
+    with _store_directory(areas, areas[:4]) as tmp:
+        store = os.path.join(tmp, "objects")
+        os.mkdir(store)
+        yield Store(store, alternates)
+
+
+def _store_env(store):
+    """The gate's environment (_git_env) with `store` as git's object directory, the repository's objects
+    read through it as an alternate."""
+    env = _git_env()
+    env.update(GIT_OBJECT_DIRECTORY=store.objects, GIT_ALTERNATE_OBJECT_DIRECTORIES=store.alternates)
+    return env
+
+
+def _store_git(root, store, data, *args):
+    """git under the store's environment (_store_env)."""
+    proc = _run_git(root, _store_env(store), data, *args)
+    if proc.returncode != 0:
+        raise CannotEvaluate("git {} exited {} ({})".format(args[0], proc.returncode, _stderr(proc)))
+    return proc.stdout
+
+
+def _store_has(root, store, oid):
+    """Whether the object `oid` is readable under the store's environment: in the store or, through the
+    alternate, in the repository. git cat-file -e only reads; it writes no object and refreshes the
+    modification time of none."""
+    proc = _run_git(root, _store_env(store), None, "cat-file", "-e", oid)
+    if proc.returncode not in (0, 1):
+        raise CannotEvaluate("git cat-file -e exited {} ({})".format(proc.returncode, _stderr(proc)))
+    return proc.returncode == 0
+
+
+def _store_object(root, store, kind, content, what, write):
+    """The id of the `kind` object holding `content`, written into `store` only when it is in neither the
+    store nor the repository. The id is computed first, without writing (git hash-object -t `kind`
+    without -w, which also checks a tree's format); git cat-file -e (_store_has) then looks for it, and
+    only an object found nowhere is written, by git with the arguments write[1:] and write[0] on its
+    standard input, whose printed id must be the computed one. Asked to write an object the repository
+    already holds, git writes nothing into the store but refreshes the modification time of the
+    repository's loose object file or pack, which this order never asks it to do."""
+    oid = _store_id(_store_git(root, store, content, "hash-object", "-t", kind, "--no-filters", "--stdin"),
+                    what)
+    if not _store_has(root, store, oid):
+        written = _store_id(_store_git(root, store, write[0], *write[1:]), what)
+        if written != oid:
+            raise CannotEvaluate("git wrote {} for {}, whose id was computed as {}".format(written, what, oid))
+    return oid
+
+
+def _tree_object(records):
+    """The content of the tree object git mktree -z builds from `records` (git ls-tree -z records: mode,
+    type and id separated by spaces, a tab, the name): each entry is its mode without leading zeros, a
+    space, its name, a NUL and its raw id, in git's tree order (bytewise, a tree's name compared as if it
+    ended in '/')."""
+    entries = []
+    for record in records:
+        meta, _tab, name = record.partition(b"\t")
+        mode, kind, oid = meta.split(b" ")
+        entries.append((name + b"/" if kind == b"tree" else name,
+                        mode.lstrip(b"0") + b" " + name + b"\0" + bytes.fromhex(oid.decode("ascii"))))
+    return b"".join(entry for _key, entry in sorted(entries, key=lambda item: item[0]))
+
+
+def _store_id(output, what):
+    lines = output.decode("ascii", "replace").split()
+    if len(lines) != 1 or not COMMIT_RE.fullmatch(lines[0]):
+        raise CannotEvaluate("git printed {!r} for {}".format(output[:200], what))
+    return lines[0]
+
+
+def _tree_with_blob(root, store, treeish, parts, blob):
+    """The id of the tree `treeish` (None for an empty tree) with the blob `blob` at the path `parts`
+    (in the mode of the regular file it replaces, else 100644), every other entry kept as it is: built
+    with git ls-tree and, for a tree neither the store nor the repository holds, git mktree in `store`
+    (_store_object)."""
+    entries, name, sub, mode = [], parts[0].encode("ascii"), None, b"100644"
+    if treeish is not None:
+        listing = _store_git(root, store, None, "ls-tree", "-z", "--end-of-options", treeish)
+        for record in listing.split(b"\0"):
+            if not record:
+                continue
+            meta, _tab, entry = record.partition(b"\t")
+            fields = meta.split(b" ")
+            if len(fields) != 3 or not entry:
+                raise CannotEvaluate("git ls-tree printed {!r}".format(record[:200]))
+            if entry == name:
+                if len(parts) > 1 and fields[1] != b"tree":
+                    raise CannotEvaluate("{} is not a directory in the candidate".format(parts[0]))
+                sub = fields[2].decode("ascii")
+                if len(parts) == 1 and fields[0] in (b"100644", b"100755"):
+                    mode = fields[0]
+                continue
+            entries.append(record)
+    if len(parts) > 1:
+        entries.append(b"040000 tree " + _tree_with_blob(root, store, sub, parts[1:], blob).encode("ascii")
+                       + b"\t" + name)
+    else:
+        entries.append(mode + b" blob " + blob.encode("ascii") + b"\t" + name)
+    return _store_object(root, store, "tree", _tree_object(entries), "a tree of the substituted candidate",
+                         (b"".join(record + b"\0" for record in entries), "mktree", "-z"))
+
+
+def _substituted_tree(root, store, head_sha, data):
+    """C': the id of the candidate commit's tree with the baseline file's blob replaced by `data` (added
+    when C has none), every other path as it is in C, built in `store`. A commit of `data` on top of C
+    with nothing else changed has this tree. An object the repository already holds is not written
+    (_store_object)."""
+    blob = _store_object(root, store, "blob", data, "the proposed baseline's blob",
+                         (data, "hash-object", "-w", "--no-filters", "--stdin"))
+    return _tree_with_blob(root, store, head_sha, BASELINE_RELPATH.split("/"), blob)
+
+
+def _store_diff(root, store, base, tree):
+    """The raw diff bytes from `base` to the tree `tree` of `store`, with the gate's own diff options."""
+    return _store_git(root, store, None, "-c", "core.quotePath=true", "diff", *DIFF_OPTIONS, base, tree, "--")
+
+
+def _settled_deleted(deleted):
+    """The deleted lines the settled proposal is judged with: those of the B..C' diff it settled on, so
+    a line of the proposal's own render is judged with the move credit C' leaves, as the gate would."""
+    return deleted
+
+
+def _owning_rows(data, number):
+    """The lines of the [[entry]] table of the rendered baseline `data` that holds its line `number`
+    (one-based), or None for a line before the first table (the header)."""
+    rows = data.decode("utf-8", "replace").split("\n")
+    start = None
+    for index in range(min(number, len(rows)) - 1, -1, -1):
+        if rows[index] == "[[entry]]":
+            start = index
+            break
+    if start is None:
+        return None
+    body = []
+    for row in rows[start + 1:]:
+        if not row or row == "[[entry]]":
+            break
+        body.append(row)
+    return body
+
+
+def _owning_entry(data, number):
+    """The [[entry]] table of the rendered baseline `data` that holds its line `number` (one-based), as
+    its lines joined by "; ", or "the header" for a line before the first table."""
+    body = _owning_rows(data, number)
+    return "the header" if body is None else "the entry " + "; ".join(body)
+
+
+def _r8_way_out(own, proposal, findings):
+    """(way, reason): the way out of an R8 refusal built from the empty start's own refusal, as
+    _empty_start finds it: `own` the charged lines of the baseline file on that start's settled
+    proposal `proposal` (its render), `findings` the findings of the gate's verdict on that start (the
+    Verdict's findings: on the lines the diff adds that the move credit leaves). `way` names every file
+    with an entry that holds a charged line, each once however many of its lines are charged: renaming
+    that file to a path no shape matches, only when the path line is the one line of its entries that is
+    charged (a charged shape, digest or count line is rendered again after a rename, so renaming is then
+    named as no way out), or removing from it every finding line that needs an entry there (each finding
+    of `findings` on that file, so a line the merge base already holds and the diff does not add is not
+    listed), so the candidate needs no entry for it; `reason` is None then. For a charged line of the
+    header every proposal holds, `way` is None and `reason` says why no way out is named."""
+    header = len(BASELINE_HEADER) + 2
+    keys = sorted(proposal)
+    files = {}
+    for item in own:
+        index, offset = divmod(item.number - header - 1, 6)
+        if item.number <= header or index >= len(keys):
+            return None, ("the empty start's charged line {}:{} is in the header every proposal holds, so "
+                          "no baseline the writer can propose avoids it".format(BASELINE_RELPATH, item.number))
+        files.setdefault(keys[index][0], []).append((offset, item.number))
+    parts = []
+    for path, charged in sorted(files.items()):
+        lines = sorted((item for item in findings if item.path == path),
+                       key=lambda item: (item.number, item.shape))
+        listed = ", ".join("{}:{}: {} ({}): {}".format(_printable(item.path), item.number, _escaped(item.shape),
+                                                       _escaped(item.description), _printable(item.text))
+                           for item in lines)
+        others = sorted(number for offset, number in charged if offset != 2)
+        rename, note = "", ""
+        if not others:
+            rename = "rename {} to a path no shape matches, or ".format(_escaped(path))
+        elif len(others) < len(charged):
+            note = (" (renaming {} is no way out: its entry's line(s) {} other than the path line are charged "
+                    "too, and are rendered again under any path)".format(_escaped(path), ", ".join(
+                        "{}:{}".format(BASELINE_RELPATH, number) for number in others)))
+        parts.append("for {}, {}remove from {} every finding line that needs an entry there ({}){}".format(
+            _escaped(path), rename, _escaped(path), listed or "none found", note))
+    return ("make a candidate that needs no entry for each of the {} file(s) whose entry puts a charged line "
+            "into the baseline file on the empty start: {}".format(len(parts), "; ".join(parts))), None
+
+
+def _way_out(ways, reason):
+    """The way out a refusal names: each of `ways`, then to run the writer on that commit; or, with none,
+    that no way out is named and why (`reason`)."""
+    if not ways:
+        return "no way out is named ({})".format(reason)
+    return "to get out, {}, and run the writer on that commit".format(", or ".join(ways))
+
+
+def _settled_refusal(verdict, data):
+    """None when the gate's own predicate (baseline_verdict), judging the B..C' diff with the proposal as
+    the candidate baseline, charges no finding and finds no stale entry; else (own, message), `own` the
+    charged lines of the baseline file itself (empty for none). The first is named as R8 with the entry
+    of `data` (the proposal's render) it sits in: an entry whose path matches a shape writes a label line
+    into the baseline file, which no entry can grandfather, unless a line the diff deletes credits it as a
+    move."""
+    own = [item for item in verdict.charged if item.path == BASELINE_RELPATH]
+    if own:
+        item = own[0]
+        return own, (
+            "R8: committed on top of the candidate, the proposal's own line {}:{} would be charged as {} "
+            "({}): {}, in {}; the baseline file is judged like any other and cannot grandfather its own "
+            "lines ({} charged finding(s) on its lines); no baseline is proposed".format(
+                BASELINE_RELPATH, item.number, item.shape, item.description, item.text,
+                _owning_entry(data, item.number), len(own)))
+    if verdict.charged or verdict.stale:
+        return [], ("committed on top of the candidate, the proposal would leave the gate {} charged "
+                    "finding(s) and {} stale entr(ies); no baseline is proposed".format(
+                        len(verdict.charged), len(verdict.stale)))
+    return None
+
+
+def _unsettled_way_out(stale, way, reason):
+    """The way out of evaluations of C' still changing at their bound once the empty start does not pass
+    either (so committing an empty baseline first is none), naming only what applies: removing the
+    candidate baseline's keys `stale` the gate reports stale (when there are any), and `way`, the way
+    out of the empty start's R8 refusal (_r8_way_out, when it has one); else no way out, with `reason`."""
+    ways = []
+    if stale:
+        ways.append("remove the {} stale entr(ies) the gate reports from the candidate's baseline".format(
+            len(stale)))
+    if way:
+        ways.append(way)
+    return _way_out(ways, "the gate reports no stale entry in the candidate's baseline, and {}".format(reason))
+
+
+Settled = namedtuple("Settled", ("proposal", "run", "runs", "evaluations", "bound"))
+
+
+def _settle(root, config, revision, store, head_sha, base, before, run):
+    """A Settled: from the evaluation `run`, each proposal substituted for the candidate's baseline (C')
+    and evaluated on B..C' carrying it, until an evaluation of C' proposes the entries substituted in it
+    (`proposal` and `evaluations` set) or writer_settle_bound(run.keys) evaluations have run without that
+    (both None)."""
+    runs, limit = [run], writer_settle_bound(run.keys)
+    for settled in range(1, limit + 1):
+        proposal = run.proposal
+        tree = _substituted_tree(root, store, head_sha, render_baseline(head_sha, proposal))
+        run = _writer_run(root, config, revision, _store_diff(root, store, base, tree), proposal, before)
+        runs.append(run)
+        if run.proposal == proposal:
+            return Settled(proposal, run, runs, settled, limit)
+    return Settled(None, run, runs, None, limit)
+
+
+EmptyStart = namedtuple("EmptyStart", ("settled", "why", "verdict", "way", "reason"))
+
+
+def _empty_start(root, config, revision, store, head_sha, base, before):
+    """An EmptyStart: the writer's evaluations from an empty starting proposal, as a writer run on the
+    candidate with an empty baseline committed would make them: the first reads B..C' with the empty
+    render substituted and carries nothing, then _settle (`settled`, None when it cannot evaluate or does
+    not settle). `why` says why that start does not pass (an evaluation that cannot evaluate,
+    evaluations of C' still changing at their bound, or _settled_refusal's verdict), None when it passes;
+    `way` is the way out of that start's own R8 refusal (_r8_way_out), None when it has none, `reason`
+    then saying why."""
+    try:
+        tree = _substituted_tree(root, store, head_sha, render_baseline(head_sha, {}))
+        run = _writer_run(root, config, revision, _store_diff(root, store, base, tree), {}, before)
+        settled = _settle(root, config, revision, store, head_sha, base, before, run)
+    except CannotEvaluate as exc:
+        return EmptyStart(None, str(exc), None, None, "the empty start cannot be evaluated, so which file "
+                          "needs no entry is unknown")
+    if settled.proposal is None:
+        return EmptyStart(None, "it still proposed other entries after {} evaluation(s)".format(settled.bound),
+                          None, None, "the empty start does not settle, so which file needs no entry is "
+                          "unknown")
+    verdict = baseline_verdict(settled.run.judged, _settled_deleted(settled.run.deleted), config,
+                               settled.proposal, before, settled.run.counts)
+    refusal = _settled_refusal(verdict, render_baseline(head_sha, settled.proposal))
+    if refusal is None:
+        return EmptyStart(settled, None, verdict, None, None)
+    if not refusal[0]:
+        return EmptyStart(settled, refusal[1], verdict, None, "the empty start is not refused as R8")
+    way, reason = _r8_way_out(refusal[0], settled.proposal, verdict.findings)
+    return EmptyStart(settled, refusal[1], verdict, way, reason)
+
+
+def propose_baseline(root, protected=None, head=None, environ=None):
+    """(canonical bytes, review lines, growth keys) of the baseline --write-baseline proposes for the
+    candidate commit C, the fixed point the docstring describes. One evaluation (_writer_run) runs passes
+    (_writer_pass) from no pinned line; each round pins the lines the proposal so far has entries for,
+    credits moves, and adds each key a charged finding has (at its count in C) and every carried entry
+    (_carried); the first pass carries the candidate's baseline, each later one the proposal of the pass
+    before it, until a pass proposes what the one before it did. The first evaluation reads B..C; each
+    later one reads B..C', C with the last proposal's render substituted for its baseline
+    (_substituted_tree), carrying that proposal, as a writer run on that proposal committed would, until
+    an evaluation of C' proposes the entries substituted in it. The gate's own predicate
+    (baseline_verdict) then judges that B..C' diff, its deleted and added baseline lines included, with
+    the proposal as the candidate baseline (_settled_refusal). When it charges a line of the baseline
+    file itself (R8), or the proposal is still changing after writer_settle_bound evaluations of C', the
+    writer evaluates from an empty starting proposal as well (_empty_start, as a writer run on a commit
+    of an empty baseline would) and proposes that start's settled proposal when the same predicate
+    accepts it. A pass still changing after writer_round_bound rounds, passes still changing after
+    writer_pass_bound passes, a proposal still changing after writer_settle_bound evaluations of C' when
+    the empty start does not pass either (the message naming only the way out that applies,
+    _unsettled_way_out), a proposal that predicate charges a finding for or finds an entry of stale on
+    B..C' (R8 when the charged line is the baseline file's own and the empty start does not pass either,
+    the message naming the way out built from the empty start's own refusal, _r8_way_out), or one whose
+    render is larger than MAX_BASELINE_BYTES, is CannotEvaluate (nothing is printed)."""
+    environ = os.environ if environ is None else environ
+    config = load_config(Path(root) / CONFIG_RELPATH)
+    require_excluded_files(root, config.excluded)
+    _require_full_history(root)
+    ref, _source = protected_ref(root, protected, environ)
+    protected_sha = _resolve_commit(root, ref, "protected branch")
+    head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
+    base = merge_base(root, protected_sha, head_sha)
+    revision = _write_revision(head_sha)
+    current = read_baseline(root, head_sha, config)
+    prior = read_baseline(root, base, _merge_base_config(config))
+    old = {} if current is None else current.entries
+    before = {} if prior is None else prior.entries
+    run = _writer_run(root, config, revision, read_diff(root, base, revision), old, before)
+    first, start = run, ""
+    also = ("the writer also evaluated an empty starting proposal, as on a commit of an empty baseline, and "
+            "it does not pass either ({}), so committing an empty baseline first is no way out; {}")
+    with _scratch_store(root) as store:
+        settled = _settle(root, config, revision, store, head_sha, base, before, run)
+        runs = settled.runs
+        if settled.proposal is None:
+            unsettled = ("with each proposal substituted for the candidate's baseline, the writer still "
+                         "proposed other entries after {} evaluation(s) of that candidate; no baseline is "
+                         "proposed".format(settled.bound))
+            empty = _empty_start(root, config, revision, store, head_sha, base, before)
+            if empty.why is not None:
+                raise CannotEvaluate("{}; {}".format(unsettled, also.format(empty.why, _unsettled_way_out(
+                    stale_entries(old, first.counts, None), empty.way, empty.reason))))
+            refusal = None
+            start = (", from an empty starting proposal (the start from the candidate's baseline still "
+                     "proposed other entries after {} evaluation(s))".format(settled.bound))
+        else:
+            data = render_baseline(head_sha, settled.proposal)
+            verdict = baseline_verdict(settled.run.judged, _settled_deleted(settled.run.deleted), config,
+                                       settled.proposal, before, settled.run.counts)
+            refusal = _settled_refusal(verdict, data)
+            if refusal is not None and refusal[0]:
+                empty = _empty_start(root, config, revision, store, head_sha, base, before)
+                if empty.why is not None:
+                    raise CannotEvaluate("{}; {}".format(refusal[1], also.format(
+                        empty.why, _way_out([empty.way] if empty.way else [], empty.reason))))
+                refusal = None
+                start = (", from an empty starting proposal (the start from the candidate's baseline settled "
+                         "on a proposal refused as R8)")
+        if refusal is not None:
+            raise CannotEvaluate(refusal[1])
+        if start:
+            settled, verdict = empty.settled, empty.verdict
+            runs = runs + settled.runs
+        proposal, run = settled.proposal, settled.run
+        data = render_baseline(head_sha, proposal)
+    if len(data) > MAX_BASELINE_BYTES:
+        raise CannotEvaluate("the proposed baseline is {} bytes ({} entr(ies)), larger than the {} bytes the "
+                             "gate reads; it is not printed".format(len(data), len(proposal),
+                                                                    MAX_BASELINE_BYTES))
+    growth = verdict.growth
+    ledger = Ledger(None, [(key, before.get(key, 0), proposal[key], run.found.get(key, []))
+                           for key in growth],
+                    [], [(key, count, proposal.get(key, 0)) for key, count in sorted(before.items())
+                         if proposal.get(key, 0) < count], [])
+    keys = max(item.keys for item in runs)
+    checked = ("ROUND TRIP: settled in {} pass(es) (bound {}), the longest {} round(s) (bound {}), for {} "
+               "candidate key(s), and stable with it substituted for the candidate's baseline after {} "
+               "evaluation(s) of that candidate (bound {}){}; committed with nothing else changed, the "
+               "gate's own predicate charges no finding and finds no stale entry, and a writer run on that "
+               "commit proposes the same entries in its first evaluation (R16)".format(
+                   max(item.passes for item in runs), writer_pass_bound(keys),
+                   max(item.rounds for item in runs), writer_round_bound(keys), keys, settled.evaluations,
+                   settled.bound, start))
+    return data, _review_lines(ledger) + [checked], growth
+
+
+def write_baseline(root, protected=None, head=None, environ=None):
+    """--write-baseline: the proposal on stdout (no file is written in the repository), its review
+    listing and its ROUND TRIP line on stderr; exit 1 when it grows against the merge base's baseline, 0
+    otherwise, 2 when it cannot evaluate (an oversized or unsettled proposal, and one the gate's
+    predicate would charge a finding on with the proposal committed, its own lines included, with
+    nothing on stdout)."""
+    try:
+        data, review, growth = propose_baseline(root, protected, head, environ)
+    except CannotEvaluate as exc:
+        print("CANNOT EVALUATE: review-label baseline writer: {}".format(_message(exc)), file=sys.stderr)
+        return 2
+    sys.stdout.write(data.decode("ascii"))
+    for line in review:
+        print(line, file=sys.stderr)
+    print("{}: the proposal {} against the merge base's baseline".format(
+        "GROWTH" if growth else "NO GROWTH", "grows {} key(s)".format(len(growth)) if growth
+        else "does not grow"), file=sys.stderr)
+    return 1 if growth else 0
+
+
 def evaluate(root, protected=None, head=None, environ=None):
-    """(findings, summary) for the repository at `root`; CannotEvaluate when it cannot be judged."""
+    """The Evaluation of the repository at `root`; CannotEvaluate when it cannot be judged."""
     environ = os.environ if environ is None else environ
     config = load_config(Path(root) / CONFIG_RELPATH)
     require_excluded_files(root, config.excluded)
@@ -646,43 +1889,82 @@ def evaluate(root, protected=None, head=None, environ=None):
     head_sha = _resolve_commit(root, "HEAD" if head is None else head, "candidate")
     base = merge_base(root, protected_sha, head_sha)
     diff = added_lines(read_diff(root, base, None if head is None else head_sha))
-    judged = [line for line in diff.added if not _excluded(line.path, config.excluded)]
+    judged = _judged_lines(diff.added, config)
     skipped = len(diff.added) - len(judged)
-    judged, moved = credit_moves(judged, _credits(diff.deleted, config.excluded))
-    summary = "{} added line(s) in {} file(s) judged against merge base {} of {} (from {}){}{}{}{}".format(
-        len(judged), len({line.path for line in judged}), base[:12], ref, source,
+    candidate = read_baseline(root, None if head is None else head_sha, config)
+    verdict, ledger = apply_baseline(root, config, base, head_sha, head, judged, diff.deleted, candidate)
+    findings, judged, moved = verdict.charged, verdict.lines, verdict.moved
+    summary = "{} added line(s) in {} file(s) judged against merge base {} of {} (from {}){}{}{}{}{}".format(
+        len(judged), len({line.path for line in judged}), base[:12], _shown_ref(ref), _shown_ref(source),
         "" if head is None else ", candidate {}".format(head_sha[:12]),
         "; {} moved line(s) not charged".format(moved) if moved else "",
         "; {} line(s) in excluded file(s) not judged".format(skipped) if skipped else "",
         "; {} file(s) with a NUL byte read as raw lines".format(len(diff.nul_paths))
-        if diff.nul_paths else "")
+        if diff.nul_paths else "",
+        "; {} added finding(s) grandfathered".format(len(ledger.grandfathered)) if ledger.grandfathered
+        else "")
     note = _position_note(ref, protected_sha, base, head_sha, head, diff.added)
-    return judge(judged, config), summary, config.marker, note
+    return Evaluation(findings, summary, config.marker, note, ledger)
+
+
+def _escaped(text):
+    """The text with every character outside printable ASCII escaped: a non-ASCII character as Python's
+    backslash escape, and a control character (below 0x20, a tab and a carriage return included) or DEL
+    as \\xNN, so no terminal control sequence (an erase-line escape, a carriage return that rewinds the
+    line) reaches a listing line."""
+    return "".join(ch if 0x20 <= ord(ch) < 0x7F else "\\x{:02x}".format(ord(ch)) if ord(ch) < 0x80
+                   else ch.encode("ascii", "backslashreplace").decode("ascii") for ch in text)
+
+
+def _shown_ref(ref):
+    """The protected ref (and the name of its source) as the summary and the NOTE line print them:
+    escaped like a listing line (_escaped). --protected takes any revision git resolves, and one such as
+    main^{/text} can hold a control byte or a non-ASCII character."""
+    return _escaped(ref)
+
+
+def _message(exc):
+    """A cannot-evaluate message as printed: escaped like a listing line (_escaped), so git's stderr and a
+    path decoded from the diff (a quoted path may hold any byte) cannot carry a control sequence to the
+    terminal. Every such message reaches the user through this one function."""
+    return _escaped(str(exc))
 
 
 def _printable(text):
     text = text.strip()
     if len(text) > MAX_EXCERPT:
         text = text[:MAX_EXCERPT] + "..."
-    return text.encode("ascii", "backslashreplace").decode("ascii")
+    return _escaped(text)
 
 
 def run(root, protected=None, head=None, environ=None):
     try:
-        findings, summary, marker, note = evaluate(root, protected, head, environ)
+        findings, summary, marker, note, ledger = evaluate(root, protected, head, environ)
     except CannotEvaluate as exc:
-        print("CANNOT EVALUATE: review-label gate: {}".format(exc), file=sys.stderr)
+        print("CANNOT EVALUATE: review-label gate: {}".format(_message(exc)), file=sys.stderr)
         return 2
     if note is not None:
         print("NOTE: review-label gate: {}".format(note))
-    if findings:
-        print("FAIL: {} review or work label(s) on added lines ({}):".format(len(findings), summary))
-        for item in findings:
-            print("  {}:{}: {} ({}): {}".format(_printable(item.path), item.number, item.shape,
-                                                item.description, _printable(item.text)))
-        print("Say what the code guards and why, not which review or tracker item asked for it; a "
-              "deliberate quotation carries the {} marker on its line.".format(marker))
+    if ledger.header is not None:
+        print("BASELINE: review-label gate: {}".format(ledger.header))
+    for line in _review_lines(ledger):
+        print(line)
+    if findings or ledger.growth or ledger.stale:
+        if findings:
+            print("FAIL: {} review or work label(s) on added lines ({}):".format(len(findings), summary))
+            for item in findings:
+                print("  {}:{}: {} ({}): {}".format(_printable(item.path), item.number, _escaped(item.shape),
+                                                    _escaped(item.description), _printable(item.text)))
+        if ledger.growth or ledger.stale:
+            print("FAIL: review-label baseline: {} key(s) grow against the merge base and {} entr(ies) are "
+                  "stale ({}); growth needs the maintainer's recorded authorization, and a stale entry is "
+                  "lowered or dropped".format(len(ledger.growth), len(ledger.stale), summary))
+        if findings:
+            print("Say what the code guards and why, not which review or tracker item asked for it; a "
+                  "deliberate quotation carries the {} marker on its line.".format(marker))
         return 1
+    for line in _grandfathered_lines(ledger):
+        print(line)
     print("PASS: no review or work label on an added line ({})".format(summary))
     return 0
 
@@ -791,6 +2073,12 @@ def _fail_open_loader(path):
 
 
 _REAL_LOAD_CONFIG = load_config
+_REAL_OCCURRENCES = occurrences
+_REAL_ADDED_LINES = added_lines
+_REAL_READ_BASELINE = read_baseline
+_REAL_PARSE_BASELINE = parse_baseline
+_REAL_RENDER_BASELINE = render_baseline
+_REAL_BASELINE_VERDICT = baseline_verdict
 
 
 # The label lines the refused rows add, assembled at run time so that no contiguous label sits in this
@@ -836,8 +2124,16 @@ def _base_repo(tmp, name):
     _write(repo, "seed.py", "a = 1\nb = 2\n{}\n".format(labels["round-number"]))
     _write(repo, "old.py", "keep = 1\n{}\nkeep2 = 2\n".format(labels["finding-number"]))
     _write(repo, "moved.py", "{}\nvalue = 3\n".format(labels["backlog-id"]))
-    _commit_all(repo, "base")
+    first = _commit_all(repo, "base")
+    if _FIXTURE_EMPTY_BASELINE:
+        _write_bytes(repo, BASELINE_RELPATH, render_baseline(first, {}))
+        _commit_all(repo, "an empty canonical baseline")
     return repo
+
+
+# When true, every fixture _base_repo builds also commits an empty canonical baseline on main (the
+# section 8 accounting row runs the rows that predate the baseline again this way).
+_FIXTURE_EMPTY_BASELINE = False
 
 
 def _self_test():
@@ -875,11 +2171,35 @@ def _self_test():
           "refused; a clone of a feature-branch checkout is judged against origin/main at the branch "
           "tip, one commit past it and several past it, and hides the branch's label once origin/HEAD's "
           "branch is trusted; the configuration size bound holds under, at and over; bad arguments exit "
-          "2 without a scan)".format(len(EXECUTED)))
+          "2 without a scan; the baseline grandfathers exactly its counted keys per path, digest and "
+          "shape, refuses componentwise growth, stale entries and every malformed or non-regular file at "
+          "either revision, and its writer reads committed objects and round-trips)".format(len(EXECUTED)))
     return 0
 
 
 def _rows(tmp):
+    labels = _label_lines()
+    start = len(EXECUTED)
+    _existing_rows(tmp)
+    existing = EXECUTED[start:]
+    _baseline_rows(tmp, labels)
+    _baseline_fail_closed_rows(tmp, labels)
+    _baseline_write_rows(tmp, labels)
+    _baseline_pin_rows(tmp, labels)
+    _baseline_writer_fixpoint_rows(tmp, labels)
+    _baseline_writer_roundtrip_rows(tmp, labels)
+    _baseline_writer_substitution_rows(tmp, labels)
+    _baseline_writer_store_rows(tmp, labels)
+    _message_rows(tmp)
+    _ref_rows(tmp)
+    _baseline_listing_rows(tmp, labels)
+    _baseline_config_change_rows(tmp, labels)
+    _baseline_merge_base_read_rows(tmp)
+    _existing_rows_with_empty_baseline(tmp, existing)
+
+
+def _existing_rows(tmp):
+    """The rows that predate the baseline."""
     labels = _label_lines()
     marker = load_config(ROOT / CONFIG_RELPATH).marker
     twins = _twin_lines(marker)
@@ -999,6 +2319,1989 @@ def _rows(tmp):
     _replace_ref_rows(tmp, labels)
     _git_output_rows()
     _bound_and_cli_rows()
+
+
+# --- self-test: the baseline ---------------------------------------------------------------------------
+def _write_bytes(repo, rel, data):
+    path = Path(repo) / rel
+    os.makedirs(path.parent, exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+
+def _sha(data):
+    """A fixture digest computed apart from _line_digest, so a flip of that function cannot move it."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _put_baseline(repo, source, entries):
+    """Write the canonical baseline of `entries` ({(path, line bytes, shape): count}) into the fixture."""
+    _write_bytes(repo, BASELINE_RELPATH, render_baseline(
+        source, {(path, _sha(raw), shape): count for (path, raw, shape), count in entries.items()}))
+
+
+def _partition_whole_line(findings, entries, counts):
+    """A flip of partition: an entry for any shape exempts every finding on that line."""
+    lines = {(path, digest) for path, digest, _shape in entries}
+    exempt = [item for item in findings if (item.path, _line_digest(item.raw)) in lines]
+    return [item for item in findings if item not in exempt], exempt
+
+
+def _partition_all_copies(findings, entries, counts):
+    """A flip of partition: every added copy at a key with an entry is exempt."""
+    exempt = [item for item in findings if _finding_key(item) in entries]
+    return [item for item in findings if item not in exempt], exempt
+
+
+def _partition_pathless(findings, entries, counts):
+    """A flip of partition: the key drops the path, so an entry for one file exempts the line in any."""
+    granted, found = Counter(), Counter()
+    for (_path, digest, shape), count in entries.items():
+        granted[(digest, shape)] += count
+    for (_path, digest, shape), count in counts.items():
+        found[(digest, shape)] += count
+    by_key = {}
+    for item in findings:
+        by_key.setdefault((_line_digest(item.raw), item.shape), []).append(item)
+    exempt = []
+    for key, items in by_key.items():
+        if granted[key]:
+            charged = min(len(items), max(0, found[key] - granted[key]))
+            exempt += items[:len(items) - charged]
+    return [item for item in findings if item not in exempt], exempt
+
+
+def _growth_by_total(candidate, prior):
+    """A flip of baseline_growth: the totals are compared, so one key's growth nets against another's fall."""
+    return sorted(candidate) if sum(candidate.values()) > sum(prior.values()) else []
+
+
+def _growth_by_path_shape(candidate, prior):
+    """A flip of baseline_growth: counts keyed by (path, shape), so a re-keyed line of the same count passes."""
+    def totals(entries):
+        out = Counter()
+        for (path, _digest, shape), count in entries.items():
+            out[(path, shape)] += count
+        return out
+    new, old = totals(candidate), totals(prior)
+    return sorted(key for key in candidate if new[(key[0], key[2])] > old[(key[0], key[2])])
+
+
+def _stale_without_added_line(entries, counts, findings):
+    """A flip of stale_entries: an entry with no matching added line is stale, so every entry goes stale
+    once its import merges."""
+    added = {_finding_key(item) for item in findings}
+    return sorted(key for key in entries if key not in added)
+
+
+def _worktree_occurrences(root, revision, paths, config):
+    """A flip of occurrences: the working tree's raw bytes are split on LF and counted, no clean form."""
+    if revision is not None:
+        return _REAL_OCCURRENCES(root, revision, paths, config)
+    found = {}
+    for path in sorted(paths):
+        with open(Path(root) / path, "rb") as handle:
+            raws = handle.read().split(b"\n")
+        if raws and raws[-1] == b"":
+            raws.pop()
+        for number, raw in enumerate(raws, 1):
+            line = Added(path, number, raw.decode("utf-8", "replace"), "+", raw)
+            for shape in _shapes_of(line, config):
+                found.setdefault((path, _line_digest(raw), shape.id), []).append(
+                    Occurrence(path, number, shape.id, shape.description, line.text))
+    return found
+
+
+def _lf_marking_added_lines(diff):
+    """A flip of added_lines: a line git marks as having no final LF is read with a marker appended, so
+    the final LF is distinguished."""
+    return _REAL_ADDED_LINES(diff.replace(b"\n\\ No newline at end of file", b"\\NOLF"))
+
+
+def _fail_open_read_baseline(root, revision, config):
+    """A flip of the baseline's fail-closed read: any refusal reads as the empty baseline."""
+    try:
+        return _REAL_READ_BASELINE(root, revision, config)
+    except CannotEvaluate:
+        return None
+
+
+def _refuse_absent_baseline(where):
+    raise CannotEvaluate("{} is absent (flip)".format(where))
+
+
+def _refuse_entryless_baseline(data, where, config):
+    parsed = _REAL_PARSE_BASELINE(data, where, config)
+    if not parsed.entries:
+        raise CannotEvaluate("{} has no entry (flip)".format(where))
+    return parsed
+
+
+def _review_lines_digests_only(ledger):
+    return ["  GROWTH {}".format(digest[:12]) for (_path, digest, _shape), _old, _new, _items in ledger.growth]
+
+
+def _baseline_repo(tmp, name):
+    """A fixture repository on main with no baseline, and the base commit's id."""
+    repo = _base_repo(tmp, name)
+    return repo, _fx_git(repo, "rev-parse", "HEAD")
+
+
+def _baseline_rows(tmp, labels):
+    """The gate's baseline: componentwise growth, stale entries, the per-key partition and its digest."""
+    la, lb = labels["backlog-id"], labels["finding-number"]
+    la_raw, lb_raw = la.encode("utf-8"), lb.encode("utf-8")
+
+    # An import whose entry already sits on main: the branch adds the line and it is grandfathered.
+    repo, base = _baseline_repo(tmp, "baseline-import")
+    _put_baseline(repo, base, {("imported.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "authorized entry")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "imported.py", "x = 1\n" + la + "\n")
+    _commit_all(repo, "the import")
+    code, out = _gate(repo)
+    check("pass/baseline-import-grandfathered", code == 0 and "  imported.py:2:" not in out, out)
+    check("review/pass-notes-grandfathered", code == 0 and "NOTE: review-label gate: grandfathered by "
+          "{}: imported.py:2: backlog-id (".format(BASELINE_RELPATH) in out
+          and "1 added finding(s) grandfathered" in out, out)
+    with _patched(partition=lambda findings, entries, counts: (findings, [])):
+        code, out = _gate(repo)
+    check("flip/baseline-partition-grants-nothing", code == 1 and "  imported.py:2: backlog-id" in out, out)
+    with _patched(_grandfathered_lines=lambda ledger: []):
+        code, out = _gate(repo)
+    check("flip/baseline-grandfathered-note-omitted", code == 0 and "grandfathered by" not in out, out)
+
+    # A nonempty baseline appearing where the merge base has none is growth, listed per occurrence.
+    repo, base = _baseline_repo(tmp, "baseline-growth")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "imported.py", la + "\nx = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("imported.py", la_raw, "backlog-id"): 2})
+    _commit_all(repo, "import with its entry")
+    code, out = _gate(repo)
+    growth_line = "  GROWTH imported.py:{}: backlog-id (a tracker backlog id): {} [{} count 0 to 2]"
+    check("refuse/baseline-growth-new-entry", code == 1 and "  GROWTH imported.py:1: backlog-id" in out
+          and "  imported.py:1: backlog-id" not in out, out)
+    check("review/growth-lists-occurrences", all(growth_line.format(number, la, _sha(la_raw)[:12]) in out
+                                                  for number in (1, 3)), out)
+    with _patched(baseline_growth=lambda candidate, prior: []):
+        code, out = _gate(repo)
+    check("flip/baseline-growth-unchecked", code == 0, out)
+    with _patched(_review_lines=_review_lines_digests_only):
+        code, out = _gate(repo)
+    check("flip/growth-listed-by-digest-only", not all(
+        growth_line.format(number, la, _sha(la_raw)[:12]) in out for number in (1, 3)), out)
+
+    # Growth is componentwise: one key up and another down by the same amount still grows.
+    repo, base = _baseline_repo(tmp, "baseline-netted")
+    _write(repo, "a.py", la + "\n")
+    _write(repo, "b.py", lb + "\nkeep = 1\n" + lb + "\n")
+    _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1, ("b.py", lb_raw, "finding-number"): 2})
+    main = _commit_all(repo, "two entries")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "a.py", la + "\n" + la + "\n")
+    _write(repo, "b.py", lb + "\nkeep = 1\n")
+    _put_baseline(repo, main, {("a.py", la_raw, "backlog-id"): 2, ("b.py", lb_raw, "finding-number"): 1})
+    _commit_all(repo, "one key up, the other down")
+    code, out = _gate(repo)
+    check("refuse/baseline-growth-netted", code == 1 and "  GROWTH a.py:" in out
+          and "RELEASED b.py: finding-number" in out, out)
+    with _patched(baseline_growth=_growth_by_total):
+        code, out = _gate(repo)
+    check("flip/baseline-growth-netted-by-total", code == 0, out)
+
+    # An entry whose line the branch deletes is stale; the same entry survives an unrelated branch.
+    repo, base = _baseline_repo(tmp, "baseline-stale")
+    _write(repo, "a.py", "x = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "import merged")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "a.py", "x = 1\n")
+    _commit_all(repo, "the line deleted")
+    code, out = _gate(repo)
+    check("refuse/baseline-stale-entry", code == 1 and "  STALE a.py: backlog-id {} count 1, 0 found".format(
+        _sha(la_raw)[:12]) in out, out)
+    with _patched(stale_entries=lambda entries, counts, findings: []):
+        code, out = _gate(repo)
+    check("flip/baseline-stale-unchecked", code == 0, out)
+    _fx_git(repo, "checkout", "-q", "-b", "unrelated", "main")
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "an unrelated change")
+    code, out = _gate(repo)
+    check("pass/baseline-survives-merge", code == 0, out)
+    with _patched(stale_entries=_stale_without_added_line):
+        code, out = _gate(repo)
+    check("flip/baseline-stale-means-no-added-line", code == 1 and "  STALE a.py:" in out, out)
+
+    # Entry counts: one entry of count 1 grants one copy; count 2 grants two.
+    repo, base = _baseline_repo(tmp, "baseline-copies")
+    _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1, ("c.py", la_raw, "backlog-id"): 2})
+    _commit_all(repo, "two entries")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "a.py", la + "\n" + la + "\n")
+    _write(repo, "c.py", la + "\n" + la + "\n")
+    _commit_all(repo, "two copies each")
+    code, out = _gate(repo)
+    check("refuse/baseline-extra-copy-charged", code == 1 and out.count("  a.py:") == 1
+          and "  a.py:2: backlog-id" in out, out)
+    check("pass/baseline-two-copies-count-two", "  c.py:" not in out and "STALE c.py" not in out, out)
+    with _patched(partition=_partition_all_copies):
+        code, out = _gate(repo)
+    check("flip/baseline-every-copy-exempt", code == 0, out)
+    with _patched(_occurrence_count=lambda items: min(1, len(items))):
+        code, out = _gate(repo)
+    check("flip/baseline-count-capped-at-one", code == 1 and "  STALE c.py:" in out, out)
+
+    # The exemption is per shape, per path and per digest.
+    two_shapes = la + " after the review " + "rou" + "nd"
+    repo, base = _baseline_repo(tmp, "baseline-keys")
+    _put_baseline(repo, base, {("s.py", two_shapes.encode("utf-8"), "backlog-id"): 1,
+                               ("a.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "entries")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "s.py", two_shapes + "\n")
+    _write(repo, "a.py", la + "\n")
+    _write(repo, "other.py", la + "\n")
+    _commit_all(repo, "a two-shape line, and one line in its own file and another")
+    code, out = _gate(repo)
+    check("refuse/baseline-shape-scoped", code == 1 and "  s.py:1: review-cycle-words" in out
+          and "  s.py:1: backlog-id" not in out, out)
+    check("refuse/baseline-other-path", code == 1 and "  other.py:1: backlog-id" in out
+          and "  a.py:1:" not in out, out)
+    with _patched(partition=_partition_whole_line):
+        code, out = _gate(repo)
+    check("flip/baseline-exempts-whole-line", "  s.py:1: review-cycle-words" not in out, out)
+    with _patched(partition=_partition_pathless):
+        code, out = _gate(repo)
+    check("flip/baseline-key-without-path", "  other.py:1: backlog-id" not in out, out)
+
+    # A label replaced by different text of the same shape, its entry re-keyed: growth on the new key.
+    la2 = la.replace("12", "13")
+    repo, base = _baseline_repo(tmp, "baseline-replace")
+    _write(repo, "a.py", la + "\n")
+    _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
+    main = _commit_all(repo, "import merged")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "a.py", la2 + "\n")
+    _put_baseline(repo, main, {("a.py", la2.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "replaced and re-keyed")
+    code, out = _gate(repo)
+    check("refuse/baseline-same-count-replacement", code == 1 and "  GROWTH a.py:1: backlog-id" in out, out)
+    with _patched(baseline_growth=_growth_by_path_shape):
+        code, out = _gate(repo)
+    check("flip/baseline-keyed-by-path-and-shape", code == 0, out)
+
+    # The digest is over the exact judged bytes: a CR kept, git's clean form, no final LF, NUL bytes raw.
+    utf16 = la.encode("utf-16-le")
+    repo, base = _baseline_repo(tmp, "baseline-bytes")
+    _write(repo, ".gitattributes", "*.txt -text\n")
+    _write(repo, "f.py", "x = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("c.txt", la_raw + b"\r", "backlog-id"): 1, ("f.py", la_raw, "backlog-id"): 1,
+                               ("u.bin", utf16, "backlog-id"): 1})
+    _commit_all(repo, "entries")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write_bytes(repo, "c.txt", la_raw + b"\r\n")
+    _write_bytes(repo, "f.py", b"x = 1\n" + la_raw)
+    _write_bytes(repo, "u.bin", utf16 + "\n".encode("utf-16-le"))
+    _commit_all(repo, "a CRLF line, a lost final LF and a UTF-16 line")
+    code, out = _gate(repo)
+    check("pass/baseline-crlf-kept", code == 0 and "  c.txt:" not in out and "STALE c.txt" not in out, out)
+    check("pass/baseline-final-line-no-lf", code == 0 and "  f.py:" not in out and "STALE f.py" not in out, out)
+    check("pass/baseline-utf16-raw", code == 0 and "  u.bin:" not in out and "STALE u.bin" not in out, out)
+    with _patched(_line_digest=lambda raw: hashlib.sha256(raw.rstrip(b"\r")).hexdigest()):
+        code, out = _gate(repo)
+    check("flip/baseline-digest-strips-cr", code == 1 and "  c.txt:1: backlog-id" in out, out)
+    with _patched(added_lines=_lf_marking_added_lines):
+        code, out = _gate(repo)
+    check("flip/baseline-final-lf-distinguished", code == 1 and "STALE f.py" in out, out)
+    with _patched(_line_digest=lambda raw: hashlib.sha256(raw.replace(b"\x00", b"")).hexdigest()):
+        code, out = _gate(repo)
+    check("flip/baseline-digest-of-decoded-view", code == 1 and "  u.bin:1: backlog-id" in out, out)
+
+    # core.autocrlf with a CRLF working tree: m(k) is read in git's clean form, not from the raw bytes.
+    repo, base = _baseline_repo(tmp, "baseline-autocrlf")
+    _put_baseline(repo, base, {("w.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "entry")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "w.py", la + "\n")
+    _commit_all(repo, "the line")
+    _fx_git(repo, "config", "core.autocrlf", "true")
+    _write_bytes(repo, "w.py", la_raw + b"\r\n")
+    code, out = _gate(repo)
+    check("pass/baseline-autocrlf-worktree", code == 0, out)
+    with _patched(occurrences=_worktree_occurrences):
+        code, out = _gate(repo)
+    check("flip/baseline-counted-from-raw-worktree", code == 1 and "STALE w.py" in out, out)
+
+    # An entry's line moved to another file with its entry kept leaves the entry stale (m counted in the
+    # candidate); the pinned move credit also charges the copy in the other file (R14).
+    repo, base = _baseline_repo(tmp, "baseline-moved")
+    _write(repo, "a.py", "x = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "import merged")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "a.py", "x = 1\n")
+    _write(repo, "g.py", la + "\n")
+    _commit_all(repo, "the line moved")
+    code, out = _gate(repo)
+    check("refuse/baseline-moved-away-stale", code == 1 and "STALE a.py" in out
+          and "  g.py:1: backlog-id" in out, out)
+    with _patched(_occurrence_revision=lambda base_sha, head_sha, head: base_sha):
+        code, out = _gate(repo)
+    check("flip/baseline-counted-at-merge-base", "STALE a.py" not in out, out)
+
+    # Absent, deleted and empty baselines.
+    repo, base = _baseline_repo(tmp, "baseline-absent")
+    _write(repo, "a.py", la + "\n")
+    _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
+    main = _commit_all(repo, "import merged")
+    _fx_git(repo, "checkout", "-q", "-b", "shrink")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _commit_all(repo, "baseline deleted")
+    code, out = _gate(repo)
+    check("pass/baseline-deleted-is-shrink", code == 0 and "RELEASED a.py: backlog-id" in out, out)
+    with _patched(_absent_baseline=_refuse_absent_baseline):
+        code, out = _gate(repo)
+    check("flip/baseline-deleted-refused", code == 2, out)
+    _write(repo, "added.py", la.replace("12", "14") + "\n")
+    _commit_all(repo, "a label with no baseline")
+    code, out = _gate(repo)
+    check("refuse/baseline-absent-label-charged", code == 1 and "  added.py:1: backlog-id" in out, out)
+    with _patched(_absent_baseline=_refuse_absent_baseline):
+        code, out = _gate(repo)
+    check("flip/baseline-absent-refused", code == 2, out)
+    repo, base = _baseline_repo(tmp, "baseline-empty")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _put_baseline(repo, base, {})
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "an empty canonical baseline")
+    code, out = _gate(repo)
+    check("pass/baseline-empty-file", code == 0, out)
+    with _patched(parse_baseline=_refuse_entryless_baseline):
+        code, out = _gate(repo)
+    check("flip/baseline-empty-file-refused", code == 2, out)
+
+    # The source commit: checked for ancestry only when the baseline changed.
+    repo, base = _baseline_repo(tmp, "baseline-source")
+    _fx_git(repo, "checkout", "-q", "-b", "side")
+    side = _commit_all(repo, "a commit main never merges")
+    _fx_git(repo, "checkout", "-q", "main")
+    _put_baseline(repo, side, {})
+    _commit_all(repo, "a baseline naming the side commit (a squash merge)")
+    _fx_git(repo, "checkout", "-q", "-b", "later")
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "a later change")
+    code, out = _gate(repo)
+    check("pass/baseline-source-commit-unreachable-unchanged", code == 0, out)
+    with _patched(_baseline_changed=lambda candidate, prior: True):
+        code, out = _gate(repo)
+    check("flip/baseline-source-commit-always-checked", code == 2 and "not an ancestor" in out, out)
+    _fx_git(repo, "checkout", "-q", "-b", "grow", "main")
+    _write(repo, "a.py", la + "\n")
+    _put_baseline(repo, side, {("a.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a changed baseline naming the side commit")
+    code, out = _gate(repo)
+    check("fail-closed/baseline-source-commit-not-ancestor", code == 2 and "not an ancestor" in out, out)
+    check("review/not-ancestor-names-writer", code == 2 and "--write-baseline --head {}".format(
+        _fx_git(repo, "rev-parse", "HEAD")[:12]) in out, out)
+    with _patched(_require_source_ancestor=lambda root, source, head_sha: None):
+        code, out = _gate(repo)
+    check("flip/baseline-source-commit-accepted", code == 1, out)
+
+    # The baseline file is itself judged: an entry whose path matches a shape is charged there.
+    noted = "notes/review-" + "rou" + "nd.txt"
+    repo, base = _baseline_repo(tmp, "baseline-judged")
+    _write(repo, noted, la + "\n")
+    main = _commit_all(repo, "a file whose path matches a shape")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _put_baseline(repo, main, {(noted, la_raw, "backlog-id"): 1})
+    _commit_all(repo, "its entry")
+    code, out = _gate(repo)
+    check("refuse/baseline-file-judged", code == 1 and "  {}:".format(BASELINE_RELPATH) in out
+          and ": review-cycle-words (" in out, out)
+    with _patched(_excluded=lambda path, excluded: path in excluded or path == BASELINE_RELPATH):
+        code, out = _gate(repo)
+    check("flip/baseline-file-excluded", "  {}:".format(BASELINE_RELPATH) not in out, out)
+
+
+def _baseline_fail_closed_rows(tmp, labels):
+    """A malformed, non-canonical or non-regular baseline, at the candidate or the merge base, exits 2."""
+    la = labels["backlog-id"]
+    repo, base = _baseline_repo(tmp, "baseline-malformed")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "labelled.py", la + "\n")
+    _commit_all(repo, "a label")
+    digest = _sha(la.encode("utf-8"))
+    good = render_baseline(base, {("labelled.py", digest, "backlog-id"): 1})
+    block = render_baseline(base, {("labelled.py", digest, "backlog-id"): 1})[len(render_baseline(base, {})):]
+    path = Path(repo) / BASELINE_RELPATH
+    excluded = sorted(_REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH).excluded)[0]
+    target = Path(tmp) / "baseline-target.toml"
+    with open(target, "wb") as handle:
+        handle.write(good)
+    bodies = {
+        "not-toml": b"[[entry\n",
+        "unknown-key": good.replace(b"format-version = 1\n", b"format-version = 1\nextra = 1\n"),
+        "unknown-shape": good.replace(b"\"backlog-id\"", b"\"no-such-shape\""),
+        "duplicate": good + block,
+        "unsorted": render_baseline(base, {("z.py", digest, "backlog-id"): 1}) + block,
+        "comment": good + b"# a note\n",
+        "count-zero": good.replace(b"count = 1", b"count = 0"),
+        "count-bool": good.replace(b"count = 1", b"count = true"),
+        "path-absolute": good.replace(b"\"labelled.py\"", b"\"/labelled.py\""),
+        "path-dotdot": good.replace(b"\"labelled.py\"", b"\"../labelled.py\""),
+        "excluded-path": good.replace(b"\"labelled.py\"", "\"{}\"".format(excluded).encode("ascii")),
+        "own-path": good.replace(b"\"labelled.py\"", "\"{}\"".format(BASELINE_RELPATH).encode("ascii")),
+        "bad-source-commit": good.replace(base.encode("ascii"), b"main"),
+        "oversized": good + b"#" * MAX_BASELINE_BYTES,
+        "not-utf8": b"\xff\n",
+    }
+    for check_id, flip_id, name, needle in (
+            ("fail-closed/baseline-not-toml", "flip/baseline-not-toml-read-as-empty", "not-toml",
+             "cannot be parsed"),
+            ("fail-closed/baseline-unknown-key", "flip/baseline-unknown-key-read-as-empty", "unknown-key",
+             "unknown key"),
+            ("fail-closed/baseline-unknown-shape", "flip/baseline-unknown-shape-read-as-empty",
+             "unknown-shape", "names no shape"),
+            ("fail-closed/baseline-duplicate", "flip/baseline-duplicate-read-as-empty", "duplicate",
+             "duplicate entry"),
+            ("fail-closed/baseline-unsorted", "flip/baseline-unsorted-read-as-empty", "unsorted", "canonical"),
+            ("fail-closed/baseline-comment", "flip/baseline-comment-read-as-empty", "comment", "canonical"),
+            ("fail-closed/baseline-count-zero", "flip/baseline-count-zero-read-as-empty", "count-zero",
+             "count must be"),
+            ("fail-closed/baseline-count-bool", "flip/baseline-count-bool-read-as-empty", "count-bool",
+             "count must be"),
+            ("fail-closed/baseline-path-absolute", "flip/baseline-path-absolute-read-as-empty",
+             "path-absolute", "normalized relative"),
+            ("fail-closed/baseline-path-dotdot", "flip/baseline-path-dotdot-read-as-empty", "path-dotdot",
+             "normalized relative"),
+            ("fail-closed/baseline-excluded-path", "flip/baseline-excluded-path-read-as-empty",
+             "excluded-path", "excluded file or the baseline itself"),
+            ("fail-closed/baseline-own-path", "flip/baseline-own-path-read-as-empty", "own-path",
+             "excluded file or the baseline itself"),
+            ("fail-closed/baseline-bad-source-commit", "flip/baseline-bad-source-commit-read-as-empty",
+             "bad-source-commit", "source-commit must be"),
+            ("fail-closed/baseline-symlink", "flip/baseline-symlink-read-as-empty", "SYMLINK",
+             "not a regular file"),
+            ("fail-closed/baseline-directory", "flip/baseline-directory-read-as-empty", "DIRECTORY",
+             "not a regular file"),
+            ("fail-closed/baseline-fifo", "flip/baseline-fifo-read-as-empty", "FIFO", "not a regular file"),
+            ("fail-closed/baseline-oversized", "flip/baseline-oversized-read-as-empty", "oversized",
+             "larger than"),
+            ("fail-closed/baseline-not-utf8", "flip/baseline-not-utf8-read-as-empty", "not-utf8",
+             "not UTF-8")):
+        body = bodies.get(name, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            os.rmdir(path)
+        elif os.path.lexists(path):
+            os.unlink(path)
+        os.makedirs(path.parent, exist_ok=True)
+        if body == "SYMLINK":
+            os.symlink(target, path)
+        elif body == "DIRECTORY":
+            os.mkdir(path)
+        elif body == "FIFO":
+            os.mkfifo(path)
+        else:
+            _write_bytes(repo, BASELINE_RELPATH, body)
+        code, out = _gate(repo)
+        check(check_id, code == 2 and needle in out, out)
+        with _patched(read_baseline=_fail_open_read_baseline):
+            code, out = _gate(repo)
+        check(flip_id, code == 1 and "  labelled.py:1: backlog-id" in out, out)
+    if os.path.isdir(path) and not os.path.islink(path):
+        os.rmdir(path)
+    elif os.path.lexists(path):
+        os.unlink(path)
+
+    # The merge base's baseline is read with the same refusals.
+    for check_id, flip_id, name, kind in (
+            ("fail-closed/baseline-merge-base-symlink", "flip/baseline-merge-base-symlink-read-as-empty",
+             "merge-base-symlink", "SYMLINK"),
+            ("fail-closed/baseline-merge-base-malformed", "flip/baseline-merge-base-malformed-read-as-empty",
+             "merge-base-malformed", "MALFORMED")):
+        repo, base = _baseline_repo(tmp, "baseline-" + name)
+        os.makedirs((Path(repo) / BASELINE_RELPATH).parent, exist_ok=True)
+        if kind == "SYMLINK":
+            os.symlink("../seed.py", Path(repo) / BASELINE_RELPATH)
+        else:
+            _write_bytes(repo, BASELINE_RELPATH, b"[[entry\n")
+        _commit_all(repo, "a bad baseline on main")
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+        _write(repo, "labelled.py", la + "\n")
+        _commit_all(repo, "baseline removed, label added")
+        code, out = _gate(repo)
+        check(check_id, code == 2 and "at {}".format(
+            _fx_git(repo, "merge-base", "main", "HEAD")[:12]) in out, out)
+        with _patched(read_baseline=_fail_open_read_baseline):
+            code, out = _gate(repo)
+        check(flip_id, code == 1, out)
+
+
+def _write_exit(repo, protected="main", head=None):
+    """write_baseline()'s exit code, its stdout and its stderr for one fixture repository."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = write_baseline(repo, protected, head, {})
+    return code, out.getvalue(), err.getvalue()
+
+
+def _unsorted_render(source, entries):
+    """A flip of render_baseline: entries in insertion order, unsorted."""
+    lines = list(BASELINE_HEADER) + ["format-version = 1", "source-commit = \"{}\"".format(source)]
+    for (path, digest, shape), count in entries.items():
+        lines += ["", "[[entry]]", "path = \"{}\"".format(path), "line-sha256 = \"{}\"".format(digest),
+                  "shape = \"{}\"".format(shape), "count = {}".format(count)]
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _sourceless_render(source, entries):
+    """A flip of render_baseline: the source-commit field omitted."""
+    return b"".join(line + b"\n" for line in _REAL_RENDER_BASELINE(source, entries).split(b"\n")
+                    if line and not line.startswith(b"source-commit"))
+
+
+def _baseline_write_rows(tmp, labels):
+    """--write-baseline: deterministic, from committed objects only, records C, reports its own growth,
+    and the gate grants exactly the keys it writes."""
+    la, lb = labels["backlog-id"], labels["finding-number"]
+    # Two label lines in one file, the larger digest first, so insertion order is not sorted order.
+    first, second = sorted((la, lb), key=lambda text: _sha(text.encode("utf-8")), reverse=True)
+    repo, base = _baseline_repo(tmp, "baseline-writer")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "imported.py", first + "\n" + second + "\n" + la + "\n")
+    _write_bytes(repo, "u.bin", la.encode("utf-16-le") + "\n".encode("utf-16-le"))
+    head_sha = _commit_all(repo, "an import")
+    uncommitted = labels["review-test-name"]
+    _write(repo, "imported.py", first + "\n" + second + "\n" + la + "\n" + uncommitted + "\n")
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+
+    code, out, err = _write_exit(repo)
+    code2, out2, _err2 = _write_exit(repo)
+    try:
+        parsed = parse_baseline(out.encode("ascii"), "writer output", config)
+    except CannotEvaluate as exc:
+        parsed = exc
+    check("write/deterministic", out == out2 and isinstance(parsed, Baseline) and len(parsed.entries) == 3,
+          (out, out2, parsed))
+    with _patched(render_baseline=_unsorted_render):
+        code_f, out_f, _err_f = _write_exit(repo)
+    check("flip/write-unsorted-render-refused", _refused(parse_baseline, out_f.encode("ascii"), "flip",
+                                                          config) == "refused", out_f)
+    check("write/reads-committed-objects", isinstance(parsed, Baseline) and _sha(uncommitted.encode("utf-8"))
+          not in out, out)
+    # The flip reads the working tree in every evaluation: the first one's diff and counts, and the diff
+    # of each evaluation of C' (built from the committed tree, so it cannot hold an uncommitted line).
+    with _patched(_write_revision=lambda head_sha: None,
+                  _store_diff=lambda root, store, base, tree: read_diff(root, base, None)):
+        code_f, out_f, _err_f = _write_exit(repo)
+    check("flip/write-reads-working-tree", _sha(uncommitted.encode("utf-8")) in out_f, out_f)
+    check("write/records-source-commit", "source-commit = \"{}\"\n".format(head_sha) in out
+          and isinstance(parsed, Baseline) and parsed.source == head_sha, out)
+    with _patched(render_baseline=_sourceless_render):
+        code_f, out_f, _err_f = _write_exit(repo)
+    check("flip/write-source-commit-omitted", _refused(parse_baseline, out_f.encode("ascii"), "flip",
+                                                        config) == "refused", out_f)
+    check("write/reports-growth", code == 1 and code2 == 1 and "  GROWTH imported.py:" in err, (code, err))
+    with _patched(baseline_growth=lambda candidate, prior: []):
+        code_f, _out_f, err_f = _write_exit(repo)
+    check("flip/write-growth-unreported", code_f == 0, err_f)
+
+    # Round trip: the writer's output committed on the branch; the gate grants exactly its keys (growth
+    # aside, which is the review step), so no added label is charged and no entry is stale.
+    _fx_git(repo, "checkout", "-q", "--", "imported.py")
+    _write_bytes(repo, BASELINE_RELPATH, out.encode("ascii"))
+    _commit_all(repo, "the writer's baseline")
+    code, gate_out = _gate(repo, head="HEAD")
+    check("write/roundtrip", code == 1 and gate_out.count("  GROWTH ") == 4 and "STALE" not in gate_out
+          and "review or work label(s) on added lines" not in gate_out, gate_out)
+    _fx_git(repo, "checkout", "-q", "-b", "flip-decoded", head_sha)
+    with _patched(_line_digest=lambda raw: hashlib.sha256(
+            raw.replace(b"\x00", b"").decode("utf-8", "replace").encode("utf-8")).hexdigest()):
+        code_f, out_f, _err_f = _write_exit(repo)
+    _write_bytes(repo, BASELINE_RELPATH, out_f.encode("ascii"))
+    _commit_all(repo, "a writer that hashed the decoded text")
+    code, gate_out = _gate(repo, head="HEAD")
+    check("flip/write-hashes-decoded-text", "STALE u.bin" in gate_out and "  u.bin:1: backlog-id" in gate_out,
+          gate_out)
+
+    # Bad write-mode argument lists exit 2 without a scan.
+    bad = (["--write-baseline", "--bogus"], ["--write-baseline", "--write-baseline"],
+           ["--write-baseline", "--head"], ["--write-baseline", "--self-test"],
+           ["--write-baseline", "--head", "HEAD", "--head", "HEAD"])
+    with _patched(run=lambda *args, **kwargs: 99, write_baseline=lambda *args, **kwargs: 98):
+        got = [_main_exit(argv) for argv in bad]
+        good_exit = _main_exit(["--write-baseline", "--protected", "main", "--head", "HEAD"])
+    check("refuse/write-baseline-bad-args", got == [2] * len(bad) and good_exit == 98, (got, good_exit))
+    with _patched(run=lambda *args, **kwargs: 99, write_baseline=lambda *args, **kwargs: 98,
+                  _parse_options=lambda argv: {}):
+        got = [_main_exit(argv) for argv in bad]
+    check("flip/write-baseline-lenient-args", got == [98] * len(bad), got)
+
+
+_REAL_GIT = _git
+
+
+def _no_pins(baseline):
+    """A flip of _pinned_lines: no line is pinned, so a deleted baselined line credits any file."""
+    return frozenset()
+
+
+def _all_pinned_credits(deleted, excluded, pinned):
+    """A flip of _move_credits: every deleted line credits only its own file, baselined or not."""
+    credits = Counter()
+    for (path, raw), count in deleted.items():
+        if not _excluded(path, excluded):
+            credits[(path, raw)] += count
+    return credits
+
+
+def _baseline_pin_rows(tmp, labels):
+    """A deleted line of a file whose baseline entry has its digest credits only that file, so it cannot
+    be spent twice: as the move credit for a copy in another file and as room under the entry."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    # The layout of the case: zz/F.py holds the line with an entry of count 1; the branch deletes it,
+    # adds it back lower in F and adds a copy in a second file, which sorts before F (aa/G.py, first in
+    # diff order) or after it (zzz/G.py).
+    repos = {}
+    for other in ("aa/G.py", "zzz/G.py"):
+        repo, base = _baseline_repo(tmp, "baseline-pin-" + other.split("/")[0])
+        _write(repo, "zz/F.py", "a = 1\n" + la + "\nb = 2\n")
+        _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+        _commit_all(repo, "a baselined line")
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _write(repo, "zz/F.py", "a = 1\nb = 2\n" + la + "\n")
+        _write(repo, other, la + "\n")
+        _commit_all(repo, "the line moved lower in its file and copied into another")
+        repos[other] = repo
+    code, out = _gate(repos["aa/G.py"])
+    check("refuse/baseline-deletion-credits-once", code == 1 and "  aa/G.py:1: backlog-id" in out
+          and "  zz/F.py:" not in out and "grandfathered" not in out and "STALE" not in out, out)
+    with _patched(_pinned_lines=_no_pins):
+        code, out = _gate(repos["aa/G.py"])
+    check("flip/baseline-deletion-credits-twice", code == 0 and "grandfathered by" in out, out)
+    code, out = _gate(repos["zzz/G.py"])
+    check("refuse/baseline-deletion-credits-once-sorted-after", code == 1
+          and "  zzz/G.py:1: backlog-id" in out and "  zz/F.py:" not in out and "grandfathered" not in out
+          and "STALE" not in out, out)
+    code, out, err = _write_exit(repos["aa/G.py"])
+    check("write/pinned-deletion-reports-growth", code == 1 and "  GROWTH aa/G.py:1: backlog-id" in err,
+          (code, out, err))
+    with _patched(_pinned_lines=_no_pins):
+        code, out, err = _write_exit(repos["aa/G.py"])
+    check("flip/write-deletion-credits-twice", code == 0 and "GROWTH aa/G.py" not in err, (code, err))
+
+    # Dropping the entry in the same change unpins the line: moved to another file, it is credited.
+    repo, base = _baseline_repo(tmp, "baseline-pin-dropped")
+    _write(repo, "zz/F.py", "a = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a baselined line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", "a = 1\n")
+    _write(repo, "aa/G.py", la + "\n")
+    _put_baseline(repo, base, {})
+    _commit_all(repo, "the line moved to another file, its entry dropped")
+    code, out = _gate(repo)
+    check("pass/baseline-dropped-entry-unpins-move", code == 0 and "1 moved line(s) not charged" in out
+          and "RELEASED zz/F.py: backlog-id" in out, out)
+    with _patched(_move_credits=_all_pinned_credits):
+        code, out = _gate(repo)
+    check("flip/baseline-every-deletion-pinned", code == 1 and "  aa/G.py:1: backlog-id" in out, out)
+
+
+def _entries_text(out):
+    """A writer proposal without its source-commit line: what two runs at different commits share."""
+    return "\n".join(line for line in out.split("\n") if not line.startswith("source-commit"))
+
+
+def _proposed_entries(out, config):
+    try:
+        return parse_baseline(out.encode("ascii"), "writer output", config).entries
+    except CannotEvaluate as exc:
+        return exc
+
+
+def _writer_roundtrip(repo, config):
+    """The writer at the branch tip, its output committed on top, the gate there and the writer again:
+    (writer exit, its stdout, its stderr, entries, gate exit, gate output, second exit, second stdout)."""
+    code, out, err = _write_exit(repo)
+    entries = _proposed_entries(out, config)
+    if not out:
+        return code, out, err, entries, None, "", None, ""
+    _write_bytes(repo, BASELINE_RELPATH, out.encode("ascii"))
+    _commit_all(repo, "the writer's baseline")
+    gate_code, gate_out = _gate(repo)
+    code2, out2, _err2 = _write_exit(repo)
+    return code, out, err, entries, gate_code, gate_out, code2, out2
+
+
+def _uncapped_carry(old, before, counts):
+    """A flip of _carried: an entry of C's baseline is carried at min(its count, its count in C), never
+    capped at the merge base's count, so an entry no finding needs keeps its growth."""
+    carried = {key: min(count, counts.get(key, 0)) for key, count in old.items()}
+    return {key: count for key, count in carried.items() if count > 0}
+
+
+def _baseline_writer_fixpoint_rows(tmp, labels):
+    """--write-baseline proposes the fixed point of the pinned move credit: its output committed leaves
+    the gate only true growth (or a pass), a second run proposes the same entries, the rounds are bounded,
+    an oversized proposal is refused, and a rename's stale entry is dropped while a transferred allowance
+    is growth."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+    key_f, key_g = ("zz/F.py", _sha(la_raw), "backlog-id"), ("aa/G.py", _sha(la_raw), "backlog-id")
+    charged_text = "review or work label(s) on added lines"
+
+    # A baselined line moved whole from zz/F.py to aa/G.py, the baseline left as it is: the writer drops
+    # F's entry (its file holds no copy), and with that committed the move is credited and the gate passes.
+    repo, base = _baseline_repo(tmp, "baseline-writer-move")
+    _write(repo, "zz/F.py", "a = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a baselined line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", "a = 1\n")
+    _write(repo, "aa/G.py", la + "\n")
+    _commit_all(repo, "the line moved to another file, the baseline kept")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-move-drops-entry", code == 0 and entries == {} and "RELEASED zz/F.py" in err
+          and gate_code == 0 and "1 moved line(s) not charged" in gate_out and code2 == 0
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # An unbaselined label reordered in zz/F.py and copied into aa/G.py (first in diff order): no single
+    # entry lets it pass, so the writer proposes both keys; committed, the gate charges no line and finds
+    # no entry stale, only the growth, and a second run proposes the same entries.
+    repo, base = _baseline_repo(tmp, "baseline-writer-reorder-copy")
+    _write(repo, "zz/F.py", "a = 1\nb = 2\n" + la + "\n")
+    _commit_all(repo, "a label line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", la + "\na = 1\nb = 2\n")
+    _write(repo, "aa/G.py", la + "\n")
+    reorder_head = _commit_all(repo, "the line reordered in its file and copied into another")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-reorder-and-copy", code == 1 and entries == {key_f: 1, key_g: 1}
+          and gate_code == 1 and charged_text not in gate_out and "STALE" not in gate_out
+          and gate_out.count("  GROWTH ") == 2 and code2 == 1 and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    reorder_out = out
+
+    # The rounds are bounded: that layout settles on its third round, so a bound of two refuses it with
+    # nothing printed and a bound of three proposes it; rounds that replace the proposal instead of adding
+    # to it alternate between the two keys and are refused the same way.
+    with _patched(writer_round_bound=lambda keys: 2):
+        code_2, out_2, err_2 = _write_exit(repo, head=reorder_head)
+    with _patched(writer_round_bound=lambda keys: 3):
+        code_3, out_3, _err_3 = _write_exit(repo, head=reorder_head)
+    check("fail-closed/write-rounds-bound", code_2 == 2 and out_2 == "" and "still changed after 2 rounds"
+          in err_2 and code_3 == 1 and out_3 == reorder_out, (code_2, out_2, err_2, code_3, out_3))
+    with _patched(_merged=lambda proposal, found: found):
+        code_f, out_f, err_f = _write_exit(repo, head=reorder_head)
+    check("flip/write-rounds-replace-proposal", code_f == 2 and out_f == "" and "still changed" in err_f,
+          (code_f, out_f, err_f))
+
+    # The proposal is held to the gate's read limit before it is printed: at its own size it is printed,
+    # one byte under it the writer exits 2 with nothing on stdout.
+    size = len(reorder_out.encode("ascii"))
+    with _patched(MAX_BASELINE_BYTES=size):
+        code_at, out_at, _err_at = _write_exit(repo, head=reorder_head)
+    with _patched(MAX_BASELINE_BYTES=size - 1):
+        code_over, out_over, err_over = _write_exit(repo, head=reorder_head)
+    check("fail-closed/write-oversized-proposal-refused", code_at == 1 and out_at == reorder_out
+          and code_over == 2 and out_over == "" and "larger than the {} bytes".format(size - 1) in err_over,
+          (code_at, code_over, out_over, err_over))
+
+    # R14's writer half: one of two baselined copies moved to aa/G.py. F still holds a copy, so its entry
+    # is carried (lowered to 1), which pins F's deletion, and the moved copy is proposed as growth.
+    repo, base = _baseline_repo(tmp, "baseline-writer-partial-move")
+    _write(repo, "zz/F.py", la + "\na = 1\n" + la + "\n")
+    _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 2})
+    _commit_all(repo, "two baselined copies")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", "a = 1\n" + la + "\n")
+    _write(repo, "aa/G.py", la + "\n")
+    _commit_all(repo, "one copy moved to another file, the baseline kept")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/partial-move-carries-entry", code == 1 and entries == {key_f: 1, key_g: 1}
+          and "  GROWTH aa/G.py:1: backlog-id" in err and gate_code == 1 and charged_text not in gate_out
+          and "STALE" not in gate_out and code2 == 1 and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # The candidate has no baseline while the merge base has F's entry: the writer still pins F's
+    # deletion once it proposes F's entry, so the copy in aa/G.py is reported as growth, not passed.
+    repo, base = _baseline_repo(tmp, "baseline-writer-absent-candidate")
+    _write(repo, "zz/F.py", "a = 1\nb = 2\n" + la + "\n")
+    _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a baselined line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "zz/F.py", la + "\na = 1\nb = 2\n")
+    _write(repo, "aa/G.py", la + "\n")
+    _commit_all(repo, "the baseline removed, the line reordered and copied into another file")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-absent-candidate-baseline", code == 1 and entries == {key_f: 1, key_g: 1}
+          and "  GROWTH aa/G.py:1: backlog-id" in err and "GROWTH zz/F.py" not in err and gate_code == 1
+          and charged_text not in gate_out and "STALE" not in gate_out and "  GROWTH aa/G.py:1:" in gate_out
+          and "GROWTH zz/F.py" not in gate_out and code2 == 1 and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # A pure rename of a baselined file adds no line: its entry is stale, the writer drops it and the gate
+    # then passes. Writing the allowance under the new path instead is growth, and the writer drops that
+    # entry too, since no finding needs it and the merge base has none.
+    repo, base = _baseline_repo(tmp, "baseline-writer-rename")
+    _write(repo, "zz/F.py", "a = 1\nb = 2\n" + la + "\n")
+    _put_baseline(repo, base, {("zz/F.py", la_raw, "backlog-id"): 1})
+    main = _commit_all(repo, "a baselined line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "mv", "zz/F.py", "zz/H.py")
+    _commit_all(repo, "a pure rename")
+    gate_code0, gate_out0 = _gate(repo)
+    code, out, err, entries, gate_code, gate_out, _code2, _out2 = _writer_roundtrip(repo, config)
+    check("pass/baseline-pure-rename-drops-stale-entry", gate_code0 == 1 and "STALE zz/F.py" in gate_out0
+          and "GROWTH" not in gate_out0 and charged_text not in gate_out0 and code == 0 and entries == {}
+          and "RELEASED zz/F.py" in err and gate_code == 0 and "RELEASED zz/F.py" in gate_out,
+          (gate_code0, gate_out0, code, err, entries, gate_code, gate_out))
+    _fx_git(repo, "checkout", "-q", "-b", "transfer", main)
+    _fx_git(repo, "mv", "zz/F.py", "zz/H.py")
+    _put_baseline(repo, main, {("zz/H.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a pure rename with the allowance written under the new path")
+    gate_code, gate_out = _gate(repo)
+    code, out, err = _write_exit(repo)
+    check("write/rename-transferred-allowance-is-growth", gate_code == 1 and "  GROWTH zz/H.py:3:" in gate_out
+          and "STALE" not in gate_out and charged_text not in gate_out and code == 0
+          and _proposed_entries(out, config) == {} and "RELEASED zz/F.py" in err,
+          (gate_code, gate_out, code, out, err))
+    with _patched(_carried=_uncapped_carry):
+        code_f, out_f, err_f = _write_exit(repo)
+    check("flip/write-carry-uncapped", code_f == 1 and "  GROWTH zz/H.py:3:" in err_f, (code_f, err_f))
+
+    # A growing key whose file holds no such line is listed once, with its path and shape alone.
+    repo, base = _baseline_repo(tmp, "baseline-growth-no-line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.py", "value = 1\n")
+    _put_baseline(repo, base, {("x.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "an entry for a line the file does not hold")
+    gate_code, gate_out = _gate(repo)
+    listed = "  GROWTH x.py: backlog-id [{} count 0 to 1], no such line in the file".format(_sha(la_raw)[:12])
+    check("review/growth-without-line-listed-once", gate_code == 1 and gate_out.count("  GROWTH ") == 1
+          and listed in gate_out and "STALE x.py: backlog-id" in gate_out, gate_out)
+
+
+def _moved_within(label, *rest):
+    """A file's text before and after a move of `label` within it: the label and the lines `rest` on main,
+    then `rest` followed by the label, so git's diff deletes the label and adds it back (the three other
+    lines are the longest common run)."""
+    body = "".join(line + "\n" for line in ("a = 1", "b = 2", "c = 3"))
+    return label + "\n" + body + "".join(line + "\n" for line in rest), body + "".join(
+        line + "\n" for line in rest) + label + "\n"
+
+
+def _chain_repo(tmp, name, label, files):
+    """A pin chain: `files` files each hold one unbaselined `label` on main, the branch moves it within
+    every one of them and adds one new copy in aa/first.py, which sorts before them in diff order."""
+    repo, _base = _baseline_repo(tmp, name)
+    paths = ["chain/{:02d}.py".format(index) for index in range(files)]
+    for path in paths:
+        _write(repo, path, _moved_within(label)[0])
+    _commit_all(repo, "one label line in each file of the chain")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    for path in paths:
+        _write(repo, path, _moved_within(label)[1])
+    _write(repo, "aa/first.py", label + "\n")
+    _commit_all(repo, "the label moved within every file and one new copy added")
+    return repo, paths
+
+
+def _without_path(path):
+    """A flip of _writer_round: the round never proposes a key of `path`, so the pass settles on a
+    proposal the gate still charges a finding for."""
+    real = _writer_round
+
+    def broken(*args):
+        return {key: count for key, count in real(*args).items() if key[0] != path}
+    return broken
+
+
+def _uncharged_verdict(*args):
+    """A flip of baseline_verdict: no finding is ever charged and no entry is stale."""
+    return _REAL_BASELINE_VERDICT(*args)._replace(charged=[], stale=[])
+
+
+def _baseline_writer_roundtrip_rows(tmp, labels):
+    """--write-baseline round-trips: its passes carry their own proposal as C's baseline until it stops
+    changing, the gate's own predicate checks the result before it is printed, and the round and pass
+    bounds come from the number of candidate keys."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+    charged_text = "review or work label(s) on added lines"
+
+    def key(path):
+        return (path, _sha(la_raw), "backlog-id")
+
+    # A five-file layout: main holds the label twice in cc/C.py and twice in dd/D.py, each with an entry
+    # of count 1. The branch deletes the baseline, adds two copies in aa/A.py, moves one copy within C,
+    # deletes both copies in D and adds one back, and adds ee/E.py with one copy. The first pass proposes
+    # C at 2 (D's pin takes D's deletions from the shared pool); carried as C's baseline, C's own pin
+    # credits its move, so the writer proposes C at 1 and only A and E grow.
+    repo, base = _baseline_repo(tmp, "baseline-writer-five-files")
+    _write(repo, "cc/C.py", la + "\na = 1\nb = 2\nc = 3\n" + la + "\n")
+    _write(repo, "dd/D.py", la + "\n" + la + "\na = 1\nb = 2\nc = 3\n")
+    _put_baseline(repo, base, {("cc/C.py", la_raw, "backlog-id"): 1, ("dd/D.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "two baselined files")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "aa/A.py", la + "\n" + la + "\n")
+    _write(repo, "cc/C.py", "a = 1\nb = 2\nc = 3\n" + la + "\n" + la + "\n")
+    _write(repo, "dd/D.py", "a = 1\nb = 2\nc = 3\n" + la + "\n")
+    _write(repo, "ee/E.py", la + "\n")
+    five_head = _commit_all(repo, "the baseline deleted, copies added and moved")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-five-files-carried-pins", code == 1
+          and entries == {key("aa/A.py"): 2, key("cc/C.py"): 1, key("dd/D.py"): 1, key("ee/E.py"): 1}
+          and "GROWTH cc/C.py" not in err and "ROUND TRIP: settled in 3 pass(es)" in err and gate_code == 1
+          and charged_text not in gate_out and "STALE" not in gate_out and "GROWTH cc/C.py" not in gate_out
+          and gate_out.count("  GROWTH aa/A.py:") == 2 and gate_out.count("  GROWTH ") == 3 and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # The passes are bounded: that layout settles on its third pass, so a bound of two refuses it with
+    # nothing printed and a bound of three proposes it.
+    with _patched(writer_pass_bound=lambda keys: 2):
+        code_2, out_2, err_2 = _write_exit(repo, head=five_head)
+    with _patched(writer_pass_bound=lambda keys: 3):
+        code_3, out_3, _err_3 = _write_exit(repo, head=five_head)
+    check("fail-closed/write-passes-bound", code_2 == 2 and out_2 == "" and "other entries after 2 passes"
+          in err_2 and code_3 == 1 and out_3 == out, (code_2, out_2, err_2, code_3, out_3))
+
+    # A three-file layout: main holds the label twice in 1.py with an entry of count 1 and once in 2.py
+    # with none. The branch deletes the baseline, moves one copy within each file and copies the label
+    # into a new 0.py. The writer proposes 1.py at 1, not 2, and committed the gate lists no 1.py growth.
+    repo, base = _baseline_repo(tmp, "baseline-writer-three-files")
+    _write(repo, "1.py", _moved_within(la, la)[0])
+    _write(repo, "2.py", _moved_within(la)[0])
+    _put_baseline(repo, base, {("1.py", la_raw, "backlog-id"): 1})
+    _commit_all(repo, "a partial allowance in 1.py, none in 2.py")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "1.py", _moved_within(la, la)[1])
+    _write(repo, "2.py", _moved_within(la)[1])
+    _write(repo, "0.py", la + "\n")
+    _commit_all(repo, "the baseline deleted, each label moved within its file, a copy in 0.py")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-three-files-partial-allowance", code == 1
+          and entries == {key("0.py"): 1, key("1.py"): 1, key("2.py"): 1} and "GROWTH 1.py" not in err
+          and "ROUND TRIP: " in err and gate_code == 1 and charged_text not in gate_out
+          and "STALE" not in gate_out and "GROWTH 1.py" not in gate_out and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+
+    # Pin chains of 30 and 31 files: one new copy becomes one key per file in the chain plus its own, and
+    # the bounds come from the 31 or 32 candidate keys (63 or 65 rounds), so both settle (a fixed bound of
+    # 32 rounds refused the longer one) and both round-trip.
+    for check_id, files in (("write/roundtrip-pin-chain-30", 30), ("write/roundtrip-pin-chain-31", 31)):
+        repo, paths = _chain_repo(tmp, "baseline-writer-chain-{}".format(files), la, files)
+        code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+        check(check_id, code == 1
+              and entries == {key(path): 1 for path in paths + ["aa/first.py"]}
+              and "the longest {} round(s) (bound {}), for {} candidate key(s)".format(
+                  files + 2, 2 * (files + 1) + 1, files + 1) in err
+              and gate_code == 1 and charged_text not in gate_out and "STALE" not in gate_out
+              and gate_out.count("  GROWTH ") == files + 1 and code2 == 1
+              and _entries_text(out2) == _entries_text(out), (code, err, entries, gate_code, gate_out, code2))
+
+    # The settled proposal is judged by the gate's own predicate before it is printed: rounds that never
+    # propose aa/G.py's key settle on F's alone, which the gate would charge G's copy under, so the writer
+    # exits 2 with nothing printed; with that check removed it prints the short proposal.
+    repo, base = _baseline_repo(tmp, "baseline-writer-gate-check")
+    _write(repo, "zz/F.py", _moved_within(la)[0])
+    _commit_all(repo, "a label line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "zz/F.py", _moved_within(la)[1])
+    _write(repo, "aa/G.py", la + "\n")
+    _commit_all(repo, "the line moved in its file and copied into another")
+    code, out, _err = _write_exit(repo)
+    with _patched(_writer_round=_without_path("aa/G.py")):
+        code_c, out_c, err_c = _write_exit(repo)
+        with _patched(baseline_verdict=_uncharged_verdict):
+            code_f, out_f, _err_f = _write_exit(repo)
+    check("fail-closed/write-proposal-checked-by-gate", code == 1
+          and _proposed_entries(out, config) == {key("zz/F.py"): 1, key("aa/G.py"): 1} and code_c == 2
+          and out_c == "" and "would leave the gate 1 charged finding(s) and 0 stale entr(ies)" in err_c,
+          (code, out, code_c, out_c, err_c))
+    check("flip/write-proposal-unchecked", code_f == 1 and _proposed_entries(out_f, config) == {
+        key("zz/F.py"): 1}, (code_f, out_f))
+
+    # R8 by construction: a branch adds a file whose path matches a shape and whose line is a finding (a
+    # Markdown file and a Python file, the path and the line assembled at run time). The B..C diff holds
+    # no baseline line, so only B..C', with the proposal's render substituted for the baseline, shows that
+    # its path line would be charged in the baseline file: the writer exits 2 with nothing printed, naming
+    # R8 and the entry. Judged on B..C instead, it prints the proposal and a ROUND TRIP line, yet
+    # committed the gate charges the baseline file's own line 8 and a second writer run exits 2.
+    fx = "FI" + "X-"
+    for check_id, flip_id, name, path, line in (
+            ("fail-closed/write-own-line-r8-markdown", "flip/write-own-line-unchecked-markdown",
+             "baseline-writer-r8-markdown", "docs/" + fx + "7.md", "see " + fx + "7"),
+            ("fail-closed/write-own-line-r8-python", "flip/write-own-line-unchecked-python",
+             "baseline-writer-r8-python", fx + "12.py", la)):
+        repo, base = _baseline_repo(tmp, name)
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _write(repo, path, line + "\n")
+        _commit_all(repo, "a file whose path matches a shape, holding a finding line")
+        code, out, err = _write_exit(repo)
+        own = "{}:8 would be charged as backlog-id".format(BASELINE_RELPATH)
+        check(check_id, code == 2 and out == "" and "R8: " in err and own in err
+              and 'the entry path = "{}"'.format(path) in err and "ROUND TRIP" not in err
+              and "an empty starting proposal" in err and "does not pass either" in err
+              and "rename {} to a path no shape matches, or remove from {} every finding line that needs an "
+                  "entry there ({}:1: backlog-id".format(path, path, path) in err
+              and "commit an empty baseline first" not in err, (code, out, err))
+        with _patched(_substituted_tree=_unsubstituted_tree):
+            code_f, out_f, err_f, entries_f, gate_code, gate_out, code2, out2 = _writer_roundtrip(
+                repo, config)
+        check(flip_id, code_f == 1 and entries_f == {(path, _sha(line.encode("utf-8")), "backlog-id"): 1}
+              and "ROUND TRIP: " in err_f and gate_code == 1 and charged_text in gate_out
+              and "  {}:8: backlog-id".format(BASELINE_RELPATH) in gate_out and code2 == 2 and out2 == "",
+              (code_f, err_f, entries_f, gate_code, gate_out, code2, out2))
+
+    # The R8 way out comes from the empty start's own refusal, as that start is what a writer run on a
+    # commit of an empty baseline would refuse. Main holds the document with its own path line first;
+    # the branch moves that line to the end, adds the note holding its own path line, and its baseline
+    # holds one entry for the document's path line. The start from that baseline is refused on the
+    # document's entry, the empty start on the note's alone, so the way out names the note and its line,
+    # not the document; renamed as named, the writer lists the note's growth only.
+    doc, note = "docs/" + fx + "7.md", "notes/" + fx + "8.toml"
+    doc_path_line, note_path_line = 'path = "{}"'.format(doc), 'path = "{}"'.format(note)
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-way-out-other-file")
+    _write(repo, doc, doc_path_line + "\nb = 2\n")
+    _commit_all(repo, "the document with its own path line first, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "b = 2\n" + doc_path_line + "\n")
+    _write(repo, note, note_path_line + "\n")
+    _put_baseline(repo, base, {(doc, doc_path_line.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "the path line moved, the note added, one baseline entry for the document")
+    code, out, err = _write_exit(repo)
+    way = err.partition("committing an empty baseline first is no way out; ")[2]
+    _fx_git(repo, "mv", note, "notes/eight.toml")
+    _commit_all(repo, "the note renamed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-r8-way-out-other-file", code == 2 and out == "" and "R8: " in err
+          and 'in the entry path = "{}"'.format(doc) in err
+          and "for each of the 1 file(s)" in way and "for {}, rename {} to a path no shape matches".format(
+              note, note) in way and "({}:1: backlog-id".format(note) in way and doc not in way
+          and code_r == 1 and "  GROWTH notes/eight.toml:1: backlog-id" in err_r, (code, out, err, code_r, err_r))
+
+    # A file holding two findings of different digests needs two entries, each putting its path line
+    # into the baseline file: the way out names that file once with both finding lines, and with both
+    # removed the writer proposes no entry.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-way-out-two-digests")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "see " + fx + "7\n" + la + "\n")
+    _commit_all(repo, "two findings of different digests in a file whose path matches a shape")
+    code, out, err = _write_exit(repo)
+    way = err.partition("committing an empty baseline first is no way out; ")[2]
+    _write(repo, doc, "a = 1\n")
+    _commit_all(repo, "both finding lines removed as the way out names")
+    code_r, out_r, _err_r = _write_exit(repo)
+    check("fail-closed/write-r8-way-out-two-digests", code == 2 and out == "" and "R8: " in err
+          and "(2 charged finding(s) on its lines)" in err and "for each of the 1 file(s)" in way
+          and way.count("for {}, rename".format(doc)) == 1 and "({}:1: backlog-id".format(doc) in way
+          and ", {}:2: backlog-id".format(doc) in way and code_r == 0 and _proposed_entries(out_r, config) == {},
+          (code, out, err, code_r, out_r))
+
+    # A configuration whose extra shape matches the entry's own shape line: the empty start charges the
+    # document's path line and its shape line, which a rename renders again under the new path, so the
+    # way out names no rename (it says renaming is none, naming the shape line) and only the removal of
+    # the finding line, which clears it.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-way-out-shape-line")
+    _write(repo, CONFIG_RELPATH, _config_text() + '\n[[shape]]\nid = "quoted-shape"\ndescription = "a quoted '
+           'shape id"\nregex = \'shape = "backlog-id"\'\n')
+    _commit_all(repo, "a shape matching an entry's shape line")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "see " + fx + "7\n")
+    _commit_all(repo, "a finding in a file whose path matches a shape")
+    code, out, err = _write_exit(repo)
+    way = err.partition("committing an empty baseline first is no way out; ")[2]
+    _write(repo, doc, "a = 1\n")
+    _commit_all(repo, "the finding line removed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-r8-way-out-shape-line-no-rename", code == 2 and out == ""
+          and "(2 charged finding(s) on its lines)" in err and "rename {} to".format(doc) not in way
+          and "for {}, remove from {} every finding line that needs an entry there ({}:1: backlog-id".format(
+              doc, doc, doc) in way
+          and "(renaming {} is no way out: its entry's line(s) {}:10 other than the path line".format(
+              doc, BASELINE_RELPATH) in way and code_r == 0 and _proposed_entries(out_r, config) == {},
+          (code, out, err, code_r, out_r, err_r))
+
+    # Main holds the document with one finding line; the branch adds another line and a second copy. Only
+    # the copy the diff adds needs an entry, so the way out lists line 3, not line 1 that main holds, and
+    # with line 3 removed the writer proposes no entry.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-way-out-added-lines")
+    _write(repo, doc, "see " + fx + "7\n")
+    _commit_all(repo, "the document with one finding line, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "see " + fx + "7\nmore = 1\nsee " + fx + "7\n")
+    _commit_all(repo, "a second copy of the finding line")
+    code, out, err = _write_exit(repo)
+    way = err.partition("committing an empty baseline first is no way out; ")[2]
+    _write(repo, doc, "see " + fx + "7\nmore = 1\n")
+    _commit_all(repo, "the added copy removed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-r8-way-out-added-lines-only", code == 2 and out == "" and "R8: " in err
+          and "every finding line that needs an entry there ({}:3: backlog-id".format(doc) in way
+          and "{}:1: backlog-id".format(doc) not in way and code_r == 0
+          and _proposed_entries(out_r, config) == {}, (code, out, err, code_r, out_r, err_r))
+
+    # A charged line of the header (before the first entry, or past the last) names no way out, as every
+    # proposal holds it; a line of an entry names that entry's file.
+    one = {(doc, _sha(b"x"), "backlog-id"): 1}
+    finding = Finding(doc, 1, "backlog-id", "a tracker backlog id", "see", b"see")
+    header_way = _r8_way_out([Finding(BASELINE_RELPATH, 1, "backlog-id", "d", "t", b"t")], one, [finding])
+    entry_way = _r8_way_out([Finding(BASELINE_RELPATH, 8, "backlog-id", "d", "t", b"t")], one, [finding])
+    check("fail-closed/write-r8-way-out-header-line", header_way[0] is None
+          and "{}:1 is in the header every proposal holds".format(BASELINE_RELPATH) in header_way[1]
+          and entry_way[1] is None and "for {}, rename {}".format(doc, doc) in entry_way[0],
+          (header_way, entry_way))
+
+
+def _failing_empty_start(*args):
+    """A flip of _empty_start: the empty start never passes and names no way out of its own."""
+    return EmptyStart(None, "flip: no empty start", None, None, "the flip names none")
+
+
+def _unsubstituted_tree(root, store, head_sha, data):
+    """A flip of _substituted_tree: C itself, so every evaluation and the settled proposal's judgement
+    read B..C, which holds the candidate's own baseline lines in place of the proposal's."""
+    return head_sha
+
+
+def _baseline_lines_judged(added, config):
+    """A flip of _judged_lines: the baseline file's lines are judged even when the configuration excludes
+    that file."""
+    return [line for line in added
+            if not _excluded(line.path, config.excluded) or line.path == BASELINE_RELPATH]
+
+
+def _baseline_writer_substitution_rows(tmp, labels):
+    """--write-baseline judges each proposal on B..C', the candidate with the proposal's render
+    substituted for its baseline: a baseline line C' deletes credits an identical line added elsewhere, a
+    stale baseline line of C takes no credit C' frees, the proposal's own lines are judged with the move
+    credit C' leaves, the lines of an excluded baseline file are not judged, and the evaluations of C'
+    are bounded."""
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+    charged_text = "review or work label(s) on added lines"
+    fx = "FI" + "X-"
+    doc, doc_line = "docs/" + fx + "7.md", "see " + fx + "7"
+    path_line = 'path = "{}"'.format(doc)
+
+    def key(path, line):
+        return (path, _sha(line.encode("utf-8")), "backlog-id")
+
+    # Main holds a document with a baseline entry; the branch deletes the document, keeps the baseline
+    # and adds x.txt holding exactly the baseline's path line. On B..C the copy is charged; C' (any
+    # proposal without that entry) deletes the baseline's path line, which credits the copy, so the writer
+    # proposes no entry, the gate passes with the proposal committed, and a second run proposes none.
+    repo, base = _baseline_repo(tmp, "baseline-writer-freed-path-line")
+    _write(repo, doc, doc_line + "\n")
+    _put_baseline(repo, base, {(doc, doc_line.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "a baselined document")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", doc)
+    _write(repo, "x.txt", path_line + "\n")
+    freed_head = _commit_all(repo, "the document deleted, its baseline path line copied into x.txt")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-freed-baseline-line-credits-copy", code == 0 and entries == {}
+          and "RELEASED " + doc in err and "ROUND TRIP: " in err and gate_code == 0
+          and "1 moved line(s) not charged" in gate_out and code2 == 0
+          and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_substituted_tree=_unsubstituted_tree):
+        code_f, out_f, err_f = _write_exit(repo, head=freed_head)
+    check("flip/write-freed-line-judged-on-candidate", code_f == 1
+          and _proposed_entries(out_f, config) == {key("x.txt", path_line): 1}, (code_f, out_f, err_f))
+
+    # The evaluations of C' are bounded: that layout is stable on its second evaluation of C' (the first
+    # drops x.txt's key), so with no empty start to fall back on (the empty start, as on a commit of an
+    # empty baseline, settles there at once) a bound of one refuses it with nothing printed, naming the
+    # stale entry and not an empty baseline, and a bound of two proposes it.
+    with _patched(writer_settle_bound=lambda keys: 1, _empty_start=_failing_empty_start):
+        code_1, out_1, err_1 = _write_exit(repo, head=freed_head)
+    with _patched(writer_settle_bound=lambda keys: 2):
+        code_2, out_2, _err_2 = _write_exit(repo, head=freed_head)
+    check("fail-closed/write-settle-bound", code_1 == 2 and out_1 == "" and "after 1 evaluation(s)" in err_1
+          and "flip: no empty start" in err_1 and "commit an empty baseline first" not in err_1
+          and "to get out, remove the 1 stale entr(ies) the gate reports" in err_1 and code_2 == 0
+          and _entries_text(out_2) == _entries_text(out), (code_1, out_1, err_1, code_2, out_2))
+
+    # Main holds x.toml with the path lines of the document and of a note; the branch deletes both, adds
+    # the document holding the note's path line and the note holding the document's, and its baseline
+    # holds one entry for the document. Each proposal's own path line takes the move credit the other
+    # file's copy needs, so the evaluations of C' swap between two proposals to their bound. The writer
+    # then evaluates from an empty starting proposal, as on a commit of an empty baseline, which settles
+    # on no entry, and proposes that: committed, the gate passes and a second run proposes none. With no
+    # empty start to fall back on, it refuses with nothing printed, naming no empty baseline and no stale
+    # entry to remove, as neither applies.
+    note = "notes/" + fx + "8.toml"
+    note_line = 'path = "{}"'.format(note)
+    repo, base = _baseline_repo(tmp, "baseline-writer-swap")
+    _write(repo, "x.toml", path_line + "\n" + note_line + "\n")
+    _commit_all(repo, "two path lines on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "")
+    _write(repo, doc, note_line + "\n")
+    _write(repo, note, path_line + "\n")
+    _put_baseline(repo, base, {(doc, note_line.encode("utf-8"), "backlog-id"): 1})
+    swap_head = _commit_all(repo, "each path line in the file the other names, one baseline entry")
+    with _patched(_empty_start=_failing_empty_start):
+        code_f, out_f, err_f = _write_exit(repo, head=swap_head)
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/unsettled-swap-empty-start-proposed", code == 0 and entries == {}
+          and "from an empty starting proposal (the start from the candidate's baseline still proposed other "
+              "entries after" in err and gate_code == 0 and code2 == 0 and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    check("fail-closed/write-unsettled-swap-names-way-out", code_f == 2 and out_f == ""
+          and "still proposed other entries after" in err_f and "flip: no empty start" in err_f
+          and "commit an empty baseline first" not in err_f and "remove the" not in err_f
+          and "no way out is named (the gate reports no stale entry" in err_f, (code_f, out_f, err_f))
+
+    # The same swap with a further note holding its own path line: the start from the candidate's
+    # baseline does not settle and the empty start is refused as R8 on that note alone, so the unsettled
+    # refusal names the empty start's own way out (rename or clear that note), not that none is named;
+    # renamed as named, the writer proposes from the empty start, listing that note's growth only.
+    nine = "notes/" + fx + "9.toml"
+    repo, base = _baseline_repo(tmp, "baseline-writer-swap-r8")
+    _write(repo, "x.toml", path_line + "\n" + note_line + "\n")
+    _commit_all(repo, "two path lines on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "")
+    _write(repo, doc, note_line + "\n")
+    _write(repo, note, path_line + "\n")
+    _write(repo, nine, 'path = "{}"\n'.format(nine))
+    _put_baseline(repo, base, {(doc, note_line.encode("utf-8"), "backlog-id"): 1})
+    _commit_all(repo, "the swap and a note holding its own path line")
+    code, out, err = _write_exit(repo)
+    _fx_git(repo, "mv", nine, "notes/nine.toml")
+    _commit_all(repo, "the note renamed as the way out names")
+    code_r, out_r, err_r = _write_exit(repo)
+    check("fail-closed/write-unsettled-names-empty-start-r8-way-out", code == 2 and out == ""
+          and "still proposed other entries after" in err and "R8: " in err
+          and "to get out, make a candidate that needs no entry for each of the 1 file(s)" in err
+          and "for {}, rename {} to a path no shape matches".format(nine, nine) in err
+          and "no way out is named" not in err and code_r == 1
+          and "  GROWTH notes/nine.toml:1: backlog-id" in err_r and err_r.count("  GROWTH ") == 1
+          and "from an empty starting proposal" in err_r, (code, out, err, code_r, out_r, err_r))
+
+    # Main holds the document with its own path line first, then three lines; the branch moves that line
+    # to the end of the file and its baseline holds one entry for it. From the candidate's baseline the
+    # proposal's own path line (the baseline file comes first in the diff) and the document's copy trade
+    # the document's deletion credit, and the start settles on that entry, refused as R8; an empty
+    # starting proposal settles on no entry, which the gate's predicate accepts, so the writer proposes
+    # it: committed, the gate passes with the move credited, and a second run proposes none. Without the
+    # empty start the writer refuses with R8.
+    repo, base = _baseline_repo(tmp, "baseline-writer-r8-empty-start")
+    _write(repo, doc, path_line + "\na = 1\nb = 2\nc = 3\n")
+    _commit_all(repo, "the document with its own path line first, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, "a = 1\nb = 2\nc = 3\n" + path_line + "\n")
+    _put_baseline(repo, base, {(doc, path_line.encode("utf-8"), "backlog-id"): 1})
+    empty_head = _commit_all(repo, "the path line moved to the end, one baseline entry for it")
+    with _patched(_empty_start=_failing_empty_start):
+        code_f, out_f, err_f = _write_exit(repo, head=empty_head)
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/r8-empty-start-proposed", code == 0 and entries == {}
+          and "from an empty starting proposal" in err and gate_code == 0
+          and "1 moved line(s) not charged" in gate_out and code2 == 0 and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    check("flip/write-r8-without-empty-start", code_f == 2 and out_f == "" and "R8: " in err_f
+          and "flip: no empty start" in err_f, (code_f, out_f, err_f))
+
+    # The way out an unsettled refusal names, once the empty start does not pass either, is only what
+    # applies: removing the stale entries when the candidate's baseline holds some, and the way out of
+    # the empty start's own R8 refusal when it has one; never an empty baseline; else none, with why.
+    one = sorted({(doc, _sha(path_line.encode("utf-8")), "backlog-id"): 1})
+    r8 = "make a candidate that needs no entry for each of the 1 file(s)"
+    stale_way, r8_way, both_way, none_way = (
+        _unsettled_way_out(one, None, "why"), _unsettled_way_out([], r8, None),
+        _unsettled_way_out(one, r8, None), _unsettled_way_out([], None, "the empty start is not refused as R8"))
+    check("fail-closed/write-unsettled-way-out-applies",
+          stale_way.startswith("to get out, remove the 1 stale entr(ies)") and r8 not in stale_way
+          and r8_way == "to get out, {}, and run the writer on that commit".format(r8)
+          and "remove the 1 stale entr(ies)" in both_way and ", or " + r8 in both_way
+          and none_way.startswith("no way out is named (") and "not refused as R8" in none_way
+          and not any("empty baseline" in way for way in (stale_way, r8_way, both_way, none_way)),
+          (stale_way, r8_way, both_way, none_way))
+
+    # Main holds x.toml with the path line; the branch moves it to notes/a.toml and its baseline holds a
+    # stale entry for the document. On B..C the stale path line comes first in diff order and takes the
+    # move credit, so the copy is charged; C' drops that line, the credit spares the copy, and the writer
+    # proposes no entry, the gate passes with it committed, and a second run proposes none.
+    repo, base = _baseline_repo(tmp, "baseline-writer-stale-line-credit")
+    _write(repo, "x.toml", "a = 1\n" + path_line + "\n")
+    _commit_all(repo, "a path line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "a = 1\n")
+    _write(repo, "notes/a.toml", path_line + "\n")
+    _put_baseline(repo, base, {(doc, doc_line.encode("utf-8"), "backlog-id"): 1})
+    stale_head = _commit_all(repo, "the path line moved, a stale baseline entry")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/roundtrip-stale-baseline-line-frees-credit", code == 0 and entries == {} and gate_code == 0
+          and "1 moved line(s) not charged" in gate_out and code2 == 0
+          and _proposed_entries(out2, config) == {},
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_substituted_tree=_unsubstituted_tree):
+        code_f, out_f, err_f = _write_exit(repo, head=stale_head)
+    check("flip/write-stale-line-judged-on-candidate", code_f == 1
+          and _proposed_entries(out_f, config) == {key("notes/a.toml", path_line): 1}, (code_f, out_f, err_f))
+
+    # Main holds x.toml with the path line; the branch deletes it and adds the document. The proposal's
+    # own path line is credited by that deletion on B..C', so the writer proposes the document's entry,
+    # the gate lists only its growth with the proposal committed, and a second run proposes the same.
+    # Judged with no move credit (as when the proposal's render was read apart from the diff), that line
+    # is charged and the writer refuses a proposal the gate accepts.
+    repo, base = _baseline_repo(tmp, "baseline-writer-own-line-credited")
+    _write(repo, "x.toml", "a = 1\n" + path_line + "\n")
+    _commit_all(repo, "a path line on main, no baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "x.toml", "a = 1\n")
+    _write(repo, doc, doc_line + "\n")
+    credited_head = _commit_all(repo, "the path line deleted, the document added")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/own-line-judged-with-substituted-credit", code == 1 and entries == {key(doc, doc_line): 1}
+          and "  GROWTH {}:1: backlog-id".format(doc) in err and gate_code == 1
+          and charged_text not in gate_out and "STALE" not in gate_out
+          and "1 moved line(s) not charged" in gate_out
+          and "  GROWTH {}:1: backlog-id".format(doc) in gate_out and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_settled_deleted=lambda deleted: Counter()):
+        code_f, out_f, err_f = _write_exit(repo, head=credited_head)
+    check("flip/write-own-line-judged-without-credit", code_f == 2 and out_f == "" and "R8: " in err_f
+          and "{}:8 would be charged as backlog-id".format(BASELINE_RELPATH) in err_f, (code_f, out_f, err_f))
+
+    # The configuration excludes the baseline file: the gate judges none of its lines, so neither does the
+    # writer, and an entry whose path matches a shape is proposed; committed, the gate lists only its
+    # growth, and a second run proposes the same. Judging the excluded file's lines refuses it as R8.
+    repo, base = _baseline_repo(tmp, "baseline-writer-excluded-baseline")
+    _write(repo, CONFIG_RELPATH, _config_with_excluded(sorted(config.excluded) + [BASELINE_RELPATH]))
+    _put_baseline(repo, base, {})
+    _commit_all(repo, "the baseline file excluded, an empty baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, doc, doc_line + "\n")
+    excluded_head = _commit_all(repo, "a document whose path matches a shape")
+    code, out, err, entries, gate_code, gate_out, code2, out2 = _writer_roundtrip(repo, config)
+    check("write/excluded-baseline-own-lines-not-judged", code == 1 and entries == {key(doc, doc_line): 1}
+          and gate_code == 1 and charged_text not in gate_out and "STALE" not in gate_out
+          and "  GROWTH {}:1: backlog-id".format(doc) in gate_out
+          and "line(s) in excluded file(s) not judged" in gate_out and code2 == 1
+          and _entries_text(out2) == _entries_text(out),
+          (code, err, entries, gate_code, gate_out, code2, out2))
+    with _patched(_judged_lines=_baseline_lines_judged):
+        code_f, out_f, err_f = _write_exit(repo, head=excluded_head)
+    check("flip/write-excluded-baseline-lines-judged", code_f == 2 and out_f == "" and "R8: " in err_f,
+          (code_f, out_f, err_f))
+
+
+@contextlib.contextmanager
+def _ambient_tmpdir(path):
+    """TMPDIR set to `path` in this process's environment for the length of a block, then restored. The
+    writer reads the environment itself (_temporary_candidates), so tempfile's cached directory is left
+    as it is."""
+    saved = os.environ.get("TMPDIR")
+    os.environ["TMPDIR"] = str(path)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = saved
+
+
+def _unchecked_store_directory(areas, own=None):
+    """A flip of _store_directory: the store created under TMPDIR's real path, never checked."""
+    parent = os.path.realpath(os.environ["TMPDIR"])
+    return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
+
+
+def _discovered_store_directory(areas, own=None):
+    """A flip of _store_directory: the parent found by tempfile.gettempdir, whose discovery writes and
+    removes a probe file in a candidate directory, and only then checked against `areas`."""
+    parent = os.path.realpath(tempfile.gettempdir())
+    for area in areas:
+        if os.path.commonpath([parent, area]) == area:
+            raise CannotEvaluate("the temporary directory {} (TMPDIR) lies inside the repository ({}) "
+                                 "(flip)".format(parent, area))
+    return tempfile.TemporaryDirectory(prefix="review-label-writer-", dir=parent)
+
+
+def _text_repository_areas(root):
+    """A flip of _repository_areas: git's paths decoded as UTF-8 text with backslash escapes (_git_lines),
+    so a byte that is not UTF-8 becomes escape text naming another path."""
+    lines = _git_lines(root, "the repository's directories cannot be found", "rev-parse",
+                       "--path-format=absolute", "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
+                       "--git-path", "objects")
+    return lines[3], [os.path.realpath(line) for line in lines]
+
+
+def _tree_listing(path):
+    """Every entry below `path`, as sorted relative paths."""
+    return sorted(os.path.relpath(os.path.join(top, name), path)
+                  for top, dirs, files in os.walk(path) for name in dirs + files)
+
+
+# The fresh child for the TMPDIR rows: it records every open, mkdir, rename and removal whose path lies
+# in argv[3] (an audit hook installed before the module is imported, so a transient probe file that a
+# directory listing taken before and after cannot see is recorded), then runs --write-baseline's
+# writer on argv[2] and prints its exit code, stdout, stderr and the recorded events as JSON. With
+# argv[4] "discovery", _store_directory is replaced by its flip _discovered_store_directory.
+_TMPDIR_CHILD = r"""
+import contextlib, io, json, os, sys
+tools, repo, inside, flip = sys.argv[1:5]
+touched = []
+
+
+def hook(event, args):
+    if event in ("open", "os.mkdir", "os.rename", "os.remove", "os.rmdir") and args \
+            and isinstance(args[0], (str, bytes, os.PathLike)):
+        path = os.path.abspath(os.fsdecode(args[0]))
+        if path == inside or path.startswith(inside + os.sep):
+            touched.append([event, path])
+
+
+sys.addaudithook(hook)
+sys.path.insert(0, tools)
+import check_review_labels as labels
+if flip == "discovery":
+    labels._store_directory = labels._discovered_store_directory
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    code = labels.write_baseline(repo, "main", None, {})
+sys.__stdout__.write(json.dumps({"code": code, "out": out.getvalue(), "err": err.getvalue(),
+                                 "touched": touched}))
+"""
+
+
+def _child_write_exit(repo, tmpdir, flip=""):
+    """(exit code, stdout, stderr, recorded events) of the writer run on `repo` in a fresh python3 -I
+    process whose environment sets TMPDIR to `tmpdir`, or (None, ...) when the child printed no
+    result."""
+    import json
+    env = dict(os.environ, TMPDIR=str(tmpdir))
+    tools = str(Path(__file__).resolve().parent)
+    proc = subprocess.run([sys.executable, "-I", "-B", "-c", _TMPDIR_CHILD, tools, str(repo), str(tmpdir), flip],
+                          capture_output=True, text=True, timeout=TIMEOUT, env=env, stdin=subprocess.DEVNULL)
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError:
+        return None, proc.stdout, proc.stderr, None
+    return result["code"], result["out"], result["err"], result["touched"]
+
+
+def _recorded_store_git(seen):
+    """A wrapper of _store_git that adds each store's object directory to `seen`."""
+    real = _store_git
+
+    def wrapper(root, store, data, *args):
+        seen.add(store.objects)
+        return real(root, store, data, *args)
+    return wrapper
+
+
+def _baseline_writer_store_rows(tmp, labels):
+    """--write-baseline's temporary object store: a temporary directory whose real path lies in the
+    worktree or the git directory is refused before anything is created (no tempfile probe file either,
+    in a fresh process whose environment sets TMPDIR), also in a checkout whose path holds a byte that
+    is not UTF-8, and a checkout whose object directory path holds ':' (which git splits
+    GIT_ALTERNATE_OBJECT_DIRECTORIES on) is refused with a message naming that separator rather than
+    failing on a split alternate."""
+    la = labels["backlog-id"]
+    added = {("aa/A.py", _sha(la.encode("utf-8")), "backlog-id"): 1}
+    config = _REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH)
+
+    # The branch adds one label line. With the ambient temporary directory the writer proposes its entry;
+    # with TMPDIR at the repository's .git/objects, in the worktree, or at a link outside the repository
+    # whose target is .git/objects, it exits 2 with nothing printed, naming the temporary directory.
+    repo, _base = _baseline_repo(tmp, "baseline-writer-tmpdir-in-repository")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    _commit_all(repo, "a label line")
+    link = Path(tmp) / "baseline-writer-tmpdir-link"
+    os.symlink(repo / ".git", link)
+    code, out, _err = _write_exit(repo)
+    refused = []
+    for parent in (repo / ".git" / "objects", repo / "aa", link / "objects"):
+        with _ambient_tmpdir(parent):
+            refused.append(_write_exit(repo))
+    check("fail-closed/write-tmpdir-inside-repository", code == 1 and _proposed_entries(out, config) == added
+          and all(code_r == 2 and out_r == "" and "(TMPDIR) lies inside the repository" in err_r
+                  for code_r, out_r, err_r in refused), (code, out, refused))
+    seen = set()
+    with _ambient_tmpdir(repo / ".git" / "objects"), _patched(
+            _store_directory=_unchecked_store_directory, _store_git=_recorded_store_git(seen)):
+        code_f, out_f, err_f = _write_exit(repo)
+    inside = str(os.path.realpath(repo / ".git" / "objects")) + os.sep
+    check("flip/write-tmpdir-unchecked", code_f == 1 and seen
+          and all(os.path.realpath(path).startswith(inside) for path in seen), (code_f, err_f, seen))
+
+    # A fresh process with TMPDIR at .git/objects in its environment: the writer exits 2 with nothing
+    # printed, and no open, mkdir, rename or removal ever touches that directory, whose listing is the
+    # same before and after. With the parent found by tempfile.gettempdir, the refusal still comes, but
+    # only after its discovery opened (and removed) a probe file there, which the listing cannot show.
+    objects = os.path.realpath(repo / ".git" / "objects")
+    before = _tree_listing(objects)
+    code, out, err, touched = _child_write_exit(repo, objects)
+    check("fail-closed/write-tmpdir-env-no-probe-write", code == 2 and out == ""
+          and "(TMPDIR) lies inside the repository" in err and touched == []
+          and _tree_listing(objects) == before, (code, out, err, touched))
+    code_f, out_f, err_f, touched_f = _child_write_exit(repo, objects, "discovery")
+    check("flip/write-tmpdir-env-discovery-probe", code_f == 2 and bool(touched_f)
+          and any(event == "open" for event, _path in touched_f) and _tree_listing(objects) == before,
+          (code_f, out_f, err_f, touched_f))
+    _baseline_writer_non_utf8_rows(tmp, la, added, config)
+
+    # The same layout in a checkout whose path holds ':': the writer exits 2 with nothing printed, naming
+    # the separator; with the path passed raw, git splits it into alternates that do not exist.
+    repo, _base = _baseline_repo(tmp, "baseline-writer-colon:repo")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    _commit_all(repo, "a label line")
+    code, out, err = _write_exit(repo)
+    check("fail-closed/write-checkout-path-colon", code == 2 and out == ""
+          and "holds ':', which git splits GIT_ALTERNATE_OBJECT_DIRECTORIES on" in err, (code, out, err))
+    with _patched(_alternate_entry=lambda objects: objects):
+        code_f, out_f, err_f = _write_exit(repo)
+    check("flip/write-checkout-path-colon-raw", code_f == 2 and out_f == "" and "alternate" in err_f
+          and "GIT_ALTERNATE_OBJECT_DIRECTORIES on" not in err_f, (code_f, out_f, err_f))
+
+    # Windows paths (ntpath) with TMPDIR on another drive than the repository: os.path.commonpath raises
+    # ValueError there, which _store_directory turns into cannot-evaluate naming both paths, before
+    # anything is created; a TMPDIR inside the repository on its own drive is still refused as inside.
+    import ntpath
+    import types
+    outcomes = []
+    for tmpdir in ("D:\\tmp", "C:\\repo\\tmp"):
+        with _patched(os=types.SimpleNamespace(path=ntpath),
+                      _temporary_candidates=lambda tmpdir=tmpdir: [("TMPDIR", tmpdir)]):
+            try:
+                _store_directory(["C:\\repo"])
+                outcomes.append("accepted")
+            except CannotEvaluate as exc:
+                outcomes.append(str(exc))
+            except Exception as exc:
+                outcomes.append("error {}: {}".format(type(exc).__name__, exc))
+    check("fail-closed/write-tmpdir-other-drive", len(outcomes) == 2
+          and "the temporary directory D:\\tmp (TMPDIR) cannot be compared with the repository's C:\\repo"
+          in outcomes[0] and "different drives" in outcomes[0]
+          and "(TMPDIR) lies inside the repository" in outcomes[1], outcomes)
+
+    # Windows paths (ntpath) with the repository's own areas on two drives (a linked worktree on D:, its
+    # git directory on C:): a TMPDIR on either drive or a third one cannot be compared with every area, so
+    # each is cannot-evaluate saying no TMPDIR setting avoids it, never advising a drive.
+    outcomes = []
+    for tmpdir in ("D:\\tmp", "C:\\tmp", "E:\\tmp"):
+        with _patched(os=types.SimpleNamespace(path=ntpath),
+                      _temporary_candidates=lambda tmpdir=tmpdir: [("TMPDIR", tmpdir)]):
+            try:
+                _store_directory(["D:\\wt", "C:\\repo\\.git"])
+                outcomes.append("accepted")
+            except CannotEvaluate as exc:
+                outcomes.append(str(exc))
+            except Exception as exc:
+                outcomes.append("error {}: {}".format(type(exc).__name__, exc))
+    check("fail-closed/write-tmpdir-areas-on-two-drives", len(outcomes) == 3 and all(
+        "the repository's own areas lie on different drives (D:\\wt, C:\\repo\\.git)" in outcome
+        and "no TMPDIR setting avoids this" in outcome and "on the drive the repository is on" not in outcome
+        for outcome in outcomes), outcomes)
+
+    # The same two-drive layout with TMPDIR inside the worktree on D: the drives are checked before any
+    # candidate, so the refusal says no TMPDIR setting avoids it, never advising a TMPDIR outside the
+    # repository (which, on either drive, still could not be compared with the other area).
+    with _patched(os=types.SimpleNamespace(path=ntpath),
+                  _temporary_candidates=lambda: [("TMPDIR", "D:\\wt\\tmp")]):
+        try:
+            _store_directory(["D:\\wt", "C:\\repo\\.git"])
+            outcome = "accepted"
+        except CannotEvaluate as exc:
+            outcome = str(exc)
+        except Exception as exc:
+            outcome = "error {}: {}".format(type(exc).__name__, exc)
+    check("fail-closed/write-tmpdir-two-drives-before-containment",
+          "the repository's own areas lie on different drives (D:\\wt, C:\\repo\\.git)" in outcome
+          and "no TMPDIR setting avoids this" in outcome and "lies inside the repository (" not in outcome
+          and "set TMPDIR" not in outcome, outcome)
+
+    # The checkout runs from C:\repo (worktree and git directory on C:) while another worktree of the
+    # repository lies on D:. Running from a checkout on one drive is what the user already does, so the
+    # refusal names the worktree on D: to remove, or a separate clone; with that worktree gone, the areas
+    # are compared with the candidate again (one inside the worktree is refused as inside, so nothing is
+    # created).
+    own = ["C:\\repo", "C:\\repo\\.git", "C:\\repo\\.git", "C:\\repo\\.git\\objects"]
+    outcomes = []
+    for areas in (own + ["C:\\repo", "D:\\wt"], own + ["C:\\repo"]):
+        with _patched(os=types.SimpleNamespace(path=ntpath),
+                      _temporary_candidates=lambda: [("TMPDIR", "C:\\repo\\tmp")]):
+            try:
+                _store_directory(areas, own)
+                outcomes.append("accepted")
+            except CannotEvaluate as exc:
+                outcomes.append(str(exc))
+            except Exception as exc:
+                outcomes.append("error {}: {}".format(type(exc).__name__, exc))
+    check("fail-closed/write-tmpdir-other-worktree-on-other-drive", len(outcomes) == 2
+          and "this checkout's worktree and git directory lie on C:, so remove the repository's worktree(s) on "
+              "another drive (D:\\wt) with git worktree remove (git worktree prune for one whose directory is "
+              "gone), or run the writer from a separate clone"
+          in outcomes[0] and "whose worktree and git directory are on one drive" not in outcomes[0]
+          and "(TMPDIR) lies inside the repository (C:\\repo)" in outcomes[1], outcomes)
+    _baseline_writer_store_isolation_rows(tmp, la, added, config)
+
+
+@contextlib.contextmanager
+def _kept_store_directory(areas, own=None):
+    """A flip of _store_directory: the store created under TMPDIR's real path and never removed."""
+    yield tempfile.mkdtemp(prefix="review-label-writer-", dir=os.path.realpath(os.environ["TMPDIR"]))
+
+
+def _object_files(repo):
+    """{path below the fixture's .git/objects: modification time in nanoseconds} for every file there."""
+    objects = Path(repo) / ".git" / "objects"
+    return {os.path.relpath(os.path.join(top, name), objects): os.stat(os.path.join(top, name)).st_mtime_ns
+            for top, _dirs, files in os.walk(objects) for name in files}
+
+
+def _aged_objects(repo):
+    """Every object file of the fixture (loose objects, packs and their indexes) set to the modification
+    time 1000000000 (2001), and the times read back."""
+    objects = Path(repo) / ".git" / "objects"
+    for path in _object_files(repo):
+        os.utime(objects / path, (1000000000, 1000000000))
+    return _object_files(repo)
+
+
+def _repository_state(repo):
+    """(object file paths, refs, index bytes) of a fixture: what a writer run leaves as it is."""
+    return (sorted(_object_files(repo)), _fx_git(repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+            (Path(repo) / ".git" / "index").read_bytes())
+
+
+def _baseline_writer_store_isolation_rows(tmp, la, added, config):
+    """The writer's temporary object store stays out of the repository and is removed: a writer run that
+    builds C' leaves the fixture's object files, refs and index as they were and no review-label-writer-*
+    directory in TMPDIR; it refreshes the modification time of no object file the repository already
+    holds, loose or packed; and a temporary directory inside another worktree of the same repository is
+    refused."""
+    # The branch adds one label line; TMPDIR is an empty directory outside the repository. The writer
+    # proposes its entry, and the object files, refs, index and TMPDIR are as they were. With the store's
+    # environment dropped, C''s blob and trees are written into the repository; with the store never
+    # removed, its directory stays in TMPDIR.
+    repo, _base = _baseline_repo(tmp, "baseline-writer-store-isolation")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    _commit_all(repo, "a label line")
+    parent = Path(tmp) / "baseline-writer-store-isolation-tmpdir"
+    os.mkdir(parent)
+    before = _repository_state(repo)
+    with _ambient_tmpdir(parent):
+        code, out, err = _write_exit(repo)
+    after, left = _repository_state(repo), os.listdir(parent)
+    check("write/store-leaves-repository-unchanged", code == 1 and _proposed_entries(out, config) == added
+          and after == before and left == [], (code, err, after[0], before[0], left))
+    with _ambient_tmpdir(parent), _patched(_store_env=lambda store: _git_env()):
+        code_f, out_f, err_f = _write_exit(repo)
+    created = sorted(set(_repository_state(repo)[0]) - set(before[0]))
+    check("flip/write-store-objects-in-repository", code_f == 1 and out_f == out and len(created) >= 3
+          and os.listdir(parent) == [], (code_f, err_f, created))
+    with _ambient_tmpdir(parent), _patched(_store_directory=_kept_store_directory):
+        code_f, out_f, err_f = _write_exit(repo)
+    kept = os.listdir(parent)
+    check("flip/write-store-not-removed", code_f == 1 and out_f == out and len(kept) == 1
+          and kept[0].startswith("review-label-writer-"), (code_f, err_f, kept))
+
+    # The writer's output committed on top of C, every object file set to an old time, a writer run on C
+    # again prints the same bytes and changes no object file's time, with the objects loose and again
+    # after git repack packs them; with each object written without first looking for it, git refreshes
+    # the time of the loose object files and of the pack instead of writing into the store.
+    repo, _base = _baseline_repo(tmp, "baseline-writer-store-times")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    head = _commit_all(repo, "a label line")
+    with _ambient_tmpdir(parent):
+        code, out, err = _write_exit(repo)
+        _write_bytes(repo, BASELINE_RELPATH, out.encode("ascii"))
+        _commit_all(repo, "the writer's baseline")
+        results, flipped = [], []
+        for packed in (False, True):
+            if packed:
+                _fx_git(repo, "repack", "-a", "-d", "-q")
+            aged = _aged_objects(repo)
+            code_r, out_r, _err_r = _write_exit(repo, head=head)
+            results.append((packed, code_r, out_r == out, _object_files(repo) == aged,
+                            any(name.endswith(".pack") for name in aged)))
+            aged = _aged_objects(repo)
+            with _patched(_store_has=lambda root, store, oid: False):
+                code_f, out_f, _err_f = _write_exit(repo, head=head)
+            flipped.append((packed, code_f, out_f == out,
+                            sorted(name for name, when in _object_files(repo).items() if when != aged[name])))
+    check("write/store-keeps-object-times", code == 1 and _proposed_entries(out, config) == added
+          and results == [(False, 1, True, True, False), (True, 1, True, True, True)], (code, err, results))
+    check("flip/write-store-refreshes-object-times", len(flipped) == 2
+          and all(code_f == 1 and same and changed for _packed, code_f, same, changed in flipped)
+          and any(name.endswith(".pack") for name in flipped[1][3]), flipped)
+
+    # A linked worktree of the same repository: the writer run there with TMPDIR inside the main worktree,
+    # and run in the main worktree with TMPDIR inside the linked one, is refused with nothing printed
+    # and no store created; with the worktree it runs in checked alone, the store is created inside the
+    # main worktree.
+    linked = Path(tmp) / "baseline-writer-store-linked"
+    _fx_git(repo, "worktree", "add", "-q", "-b", "linked", str(linked), head)
+    refused = []
+    for root, inside in ((linked, repo / "aa"), (repo, linked / "aa")):
+        seen = set()
+        with _ambient_tmpdir(inside), _patched(_store_git=_recorded_store_git(seen)):
+            refused.append(_write_exit(root, head=head) + (sorted(seen),))
+    check("fail-closed/write-tmpdir-in-other-worktree", all(
+        code_r == 2 and out_r == "" and "(TMPDIR) lies inside the repository" in err_r and not seen_r
+        for code_r, out_r, err_r, seen_r in refused), refused)
+    seen = set()
+    with _ambient_tmpdir(repo / "aa"), _patched(_repository_areas=_current_worktree_areas,
+                                                 _store_git=_recorded_store_git(seen)):
+        code_f, out_f, err_f = _write_exit(linked, head=head)
+    inside = os.path.realpath(repo / "aa") + os.sep
+    check("flip/write-tmpdir-other-worktree-unchecked", code_f == 1 and bool(seen)
+          and all(os.path.realpath(path).startswith(inside) for path in seen), (code_f, err_f, seen))
+
+
+def _baseline_writer_non_utf8_rows(tmp, la, added, config):
+    """The writer's store in a checkout whose path holds the byte 0xff (not UTF-8), skipped (not run,
+    so the self-test is incomplete) where the filesystem refuses such a name. With the ambient temporary
+    directory the writer proposes its entry, reading the repository's objects through the path as it is
+    on disk; with TMPDIR at its .git/objects, it exits 2 with nothing printed and no store created. With
+    git's paths decoded as text with escapes, the containment check passes and the store is created
+    there."""
+    name = "baseline-writer-non-utf8-" + os.fsdecode(b"\xff")
+    try:
+        os.mkdir(Path(tmp) / name)
+        os.rmdir(Path(tmp) / name)
+    except (OSError, UnicodeError) as exc:
+        NOT_RUN.append("write/checkout-path-non-utf8 and its two rows (the filesystem refuses a directory "
+                       "name holding the byte 0xff: {})".format(exc))
+        return
+    repo, _base = _baseline_repo(tmp, name)
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "aa/A.py", la + "\n")
+    _commit_all(repo, "a label line")
+    code, out, err = _write_exit(repo)
+    check("write/checkout-path-non-utf8", code == 1 and _proposed_entries(out, config) == added,
+          (code, out, err))
+    objects = repo / ".git" / "objects"
+    before = _tree_listing(objects)
+    seen = set()
+    with _ambient_tmpdir(objects), _patched(_store_git=_recorded_store_git(seen)):
+        code, out, err = _write_exit(repo)
+    check("fail-closed/write-tmpdir-inside-non-utf8-checkout", code == 2 and out == ""
+          and "(TMPDIR) lies inside the repository" in err and not seen and _tree_listing(objects) == before,
+          (code, out, err, seen))
+    seen = set()
+    with _ambient_tmpdir(objects), _patched(_repository_areas=_text_repository_areas,
+                                            _store_git=_recorded_store_git(seen)):
+        code_f, out_f, err_f = _write_exit(repo)
+    inside = os.path.realpath(objects) + os.sep
+    check("flip/write-non-utf8-checkout-escaped", bool(seen)
+          and all(os.path.realpath(path).startswith(inside) for path in seen), (code_f, err_f, seen))
+
+
+def _cannot_evaluate_outputs(repo):
+    """The gate's and the writer's output for a diff that ends inside a hunk of a quoted path holding an
+    escape byte, and for a git merge-base whose stderr holds a title-setting sequence."""
+    crafted = (b'diff --git "a/\\033[2Kx.py" "b/\\033[2Kx.py"\nnew file mode 100644\n--- /dev/null\n'
+               b'+++ "b/\\033[2Kx.py"\n@@ -0,0 +1,2 @@\n+a = 1\n')
+
+    def stderr_git(root, *args):
+        if args[:1] == ("merge-base",):
+            return subprocess.CompletedProcess(args, 128, b"", b"fatal: \x1b]0;title\x07 bad\n")
+        return _REAL_GIT(root, *args)
+    outputs = []
+    with _patched(read_diff=lambda root, base, head: crafted):
+        outputs.append(_gate(repo))
+        outputs.append(_write_exit(repo))
+    with _patched(_git=stderr_git):
+        outputs.append(_gate(repo))
+        outputs.append(_write_exit(repo))
+    return [(result[0], "".join(result[1:])) for result in outputs]
+
+
+def _message_rows(tmp):
+    """A CANNOT EVALUATE message is escaped like a listing line: a path decoded from the diff and git's
+    stderr reach the terminal with their control bytes as \\xNN."""
+    repo, _base = _baseline_repo(tmp, "cannot-evaluate-escaped")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "a clean line")
+    results = _cannot_evaluate_outputs(repo)
+    check("review/cannot-evaluate-message-escaped", all(code == 2 and "CANNOT EVALUATE" in text
+                                                        and "\x1b" not in text and "\x07" not in text
+                                                        for code, text in results)
+          and all("\\x1b[2Kx.py" in text for _code, text in results[:2])
+          and all("\\x1b]0;title\\x07 bad" in text for _code, text in results[2:]), results)
+    with _patched(_message=str):
+        results = _cannot_evaluate_outputs(repo)
+    check("flip/cannot-evaluate-message-raw", all("\x1b" in text for _code, text in results), results)
+
+
+def _ref_rows(tmp):
+    """The protected ref is escaped in the summary and the NOTE line: --protected main^{/text} resolves
+    through a commit message, so it can hold an escape byte and a non-ASCII character."""
+    repo, _base = _baseline_repo(tmp, "protected-ref-escaped")
+    _fx_git(repo, "commit", "-q", "--allow-empty", "-m", "tip \x1bQ \xe9")
+    ref = "main^{/\x1bQ \xe9}"
+    results = [_gate(repo, protected=ref)]
+    with _patched(_shown_ref=lambda text: text):
+        results.append(_gate(repo, protected=ref))
+    (code, out), (_code_f, out_f) = results
+    check("review/protected-ref-escaped", code == 0 and "\x1b" not in out and "\xe9" not in out
+          and "NOTE: review-label gate: the candidate" in out and out.count("main^{/\\x1bQ \\xe9}") == 2,
+          out)
+    check("flip/protected-ref-raw", "\x1b" in out_f and "\xe9" in out_f, out_f)
+
+
+def _ascii_only_escaped(text):
+    """A flip of _escaped: only non-ASCII characters are escaped, control bytes pass raw."""
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _baseline_listing_rows(tmp, labels):
+    """A carriage return and an erase-line escape in a listed line are escaped in the gate's listing and
+    in --write-baseline's, never printed raw."""
+    la = labels["backlog-id"]
+    hidden = la.encode("utf-8") + b"\r\x1b[2Kvalue = 1"
+    shown = la + "\\x0d\\x1b[2Kvalue = 1"
+    repo, base = _baseline_repo(tmp, "baseline-listing")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _write_bytes(repo, "c.py", hidden + b"\n")
+    _put_baseline(repo, base, {("c.py", hidden, "backlog-id"): 1})
+    _commit_all(repo, "a line holding a carriage return and an erase-line escape, with its entry")
+    code, out = _gate(repo)
+    _wcode, _wout, err = _write_exit(repo)
+    check("review/listing-escapes-control-bytes", code == 1 and "  GROWTH c.py:1: backlog-id" in out
+          and shown in out and "\r" not in out and "\x1b" not in out, out)
+    check("review/write-listing-escapes-control-bytes", "  GROWTH c.py:1: backlog-id" in err and shown in err
+          and "\r" not in err and "\x1b" not in err, err)
+    with _patched(_escaped=_ascii_only_escaped):
+        code, out = _gate(repo)
+        _wcode, _wout, err = _write_exit(repo)
+    check("flip/listing-control-bytes-raw", "\x1b" in out and "\x1b" in err, (out, err))
+
+
+SHAPE_BLOCK_RE = r'(?ms)^\[\[shape\]\]\nid = "{}"\n.*?(?=^\[\[shape\]\]|\Z)'
+
+
+def _config_without_shape(shape_id):
+    """The shipped configuration text with the [[shape]] table of `shape_id` removed."""
+    text, count = re.subn(SHAPE_BLOCK_RE.format(re.escape(shape_id)), "", _config_text())
+    if count != 1:
+        raise RuntimeError("the shipped configuration has no single shape {}".format(shape_id))
+    return text
+
+
+def _baseline_config_change_rows(tmp, labels):
+    """The merge base's baseline is checked for structure only: a change that retires a shape, or
+    excludes a baselined path, while dropping those entries is judged, not refused."""
+    la = labels["backlog-id"]
+    la_raw = la.encode("utf-8")
+    excluded = sorted(_REAL_LOAD_CONFIG(ROOT / CONFIG_RELPATH).excluded)
+    for check_id, flip_id, config_text, needle in (
+            ("pass/baseline-shape-retired-with-its-entry", "flip/baseline-merge-base-held-to-retired-shape",
+             _config_without_shape("backlog-id"), "names no shape"),
+            ("pass/baseline-path-excluded-with-its-entry", "flip/baseline-merge-base-held-to-new-exclusion",
+             _config_with_excluded(excluded + ["a.py"]), "excluded file or the baseline itself")):
+        repo, base = _baseline_repo(tmp, "baseline-" + check_id.split("/")[1])
+        _write(repo, "a.py", la + "\n")
+        _put_baseline(repo, base, {("a.py", la_raw, "backlog-id"): 1})
+        main = _commit_all(repo, "a baselined line")
+        _fx_git(repo, "checkout", "-q", "-b", "work")
+        _write(repo, CONFIG_RELPATH, config_text)
+        _put_baseline(repo, main, {})
+        _commit_all(repo, "the configuration changed and the entry dropped")
+        code, out = _gate(repo)
+        check(check_id, code == 0 and "RELEASED a.py: backlog-id" in out, out)
+        with _patched(_merge_base_config=lambda config: config):
+            code, out = _gate(repo)
+        check(flip_id, code == 2 and needle in out, out)
+
+
+def _ls_tree_link_as_regular(root, *args):
+    """A flip of the committed baseline's mode check: git ls-tree reports a symlink blob as mode 100644."""
+    proc = _REAL_GIT(root, *args)
+    if args[:1] == ("ls-tree",):
+        proc = subprocess.CompletedProcess(proc.args, proc.returncode,
+                                           proc.stdout.replace(b"120000 blob ", b"100644 blob "), proc.stderr)
+    return proc
+
+
+def _small_blob_size(root, *args):
+    """A flip of the committed baseline's size pre-check: git cat-file -s reports every blob as 1 byte."""
+    proc = _REAL_GIT(root, *args)
+    if args[:2] == ("cat-file", "-s"):
+        proc = subprocess.CompletedProcess(proc.args, proc.returncode, b"1\n", proc.stderr)
+    return proc
+
+
+def _baseline_merge_base_read_rows(tmp):
+    """The merge base's committed baseline: a symlink blob is refused even when its bytes are a canonical
+    baseline, and an oversized blob is refused from its size before its bytes are read."""
+    repo, base = _baseline_repo(tmp, "baseline-merge-base-link-canonical")
+    blob = _fx_git(repo, "hash-object", "-w", "--stdin", stdin_text=render_baseline(base, {}).decode("ascii"))
+    _fx_git(repo, "update-index", "--add", "--cacheinfo", "120000,{},{}".format(blob, BASELINE_RELPATH))
+    _fx_git(repo, "commit", "-q", "-m", "a symlink blob whose bytes are a canonical baseline")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", "--cached", BASELINE_RELPATH)
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "baseline removed, a clean line added")
+    code, out = _gate(repo)
+    check("fail-closed/baseline-merge-base-link-canonical", code == 2 and "mode 120000" in out, out)
+    with _patched(_git=_ls_tree_link_as_regular):
+        code, out = _gate(repo)
+    check("flip/baseline-merge-base-link-mode-unchecked", code == 0, out)
+
+    repo, base = _baseline_repo(tmp, "baseline-merge-base-oversized")
+    _write_bytes(repo, BASELINE_RELPATH, render_baseline(base, {}) + b"#" * MAX_BASELINE_BYTES)
+    _commit_all(repo, "an oversized baseline on main")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    _fx_git(repo, "rm", "-q", BASELINE_RELPATH)
+    _write(repo, "clean.py", "value = 1\n")
+    _commit_all(repo, "baseline removed, a clean line added")
+    for check_id, flip, expect_read in (
+            ("fail-closed/baseline-merge-base-oversized-unread", None, False),
+            ("flip/baseline-merge-base-size-unchecked", _small_blob_size, True)):
+        calls = []
+        inner = _REAL_GIT if flip is None else flip
+
+        def recording(root, *args):
+            calls.append(args)
+            return inner(root, *args)
+        with _patched(_git=recording):
+            code, out = _gate(repo)
+        read = any(args[:2] == ("cat-file", "blob") for args in calls)
+        check(check_id, code == 2 and "larger than" in out and read == expect_read, (read, out))
+
+
+def _existing_rows_with_empty_baseline(tmp, existing):
+    """The section 8 accounting: every row that predates the baseline, run again with an empty canonical
+    baseline committed on main in each fixture, gives the same result as without one."""
+    results = {}
+
+    def collect(name, ok, detail=""):
+        results.setdefault(name, []).append((ok, detail))
+    sub = Path(tmp) / "existing-with-empty-baseline"
+    os.makedirs(sub)
+    with _patched(check=collect, _FIXTURE_EMPTY_BASELINE=True):
+        _existing_rows(sub)
+    committed = _fx_git(sub / "refused", "ls-tree", "--name-only", "main", "--", BASELINE_RELPATH)
+    failed = sorted(name for name, runs in results.items() if not all(ok for ok, _detail in runs))
+    check("pass/existing-rows-with-empty-baseline", committed == BASELINE_RELPATH and not failed
+          and sorted(results) == sorted(existing), (committed, failed, [results[name] for name in failed],
+                                                    sorted(set(existing) ^ set(results))))
 
 
 def _fail_closed_rows(tmp, labels):
@@ -1905,6 +5208,12 @@ def main(argv=None):
             import _selftest_exit_report
             _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
         return _self_test()
+    if argv[:1] == ["--write-baseline"]:
+        options = _parse_options(argv[1:])
+        if options is None:
+            print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
+            return 2
+        return write_baseline(ROOT, options.get("--protected"), options.get("--head"))
     options = _parse_options(argv)
     if options is None:
         print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
