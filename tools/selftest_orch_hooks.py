@@ -8666,11 +8666,12 @@ def _citecheck_cd_cases(tmp):
     of that name in the session cwd instead. Repository r holds tools/a.py, a msg.txt that cites nothing
     and a sub/msg.txt that cites tools/a.py:1, and the reverse pair, a msg2.txt citing tools/a.py:2 and a
     sub/msg2.txt citing nothing; nothing is read this session. git -C sub is the control: it reads sub's
-    file, as cd sub &&, pushd sub &&, a cd to sub's absolute path, a cd inside a subshell for the command in
-    it and gh pr create after cd sub && do, while the root's files are read with no cd and after a
-    subshell's cd. A cd that a ';' or a '||' can skip, a destination it cannot establish (an expansion), a
-    cd in a loop and a command scanned as written whose text holds a cd are each named as not judged, a
-    citation in a -m value then unjudged; an absolute git -C names the directory whatever cd came before."""
+    file, as cd sub &&, echo x && cd sub &&, a cd to sub's absolute path and gh pr create after cd sub && do,
+    while the root's files are read with no cd and after cd sub && cd ... A cd that a ';' or a '||' can skip,
+    a destination it cannot establish (an expansion), a cd in a loop and a command scanned as written whose
+    text holds a cd are each named as not judged, a citation in a -m value then unjudged; an expansion before
+    the command is outside the directory allowlist (_CITECHK_SHAPE_WHY), so not even an absolute git -C after
+    it is trusted. Forms outside that allowlist are covered in _citecheck_cd_sound_cases."""
     repo = _CiteRepo(tmp / "citecheck-cd", {"tools/a.py": b"a1\na2\n", "msg.txt": b"plain message\n",
                                             "sub/msg.txt": b"see tools/a.py:1\n", "msg2.txt": b"see tools/a.py:2\n",
                                             "sub/msg2.txt": b"plain message\n"})
@@ -8687,21 +8688,20 @@ def _citecheck_cd_cases(tmp):
     check("citeledger/cd-moves-message-file",
           {command: seen(command) for command in (
               "git -C sub commit --allow-empty -F msg.txt", "cd sub && git commit --allow-empty -F msg.txt",
-              "pushd sub && git commit -F msg.txt", "cd {} && git commit -F msg.txt".format(sub),
-              "(cd sub && git commit -F msg.txt)", "cd sub && gh pr create --title t --body-file msg.txt")},
+              "echo x && cd sub && git commit -F msg.txt", "cd {} && git commit -F msg.txt".format(sub),
+              "cd sub && gh pr create --title t --body-file msg.txt")},
           {"git -C sub commit --allow-empty -F msg.txt": unread_sub,
            "cd sub && git commit --allow-empty -F msg.txt": unread_sub,
-           "pushd sub && git commit -F msg.txt": unread_sub,
+           "echo x && cd sub && git commit -F msg.txt": unread_sub,
            "cd {} && git commit -F msg.txt".format(sub): unread_sub,
-           "(cd sub && git commit -F msg.txt)": unread_sub,
            "cd sub && gh pr create --title t --body-file msg.txt":
                ("warn", [("tools/a.py:1", "unread")], [["--body-file msg.txt"]], [None], False)})
     check("citeledger/cd-root-file-control",
           {command: seen(command) for command in (
-              "git commit -F msg.txt", "(cd sub); git commit -F msg.txt", "git commit -F msg2.txt",
+              "git commit -F msg.txt", "cd sub && cd .. && git commit -F msg.txt", "git commit -F msg2.txt",
               "cd sub && git commit -F msg2.txt")},
           {"git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
-           "(cd sub); git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
+           "cd sub && cd .. && git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
            "git commit -F msg2.txt": ("warn", [("tools/a.py:2", "unread")], [["-F msg2.txt"]], [None], False),
            "cd sub && git commit -F msg2.txt": ("allow", [], [["-F msg2.txt"]], [None], False)})
     split = getattr(aiqt_hooks, "_CITECHK_DIR_SPLIT", "absent")
@@ -8724,7 +8724,8 @@ def _citecheck_cd_cases(tmp):
            "cd \"$D\" && git commit -F msg.txt": ("warn", [], [[]], [opaque], True),
            "for x in 1; do git commit -F msg.txt; cd sub; done": ("warn", [], [[]], [loop], True),
            "cd sub && " + split_cmd: ("warn", [], [["command text"]], [raw], True),
-           "cd \"$D\" && git -C {} commit -F msg.txt".format(sub): unread_sub})
+           # an expansion before the command is outside the allowlist, so not even an absolute git -C is trusted
+           "cd \"$D\" && git -C {} commit -F msg.txt".format(sub): ("warn", [], [[]], [opaque], True)})
     # The search for a cd word in a command scanned as written reads a run of newlines in linear time: with
     # \s after each mark, a run of 16,000 newlines took tens of seconds (each newline rescanned the rest of
     # the run); the search, given 16,000 newlines and then 1 MiB of them, must take under a second each.
@@ -8752,9 +8753,15 @@ def _citecheck_cd_sound_cases(tmp):
     builtin eval and a mapfile -C callback run a cd in this shell; an alias for cd (expand_aliases on, a later
     line) runs true instead; a PS4 holding a ${ cmd; } substitution runs it in this shell under set -x; a
     CDPATH set through printf -v sends cd sub to alt/sub; and, for a command scanned as written, a cd spelled
-    with quotes or run by a trap. The controls are still judged: a cd ~ under the inherited HOME alone, a cd
-    in a pipeline element a '|' follows, set -e and set -euo pipefail, cd -P --, an expansion after the cd,
-    and a raw command with no directory word."""
+    with quotes or run by a trap. The directory allowlist (_CITECHK_SHAPE_WHY) decides first: the controls
+    within it are still judged (cd to a literal relative or absolute path, plain commands joined by && or ;,
+    git -C with a literal path, and a raw command of the one plain shape), while each form the walk alone
+    judged outside it (a cd ~ under the inherited HOME alone, a cd in a pipeline element a '|' follows, set -e
+    and set -euo pipefail, cd -P --, an expansion after the cd, pushd, a subshell, export) is now named as not
+    judged with its shape. The reproduced forms, a ${ cmd; } or ${| cmd; } substitution on the commit command
+    itself and time -p or time -- before cd, eval or source (and before a cd in a command scanned as written),
+    are each named as not judged, and under a variant without the allowlist each gives the walk's own result:
+    the root's msg.txt read and the command allowed."""
     repo = _CiteRepo(tmp / "citecheck-cd-sound", {
         "tools/a.py": b"a1\na2\n", "msg.txt": b"plain message\n", "sub/msg.txt": b"see tools/a.py:1\n",
         "alt/sub/msg.txt": b"see tools/a.py:2\n", "one.txt": b"a\n"})
@@ -8826,20 +8833,92 @@ def _citecheck_cd_sound_cases(tmp):
         }
         check("citeledger/cd-sound-also-unjudged", {command: seen(command) for command in rest}, rest)
         unread_sub = ("warn", [("tools/a.py:1", "unread")], [["-F msg.txt"]], [None], False)
+        # The plain shapes of the directory allowlist (_CITECHK_SHAPE_WHY) are still judged: plain words, a cd
+        # to one literal relative or absolute path, git -C with a literal path, and && or ; between them.
         controls = {
-            "cd sub | cat && git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
-            "set -e && cd sub && git commit -F msg.txt": unread_sub,
-            "set -euo pipefail && cd sub && git commit -F msg.txt": unread_sub,
-            "cd -P -- sub && git commit -F msg.txt": unread_sub,
-            "cd sub && git commit -F msg.txt --author \"$A\"": unread_sub,
+            "cd sub && git commit -F msg.txt": unread_sub,
+            "true && cd sub && git commit -F msg.txt": unread_sub,
+            "git status; cd sub && git commit -F msg.txt": unread_sub,
+            "cd {} && git commit -F msg.txt".format(sub): unread_sub,
+            "git -C sub commit -F msg.txt": unread_sub,
+            "git -C {} commit -F msg.txt".format(sub): unread_sub,
+            "git commit -F msg.txt": ("allow", [], [["-F msg.txt"]], [None], False),
             # scanned as written: it warns for its -F file, which that scan cannot read, never for its directory
             split_cmd: ("warn", [], [["command text"]], [None], False),
         }
-        got = {command: seen(command) for command in controls}
-        os.environ["HOME"] = sub  # with no word spelling HOME, ~ is read from the HOME the hook inherits
-        controls["cd ~ && git commit -F msg.txt"] = unread_sub
+        check("citeledger/cd-sound-plain-judged", {command: seen(command) for command in controls}, controls)
+        # Each form the walk alone judged (the controls it held among them) that lies outside the allowlist is
+        # now named as not judged, with the shape named, and neither directory's msg.txt is read.
+        shape_why = getattr(aiqt_hooks, "_CITECHK_SHAPE_WHY", "absent {}")
+
+        def outside(what):
+            return ("warn", [], [[]], [shape_why.format(what)], True)
+        word = "a word holding an expansion, a substitution, a ~ or a pattern ({})".format
+        builtin = "the builtin {}, which may change the directory, the shell's state or what a later command runs".format
+        funsub = "a ${ cmd; } or ${| cmd; } substitution, which runs its commands in this shell"
+        outside_forms = {
+            "cd sub | cat && git commit -F msg.txt": outside("a '|' after a command"),
+            "set -e && cd sub && git commit -F msg.txt": outside(builtin("set")),
+            "set -euo pipefail && cd sub && git commit -F msg.txt": outside(builtin("set")),
+            "cd -P -- sub && git commit -F msg.txt": outside("a cd other than cd and one literal path"),
+            "cd sub && git commit -F msg.txt --author \"$A\"": outside(word("$A")),
+            "pushd sub && git commit -F msg.txt": outside(builtin("pushd")),
+            "(cd sub && git commit -F msg.txt)": outside("a '(' after a command"),
+            "(cd sub); git commit -F msg.txt": outside("a '(' after a command"),
+            "export LC_ALL=C && cd sub && git commit -F msg.txt": outside(builtin("export")),
+        }
+        got = {command: seen(command) for command in outside_forms}
+        os.environ["HOME"] = sub  # the walk alone read ~ from the HOME the hook inherits and judged this one
+        outside_forms["cd ~ && git commit -F msg.txt"] = outside(word("~"))
         got["cd ~ && git commit -F msg.txt"] = seen("cd ~ && git commit -F msg.txt")
-        check("citeledger/cd-sound-plain-judged", got, controls)
+        os.environ["HOME"] = root
+        check("citeledger/cd-allowlist-outside", got, outside_forms)
+        # The reproduced forms: bash 5.3 commits sub/msg.txt in each, while the walk alone read the root's
+        # msg.txt and allowed. A ${ cmd; } or ${| cmd; } substitution on the commit command itself runs in this shell before
+        # git starts, so the command itself is not judged; time, with -p or --, is a reserved word, so a cd,
+        # eval or source after it is outside the allowlist whatever the walk reads after time.
+        on_commit = {
+            "git commit --allow-empty -F msg.txt ${ cd sub; }": outside(funsub),
+            "git commit --allow-empty -F msg.txt ${| cd sub; }": outside(funsub),
+        }
+        timed = {
+            "time -p cd sub && git commit --allow-empty -F msg.txt": outside("the reserved word time"),
+            "time -- cd sub && git commit --allow-empty -F msg.txt": outside("the reserved word time"),
+            "time -p eval \"cd sub\" && git commit --allow-empty -F msg.txt": outside("the reserved word time"),
+            "time -- source ./move.sh && git commit --allow-empty -F msg.txt": outside("the reserved word time"),
+            # the same class in a command scanned as written, which the walk never reads: the search for a
+            # directory word there (_citechk_raw_dir) reads time -p but not time --
+            "time -- cd sub && " + split_cmd: ("warn", [], [["command text"]],
+                                               [getattr(aiqt_hooks, "_CITECHK_RAW_SHAPE_WHY", "absent")], True),
+        }
+        check("citeledger/cd-allowlist-substitution-on-commit", {command: seen(command) for command in on_commit},
+              on_commit)
+        check("citeledger/cd-allowlist-time-options", {command: seen(command) for command in timed}, timed)
+        # Without the allowlist (_citechk_plain made to pass every segment, and the scan as written's shape test
+        # made to pass every text), each reproduced form gives what the walk alone gave: the root's msg.txt read
+        # and the command allowed with no note (for the scan as written, no directory named), so the allowlist is
+        # what decides each of them.
+        root_read = ("allow", [], [["-F msg.txt"]], [None], False)
+        saved_plain = getattr(aiqt_hooks, "_citechk_plain", None)
+        saved_raw = getattr(aiqt_hooks, "_CITECHK_RAW_PLAIN", None)
+
+        class _Every:
+            @staticmethod
+            def match(_text):
+                return True
+        try:
+            aiqt_hooks._citechk_plain = lambda seg: None
+            aiqt_hooks._CITECHK_RAW_PLAIN = _Every()
+            unfixed = {command: seen(command) for command in list(on_commit) + list(timed)}
+        finally:
+            for name, saved in (("_citechk_plain", saved_plain), ("_CITECHK_RAW_PLAIN", saved_raw)):
+                if saved is None:
+                    delattr(aiqt_hooks, name)  # a hook without it: leave none behind
+                else:
+                    setattr(aiqt_hooks, name, saved)
+        want_unfixed = {command: root_read for command in list(on_commit) + list(timed)}
+        want_unfixed["time -- cd sub && " + split_cmd] = ("warn", [], [["command text"]], [None], False)
+        check("citeledger/cd-allowlist-unfixed-variant", unfixed, want_unfixed)
     finally:
         if saved_home is None:
             os.environ.pop("HOME", None)
@@ -8854,6 +8933,18 @@ def _citecheck_cd_sound_cases(tmp):
         found = None if search is None else search(text)
         taken.append((search is not None, found, time.perf_counter() - began < 1.0))
     check("citeledger/cd-sound-raw-linear", taken, [(True, False, True), (True, False, True)])
+    # The shape test of a command scanned as written (_CITECHK_RAW_PLAIN, re.match) reads in linear time where it
+    # fails late: one word of 1 MiB, 2^19 words with no here-document after them, and a 1 MiB body that ends in
+    # a '$', each under a second, none matching; a plain one matches.
+    plain = getattr(aiqt_hooks, "_CITECHK_RAW_PLAIN", None)
+    taken = []
+    for text, want in (("git commit " + "a" * (1 << 20), False), ("git commit " + "a " * (1 << 19), False),
+                       ("git commit -F - <<EOF\n" + "x" * (1 << 20) + "$", False),
+                       ("git commit -F - <<EOF\nsee tools/a.py:1\nEOF\n", True)):
+        began = time.perf_counter()
+        found = None if plain is None else plain.match(text)
+        taken.append((plain is not None, (found is not None) == want, time.perf_counter() - began < 1.0))
+    check("citeledger/cd-allowlist-raw-linear", taken, [(True, True, True)] * 4)
 
 
 class _CiteCutPattern:
@@ -9717,7 +9808,9 @@ def _citecheck_step_cases(tmp):
     by_scan_file = ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))], False, None)
     by_text_file = ("warn", [("raw", None, [], ["command text"], named("EOF") + split_unread("-F msg.txt"))],
                     True, None)
-    lexed_value = ("allow", [("lexed", None, [], ["-m value"], [])], False, None)
+    # A lexed -m value that holds a substitution is outside the directory allowlist (_CITECHK_SHAPE_WHY), so the
+    # command is named as not judged for its directory: a warn with no source unread, where it allowed before.
+    lexed_value = ("warn", [("lexed", None, [], ["-m value"], [])], False, None)
     check("citeledger/check-split-heredoc-variants", variants,
           {"look-alike-after-subst": by_text_file, "subst-single": by_text_file,
            "subst-arith": by_both("an arithmetic command ((...))"), "subst-quoted": by_scan_file,
@@ -9764,20 +9857,27 @@ def _citecheck_step_cases(tmp):
                           ("alike", "git commit -F msg.txt -m \"$(echo x)\"")):
         commands_differ[name] = command
         differ[name] = read_split(command, "lexings-" + name, unlexed if name == "ansi-c-in-subst" else None)
+    # Each of these commands holds a substitution in a -m value, a word outside the directory allowlist
+    # (_CITECHK_SHAPE_WHY), so its directory is not established and its relative -F msg.txt is named as not
+    # read, never read from the session cwd: the entry still shows which lexing named the file.
+    shape_why = getattr(aiqt_hooks, "_CITECHK_SHAPE_WHY", "absent {}")
+
+    def off_shape(word):
+        return ["-F msg.txt: it is relative and the directory the command runs in is not established ({})".format(
+            shape_why.format("a word holding an expansion, a substitution, a ~ or a pattern ({})".format(word)))]
     check("citeledger/check-lexings-differ", differ,
           {"dquote-in-subst": ("warn", [("both", lexings, [], ["-m value"], []),
-                                        ("both", lexings, ["tools/a.py:1"], ["-m value", "-F msg.txt", "-m value"],
-                                         []),
+                                        ("both", lexings, [], ["-m value", "-m value"], off_shape("$(echo '\"')")),
                                         ("both", lexings, [], ["command text"], [])], False, lexings),
-           "squote-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+           "squote-in-subst": ("warn", [("both", lexings, [], ["-m value"], off_shape("$(echo \"it's\")")),
                                         ("both", lexings, [], ["command text"], [])], False, lexings),
-           "ansi-c-in-subst": ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+           "ansi-c-in-subst": ("warn", [("both", lexings, [], ["-m value"], off_shape("$(echo $'x\\' y')")),
                                         ("both", lexings, [], ["command text"], [])], False, lexings, True),
            "ansi-c-split-delim": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
                                   False, None),
            "dquote-split-delim": ("warn", [("raw", None, [], ["command text"], split_unread("-F msg.txt"))],
                                   False, None),
-           "alike": ("warn", [("lexed", None, ["tools/a.py:1"], ["-F msg.txt", "-m value"], [])], False, None)})
+           "alike": ("warn", [("lexed", None, [], ["-m value"], off_shape("$(echo x)"))], False, None)})
     # The rule that scans a command with a split delimiter as one that does not lex before its two lexings
     # are compared decides ansi-c-split-delim: under a variant of _citechk_commands without it, the same
     # command is read both ways, its -F msg.txt read, so the vector above gives another result.
@@ -9794,7 +9894,7 @@ def _citecheck_step_cases(tmp):
         finally:
             aiqt_hooks._citechk_commands = original
     check("citeledger/check-lexings-differ-variant", ordered_raw,
-          ("warn", [("both", lexings, ["tools/a.py:1"], ["-F msg.txt", "-m value"], []),
+          ("warn", [("both", lexings, [], ["-m value"], off_shape("$(echo $'x\\' y')")),
                     ("both", lexings, [], ["command text"], [])], False, lexings))
     # Visiting every lexing that lexed decides dquote-split-delim: under a variant of _citechk_commands
     # whose fallback keeps only the first lexing, the -F msg.txt that only the second lexing names is
@@ -9814,8 +9914,11 @@ def _citecheck_step_cases(tmp):
                                            "lexings-variant-dquote-split-delim")
         finally:
             aiqt_hooks._citechk_commands = original
+    # The scan as written now also names this command as not judged for its directory (quotes and a
+    # substitution on its first line put it outside _CITECHK_RAW_PLAIN), so the variant warns; what it drops
+    # is still the -F msg.txt entry the real fallback names.
     check("citeledger/check-split-fallback-variant", first_lexing_only,
-          ("allow", [("raw", None, [], ["command text"], [])], False, None))
+          ("warn", [("raw", None, [], ["command text"], [])], False, None))
     # The kind search over each here-document body a lexing read decides which command the after-unquoted-git
     # and after-unquoted-gh vectors name: their git commit or gh pr create lies after a split delimiter that
     # is unquoted once the backslash-newline is removed, so each lexing reads it as the here-document's body
@@ -9989,8 +10092,8 @@ def _citecheck_split_oracle_cases(tmp):
     a later '<<' on its line (subscript-later), on as an operator and skips the line's bodies with none of the
     newline's refusals, so the scan as written
     keeps the file the lexing names (_citechk_commands); each lift decides its vectors, shown by a variant of
-    _lex_pass without it (_hook_variant), under which the lexing fails, the scan names no file and the
-    command allows with no note. Controls: the default lexing (split_delims False) still refuses every vector
+    _lex_pass without it (_hook_variant), under which the lexing fails and the scan names no file (the
+    command still warns, as one whose directory is not established, _CITECHK_RAW_PLAIN). Controls: the default lexing (split_delims False) still refuses every vector
     with main's message, and a '((' command with no split delimiter, which bash also runs, is still refused by
     the check's lexing, so its -F file goes unnamed (the disclosed residual of a command the lexer refuses)."""
     repo = _CiteRepo(tmp / "citecheck-split-oracle", {"tools/a.py": b"a1\na2\n", "m1.txt": b"see tools/a.py:1\n"})
@@ -10039,13 +10142,15 @@ def _citecheck_split_oracle_cases(tmp):
     check("citeledger/split-oracle-bash-runs-commit", ran,
           {name: [["commit", "-F", "m1.txt"]] for name in ran})
     by_split = ("warn", True, [("raw", ["command text"], split_unread)])
+    # unsplit is scanned as written and its text is not the one plain shape _CITECHK_RAW_PLAIN allows (it begins
+    # with '(('), so it is named as not judged for its directory: a warn, though no file is named.
     check("citeledger/split-oracle-file-named", named,
           dict({name: by_split for name, _command, _message in vectors},
-               unsplit=("allow", False, [("raw", ["command text"], [])])))
+               unsplit=("warn", False, [("raw", ["command text"], [])])))
     check("citeledger/split-oracle-default-refuses", default,
           dict({name: message for name, _command, message in vectors}, unsplit=arith))
-    # Each lift of _lex_pass, removed by a variant, and the vectors it decides: under it those vectors allow
-    # with no note naming the file and no file in the row.
+    # Each lift of _lex_pass, removed by a variant, and the vectors it decides: under it those vectors give no
+    # note naming the file and no file in the row.
     lifts = (("split_delims and (split_pending or _heredoc_word_split(",
               "split_delims and (False or _heredoc_word_split(", ("subscript-later",)),
              ('if op == "<<" and "${" in nest and not split_operator(i):', 'if op == "<<" and "${" in nest:',
@@ -10076,7 +10181,9 @@ def _citecheck_split_oracle_cases(tmp):
                                for name in names}
         finally:
             aiqt_hooks._lex_pass = original
-    silent = ("allow", False, [("raw", ["command text"], [])])
+    # Under each variant no file is named; the command still warns, since none of these texts is the one plain
+    # shape _CITECHK_RAW_PLAIN allows, so its directory is named as not established.
+    silent = ("warn", False, [("raw", ["command text"], [])])
     check("citeledger/split-oracle-lift-variants", unlifted,
           {index: {name: silent for name in names} for index, (_old, _new, names) in enumerate(lifts)})
     # A git commit that a lifted lexing reads as a here-document's body, which bash runs, is named on the
@@ -10194,17 +10301,20 @@ _CITECHK_COST_SHAPES = (
 # The rows each shape's command gives at the bound, by the name its entry above gives, each row (decision,
 # parse, the full list of citations it judged, each with its class, duplicates included): a lexed command's
 # row; a command read both ways, whose lexed reading's row judges the citation and whose reading as written
-# allows (it finds nothing) or warns too (an expansion it names); one read both ways whose text cites the
-# range on every line of a here-document, whose lexed reading's row judges it as often as the citation cap
-# allows (_CITECHK_MAX_CITES) and whose reading as written warns for the citations past that cap; and a
-# command scanned as written, whose row judges the citation or names an expansion of a here-document.
+# warns too (its text is outside the one plain shape a scan as written is judged in, _CITECHK_RAW_PLAIN, or
+# it names an expansion); one read both ways whose text cites the range on every line of a here-document,
+# whose lexed reading's row names it not judged as often as the citation cap allows (_CITECHK_MAX_CITES), its
+# -m value a substitution outside the directory allowlist, and whose reading as written warns for the
+# citations past that cap; and a command scanned as written, whose row names the citation not judged (its
+# text is outside _CITECHK_RAW_PLAIN) or names an expansion of a here-document.
 _CITECHK_COST_CITED = [("tools/a.py:1", "unread")]
+_CITECHK_COST_UNJUDGED = [("tools/a.py:1", "unjudged")]
 _CITECHK_COST_ROWS = {"lexed": [("warn", "lexed", _CITECHK_COST_CITED)],
-                      "both": [("warn", "both", _CITECHK_COST_CITED), ("allow", "both", [])],
+                      "both": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
                       "both, both warn": [("warn", "both", _CITECHK_COST_CITED), ("warn", "both", [])],
-                      "both, capped": [("warn", "both", _CITECHK_COST_CITED * aiqt_hooks._CITECHK_MAX_CITES),
+                      "both, capped": [("warn", "both", _CITECHK_COST_UNJUDGED * aiqt_hooks._CITECHK_MAX_CITES),
                                        ("warn", "both", [])],
-                      "raw": [("warn", "raw", _CITECHK_COST_CITED)],
+                      "raw": [("warn", "raw", _CITECHK_COST_UNJUDGED)],
                       "raw, expanded": [("warn", "raw", [])]}
 _CITECHK_COST_OVER = 16 * 1024 * 1024  # the length the shapes are timed at over the bound (characters)
 _CITECHK_COST_CPU = 4.0                # CPU seconds a timed run may take: 2 under the check's 6 second budget

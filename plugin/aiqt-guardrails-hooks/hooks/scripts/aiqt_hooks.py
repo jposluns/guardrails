@@ -31623,10 +31623,16 @@ def _citechk_as_written(command, cwd, parse, reason):
     unread = [("expanded <<{} here-document".format(_citechk_short(delim)), reason)
               for delim in _citechk_expanded_heredocs(command)]
     # No lexing of the command is bash's here, so no cd in it is followed: where its text shows one (or a
-    # command that can run one) where a command can begin, the directory is not established (_citechk_raw_dir).
+    # command that can run one) where a command can begin, the directory is not established (_citechk_raw_dir),
+    # and where its text is not the one plain shape _CITECHK_RAW_PLAIN allows, it is not established either.
+    if _citechk_raw_dir(command):
+        nodir = _CITECHK_RAW_DIR_WHY
+    elif _CITECHK_RAW_PLAIN.match(command.replace("\\\n", "")) is None:
+        nodir = _CITECHK_RAW_SHAPE_WHY
+    else:
+        nodir = None
     return [{"cmd": kind, "parse": parse, "texts": [("command text", command)], "unread": unread,
-             "repo": cwd, "base": None, "nodir": _CITECHK_RAW_DIR_WHY if _citechk_raw_dir(command) else None,
-             "where": None}]
+             "repo": cwd, "base": None, "nodir": nodir, "where": None}]
 
 
 def _citechk_too_long(command, cwd):
@@ -31909,6 +31915,83 @@ _CITECHK_RAW_DIR_WHY = ("the command is scanned as written, and its text, read w
                         "removed, holds a cd, pushd, popd, eval, source, '.', builtin, command, trap, mapfile, "
                         "readarray, fc, alias, unalias, enable, shopt or set word or an expanded command word where "
                         "a command can begin, a ${ } substitution that runs in this shell, or BASH_ALIASES")
+# The directory-certainty rule, an allowlist (_citechk_plain, _citechk_dirs): a command's directory counts as
+# established only where every segment of the command line up to and including it has one of the shapes below,
+# which the walk resolves exactly as bash does, and every segment before it ends in '&&', ';' or a newline.
+# Every other shape, wherever it stands before the command or in it, leaves that command and every later one
+# not judged, whatever the walk would make of it, so a form the walk's own list never named (a ${ cmd; } on
+# the commit itself, time -p before a cd) is not judged without being listed:
+#   - plain words: no word holds an expansion, a substitution, a ~ or a pattern the lexer marks (argv_opaque),
+#     no redirection target is one it cannot resolve (target_class opaque), and the raw text of the segment
+#     holds no ${ cmd; } or ${| cmd; } substitution, quoted or not;
+#   - the first word is no variable assignment and no reserved word, and is no bash builtin other than the
+#     few that touch no shell state (_CITECHK_PLAIN_BUILTINS): any other builtin (cd aside) can move the
+#     shell (pushd, popd), run text the walk does not lex (eval, source, '.', trap, mapfile, fc), or change
+#     what a later cd or command word does (set, shopt, export, declare, read, printf -v, alias, enable, hash);
+#   - a cd is exactly cd and one literal operand that is no option, no '-' and holds no pattern or brace
+#     character, so cd -P, cd -- and cd ~ are outside it;
+#   - a git -C with a literal path is a plain word of the git command, resolved by _citechk_items.
+# Bash's builtins (5.3), each named so that none outside the plain few is taken for a program that moves nothing.
+_CITECHK_BUILTINS = frozenset((
+    ".", ":", "[", "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", "compgen", "complete",
+    "compopt", "continue", "declare", "dirs", "disown", "echo", "enable", "eval", "exec", "exit", "export",
+    "false", "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let", "local", "logout",
+    "mapfile", "popd", "printf", "pushd", "pwd", "read", "readarray", "readonly", "return", "set", "shift",
+    "shopt", "source", "suspend", "test", "times", "trap", "true", "type", "typeset", "ulimit", "umask",
+    "unalias", "unset", "wait"))
+_CITECHK_PLAIN_BUILTINS = frozenset((":", "[", "echo", "false", "pwd", "test", "true"))
+_CITECHK_RESERVED = frozenset(("!", "{", "}", "[[", "]]", "case", "coproc", "do", "done", "elif", "else", "esac",
+                               "fi", "for", "function", "if", "in", "select", "then", "time", "until", "while"))
+_CITECHK_PLAIN_SEPS = frozenset(("&&", ";", ""))  # '' is a newline, which bash reads as ';', or the end
+_CITECHK_PLAIN_CD_BAD = frozenset("*?[]{}~")
+_CITECHK_SHAPE_WHY = ("the command line, up to and including this command, holds {}, a shape outside those this "
+                      "check resolves exactly as bash does (plain words, git -C with a literal path, cd to one "
+                      "literal path, and && or ; between such commands)")
+# A command scanned as written is not lexed, so the walk never reads it: its directory counts as established
+# only where its text, read with each backslash-newline removed, is a git commit or gh pr create or edit at its
+# very start, then plain words, one here-document operator with a plain delimiter and plain words to the end of
+# that line, and after that line no '$' and no backquote at all (bash expands an unquoted here-document's body
+# in the process git runs in, so a ${ cmd; } there could move it), and where _citechk_raw_dir finds no
+# directory word in it either. re.match is anchored and each word is bounded by blanks it cannot hold, so a
+# failing match backs off in linear time (the self-test times it on 1 MiB shapes, cd-allowlist-raw-linear).
+_CITECHK_RAW_PLAIN_WORD = r"[A-Za-z0-9_./:=@%+,-]+"
+_CITECHK_RAW_PLAIN = re.compile(r"[ \t]*(?:git[ \t]+commit|gh[ \t]+pr[ \t]+(?:create|edit))"
+                                r"(?:[ \t]+" + _CITECHK_RAW_PLAIN_WORD + r")*[ \t]+<<-?[ \t]*"
+                                r"(?:'[A-Za-z0-9_]+'|\"[A-Za-z0-9_]+\"|[A-Za-z0-9_]+)"
+                                r"(?:[ \t]+" + _CITECHK_RAW_PLAIN_WORD + r")*[ \t]*\n[^$`]*\Z")
+_CITECHK_RAW_SHAPE_WHY = ("the command is scanned as written, not lexed, and its text is not one git commit or gh pr "
+                          "create or edit of plain words at its start with one plain here-document and no '$' or "
+                          "backquote after that line, so this check cannot show that its directory is the session's")
+
+
+def _citechk_plain(seg):
+    """Why one segment of a lexing is outside the shapes the walk resolves exactly as bash does
+    (_CITECHK_SHAPE_WHY, the comment above _CITECHK_BUILTINS), as the text _CITECHK_SHAPE_WHY names, or None
+    where it is one of them. Its separator is judged by _citechk_dirs, not here."""
+    words, aop = seg.argv, seg.argv_opaque
+    if _CITECHK_FUNSUB_RE.search(seg.raw):
+        return "a ${ cmd; } or ${| cmd; } substitution, which runs its commands in this shell"
+    for word, opaque in zip(words, aop):
+        if opaque:
+            return "a word holding an expansion, a substitution, a ~ or a pattern ({})".format(_citechk_short(word))
+    if any(red.target_class == "opaque" for red in seg.redirects):
+        return "a redirection whose target this check cannot resolve"
+    if not words:
+        return None
+    name = words[0]
+    if _ENV_ASSIGN_RE.match(name):
+        return "a variable assignment ({}=)".format(_citechk_short(name.partition("=")[0].rstrip("+")))
+    if name in _CITECHK_RESERVED:
+        return "the reserved word {}".format(name)
+    if name == "cd":
+        if len(words) != 2 or not words[1] or words[1].startswith("-") or _CITECHK_PLAIN_CD_BAD.intersection(
+                words[1]):
+            return "a cd other than cd and one literal path"
+        return None
+    if name in _CITECHK_BUILTINS and name not in _CITECHK_PLAIN_BUILTINS:
+        return "the builtin {}, which may change the directory, the shell's state or what a later command runs".format(
+            name)
+    return None
 
 
 def _citechk_raw_dir(command):
@@ -32042,9 +32125,13 @@ def _citechk_dir_step(seg, words, subshell, last, run, context, tainted):
 
 
 def _citechk_dirs(segments, cwd):
-    """The directory each segment of one lexing runs in, as a generator, one (directory, reason) per segment
-    in order: directory cwd, or the one the cd and pushd segments before it establish (None with reason None
-    where that is cwd and cwd is None), or (None, reason) where the walk cannot establish one directory.
+    """The directory each segment of one lexing runs in, as a generator, one (directory, reason, off) per
+    segment in order: directory cwd, or the one the cd and pushd segments before it establish (None with reason
+    None where that is cwd and cwd is None), or (None, reason) where the walk cannot establish one directory;
+    off is True where the segment, or one before it, is outside the allowlist (_citechk_plain, a separator
+    other than '&&', ';' or a newline before it), and then the directory is never established, with the
+    walk's own reason where it has one and _CITECHK_SHAPE_WHY otherwise, and no git -C overrides it. The
+    allowlist is the rule; the walk below only narrows it further, so every reason it names still applies.
     Bash's and-or lists are followed: after 'cd D &&' the next command runs in D, and a command reached
     past a cd through ';', a newline, '||' or a later '||' or '&&' that a failed or skipped cd can reach may
     run in either directory, so it is not established (_CITECHK_DIR_SPLIT). A cd in a pipeline element that
@@ -32063,7 +32150,8 @@ def _citechk_dirs(segments, cwd):
     definition on, in a command that also holds a command that can change the directory (_CITECHK_DIR_LOOP),
     since a later iteration or call can run such a segment elsewhere. Every segment after one of these, in
     this shell, is not established either. What the shell brings with it is not seen: the walk assumes that
-    cd, pushd and popd are bash's builtins with no alias or function of that name defined before this call
+    cd, pushd and popd are bash's builtins, and every other command word before the command a builtin or a
+    program, with no alias or function of that name defined before this call
     (by a shell snapshot, a profile or BASH_ENV), and that HOME and CDPATH are those of the hook process."""
     unknown = _CITECHK_DIR_UNKNOWN
     def opens(argv):
@@ -32082,21 +32170,32 @@ def _citechk_dirs(segments, cwd):
     run = list_start = frozenset((cwd,))
     pass_s = pass_f = frozenset()  # directories a success or a failure carries past the next command
     frames, why, prev, context, tainted = [], None, "", None, False
+    # The allowlist (_CITECHK_SHAPE_WHY): the first shape outside it, in a segment or in the separator after
+    # one, judged BEFORE that segment's own directory is given, so a segment outside it (a ${ cmd; } on the
+    # commit itself) is not judged either, nor any later one. It only adds to what the walk leaves unknown.
+    shape = None
     for seg in segments:
+        if shape is None:
+            shape = _citechk_plain(seg)
+        off = shape is not None
         if looped is None and seg.argv and (opens(seg.argv) or (
                 len(seg.argv) == 1 and seg.sep_after == "(" and not seg.argv_opaque[0])):
             looped = any(other.argv and (any(other.argv_opaque) or _CITECHK_CD_WORDS.intersection(other.argv)
                                          or _CITECHK_DIR_OPAQUE.intersection(other.argv)) for other in segments)
         if looped:
-            yield None, _CITECHK_DIR_LOOP
+            yield None, _CITECHK_DIR_LOOP, off
             continue
         if unknown in run:
-            yield None, why
+            yield None, why, off
         elif len(run) > 1:
-            yield None, _CITECHK_DIR_SPLIT
+            yield None, _CITECHK_DIR_SPLIT, off
+        elif off:
+            yield None, _CITECHK_SHAPE_WHY.format(shape), True
         else:
-            yield next(iter(run)), None
+            yield next(iter(run)), None, False
         sep = seg.sep_after
+        if shape is None and sep not in _CITECHK_PLAIN_SEPS:
+            shape = "a {!r} after a command".format(sep)
         subshell = sep in ("|", "|&", "&")  # an element a '|' follows, or one ending in '&': a subshell
         last = prev in ("|", "|&") and not subshell  # the last element: this shell's, under lastpipe
         if context is None and seg.argv and _CITECHK_CD_WORDS.intersection(seg.argv):
@@ -32180,7 +32279,7 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
             walk = _citechk_dirs(segments, cwd)
         while len(dirs) <= index:
             dirs.append(next(walk))
-        repo, nodir = dirs[index]
+        repo, nodir, off = dirs[index]
         where = "the directory a cd before the command moves to"
         if word == "git":
             sub, args = _git_sub_and_args(argv)
@@ -32192,7 +32291,9 @@ def _citechk_items(segments, heredocs, cwd, parse, deadline, evaluate=True, scan
                 if argv[i] == "-C" and i + 1 < len(argv):
                     target = argv[i + 1]
                     where = "the git -C directory"
-                    if os.path.isabs(target):
+                    if off:
+                        pass  # outside the allowlist: not even an absolute -C is trusted (_CITECHK_SHAPE_WHY)
+                    elif os.path.isabs(target):
                         repo, nodir = target, None  # an absolute -C names the directory, wherever the shell is
                     else:
                         repo = os.path.join(repo, target) if repo else None
