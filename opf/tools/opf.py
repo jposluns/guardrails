@@ -5779,6 +5779,21 @@ def _watchdog_completion_case(mode, tree=None):
                     lambda: emit._fixture_drain(123, deadline=101))
     elif mode == "deadline-flips":
         real_run = emit.run_bounded
+        unestablished = object()
+
+        def flipped(case):
+            # Each mutant below is red on a check that holds whether or not
+            # the subject reached its stall point (the cancel latency, the
+            # census window, the cleanup bound), so an unestablished run (no
+            # verdict) means that check did not see the mutant. It is no
+            # verdict on this flip, never read as the mutant detected.
+            got = _watchdog_deadline_case(case, unestablished=unestablished)
+            if got is unestablished:
+                raise _WatchdogBoundReached(
+                    "completion/deadline-flips: deadline/%s never reached its stall "
+                    "point and no check saw the mutant" % case)
+            return got
+
         def late(thunk, **kwargs):
             # The forced timeout sits ABOVE the measured execution bound,
             # so the late parent deadline stays red under any load the
@@ -5787,11 +5802,11 @@ def _watchdog_completion_case(mode, tree=None):
             return real_run(thunk, **dict(
                 kwargs, timeout_s=_DEADLINE_EXECUTION_BOUND + 1))
         with patch.object(emit, "run_bounded", late):
-            assert _watchdog_deadline_case("pipe-stall", unestablished=EXIT_FINDING) == EXIT_FINDING
+            assert flipped("pipe-stall") == EXIT_FINDING
         import time
         with patch.object(emit, "_fixture_cleanup_deadline",
                           side_effect=lambda deadline=None: time.monotonic() - 1):
-            assert _watchdog_deadline_case("pipe-stall", unestablished=EXIT_FINDING) == EXIT_FINDING
+            assert flipped("pipe-stall") == EXIT_FINDING
         real_signal, first = emit._fixture_signal, [True]
         def census_only(*args, **kwargs):
             if first[0]:
@@ -5808,8 +5823,7 @@ def _watchdog_completion_case(mode, tree=None):
         runner_module = sys_module.modules[_watchdog_deadline_case.__module__]
         with patch.object(emit, "_fixture_signal", census_only), \
                 patch.object(runner_module, "_DEADLINE_EXECUTION_BOUND", 1.6):
-            assert _watchdog_deadline_case("transient-census",
-                                           unestablished=EXIT_FINDING) == EXIT_FINDING
+            assert flipped("transient-census") == EXIT_FINDING
     elif mode == "subject-setup":
         real_subreaper, real_setsid = emit._fixture_subreaper, os.setsid
         in_guardian = [False]
@@ -5924,7 +5938,17 @@ def _watchdog_completion_case(mode, tree=None):
                 return real_wait(pid, flags)
 
             with patch.object(emit, "_fixture_wait", compete):
-                refuses(emit.ChildStatusUnavailable, lambda: launch(code))
+                try:
+                    refuses(emit.ChildStatusUnavailable, lambda: launch(code))
+                except _WatchdogBoundReached:
+                    # Once the competing reap landed, the owner's own wait was
+                    # handed ECHILD in that same poll, which refuses at once
+                    # (no deadline check precedes it), so a launch that still
+                    # ran to its bound did not refuse: definite. Before the
+                    # reap landed the bound is a setup bound (no verdict).
+                    assert not stolen, "completion/reaper: the owner was handed ECHILD " \
+                        "and ran to its launch bound instead of refusing"
+                    raise
             if expired:
                 # The owner's cleanup may have replaced the no-verdict on its
                 # way out; the reap never landed, so nothing was judged.
@@ -6021,7 +6045,17 @@ def _watchdog_completion_case(mode, tree=None):
             return real_wait(pid, flags)
 
         with patch.object(emit, "_fixture_wait", cancel):
-            refuses(RuntimeError, lambda: launch("import time; time.sleep(60)"))
+            try:
+                refuses(RuntimeError, lambda: launch("import time; time.sleep(60)"))
+            except _WatchdogBoundReached:
+                # The subject outlives the launch bound by design, so only the
+                # cancellation can end this launch early. Before the cancel was
+                # raised the bound is a setup bound (no verdict); once it was
+                # raised, a launch that still ran to its bound is the cancelled
+                # collection not ending it: the behaviour under test, definite.
+                assert not seen, "completion/cleanup-cancel: the cancelled collection " \
+                    "did not end the launch, which ran to its bound"
+                raise
         pid = seen[0]
         try:
             waited, _ = os.waitpid(pid, os.WNOHANG)
@@ -16048,9 +16082,12 @@ def _watchdog_load_route_vectors():
     real leg, run in process over a scripted run_status_owned and waitpid, the
     CANNOT-EVALUATE marker on a clean exit (pre-fix: the flat 5 s join failed the leg),
     while a landed reap passes and an owner that accepts the stolen status, or a stolen
-    failed guardian status, still fails it. blocked-isolation: every isolation case is
+    failed guardian status, or that runs to its launch bound after the reap, still fails it. blocked-isolation: every isolation case is
     launched at its label's measured bound, never under the margin times that label's recorded worst duration (pre-fix:
-    one flat 180 s, which a check case reached under CPU contention)."""
+    one flat 180 s, which a check case reached under CPU contention). cleanup-cancel: a
+    launch bound reached before the cancel is raised is no verdict, one reached after it
+    (the cancellation did not end the launch) fails the leg. deadline-flips: a mutant run
+    that was never established is no verdict on the flip, never read as detected."""
     import contextlib
     import io
     import subprocess
@@ -16153,6 +16190,10 @@ def _watchdog_load_route_vectors():
             try:
                 emit._fixture_wait(next(guardians), os.WNOHANG)
             except emit.ChildStatusUnavailable:
+                if script == "waits-out":
+                    # A broken owner that keeps waiting after ECHILD until
+                    # its launch bound.
+                    raise subprocess.TimeoutExpired(argv, timeout)
                 if script != "accepted":
                     raise
             return subprocess.CompletedProcess(argv, 0, b"", b"")
@@ -16173,7 +16214,8 @@ def _watchdog_load_route_vectors():
 
     if signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL:
         for script, want in (("late", "cannot-evaluate"), ("reaped", "pass"),
-                             ("accepted", "fail"), ("guardian-failed", "fail")):
+                             ("accepted", "fail"), ("guardian-failed", "fail"),
+                             ("waits-out", "fail")):
             got = reaper(script)
             if got != want:
                 misses.append("reaper with a %s competing reap -> %r, want %r" % (script, got, want))
@@ -16226,6 +16268,57 @@ def _watchdog_load_route_vectors():
                                            for _fixture, timeout in want):
         misses.append("isolation budget %r does not charge each case at its bound"
                       % (_watchdog_isolation_budget(),))
+
+    # cleanup-cancel: the real leg, run in process over a scripted
+    # run_status_owned. A launch that reaches its bound before the cancel is
+    # raised is no verdict; one that reaches it after the cancel was raised
+    # (an owner that swallows the cancellation and keeps collecting) fails
+    # the leg (pre-fix: every launch bound was no verdict, so that broken
+    # owner read as host load).
+    def cancelled(script):
+        def owned(argv, *, fixture_id, timeout, **kwargs):
+            if script == "swallowed":
+                try:
+                    emit._fixture_wait(1 << 30, os.WNOHANG)  # the leg's cancel raises here
+                except RuntimeError:
+                    pass  # the broken owner keeps collecting
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        out = io.StringIO()
+        with patch.object(emit, "run_status_owned", owned), contextlib.redirect_stdout(out):
+            try:
+                rc = _watchdog_leg_entry(1, _watchdog_completion_case, "cleanup-cancel")
+            except AssertionError:
+                return "fail"
+        return _watchdog_completion_verdict(rc, out.getvalue())
+
+    for script, want in (("unstarted", "cannot-evaluate"), ("swallowed", "fail")):
+        got = cancelled(script)
+        if got != want:
+            misses.append("cleanup-cancel over a %s launch bound -> %r, want %r" % (script, got, want))
+
+    # deadline-flips: the real leg, run in process over a scripted deadline
+    # case. A mutant run that was never established (no check saw the
+    # mutant) is no verdict on the flip (pre-fix: read as the mutant
+    # detected), a detected mutant passes and an undetected one fails.
+    def flips(outcome):
+        def case(mode, unestablished=None):
+            return unestablished if outcome == "unestablished" else outcome
+
+        out = io.StringIO()
+        with patch.object(runner_module, "_watchdog_deadline_case", case), \
+                contextlib.redirect_stdout(out):
+            try:
+                rc = _watchdog_leg_entry(1, _watchdog_completion_case, "deadline-flips")
+            except AssertionError:
+                return "fail"
+        return _watchdog_completion_verdict(rc, out.getvalue())
+
+    for outcome, want in (("unestablished", "cannot-evaluate"), (EXIT_FINDING, "pass"),
+                          (EXIT_OK, "fail")):
+        got = flips(outcome)
+        if got != want:
+            misses.append("deadline-flips over a %r mutant run -> %r, want %r" % (outcome, got, want))
     return misses
 
 
