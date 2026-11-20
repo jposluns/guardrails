@@ -250,7 +250,9 @@ bounds (State source).
    many paragraphs (a document's definitions are worked out once, in one table its units and scanned
    lines share). A shape no row times is not shown to be linear. Where a definition URL is still copied
    into the text (a URL holding a parenthesis, a square bracket or a backtick is copied into each use, and
-   a URL the markdown-link step does not read whole, as in `[a]( [x)]`, is given back in full), the copied
+   a URL the markdown-link step does not read whole, as in a reference link whose label ends in a closing
+   parenthesis written after a link text in brackets, an opening parenthesis and a space, which that step
+   reads as an inline link ending at that parenthesis, is given back in full), the copied
    text is read and quoted as written, so n uses of a URL of length L cost n * L. Those copies are
    bounded: a document whose reference links would copy more than eight characters of URL per byte of
    the document (its UTF-8 bytes, not its characters), plus 65,536, is cannot-evaluate (exit 2). Two growth rows reach that bound on each copy

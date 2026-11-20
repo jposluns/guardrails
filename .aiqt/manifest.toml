@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "6e0b49fbe7cffb4672f97850d0de68efb973535d913a287d04cd4f3194a89a06"
+tree-sha256 = "33a449e60ee35ccc28be56eda5630f2a245cc5f072caf1f02e8dcef560eb4595"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4392,8 +4392,8 @@ sha256 = "3aba6654e5757854a967398ac9e512d9b614b6b6c2012fba0d76eae55685ebff"
 
 [[sources]]
 path = "tools/check_pending_pr_claims.py"
-bytes = 313511
-sha256 = "a3e8279be487379d11d5e97d672a1350c06ff75886cd163f54ae6622a54ae9cb"
+bytes = 313700
+sha256 = "149e4b4dad87d312b142a93a74e590edaa0ec4b5ac469675c71fdf062e20dddb"
 
 [[sources]]
 path = "tools/check_pending_pr_commit.sh"

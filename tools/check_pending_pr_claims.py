@@ -73,8 +73,9 @@ back, must grow more. A shape the rows do not time is not shown to be linear. On
 link reference definitions serves all its units and scanned lines, so a definition's URL is read once.
 
 Where a URL is still copied into the text (a definition URL holding a parenthesis, a square bracket or
-a backtick, copied into each use, or a placeholder the markdown-link step leaves, as in `[a]( [x)]`, given
-its URL back), n uses of a URL of length L read n * L characters, and the clause they land in is quoted
+a backtick, copied into each use, or a placeholder the markdown-link step leaves, as in a reference link
+whose label ends in a closing parenthesis written after a link text in brackets, an opening parenthesis
+and a space, which that step reads as an inline link ending at that parenthesis, given its URL back), n uses of a URL of length L read n * L characters, and the clause they land in is quoted
 as copied. Those copies are bounded instead: past eight characters of URL per byte of the document (its
 UTF-8 bytes) plus 65,536 the document is cannot-evaluate (exit 2), and two growth rows show that bound reached on each
 copy path, with their red legs (the bound removed) growing more.
