@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "0dfd2c2188096e672f482242ec48ed7b68b2a293d0195ae5d09410d2d180bcd0"
+tree-sha256 = "df73c595b7a1dadc44e54ab1d0a3332ca9d808c13c8eaac77405ae35925cf2e2"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4857,8 +4857,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1480890
-sha256 = "9a98c4fc1d4a502112faf9c025346e4eb122e827482b937fc078612d43d64117"
+bytes = 1480910
+sha256 = "1c654c8e9f3eb8958dfada4950f6b5574ff5a6da294d058bbc212cf611f344b1"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"

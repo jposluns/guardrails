@@ -13925,7 +13925,7 @@ def _nrdo_unexercised(corpus, ran):
 
 
 # The containment no-reduction differential (nrd-contain/): the command forms of the three guard
-# reviews of 2026-11-21 (round 1, round 2 and round 3 of the fbdff942 series), restated on the nrd/
+# reviews of 2026-11-21 (the first, second and third of the fbdff942 series), restated on the nrd/
 # fixture: drafts/ is nrd-stage/, <fx>/work is the parent of the declared directories (cwd key "tmp")
 # and <fx>/other is nrd-outside ("out"). Each row is (id, cwd key, template, pinned verdict); the
 # verdict was taken from the fbdff942 guard on this fixture, except r3-find/ed and r3-find/dc, which
@@ -13935,7 +13935,7 @@ def _nrdo_unexercised(corpus, ran):
 # Placeholders: @ST@, @HB@ and @OUT@ are the staging, hand-back and outside directories, @TMP@ their
 # parent and @STDLIB@ the running interpreter's standard library.
 _NRDC_REVIEW_FORMS = (
-    # round 3, "Newly denied at fbdff942" (the cost table) and "Denied at earlier heads too"
+    # third review, "Newly denied at fbdff942" (the cost table) and "Denied at earlier heads too"
     ("r3-cost/py-c-print", "tmp", "python3 -I -c 'print(1)'", "deny"),
     ("r3-cost/arith-echo", "tmp", "echo $((1+2))", "deny"),
     ("r3-cost/arith-sleep", "tmp", "sleep $((RANDOM % 1))", "deny"),
@@ -13963,7 +13963,7 @@ _NRDC_REVIEW_FORMS = (
     ("r3-earlier/cd-toplevel", "tmp", "cd \"$(git rev-parse --show-toplevel)\" && git status", "deny"),
     ("r3-earlier/find-exec", "tmp", "find . -name '*.txt' -exec grep -l 1 {} +", "deny"),
     ("r3-earlier/wc-herestring", "tmp", "wc -l <<< 'x y'", "deny"),
-    # round 3 findings (B1-B2, M1-M4, N1)
+    # third review findings (B1-B2, M1-M4, N1)
     ("r3-find/funsub", "tmp", "echo \"${ bash nrd-stage/x.sh; }\"", "allow"),
     ("r3-find/valsub", "tmp", "echo \"${| python3 -m nrd-stage.x; }\"", "allow"),
     ("r3-find/funsub-unquoted", "tmp", "echo ${ python3 -m nrd-stage.x; }", "deny"),
@@ -13981,7 +13981,7 @@ _NRDC_REVIEW_FORMS = (
     ("r3-find/ed", "tmp", "printf '!sh nrd-stage/x.sh\\nq\\n' | ed -s", "deny"),
     ("r3-find/dc", "tmp", "dc -e '!sh nrd-stage/x.sh'", "deny"),
     ("r3-find/bash-aliases", "tmp", "cp nrd-stage/x.sh nrd-outside/.bash_aliases", "allow"),
-    # round 2 findings and its cost list
+    # second review findings and its cost list
     ("r2/herestring", "tmp", "grep -c x <<< 'xyz'", "deny"),
     ("r2/unquoted-heredoc", "tmp", "cat <<EOF > out.txt\nhi\nEOF\n", "deny"),
     ("r2/subst-py-m", "tmp", "echo \"$(python3 -m nrd-stage.x)\"", "deny"),
@@ -13998,7 +13998,7 @@ _NRDC_REVIEW_FORMS = (
     ("r2/py-c-herestring", "tmp", "python3 -I -c 'import sys' <<< hello", "deny"),
     ("r2/grep-glob", "tmp", "grep -rn python3 *.py", "deny"),
     ("r2/make-test", "tmp", "make test", "deny"),
-    # round 1 findings and its cost list
+    # first review findings and its cost list
     ("r1/py-m-ancestor", "tmp", "python3 -m nrd-stage.x", "deny"),
     ("r1/py-c-import", "tmp", "python3 -c \"import nrd-stage.x\"", "deny"),
     ("r1/cd-then-m", "out", "cd @TMP@ && python3 -m nrd-stage.x", "deny"),
