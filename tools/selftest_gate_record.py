@@ -38,6 +38,8 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
   V28    a new branch or a tag at a commit the remote already has pushes with no record (read from the
          remote's own refs); a commit it lacks stays refused, also when a remote-tracking ref names it; an
          unreadable remote cannot evaluate; with no URL the refusal stands.
+  V29    a URL ls-remote would read elsewhere (url.<base>.insteadOf, a remote named like the URL) cannot
+         evaluate and pushes nothing. Its flip: an unrelated rewrite leaves a commit the remote has pushing.
   X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
@@ -840,6 +842,53 @@ def rows_remote_has(base):
     check("V28/flip-remote-unreadable-cannot-evaluate", (done.returncode, "ls-remote" in done.stderr), (2, True))
     done = gate(repo, "verify-push", data=push_line(git_out(repo, "rev-parse", "origin/main")))
     check("V28/flip-no-url-refused", (done.returncode, "missing" in done.stderr), (1, True))
+    rows_url_rewrite(base)
+
+
+def rows_url_rewrite(base):
+    # V29 (QA qagitrecord3): git ls-remote reads the URL after the fetch rewrites, git push writes the URL after
+    # the push rewrites. url.<this clone>.insteadOf=<remote> with url.<remote>.pushInsteadOf=<remote> (two
+    # ordinary git config commands) made the remote proof read this clone, which has every commit, while the
+    # push wrote the remote, so an unrecorded commit reached it; a remote named like the push URL did the same.
+    # Both now cannot evaluate and nothing reaches the remote. The flip: a rewrite that does not match the push
+    # URL leaves a commit the remote has pushing.
+    repo = fixture(base)
+    remote = bare_remote(repo, "v29")
+    stage(repo, "u.txt", "u\n")
+    commit(repo, "v29 unrecorded", "--no-verify")
+    git_out(repo, "config", "url.{}.insteadOf".format(repo), str(remote))
+    git_out(repo, "config", "url.{}.pushInsteadOf".format(remote), str(remote))
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v29-u")
+    check("V29/insteadof-read-elsewhere-cannot-evaluate",
+          (done.returncode != 0, "insteadOf" in done.stderr,
+           git(remote, "rev-parse", "-q", "--verify", "v29-u").stdout.strip()), (True, True, ""))
+    repo = fixture(base)
+    git_out(TMP, "init", "-q", "--bare", "-b", "main", str(Path(repo) / "v29-lacks.git"))
+    git_out(repo, "remote", "set-url", "origin", "v29-lacks.git")
+    git_out(repo, "push", "-q", "--no-verify", "origin", "main")
+    stage(repo, "u.txt", "u\n")
+    commit(repo, "v29 unrecorded", "--no-verify")
+    git_out(repo, "config", "remote.v29-lacks.git.url", str(repo))
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v29-n")
+    check("V29/remote-named-like-url-cannot-evaluate",
+          (done.returncode != 0, "remote named like" in done.stderr,
+           git(Path(repo) / "v29-lacks.git", "rev-parse", "-q", "--verify", "v29-n").stdout.strip()),
+          (True, True, ""))
+    repo = fixture(base)
+    remote = bare_remote(repo, "v29-flip")
+    git_out(repo, "config", "url.{}.insteadOf".format(repo), "https://example.invalid/elsewhere.git")
+    other = TMP / "v29-other"
+    git_out(TMP, "clone", "-q", str(remote), str(other))
+    write(other, "s.txt", "elsewhere\n")
+    git_out(other, "add", "s.txt")
+    git_out(other, "commit", "-q", "-m", "made elsewhere")
+    git_out(other, "push", "-q", "origin", "main")
+    git_out(repo, "fetch", "-q", "origin")
+    git_out(repo, "switch", "-q", "-c", "v29-feature", "origin/main")
+    done = git(repo, "push", "-q", "origin", "v29-feature")
+    check("V29/flip-unrelated-rewrite-remote-commit-pushes",
+          (done.returncode, git(remote, "rev-parse", "-q", "--verify", "v29-feature").stdout.strip() != ""),
+          (0, True))
 
 
 # --- the installer -----------------------------------------------------------------------------------------
@@ -927,6 +976,11 @@ def run_checks():
         rows_install(base)
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
+        # The fixture HOME _git_fixture_env made for this process: its atexit removal never runs here, since
+        # the direct entry ends with os._exit (QA qagitrecord3 saw one aiqt-git-fixture-home-* left per run).
+        import _git_fixture_env
+        if _git_fixture_env._SCRATCH_HOME is not None:
+            shutil.rmtree(_git_fixture_env._SCRATCH_HOME, ignore_errors=True)
 
 
 def main(report_path=None):

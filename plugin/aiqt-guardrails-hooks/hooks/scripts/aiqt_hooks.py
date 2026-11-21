@@ -44774,7 +44774,7 @@ class _DeadlineWindow:
 # git can read cannot evaluate (the shallow file hides parents as a grafts file does). A pushed tip this clone
 # holds no passing record for is accepted only when the remote at the push URL already has it (_gr_remote_has:
 # git ls-remote of that URL, never this clone's refs/remotes, then git rev-list over the commit objects); a
-# remote that cannot be read then cannot evaluate. A record line is
+# remote that cannot be read, or a URL ls-remote would rewrite to another one, then cannot evaluate. A record line is
 # a JSON object with exactly _GR_KEYS, in that order: head is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
 # the check moved the tree, the index or HEAD, and a cannot-evaluate one when the check ran past its bound, a
 # process of its group outlived it, or the log was replaced or rewritten while it ran.
@@ -44804,7 +44804,10 @@ class _DeadlineWindow:
 # (_GR_HOOK_GIT_KEEP), GIT_NAMESPACE and the configuration git passes on are read as git reads them; every git
 # call here pins core.commitGraph on git's command line, which is assumed (not tested here) to outrank a
 # GIT_CONFIG_COUNT entry; a pushed commit at a shallow boundary cannot evaluate even when it is a real root; and
-# the remote proof trusts the remote at the push URL to hold every ancestor of what it advertises.
+# the remote proof trusts the remote at the push URL to hold every ancestor of what it advertises, accepts a
+# commit reachable from any ref it advertises (pull-request refs other users create included), and cannot
+# evaluate a URL git ls-remote would rewrite (url.<base>.insteadOf, a remote named like the URL), checked with
+# ls-remote --get-url just before the read, so a same-user config change between the two is an R8 race.
 _GR_FORMAT = "aiqt-gate-record/2"
 _GR_OLD_FORMATS = ("aiqt-gate-record/1",)
 _GR_RECORDER = "aiqt_hooks gate-record 2"
@@ -45525,9 +45528,19 @@ def _gr_verify_commit():
 def _gr_remote_tips(env, url):
     """The commit ids the remote at url advertises now (git ls-remote of the URL git pushes to, never this clone's
     own refs/remotes, which a same-user process can repoint) that this clone holds, as a list (peeled tags
-    included). A failed or unbounded read cannot evaluate: whether the remote has a commit is then unknown."""
+    included). A failed or unbounded read cannot evaluate: whether the remote has a commit is then unknown.
+    git ls-remote reads the URL after the fetch rewrites (url.<base>.insteadOf, or a remote whose name is that
+    text), while git pushed to the URL after the push rewrites (url.<base>.pushInsteadOf), so a same-user git
+    config could point the read at another repository (QA qagitrecord3); a URL ls-remote --get-url would
+    rewrite cannot evaluate."""
     if not url or url.startswith("-"):
         raise _GateRecordError("git gave pre-push no remote URL this verifier can read ({!r})".format(url))
+    resolved = _gr_git(env, "ls-remote", "--get-url", url)
+    if resolved != url:
+        raise _GateRecordError("git ls-remote would read {!r}, not the push URL {!r} (a url.<base>.insteadOf "
+                               "rewrite, or a remote named like the URL), so whether the remote git pushes to "
+                               "has the commit cannot be read; record the tree, or remove that rewrite and "
+                               "retry".format(resolved, url))
     listed = _gr_git_done(dict(env, GIT_TERMINAL_PROMPT="0"), ("ls-remote", url))
     if listed.returncode != 0:
         raise _GateRecordError("git ls-remote {} failed (exit {}): {}".format(
