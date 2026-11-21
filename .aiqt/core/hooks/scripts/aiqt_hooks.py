@@ -20347,6 +20347,9 @@ def _gate_plumbing_deny():
 # and the uncertain-'#' doubt path alike. The forms it cannot read (an option or variable name built at run time,
 # an alias or include in a configuration file, help.autocorrect running a misspelt verb with --exec, a PATH set by
 # a profile, a sourced file or the session before the command) stay the gate record's counted residual X4 and X5.
+# QA qagitrecord6: on the parsed path a quoted literal that is the message of a git commit, tag or merge segment is
+# data, as for the plumbing deny (_gate_plumbing_inert), so git commit -m 'ci: set PATH= for node' && git push
+# allows; a message spelling anywhere else, and every fallback path, still reads the whole raw text.
 _GATE_PUSH_WORD_RE = re.compile(r"(?<![a-z0-9_])push(?![a-z0-9_-])", re.ASCII)
 _GATE_PUSH_PACK_RE = re.compile(r"(?<![A-Za-z0-9_-])--rece(?:i(?:v(?:e(?:-(?:p(?:a(?:ck?)?)?)?)?)?)?)?(?![A-Za-z0-9_-])",
                                 re.ASCII)
@@ -20355,12 +20358,15 @@ _GATE_PUSH_ENV_RE = re.compile(r"(?<![A-Za-z0-9_])(?:PATH|GIT_EXEC_PATH|LD_PRELO
                                r"|(?<![A-Za-z0-9_-])--exec-path=", re.ASCII)
 
 
-def _gate_push_redirect(command):
+def _gate_push_redirect(command, records=None):
     """What in command can make a git push run another program or deliver elsewhere than its URL (a --receive-pack
     or --exec spelling, or a PATH, GIT_EXEC_PATH or loader override), or None. Read over the raw text and its
     de-quoted readings (_decoded_readings), each with every quote character and backslash removed; a git must be
     named (_gate_names_git: a word-bounded 'git', or a '$' or backquote that may build it), and for every form but
-    --receive-pack (which only push and send-pack take) a word-bounded push too."""
+    --receive-pack (which only push and send-pack take) a word-bounded push too. With records (the parsed path) the
+    literal messages of git commit, tag and merge are read as data first (_gate_plumbing_inert)."""
+    if records is not None:
+        command = _gate_plumbing_inert(command, records)
     for text in (command,) + tuple(_decoded_readings(command)):
         plain = text.replace("'", "").replace('"', "").replace("\\", "")
         found = _GATE_PUSH_PACK_RE.search(plain)
@@ -20658,8 +20664,9 @@ def gate_weakening(data):
     INTERIM PUSH-REDIRECT DENY (_gate_push_redirect), right after it on the same three paths: a command whose raw or
     de-quoted text names git and holds a git push --receive-pack spelling (--rece through --receive-pack), or names
     git and a push word and holds an --exec spelling (--e through --exec), a PATH, GIT_EXEC_PATH, LD_PRELOAD,
-    LD_AUDIT or LD_LIBRARY_PATH assignment or git --exec-path=, DENIES (QA qagitrecord4 finding 2 and X4); the
-    forms it cannot read stay the gate record's counted residuals X4 and X5.
+    LD_AUDIT or LD_LIBRARY_PATH assignment or git --exec-path=, DENIES (QA qagitrecord4 finding 2 and X4), a
+    quoted literal git commit, tag or merge message on the parsed path being read as data (_gate_plumbing_inert,
+    QA qagitrecord6); the forms it cannot read stay the gate record's counted residuals X4 and X5.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -20977,8 +20984,8 @@ def gate_weakening(data):
     if _gate_plumbing_git(command, records):
         return _gate_plumbing_deny()
     # The interim push-redirect deny (_gate_push_redirect): a git push naming its own receive-pack, PATH, exec
-    # path or loader.
-    redirect = _gate_push_redirect(command)
+    # path or loader; a literal commit, tag or merge message is data here too (_gate_plumbing_inert).
+    redirect = _gate_push_redirect(command, records)
     if redirect is not None:
         return _gate_push_redirect_deny(redirect)
     if pending_note is not None:
@@ -44847,7 +44854,9 @@ class _DeadlineWindow:
 # process of its group outlived it, or the log was replaced or rewritten while it ran.
 # Disclosed residuals (each closed by the required Quality gates re-run on the merged tree, or disclosed): R1 git
 # commit or push --no-verify skips the hooks (the text guard denies the spellings it reads); R2 a client that runs
-# no hooks, a core.hooksPath set later or on the command line, a removed stub, and git plumbing that runs no
+# no hooks, a core.hooksPath set later, on the command line (git -c, git --config-env) or in a configuration
+# file the command names (GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM, HOME, XDG_CONFIG_HOME; QA qagitrecord6), a
+# removed stub, and git plumbing that runs no
 # hook (the text guard denies git commit-tree, send-pack and http-push, _gate_plumbing_git; other spellings such
 # as git hash-object -t commit or git fast-import with git update-ref stay open); R3 a same-user process that
 # appends or rewrites a record or edits a stub, the checked command included when it leaves its own session and
@@ -44880,9 +44889,13 @@ class _DeadlineWindow:
 # remote.<name>.receivepack, GIT_EXEC_PATH, an ssh or git:// proxy program, a transport helper or
 # remote.<name>.vcs), and an http.proxy the push names is trusted to reach the URL's host; the proof reads the
 # remote's symbolic refs in protocol v2 (pinned on the command line, like core.commitGraph) and drops a branch or
-# tag that names a ref outside refs/heads and refs/tags, but a server that answers in protocol v0 names no
+# tag that names a ref outside refs/heads and refs/tags, but a server that answers in protocol v0 (as over an
+# ssh transport whose ssh.variant or GIT_SSH_VARIANT is simple, which sends no protocol request) names no
 # symbolic ref but HEAD, so there such a ref counts as the branch it names (trusted as the remote's own writers
-# are). Every input of the push and its stubs that can change what runs or where the push goes is read and
+# are); GIT_NAMESPACE or git --namespace on a push to a local path puts the push and the read in the same
+# namespace of the remote (GIT_NAMESPACE is kept for the read), so a commit the remote holds under
+# refs/namespaces/<name>/refs/heads or tags counts for a push into that namespace, which writes only there (QA
+# qagitrecord6). Every input of the push and its stubs that can change what runs or where the push goes is read and
 # denied here or by the text guard, or is a counted residual with these exact forms: X4 git push
 # --receive-pack and --exec on the command line reach no hook and can deliver a push to another repository than
 # its URL, which the proof then reads; the text guard (_gate_push_redirect) denies every spelling it reads
@@ -44892,11 +44905,15 @@ class _DeadlineWindow:
 # git push itself runs: the stubs run git, python3, mktemp and timeout by the absolute paths install recorded
 # (a missing one cannot evaluate), with PATH set to their directories and /usr/bin and /bin, and the verifiers
 # run the recorded git, so a PATH or GIT_EXEC_PATH override no longer reaches the stub or the proof's read; but
-# the git the shell runs for git push is found on the caller's PATH, and a planted git runs no hook (as R2's
-# client that runs no hooks), and LD_PRELOAD, LD_AUDIT or LD_LIBRARY_PATH load code into git and the stubs'
+# the git the shell runs for git push is found on the caller's PATH, or named by a shell alias, a shell function
+# or a hash -p entry, or given as a path (the text guard has no rule for these last three, QA qagitrecord6), and a
+# planted git runs no hook (as R2's client that runs no hooks), and LD_PRELOAD, LD_AUDIT or LD_LIBRARY_PATH load
+# code into git and the stubs'
 # programs; the text guard denies a git push whose command assigns PATH, GIT_EXEC_PATH or one of those loader
 # variables (NAME=, NAME+=, env, export or declare) or names git --exec-path=, so X5 is the forms it cannot read:
-# a variable name built at run time, a PATH or loader variable set by the session, a profile, a sourced file or
+# a variable name built at run time, a push the command line does not name as push (a git alias in a
+# configuration file, PATH=/x git p; QA qagitrecord6), a PATH or loader variable set by the session, a profile,
+# a sourced file or
 # an earlier command, a git commit under such an override (pre-commit's stub is covered, the git found is not),
 # a program written into a directory the stub's PATH or a recorded path names (a same-user edit, R3), and git -C,
 # --git-dir, GIT_DIR or GIT_COMMON_DIR naming a repository whose hooks hold no stub (it runs none, as a clone that

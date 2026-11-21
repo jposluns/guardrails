@@ -96,7 +96,8 @@ red with the narrowing reverted and each shape row red with the shape list empti
 reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
 reverted); the interim push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
 accepts), a PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable denies, each flip row red with
-that deny reverted; and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
+that deny reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
+reverted); and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -5071,6 +5072,12 @@ _GPR_ROWS = (
     ("gpr-23", "MYPATH=/x git push origin main", "allow", "allow", "keep"),
     ("gpr-24", "git commit -m x && PATH=/x make", "allow", "allow", "keep"),
     ("gpr-25", "echo $PATH && git push origin main", "allow", "allow", "keep"),
+    # QA qagitrecord6: a quoted literal commit message is data on the parsed path (_gate_plumbing_inert); the same
+    # spelling outside a message still denies. The data rows are red with that reading reverted (gpr-*-raw).
+    ("gpr-26", "git commit -m 'ci: set PATH= for node' && git push origin main", "allow", "allow", "data"),
+    ("gpr-27", "git merge -m 'merge the --receive-pack docs' topic && git push origin main", "allow", "allow",
+     "data"),
+    ("gpr-28", "git commit -m 'ci' && PATH=/x git push origin main", "allow", "deny", "flip"),
 )
 
 
@@ -5149,7 +5156,7 @@ def _test_gate_check_git(failures, tmp):
                         "push-redirect deny")
     saved_redirect = aiqt_hooks._gate_push_redirect
     try:
-        aiqt_hooks._gate_push_redirect = lambda command: None
+        aiqt_hooks._gate_push_redirect = lambda command, records=None: None
         for label, command, main, now, kind in _GPR_ROWS:
             got = _decision(aiqt_hooks.gate_weakening, command)
             if got != main:
@@ -5159,6 +5166,14 @@ def _test_gate_check_git(failures, tmp):
                 failures.append("({}-revert) flip row is not red with the push-redirect deny reverted".format(label))
     finally:
         aiqt_hooks._gate_push_redirect = saved_redirect
+    saved_inert = aiqt_hooks._gate_plumbing_inert
+    try:
+        aiqt_hooks._gate_plumbing_inert = lambda command, records: command
+        for label, command, main, now, kind in _GPR_ROWS:
+            if kind == "data" and _decision(aiqt_hooks.gate_weakening, command) != "deny":
+                failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_inert = saved_inert
     repo = _init_repo(Path(tmp) / "gcg-write-scope")
 
     def write(path):
