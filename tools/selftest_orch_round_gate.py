@@ -80,6 +80,9 @@ def _grade(fid, severity, source, **extra):
 
 
 def _round(number, attempt, head, permit, legs, grades, withdrawn=()):
+    """One round line; a leg that names no head reviewed the line's head (null on a missing leg)."""
+    for leg in legs:
+        leg.setdefault(org.F_HEAD, None if leg[org.F_STATE] == "missing" else head)
     return {org.F_KIND: "round", org.F_ITEM: ITEM, org.F_ROUND: number, org.F_ATTEMPT: attempt,
             org.F_HEAD: head, org.F_PERMIT: permit, org.F_LEGS: legs, org.F_GRADES: grades,
             org.F_WITHDRAWN: list(withdrawn)}
@@ -470,6 +473,7 @@ def _missing_leg(bad, findings, report):
     objs = _golden()
     leg = objs[2][org.F_LEGS][1]
     leg[org.F_STATE] = "missing"
+    leg[org.F_HEAD] = None
     leg[org.F_DISPATCH] = None
     leg[org.F_REPORT] = report if bad else None
     leg[org.F_FINDINGS] = findings if bad else []
@@ -600,7 +604,29 @@ def c_unknown_field(d, bad):
 
 
 def c_unknown_leg_field(d, bad):
-    return _obj(d, bad, (2, org.F_LEGS, 0, "head"), HEADS[1], DELETE)
+    return _obj(d, bad, (2, org.F_LEGS, 0, "note"), "x", DELETE)
+
+
+def c_leg_head_absent(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_HEAD), DELETE, HEADS[1])
+
+
+def c_leg_head_hex(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_HEAD), "2B" * 20, "2b" * 20)
+
+
+def c_leg_head_short(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 1, org.F_HEAD), "2b" * 19 + "2", "2b" * 20)
+
+
+def c_leg_head_null(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_HEAD), None, HEADS[1])
+
+
+def c_missing_leg_head(d, bad):
+    objs = _missing_leg(False, [], None)
+    objs[2][org.F_LEGS][1][org.F_HEAD] = HEADS[1] if bad else None
+    return _validate(_write(d, _lines(objs)))
 
 
 def c_missing_field(d, bad):
@@ -730,6 +756,16 @@ def _self_test():
             relinked.append(text)
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         check("accept/any-json-spacing", _validate(_write(d, relinked))[0] == "ok")
+        d = fresh()
+        objs = _set(_golden(), (3, org.F_LEGS, 1, org.F_HEAD), HEADS[1])
+        got = _validate(_write(d, _lines(objs)))
+        stored = json.loads(_lines(objs)[3])
+        check("accept/leg-head-differs-is-recorded-for-the-gate", got[0] == "ok"
+              and stored[org.F_HEAD] == HEADS[2]
+              and [leg[org.F_HEAD] for leg in stored[org.F_LEGS]] == [HEADS[2], HEADS[1]], (got, stored))
+        heads_ok = all(leg[org.F_HEAD] == line_obj[org.F_HEAD] for line_obj in _golden()[1:]
+                       for leg in line_obj[org.F_LEGS])
+        check("fixture/golden-legs-reviewed-the-line-head", heads_ok)
         families = set()
         for line_obj in _golden()[1:]:
             for leg in line_obj[org.F_LEGS]:
@@ -762,6 +798,28 @@ def _self_test():
         code, out, err = _cli([])
         check("cli/no-arguments-exit-2", code == 2 and err.startswith("CANNOT EVALUATE: usage"),
               (code, out, err))
+        # A value carried in a reason (here the record path) cannot break the framing: stdout stays one
+        # JSON object (holding the exact path) then one line, stderr one line, all printable ASCII.
+        for cid, name in (("cli/refusal-path-lf-stays-framed", "no\nsuch.jsonl"),
+                          ("cli/refusal-path-cr-stays-framed", "no\rsuch.jsonl"),
+                          ("cli/refusal-path-line-separator-stays-framed", "no such.jsonl"),
+                          ("cli/refusal-path-undecodable-byte-stays-framed", "no\udcffsuch.jsonl")):
+            bad_path = os.path.join(d, name)
+            code, out, err = _cli(["validate", "--record", bad_path])
+            rows = out.split("\n")
+            try:
+                head = json.loads(rows[0])
+            except ValueError:
+                head = None
+            check(cid, code == 2 and len(rows) == 3 and rows[2] == "" and out.isascii() and err.isascii()
+                  and err.count("\n") == 1 and err.endswith("\n") and isinstance(head, dict)
+                  and head.get("decision") == "CANNOT_EVALUATE" and bad_path in head.get("reason", "")
+                  and rows[1].startswith("CANNOT_EVALUATE ") and org.printable(bad_path) in rows[1]
+                  and err.startswith("CANNOT EVALUATE: ") and org.printable(bad_path) in err,
+                  (code, out, err))
+        sample = "a\nb\\c\x7fé \udcff\U0001f600"
+        check("cli/printable-escape-is-ascii-and-unambiguous", org.printable(sample)
+              == "a\\x0ab\\\\c\\x7f\\xe9\\u2028\\udcff\\U0001f600", org.printable(sample))
 
         # ---------- refusals, each with its flip ----------
         for cid, flip, build, want in (
@@ -835,6 +893,12 @@ def _self_test():
                 ("fc/item-shape", "flip/item-shape", c_item_shape, "an id"),
                 ("fc/head-not-hex", "flip/head-not-hex", c_head_hex, "40 lowercase hex"),
                 ("fc/head-short", "flip/head-short", c_head_short, "40 lowercase hex"),
+                ("fc/leg-head-absent", "flip/leg-head-absent", c_leg_head_absent, "missing field"),
+                ("fc/leg-head-not-hex", "flip/leg-head-not-hex", c_leg_head_hex, "40 lowercase hex"),
+                ("fc/leg-head-short", "flip/leg-head-short", c_leg_head_short, "40 lowercase hex"),
+                ("fc/leg-head-null", "flip/leg-head-null", c_leg_head_null, "40 lowercase hex"),
+                ("fc/missing-leg-head", "flip/missing-leg-head", c_missing_leg_head,
+                 "carries no head"),
                 ("fc/dispatch-id-not-hex", "flip/dispatch-id-not-hex", c_dispatch_hex, "32 lowercase hex"),
                 ("fc/dispatch-id-null", "flip/dispatch-id-null", c_dispatch_null, "32 lowercase hex"),
                 ("fc/report-not-hex", "flip/report-not-hex", c_report_hex, "64 lowercase hex"),

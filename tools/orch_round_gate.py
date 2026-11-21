@@ -13,7 +13,11 @@ The self-test is its own runner, tools/selftest_orch_round_gate.py (suite round-
 OUTPUT. stdout carries one JSON object (decision VALID or CANNOT_EVALUATE, with the item, line count, tip
 seq and last round on VALID, or the reason on CANNOT_EVALUATE), then one human-readable line. On exit 2
 stderr carries one line starting "CANNOT EVALUATE:". A caller must treat any exit other than 0, a missing
-or unparseable stdout object, or a decision that disagrees with the exit, as not valid.
+or unparseable stdout object, or a decision that disagrees with the exit, as not valid. Everything the
+reader prints is printable ASCII, so no value it reports (a path holding an LF, say) can add or split a
+line: the JSON object is written with JSON escapes and carries the reason exactly, and every
+human-readable line, the fallback error line included, writes a backslash as two backslashes and every
+other character outside printable ASCII as \\xNN, \\uNNNN or \\UNNNNNNNN.
 
 THE RECORD. One file per item, runtime state, never tracked in the repository. Append-only JSONL: UTF-8
 with no byte order mark, every line ended by LF (a final line without LF is truncated), no carriage return
@@ -35,17 +39,22 @@ integer 9) and policy_sha256 (64 lowercase hex, the pinned policy's digest).
 
 Every later line, one round attempt: seq, prev, kind ("round"), item (equal to the header's), round (the
 round number: zero is the baseline review, and fix rounds count up from one), attempt (from one), head
-(40 lowercase hex), permit_sha256 (null on the baseline round, otherwise a 64 lowercase hex digest),
+(40 lowercase hex, the head the round was dispatched to review), permit_sha256 (null on the baseline
+round, otherwise a 64 lowercase hex digest),
 legs, grades and withdrawn. The first round line is the baseline round, attempt one; each next line is either
 the same round with its attempt number plus one (a retry) or the next round number with attempt one. Any
 other step is a round or attempt gap.
 
 legs: exactly one entry per family of the header roster, no other family and no repeat. Each leg is
-{family, state, dispatch_id, report_sha256, findings}. state is complete, degraded, empty or missing.
-dispatch_id is 32 lowercase hex, or null only on a missing leg. report_sha256 is 64 lowercase hex or
-null, and null on a missing leg. findings is a list of {id, status}, status open or closed, each id once
-per leg, and empty on an empty or missing leg. A leg finding carries no severity: a reviewer family's
-own grade is not part of the record.
+{family, state, head, dispatch_id, report_sha256, findings}. state is complete, degraded, empty or
+missing. head is the head that leg reviewed: 40 lowercase hex on every leg that is not missing, and null
+on a missing leg (it reviewed nothing). dispatch_id is 32 lowercase hex, or null only on a missing leg.
+report_sha256 is 64 lowercase hex or null, and null on a missing leg. findings is a list of {id,
+status}, status open or closed, each id once per leg, and empty on an empty or missing leg. A leg
+finding carries no severity: a reviewer family's own grade is not part of the record. A leg whose head
+differs from the line's head (or from another leg's) is recorded as it happened, not refused here: the
+gate (a later release) refuses to count a round unless every leg is complete and reviewed the line's
+head, and this reader guarantees that every leg head it compares is present and well formed.
 
 grades: the orchestrator's severity, graded at source. One entry per id first graded on that line:
 {id, severity, source_ref} plus optional replaces, followup and impact. severity is HIGH, MEDIUM or
@@ -72,8 +81,9 @@ same file when opened. The directories are opened with O_PATH where the platform
 the account may search but not list is walked. An unreadable path, a missing file and a failed read are cannot-evaluate.
 
 RESIDUALS. A same-account writer can rewrite a record and its anchor together; the reader detects
-nothing then. The head field is checked for shape only (that it exists in a repository or descends from
-the previous head is not checked here). Whether the record is complete with respect to the reviews that
+nothing then. The line and leg head fields are checked for shape only (that a head exists in a
+repository or descends from the previous head is not checked here, and that a leg really reviewed the
+head it names rests on the orchestrator that wrote the line). Whether the record is complete with respect to the reviews that
 actually ran is outside what a reader can see.
 """
 import sys
@@ -130,7 +140,7 @@ IMPACT_KEYS = frozenset({"verdict_change", "user_visible_change", "security_effe
 HEADER_KEYS = frozenset({F_SEQ, F_PREV, F_SCHEMA, F_KIND, F_ITEM, F_ROSTER, F_PLAN, F_POLICY})
 ROUND_KEYS = frozenset({F_SEQ, F_PREV, F_KIND, F_ITEM, F_ROUND, F_ATTEMPT, F_HEAD, F_PERMIT, F_LEGS,
                         F_GRADES, F_WITHDRAWN})
-LEG_KEYS = frozenset({F_FAMILY, F_STATE, F_DISPATCH, F_REPORT, F_FINDINGS})
+LEG_KEYS = frozenset({F_FAMILY, F_STATE, F_HEAD, F_DISPATCH, F_REPORT, F_FINDINGS})
 FINDING_KEYS = frozenset({F_ID, F_STATUS})
 GRADE_REQUIRED = frozenset({F_ID, F_SEVERITY, F_SOURCE})
 GRADE_OPTIONAL = frozenset({F_REPLACES, F_FOLLOWUP, F_IMPACT})
@@ -384,6 +394,10 @@ def _check_round(obj, where, item, roster, graded, withdrawn_ever, previous):
             raise CannotEvaluate("{} family: {!r} has two legs on one line".format(lw, family))
         families.add(family)
         state = _closed(leg[F_STATE], STATES, lw + " state")
+        _hex(leg[F_HEAD], HEX40_RE, 40, lw + " head (the head this leg reviewed)",
+             nullable=(state == "missing"))
+        if state == "missing" and leg[F_HEAD] is not None:
+            raise CannotEvaluate("{}: a missing leg carries no head (it reviewed nothing)".format(lw))
         _hex(leg[F_DISPATCH], HEX32_RE, 32, lw + " dispatch_id", nullable=(state == "missing"))
         _hex(leg[F_REPORT], HEX64_RE, 64, lw + " report_sha256", nullable=True)
         if state == "missing" and leg[F_REPORT] is not None:
@@ -519,16 +533,40 @@ def validate_record(path, max_bytes=MAX_RECORD_BYTES):
 
 # ---------- command line ----------
 
+def printable(text):
+    """text as one line of printable ASCII, for every human-readable line the reader writes: a backslash
+    becomes two, and every other character outside U+0020..U+007E (LF, CR, any control, format or line
+    separator character, any non-ASCII character, a surrogate from an undecodable argv byte) becomes
+    \\xNN, \\uNNNN or \\UNNNNNNNN. So no value carried in a message can add, split or end a line, and
+    the escape is unambiguous."""
+    out = []
+    for ch in str(text):
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif 0x20 <= code < 0x7F:
+            out.append(ch)
+        elif code < 0x100:
+            out.append("\\x{:02x}".format(code))
+        elif code < 0x10000:
+            out.append("\\u{:04x}".format(code))
+        else:
+            out.append("\\U{:08x}".format(code))
+    return "".join(out)
+
+
 def _emit(decision, fields, human):
     payload = {"decision": decision}
     payload.update(fields)
-    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
-    sys.stdout.write(human + "\n")
+    # ensure_ascii: the object is one line of ASCII whatever a field holds (JSON escapes every control
+    # character, line separator and non-ASCII character), and it carries each value exactly.
+    sys.stdout.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
+    sys.stdout.write(printable(human) + "\n")
 
 
 def _refuse(reason):
     _emit("CANNOT_EVALUATE", {"reason": reason}, "CANNOT_EVALUATE " + reason)
-    sys.stderr.write("CANNOT EVALUATE: {}\n".format(reason))
+    sys.stderr.write("CANNOT EVALUATE: {}\n".format(printable(reason)))
     return EXIT_CANNOT_EVALUATE
 
 
@@ -554,7 +592,8 @@ def _entry():
         sys.stdout.flush()
     except Exception as exc:
         try:
-            sys.stderr.write("CANNOT EVALUATE: {}: {}\n".format(type(exc).__name__, exc))
+            sys.stderr.write("CANNOT EVALUATE: {}\n".format(printable("{}: {}".format(
+                type(exc).__name__, exc))))
             sys.stderr.flush()
         except BaseException:
             pass
