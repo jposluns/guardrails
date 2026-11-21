@@ -410,7 +410,7 @@ DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_clean_ignored_deny", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
-    "_gate_check_then_git_deny", "_gate_plumbing_deny", "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
+    "_gate_check_then_git_deny", "_gate_plumbing_deny", "_gate_push_redirect_deny", "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
     "_reset_ancestry_deny", "_wrtscp_deny")
 
@@ -19060,6 +19060,8 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind
         return _gate_check_then_git_deny()
     if check_git and _gate_plumbing_git(command):
         return _gate_plumbing_deny()
+    if check_git and _gate_push_redirect(command) is not None:
+        return _gate_push_redirect_deny(_gate_push_redirect(command))
     if kind == "swallow":
         # the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
@@ -20333,6 +20335,55 @@ def _gate_plumbing_deny():
         "AIQT guardrail: denied git plumbing that commits or pushes with no hook (rule gatdis).")
 
 
+# The interim push-redirect deny (gatdis, QA qagitrecord4 finding 2 and residual X4): a git push can be made to run
+# another program than the one installed, or to deliver to another repository than the URL its pre-push hook reads,
+# by what the command itself names. git push --receive-pack and --exec (every prefix git's option parser accepts:
+# --rece... and --e, --ex, --exe) name the program that receives the push and reach no hook; a PATH or
+# GIT_EXEC_PATH override (an assignment, env NAME=, export, declare, or git --exec-path=) can put another git,
+# python3 or git-receive-pack first; and the dynamic loader's LD_PRELOAD, LD_AUDIT and LD_LIBRARY_PATH load code into
+# git itself. A command whose text (raw, de-quoted, and with ANSI-C quotes decoded, _decoded_readings) names git
+# and holds a --receive-pack spelling, or names git and a push word and holds an --exec spelling or one of those
+# overrides, DENIES after every other deny of this guard, on the parsed path, the ordinary parse-failure fallback
+# and the uncertain-'#' doubt path alike. The forms it cannot read (an option or variable name built at run time,
+# an alias or include in a configuration file, help.autocorrect running a misspelt verb with --exec, a PATH set by
+# a profile, a sourced file or the session before the command) stay the gate record's counted residual X4 and X5.
+_GATE_PUSH_WORD_RE = re.compile(r"(?<![a-z0-9_])push(?![a-z0-9_-])", re.ASCII)
+_GATE_PUSH_PACK_RE = re.compile(r"(?<![A-Za-z0-9_-])--rece(?:i(?:v(?:e(?:-(?:p(?:a(?:ck?)?)?)?)?)?)?)?(?![A-Za-z0-9_-])",
+                                re.ASCII)
+_GATE_PUSH_EXEC_RE = re.compile(r"(?<![A-Za-z0-9_-])--e(?:x(?:ec?)?)?(?![A-Za-z0-9_-])", re.ASCII)
+_GATE_PUSH_ENV_RE = re.compile(r"(?<![A-Za-z0-9_])(?:PATH|GIT_EXEC_PATH|LD_PRELOAD|LD_AUDIT|LD_LIBRARY_PATH)\+?="
+                               r"|(?<![A-Za-z0-9_-])--exec-path=", re.ASCII)
+
+
+def _gate_push_redirect(command):
+    """What in command can make a git push run another program or deliver elsewhere than its URL (a --receive-pack
+    or --exec spelling, or a PATH, GIT_EXEC_PATH or loader override), or None. Read over the raw text and its
+    de-quoted readings (_decoded_readings), each with every quote character and backslash removed; a git must be
+    named (_gate_names_git: a word-bounded 'git', or a '$' or backquote that may build it), and for every form but
+    --receive-pack (which only push and send-pack take) a word-bounded push too."""
+    for text in (command,) + tuple(_decoded_readings(command)):
+        plain = text.replace("'", "").replace('"', "").replace("\\", "")
+        found = _GATE_PUSH_PACK_RE.search(plain)
+        if found is None and _GATE_PUSH_WORD_RE.search(plain.lower()) is not None:
+            found = _GATE_PUSH_EXEC_RE.search(plain) or _GATE_PUSH_ENV_RE.search(plain)
+        if found is not None and _gate_names_git(text, text):
+            return found.group(0)
+    return None
+
+
+def _gate_push_redirect_deny(spelling):
+    """The interim push-redirect deny: a git push that names its own receive-pack, PATH, exec path or loader."""
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): this command names git push with {!r}, which can make the push run "
+        "another program than the installed git and its hooks (a PATH or GIT_EXEC_PATH override, git --exec-path=, "
+        "or LD_PRELOAD, LD_AUDIT or LD_LIBRARY_PATH) or deliver it to another repository than the URL the "
+        "git-side gate record's pre-push hook reads (git push --receive-pack or --exec, which reach no hook). "
+        "Push with plain git push and the installed git so the hook judges where the push goes. Spellings this "
+        "guard cannot read are a disclosed residual, not an allowed route. {}".format(spelling[:40], _GATE_ALTS),
+        "AIQT guardrail: denied a git push that names its own receive-pack, PATH, exec path or loader "
+        "(rule gatdis).")
+
+
 def gate_weakening(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
@@ -20604,6 +20655,11 @@ def gate_weakening(data):
     of git commit, tag or merge is read as data first (_gate_plumbing_inert), so git commit -m 'fix the send-pack
     docs' allows, while a verb anywhere else (an unquoted or here-document message included) still denies; other
     spellings of those routes stay the gate record's disclosed residual R2.
+    INTERIM PUSH-REDIRECT DENY (_gate_push_redirect), right after it on the same three paths: a command whose raw or
+    de-quoted text names git and holds a git push --receive-pack spelling (--rece through --receive-pack), or names
+    git and a push word and holds an --exec spelling (--e through --exec), a PATH, GIT_EXEC_PATH, LD_PRELOAD,
+    LD_AUDIT or LD_LIBRARY_PATH assignment or git --exec-path=, DENIES (QA qagitrecord4 finding 2 and X4); the
+    forms it cannot read stay the gate record's counted residuals X4 and X5.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -20786,6 +20842,9 @@ def gate_weakening(data):
             return _gate_check_then_git_deny()
         if _gate_plumbing_git(command):
             return _gate_plumbing_deny()
+        redirect = _gate_push_redirect(command)
+        if redirect is not None:
+            return _gate_push_redirect_deny(redirect)
         # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
         # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
         # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
@@ -20917,6 +20976,11 @@ def gate_weakening(data):
     # parsed records let a literal commit, tag or merge message name a verb as data (_gate_plumbing_inert).
     if _gate_plumbing_git(command, records):
         return _gate_plumbing_deny()
+    # The interim push-redirect deny (_gate_push_redirect): a git push naming its own receive-pack, PATH, exec
+    # path or loader.
+    redirect = _gate_push_redirect(command)
+    if redirect is not None:
+        return _gate_push_redirect_deny(redirect)
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
@@ -44797,7 +44861,7 @@ class _DeadlineWindow:
 # it is judged by the old one, but the commit after it runs the new one, and the same holds for the configuration
 # (a commit that lowers the set, having passed the old one, sets the bar for the commit after it); R7 pre-push
 # checks tips only; R8 same-user races on the index, HEAD, the default branch or the log; the stubs bound their git and python3 calls
-# only where a timeout command exists (the verifier bounds its own git calls); and an earlier failure older than
+# only where install found a timeout command (the verifier bounds its own git calls); and an earlier failure older than
 # the 64 KiB tail the verifier reads is not seen; R9 the git state the reads still trust: the default branch refs
 # (refs/remotes/origin/HEAD, a symbolic ref, and refs/heads/main and master) are local refs a same-user process
 # can repoint (git symbolic-ref, git update-ref), so an orphan branch or a root commit keeps whichever bar they
@@ -44813,10 +44877,30 @@ class _DeadlineWindow:
 # cannot evaluate a URL git ls-remote would rewrite (url.<base>.insteadOf, a remote named like the URL), checked
 # with ls-remote --get-url just before the read, so a same-user config change between the two is an R8 race;
 # nor a push a program or setting it chose could deliver elsewhere than the read reaches (_gr_delivery_choice:
-# remote.<name>.receivepack, GIT_EXEC_PATH, an ssh or git:// proxy program, a transport helper), but git push
-# --receive-pack or --exec on the command line reaches no hook and can deliver a push to another repository than
-# its URL, which the proof then reads (open, like core.hooksPath on the command line), and an http.proxy the
-# push names is trusted to reach the URL's host.
+# remote.<name>.receivepack, GIT_EXEC_PATH, an ssh or git:// proxy program, a transport helper or
+# remote.<name>.vcs), and an http.proxy the push names is trusted to reach the URL's host; the proof reads the
+# remote's symbolic refs in protocol v2 (pinned on the command line, like core.commitGraph) and drops a branch or
+# tag that names a ref outside refs/heads and refs/tags, but a server that answers in protocol v0 names no
+# symbolic ref but HEAD, so there such a ref counts as the branch it names (trusted as the remote's own writers
+# are). Every input of the push and its stubs that can change what runs or where the push goes is read and
+# denied here or by the text guard, or is a counted residual with these exact forms: X4 git push
+# --receive-pack and --exec on the command line reach no hook and can deliver a push to another repository than
+# its URL, which the proof then reads; the text guard (_gate_push_redirect) denies every spelling it reads
+# (--rece through --receive-pack, --e through --exec, raw, quoted or ANSI-C), so X4 is the forms it cannot read:
+# an option built at run time ($O, $(...)), a git alias or include.path in a configuration file, a script file
+# or program that runs git push, and help.autocorrect running a misspelt push verb with --exec. X5 the programs
+# git push itself runs: the stubs run git, python3, mktemp and timeout by the absolute paths install recorded
+# (a missing one cannot evaluate), with PATH set to their directories and /usr/bin and /bin, and the verifiers
+# run the recorded git, so a PATH or GIT_EXEC_PATH override no longer reaches the stub or the proof's read; but
+# the git the shell runs for git push is found on the caller's PATH, and a planted git runs no hook (as R2's
+# client that runs no hooks), and LD_PRELOAD, LD_AUDIT or LD_LIBRARY_PATH load code into git and the stubs'
+# programs; the text guard denies a git push whose command assigns PATH, GIT_EXEC_PATH or one of those loader
+# variables (NAME=, NAME+=, env, export or declare) or names git --exec-path=, so X5 is the forms it cannot read:
+# a variable name built at run time, a PATH or loader variable set by the session, a profile, a sourced file or
+# an earlier command, a git commit under such an override (pre-commit's stub is covered, the git found is not),
+# a program written into a directory the stub's PATH or a recorded path names (a same-user edit, R3), and git -C,
+# --git-dir, GIT_DIR or GIT_COMMON_DIR naming a repository whose hooks hold no stub (it runs none, as a clone that
+# never ran install).
 _GR_FORMAT = "aiqt-gate-record/2"
 _GR_OLD_FORMATS = ("aiqt-gate-record/1",)
 _GR_RECORDER = "aiqt_hooks gate-record 2"
@@ -44922,10 +45006,16 @@ def _gr_bound(variable, default):
     return value if 0 < value < default else default
 
 
+# The git program every git call here runs: "git" looked up on PATH, or, in a verifier a stub ran, the absolute
+# path the stub recorded at install (_gr_use_recorded_git).
+_GR_GIT_PROGRAM = ["git"]
+
+
 def _gr_git_done(env, args, cwd=None, data=None):
     """The finished git run (with _GR_GIT_PIN); a launch failure or a run past _GR_GIT_SECONDS cannot evaluate."""
     try:
-        return subprocess.run(("git",) + _GR_GIT_PIN + args, env=env, cwd=cwd, input=data, capture_output=True,
+        return subprocess.run((_GR_GIT_PROGRAM[0],) + _GR_GIT_PIN + args, env=env, cwd=cwd, input=data,
+                              capture_output=True,
                               check=False, timeout=_GR_GIT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         raise _GateRecordError("git {} did not finish within {} seconds".format(args[0], _GR_GIT_SECONDS)) from exc
@@ -45562,8 +45652,9 @@ def _gr_delivery_choice(env, url):
     remote.<name>.receivepack naming another repository's receive-pack, GIT_EXEC_PATH (git --exec-path=) holding
     another git-receive-pack, an ssh program (GIT_SSH, GIT_SSH_COMMAND, core.sshCommand) or a git:// proxy
     (GIT_PROXY_COMMAND, core.gitProxy) that picks the repository by the service git asks for, or a transport
-    helper (a <helper>:: URL, or a scheme git does not carry itself). git push --receive-pack and --exec on the
-    command line reach no hook and stay open, like core.hooksPath on the command line."""
+    helper (a <helper>:: URL, a scheme git does not carry itself, or remote.<name>.vcs). git push --receive-pack
+    and --exec on the command line reach no hook: the text guard denies the spellings it reads
+    (_gate_push_redirect) and the rest stay open (X4), like core.hooksPath on the command line."""
     helper = re.match(r"([A-Za-z0-9][A-Za-z0-9+.-]*)::", url)
     if helper:
         return "the push URL runs the transport helper git-remote-{}".format(helper.group(1))
@@ -45590,6 +45681,8 @@ def _gr_delivery_choice(env, url):
             return "the push carried git:// through {}".format(" and ".join(named))
     if _gr_git(env, "config", "--get-regexp", r"^remote\..*\.receivepack$", check=False):
         return "a remote.<name>.receivepack setting names the program that receives a push"
+    if _gr_git(env, "config", "--get-regexp", r"^remote\..*\.vcs$", check=False):
+        return "a remote.<name>.vcs setting runs a transport helper for the push"
     pushed_with = os.environ.get("GIT_EXEC_PATH", "")
     if pushed_with:
         own = _gr_git(env, "--exec-path")
@@ -45626,15 +45719,27 @@ def _gr_remote_tips(env, url):
                                "rewrite, or a remote named like the URL), so whether the remote git pushes to "
                                "has the commit cannot be read; record the tree, or remove that rewrite and "
                                "retry".format(resolved, url))
-    listed = _gr_git_done(env, ("ls-remote", url))
+    # Protocol v2 (pinned on the command line) names the target of every symbolic ref with --symref, so a branch or
+    # tag that is a symbolic ref to a ref outside the reviewed prefixes (refs/heads/alias -> refs/pull/1/head, QA
+    # qagitrecord4 finding 3) is dropped; a server that answers in protocol v0 names only HEAD's target.
+    listed = _gr_git_done(env, ("-c", "protocol.version=2", "ls-remote", "--symref", url))
     if listed.returncode != 0:
         raise _GateRecordError("git ls-remote {} failed (exit {}): {}".format(
             url, listed.returncode, listed.stderr.decode("utf-8", "replace").strip()))
+    lines = listed.stdout.decode("utf-8", "replace").split("\n")
+    symbolic = {}
+    for line in lines:
+        if line.startswith("ref: "):
+            target, _, name = line[len("ref: "):].partition("\t")
+            symbolic[name] = target
     oids = []
-    for line in listed.stdout.decode("utf-8", "replace").split("\n"):
+    for line in lines:
         oid, _, ref = line.partition("\t")
         if not ref.startswith(_GR_REMOTE_REVIEWED):
             continue  # HEAD, refs/pull/*, refs/merge-requests/*, notes and the like: not a reviewed ref
+        target = symbolic.get(ref[:-len("^{}")] if ref.endswith("^{}") else ref)
+        if target is not None and not target.startswith(_GR_REMOTE_REVIEWED):
+            continue  # a branch or tag that is a symbolic ref to an unreviewed ref proves nothing
         if _GR_TREE_RE.fullmatch(oid) and oid not in oids:
             oids.append(oid)
     if not oids:
@@ -45715,34 +45820,49 @@ _GR_STUB = """#!/bin/sh
 # verifier from HEAD's committed {verifier} (on an unborn branch: the index's when the repository has
 # no commit at all, else the default branch's), copied to a temporary file in the git directory's aiqt
 # directory, and exits 0 (pass), 1 (refused) or 2 (cannot evaluate). Remove this file to uninstall.
+# The programs it runs are the absolute paths install recorded, never looked up on the PATH git passes (where
+# a PATH or GIT_EXEC_PATH the push named can put another python3 or git first), and PATH is set to fixed
+# directories; a recorded program that is missing cannot evaluate.
+PATH='{path}'
+export PATH
+aiqt_git='{git}'
+aiqt_python='{python}'
+aiqt_mktemp='{mktemp}'
+aiqt_timeout='{timeout}'
 fail() {{
     printf '%s\\n' "aiqt gate-record: cannot evaluate: $1" >&2
     exit 2
 }}
+for tool in "$aiqt_git" "$aiqt_python" "$aiqt_mktemp" ${{aiqt_timeout:+"$aiqt_timeout"}}; do
+    if [ ! -f "$tool" ] || [ ! -x "$tool" ]; then
+        fail "$tool (recorded at install) is not an executable file; remove the stubs and install again"
+    fi
+done
 # Replace objects, grafts and the commit-graph off, so none of them can swap the verifier read from HEAD.
 unset GIT_REPLACE_REF_BASE
 GIT_NO_REPLACE_OBJECTS=1
 GIT_GRAFT_FILE={no_grafts}
-export GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE
+AIQT_GATE_RECORD_GIT=$aiqt_git
+export GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE AIQT_GATE_RECORD_GIT
 pin='{git_pin}'
-if command -v timeout >/dev/null 2>&1; then
-    git_bound='timeout {git_seconds}'
-    verify_bound='timeout {verify_seconds}'
+if [ -n "$aiqt_timeout" ]; then
+    git_bound="$aiqt_timeout {git_seconds}"
+    verify_bound="$aiqt_timeout {verify_seconds}"
 else
     git_bound=''
     verify_bound=''
 fi
-gitdir=$($git_bound git $pin rev-parse --absolute-git-dir) || fail "git named no git directory"
-if $git_bound git $pin rev-parse -q --verify 'HEAD^{{commit}}' >/dev/null; then
+gitdir=$($git_bound "$aiqt_git" $pin rev-parse --absolute-git-dir) || fail "git named no git directory"
+if $git_bound "$aiqt_git" $pin rev-parse -q --verify 'HEAD^{{commit}}' >/dev/null; then
     src='HEAD:{verifier}'
 else
-    any=$($git_bound git $pin rev-list -n 1 --all) || fail "git rev-list failed"
+    any=$($git_bound "$aiqt_git" $pin rev-list -n 1 --all) || fail "git rev-list failed"
     if [ -z "$any" ]; then
         src=':{verifier}'
     else
         src=''
         for ref in {refs}; do
-            if $git_bound git $pin rev-parse -q --verify "$ref^{{commit}}" >/dev/null; then
+            if $git_bound "$aiqt_git" $pin rev-parse -q --verify "$ref^{{commit}}" >/dev/null; then
                 src="$ref:{verifier}"
                 break
             fi
@@ -45757,24 +45877,93 @@ fi
 if [ -L "$dir" ] || [ ! -d "$dir" ]; then
     fail "$dir is not a real directory"
 fi
-tmp=$(mktemp "$dir/verifier.XXXXXXXXXX") || fail "mktemp failed in $dir"
+tmp=$("$aiqt_mktemp" "$dir/verifier.XXXXXXXXXX") || fail "mktemp failed in $dir"
 trap 'rm -f "$tmp"' EXIT
 trap 'exit 2' HUP INT TERM
-$git_bound git $pin show "$src" >"$tmp" || fail "$src is not readable"
-$verify_bound python3 -I -B "$tmp" gate-record {mode}
+$git_bound "$aiqt_git" $pin show "$src" >"$tmp" || fail "$src is not readable"
+$verify_bound "$aiqt_python" -I -B "$tmp" gate-record {mode}
 rc=$?
 case "$rc" in
     0|1|2) exit "$rc" ;;
 esac
 exit 2
 """
+# The programs a stub runs, recorded as absolute paths at install (_gr_stub_tools): git, python3 (the interpreter
+# running install), mktemp and, where one exists, timeout. A recorded path holds only these characters (so the
+# stub can quote it and use it as a word), and the stub's PATH is their directories, then _GR_STUB_PATH_TAIL.
+_GR_STUB_TOOLS = ("git", "python", "mktemp", "timeout")
+_GR_STUB_TOOL_RE = re.compile(r"/[A-Za-z0-9/._+@,=~-]*", re.ASCII)
+_GR_STUB_PATH_TAIL = ("/usr/bin", "/bin")
+_GR_STUB_TOOL_LINE_RE = re.compile(r"^aiqt_(git|python|mktemp|timeout)='([^'\n]*)'$", re.ASCII | re.MULTILINE)
+# The variable a stub sets to its recorded git, which the verifiers then run (_gr_use_recorded_git).
+_GR_GIT_ENV = "AIQT_GATE_RECORD_GIT"
 
 
-def _gr_stub(hook):
+def _gr_find_program(name):
+    """The absolute path of name in an absolute directory of this process's PATH, or ''."""
+    for folder in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        if not os.path.isabs(folder):
+            continue  # a relative PATH entry names whatever directory the hook happens to run in
+        candidate = os.path.join(folder, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.normpath(candidate)
+    return ""
+
+
+def _gr_stub_tools():
+    """The programs install records in the stubs (_GR_STUB_TOOLS), resolved now; one that is missing (timeout
+    excepted) or whose path the stub cannot carry refuses the install."""
+    tools = {"git": _gr_find_program("git"), "python": os.path.abspath(sys.executable) if sys.executable else "",
+             "mktemp": _gr_find_program("mktemp"), "timeout": _gr_find_program("timeout")}
+    for name in _GR_STUB_TOOLS:
+        value = tools[name]
+        if not value and name != "timeout":
+            raise _GateRecordError("no {} program found to record in the stubs (an absolute PATH directory "
+                                   "holding it is needed)".format("python3" if name == "python" else name))
+        if value and not _GR_STUB_TOOL_RE.fullmatch(value):
+            raise _GateRecordError("the {} program's path {!r} holds a character the stub cannot carry".format(
+                name, value))
+    return tools
+
+
+def _gr_stub(hook, tools=None):
+    if tools is None:
+        tools = _gr_stub_tools()
     mode = 'verify-push "$1" "$2"' if hook == "pre-push" else "verify-commit"
+    folders = []
+    recorded = [os.path.dirname(tools[name]) for name in _GR_STUB_TOOLS if tools[name]]
+    for folder in recorded + list(_GR_STUB_PATH_TAIL):
+        if folder not in folders:
+            folders.append(folder)
     return _GR_STUB.format(hook=hook, verifier=_GR_VERIFIER, mode=mode, refs=" ".join(_GR_DEFAULT_REFS),
                            no_grafts=_GR_NO_GRAFTS, git_pin=" ".join(_GR_GIT_PIN),
-                           git_seconds=_GR_STUB_GIT_SECONDS, verify_seconds=_GR_STUB_VERIFY_SECONDS)
+                           git_seconds=_GR_STUB_GIT_SECONDS, verify_seconds=_GR_STUB_VERIFY_SECONDS,
+                           path=":".join(folders), **tools)
+
+
+def _gr_stub_recorded(text):
+    """The programs a stub's text records ({name: path}), or None when it records them not as install writes."""
+    found = dict(_GR_STUB_TOOL_LINE_RE.findall(text))
+    if set(found) != set(_GR_STUB_TOOLS):
+        return None
+    for name, value in found.items():
+        if not (value == "" and name == "timeout") and not _GR_STUB_TOOL_RE.fullmatch(value):
+            return None
+    return found
+
+
+def _gr_use_recorded_git():
+    """Run git by the absolute path the stub recorded (_GR_GIT_ENV, which the stub sets itself, so the value git's
+    environment carried is never read), not by a PATH lookup; a recorded git that is missing cannot evaluate.
+    With the variable unset (the verifier run by hand, or by a stub of an earlier version) git is looked up as
+    before."""
+    recorded = os.environ.get(_GR_GIT_ENV)
+    if recorded is None:
+        return
+    if not (os.path.isabs(recorded) and os.path.isfile(recorded) and os.access(recorded, os.X_OK)):
+        raise _GateRecordError("the git the stub recorded ({!r}) is not an executable file; remove the stubs "
+                               "and run gate-record install again".format(recorded))
+    _GR_GIT_PROGRAM[0] = recorded
 
 
 def _gr_install():
@@ -45790,12 +45979,13 @@ def _gr_install():
     hooks = os.path.join(common, "hooks")
     if os.path.islink(hooks):
         raise _GateRecordError("{} is a symbolic link; refusing to write through it".format(hooks))
+    tools = _gr_stub_tools()
     if not os.path.isdir(hooks):
         os.mkdir(hooks, 0o755)
     todo = []
     for hook in _GR_HOOKS:
         path = os.path.join(hooks, hook)
-        body = _gr_stub(hook)
+        body = _gr_stub(hook, tools)
         if os.path.islink(path):
             raise _GateRecordError("{} is a symbolic link; refusing".format(path))
         if os.path.lexists(path):
@@ -45844,8 +46034,15 @@ def gate_record_status(top):
         except OSError:
             problems.append("{} is missing".format(path))
             continue
-        if present != _gr_stub(hook) or os.path.islink(path) or not os.access(path, os.X_OK):
+        recorded = _gr_stub_recorded(present)
+        if (recorded is None or present != _gr_stub(hook, recorded) or os.path.islink(path)
+                or not os.access(path, os.X_OK)):
             problems.append("{} is not the gate-record stub".format(path))
+            continue
+        for name in _GR_STUB_TOOLS:
+            program = recorded[name]
+            if program and not (os.path.isfile(program) and os.access(program, os.X_OK)):
+                problems.append("{} runs {}, which is no longer an executable file".format(path, program))
     return not problems, problems
 
 
@@ -45856,8 +46053,10 @@ def gate_record_main(args):
         if command == "run":
             return _gr_run(args[1:])
         if command == "verify-commit" and len(args) == 1:
+            _gr_use_recorded_git()
             return _gr_verify_commit()
         if command == "verify-push" and len(args) in (1, 3):
+            _gr_use_recorded_git()
             return _gr_verify_push(sys.stdin.read(), args[2] if len(args) == 3 else None)
         if command == "install" and len(args) == 1:
             return _gr_install()

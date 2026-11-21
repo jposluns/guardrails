@@ -2574,7 +2574,8 @@ expected-check-ids = [
 [[suite]]
 # The git-side gate record (rule gatdis): recorder rows W1-W8, verifier rows V1-V18, binding rows V19-V25
 # (orphan bar, the check's process group, every worktree's log, the stub's copy in the git directory, bounds,
-# the O_NOFOLLOW directory, the parent commit), pinned residual rows X1-X3 and installer rows I1-I6, each
+# the O_NOFOLLOW directory, the parent commit), the remote proof and program rows V26-V35, pinned residual
+# rows X1-X4 and installer rows I1-I6, each
 # refusal with its flip, over real git commits in throwaway repositories.
 id = "gate-record-selftest"
 runner = "tools/selftest_gate_record.py"
@@ -2697,6 +2698,15 @@ expected-check-ids = [
   "V33/exec-path-receive-pack-cannot-evaluate",
   "V33/transport-helper-url-cannot-evaluate",
   "V33/flip-unrelated-config-remote-commit-pushes",
+  "V33/remote-vcs-helper-cannot-evaluate",
+  "V34/path-python3-planted-refused",
+  "V34/exec-path-python3-planted-refused",
+  "V34/exec-path-git-planted-refused",
+  "V34/flip-recorded-pushes-past-planted-python3",
+  "V34/stub-runs-recorded-programs",
+  "V34/recorded-program-missing-cannot-evaluate",
+  "V35/symbolic-branch-to-pull-ref-refused",
+  "V35/flip-symbolic-branch-to-tag-pushes",
   # ---------- the pinned residuals ----------
   "X1/no-verify-commits",
   "X2/hookspath-commits",

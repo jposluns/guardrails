@@ -94,7 +94,9 @@ shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which k
 red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
 (gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
 reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
-reverted); and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
+reverted); the interim push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
+accepts), a PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable denies, each flip row red with
+that deny reverted; and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -5037,6 +5039,41 @@ _GPL_ROWS = (
 )
 
 
+# The gatdis interim push-redirect deny (gpr-*, QA qagitrecord4 finding 2 and X4): a git push naming its own
+# receive-pack (--receive-pack, --exec, any prefix git accepts), a PATH or GIT_EXEC_PATH override, git
+# --exec-path= or a loader variable. The third column is 52baa177's decision; with the deny reverted
+# (_gate_push_redirect returning None) every row gives it again and every flip row is red.
+_GPR_ROWS = (
+    ("gpr-01", "git push '--receive-pack=git receive-pack /srv/r.git #' . HEAD:refs/heads/x", "allow", "deny",
+     "flip"),
+    ("gpr-02", "git push --receive-pack=/usr/bin/git-receive-pack origin main", "allow", "deny", "flip"),
+    ("gpr-03", "git push --rece=x . HEAD", "allow", "deny", "flip"),
+    ("gpr-04", "git push --receive-pack x origin", "allow", "deny", "flip"),
+    ("gpr-05", "git push --exec=x origin main", "allow", "deny", "flip"),
+    ("gpr-06", "git push --e x origin main", "allow", "deny", "flip"),
+    ("gpr-07", "git push --exe=x origin", "allow", "deny", "flip"),
+    ("gpr-08", "PATH=/x:/usr/bin git push origin main", "allow", "deny", "flip"),
+    ("gpr-09", "env PATH=/x git push origin main", "allow", "deny", "flip"),
+    ("gpr-10", "GIT_EXEC_PATH=/x git push origin main", "allow", "deny", "flip"),
+    ("gpr-11", "git --exec-path=/x push origin main", "allow", "deny", "flip"),
+    ("gpr-12", "export PATH=/x:$PATH; git push origin main", "allow", "deny", "flip"),
+    ("gpr-13", "LD_PRELOAD=/x.so git push origin main", "allow", "deny", "flip"),
+    # 52baa177 already denies these four (a nested shell, an ANSI-C or quoted option word, a parse failure)
+    ("gpr-14", "sh -c 'PATH=/x git push origin main'", "deny", "deny", "keep"),
+    ("gpr-15", "git push $'--receive-pack=x' .", "deny", "deny", "keep"),
+    ("gpr-16", "git push --rec'eive-pack'=x .", "deny", "deny", "keep"),
+    ("gpr-17", "git push --exec=x origin 'unbalanced", "deny", "deny", "keep"),
+    ("gpr-18", "git push origin main", "allow", "allow", "keep"),
+    ("gpr-19", "git push --no-exec origin", "allow", "allow", "keep"),
+    ("gpr-20", "git push --recurse-submodules=check origin", "allow", "allow", "keep"),
+    ("gpr-21", "git rebase --exec 'make test' main", "allow", "allow", "keep"),
+    ("gpr-22", "git fetch --upload-pack=x origin", "allow", "allow", "keep"),
+    ("gpr-23", "MYPATH=/x git push origin main", "allow", "allow", "keep"),
+    ("gpr-24", "git commit -m x && PATH=/x make", "allow", "allow", "keep"),
+    ("gpr-25", "echo $PATH && git push origin main", "allow", "allow", "keep"),
+)
+
+
 def _gcg_reason(command):
     _code, obj, _err = aiqt_hooks.gate_weakening({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": command}})
@@ -5101,6 +5138,27 @@ def _test_gate_check_git(failures, tmp):
                 failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
     finally:
         aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert = saved_plumb, saved_inert
+    for label, command, main, now, kind in _GPR_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    if "receive-pack" not in _gcg_reason("git push --exec=x origin main"):
+        failures.append("(gpr-msg) the push-redirect deny does not name the routes it refuses")
+    if "--no-verify" not in _gcg_reason("PATH=/x git push --no-verify origin main"):
+        failures.append("(gpr-msg-bypass) the hook-bypass deny no longer keeps its own message before the "
+                        "push-redirect deny")
+    saved_redirect = aiqt_hooks._gate_push_redirect
+    try:
+        aiqt_hooks._gate_push_redirect = lambda command: None
+        for label, command, main, now, kind in _GPR_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the push-redirect deny reverted, gate_weakening({!r}) should "
+                                "give 52baa177's {}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the push-redirect deny reverted".format(label))
+    finally:
+        aiqt_hooks._gate_push_redirect = saved_redirect
     repo = _init_repo(Path(tmp) / "gcg-write-scope")
 
     def write(path):

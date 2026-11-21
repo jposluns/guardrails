@@ -48,10 +48,16 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          remote has cannot evaluate. Its flip: over the plain URL, that commit pushes.
   V33    a program or setting that could deliver the push elsewhere than the proof reads cannot evaluate, and the
          unrecorded commit never reaches the remote: an ssh program or core.sshCommand that picks the repository by
-         service, remote.<name>.receivepack, GIT_EXEC_PATH with another git-receive-pack, a transport helper URL.
-         Its flip: an unrelated setting leaves a commit the remote has pushing.
+         service, remote.<name>.receivepack, GIT_EXEC_PATH with another git-receive-pack, a transport helper URL,
+         remote.<name>.vcs. Its flip: an unrelated setting leaves a commit the remote has pushing.
+  V34    the stubs run the programs install recorded: a planted python3 on PATH or in GIT_EXEC_PATH, or a planted
+         git there serving an accepting verifier, no longer skips the verifier; a recorded program that is missing
+         cannot evaluate. Its flip: a recorded commit pushes past a planted python3 that would refuse.
+  V35    a remote branch that is a symbolic ref to a pull-request ref is no proof. Its flip: a symbolic branch to a
+         tag holding the commit leaves it pushing.
   X1-X4  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line, and git push
-         --receive-pack on the command line delivering to another repository than its URL.
+         --receive-pack on the command line delivering to another repository than its URL (the text guard denies
+         the spellings it reads).
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
          and a missing configuration.
@@ -1088,13 +1094,123 @@ def rows_delivery(base):
     check("V33/flip-unrelated-config-remote-commit-pushes",
           (done.returncode, lacks(remote, "refs/heads/v33-feature") != ""), (0, True))
 
+    # remote.<name>.vcs (gitrecord5): a remote whose URL is this clone and whose vcs names a transport helper the
+    # push's PATH supplies (here one that hands the push to git remote-ext and the remote) made the proof read this
+    # clone while the helper delivered elsewhere; it now cannot evaluate and the remote never gets the branch.
+    repo, remote = unrecorded("v33g")
+    helpers = TMP / "v33g-helpers"
+    helpers.mkdir()
+    write(helpers, "git-remote-v33g", '#!/bin/sh\nexec git remote-ext "$1" "git %s {}"\n'.format(remote))
+    os.chmod(helpers / "git-remote-v33g", 0o755)
+    git_out(repo, "remote", "add", "up", str(repo))
+    git_out(repo, "config", "remote.up.vcs", "v33g")
+    git_out(repo, "config", "protocol.allow", "always")
+    done = git(repo, "push", "-q", "up", "HEAD:refs/heads/v33-u",
+               extra={"PATH": str(helpers) + os.pathsep + ENV.get("PATH", "")})
+    check("V33/remote-vcs-helper-cannot-evaluate",
+          (done.returncode != 0, "remote.<name>.vcs" in done.stderr, lacks(remote, "refs/heads/v33-u")),
+          (True, True, ""))
+
     # X4, a pinned residual: git push --receive-pack on the command line reaches no hook, so a push to this clone's
     # own URL (".") whose receive-pack runs in the remote delivers the unrecorded commit there, the proof having read
-    # this clone. Open like core.hooksPath on the command line (X2).
+    # this clone. Open like core.hooksPath on the command line (X2); the text guard denies the spellings it reads
+    # (_gate_push_redirect, the gpr-* rows of selftest_aiqt_hooks.py), so the residual is the forms it cannot read.
     repo, remote = unrecorded("x4")
     done = git(repo, "push", "-q", "--receive-pack=git receive-pack {} #".format(remote), ".", "HEAD:refs/heads/x4-u")
     check("X4/push-receive-pack-command-line-delivers",
           (done.returncode, lacks(remote, "refs/heads/x4-u") != ""), (0, True))
+    rows_programs(base, unrecorded, lacks)
+    rows_symbolic_refs(base, unrecorded, lacks)
+
+
+FAKE_PY_EXIT = "#!/bin/sh\n# a planted python3: it never runs the verifier\nexit {}\n"
+FAKE_GIT = """#!/bin/sh
+# a planted git: git show (the stub reading the verifier from HEAD) prints a verifier that accepts; every other
+# git command is the real git
+case "$*" in
+    *" show "*) printf 'raise SystemExit(0)\\n' ;;
+    *) exec "{real}" "$@" ;;
+esac
+"""
+
+
+def rows_programs(base, unrecorded, lacks):
+    # V34 (QA qagitrecord4 finding 2): the stubs ran python3, git, timeout and mktemp from the PATH git passes,
+    # where a PATH or GIT_EXEC_PATH the push named put a planted program first, so a planted python3 (or a planted
+    # git that serves an accepting verifier) skipped the verifier and the unrecorded commit reached the remote. The
+    # stubs now run the absolute paths install recorded, with PATH set to fixed directories, and the verifiers run
+    # the recorded git: each planted program is passed over and the push is refused. The flip: a recorded commit
+    # pushes with a planted python3 that would refuse first on the PATH, so the stub runs the recorded one.
+    real_git = shutil.which("git", path=ENV.get("PATH", "")) or "git"
+    repo, remote = unrecorded("v34a")
+    planted = TMP / "v34a-bin"
+    planted.mkdir()
+    write(planted, "python3", FAKE_PY_EXIT.format(0))
+    os.chmod(planted / "python3", 0o755)
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v34-u",
+               extra={"PATH": str(planted) + os.pathsep + ENV.get("PATH", "")})
+    check("V34/path-python3-planted-refused",
+          (done.returncode != 0, "missing" in done.stderr, lacks(remote, "refs/heads/v34-u")), (True, True, ""))
+    repo, remote = unrecorded("v34b")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v34-u", extra={"GIT_EXEC_PATH": str(planted)})
+    check("V34/exec-path-python3-planted-refused",
+          (done.returncode != 0, "GIT_EXEC_PATH" in done.stderr, lacks(remote, "refs/heads/v34-u")), (True, True, ""))
+    repo, remote = unrecorded("v34c")
+    fake = TMP / "v34c-exec"
+    fake.mkdir()
+    write(fake, "git", FAKE_GIT.format(real=real_git))
+    os.chmod(fake / "git", 0o755)
+    done = run([real_git, "push", "-q", "origin", "HEAD:refs/heads/v34-u"], repo, {"GIT_EXEC_PATH": str(fake)})
+    check("V34/exec-path-git-planted-refused",
+          (done.returncode != 0, "GIT_EXEC_PATH" in done.stderr, lacks(remote, "refs/heads/v34-u")), (True, True, ""))
+    repo = fixture(base)
+    remote = bare_remote(repo, "v34d")
+    refusing = TMP / "v34d-bin"
+    refusing.mkdir()
+    write(refusing, "python3", FAKE_PY_EXIT.format(1))
+    os.chmod(refusing / "python3", 0o755)
+    stage(repo, "b.txt", "v34d\n")
+    gate(repo, "run")
+    commit(repo, "v34d recorded")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v34-r",
+               extra={"PATH": str(refusing) + os.pathsep + ENV.get("PATH", "")})
+    check("V34/flip-recorded-pushes-past-planted-python3",
+          (done.returncode, lacks(remote, "refs/heads/v34-r") == head(repo)), (0, True))
+    stub = (repo / ".git" / "hooks" / "pre-push").read_text(encoding="utf-8")
+    check("V34/stub-runs-recorded-programs",
+          ("\naiqt_git='/" in stub, "\naiqt_python='/" in stub, "\nPATH='/" in stub,
+           '"$aiqt_python" -I -B "$tmp"' in stub, "\n$verify_bound python3 " in stub), (True, True, True, True, False))
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    text = hook.read_text(encoding="utf-8")
+    start = text.find("\naiqt_python='")
+    got = None  # a stub that records no program (an earlier hook): the row fails, it does not stop the run
+    if start >= 0:
+        start += len("\naiqt_python='")
+        hook.write_text(text[:start] + str(TMP / "v34-no-such-python3") + text[text.index("'", start):],
+                        encoding="utf-8")
+        done = run(["sh", str(hook)], repo)
+        got = (done.returncode, "recorded at install" in done.stderr)
+    check("V34/recorded-program-missing-cannot-evaluate", got, (2, True))
+
+
+def rows_symbolic_refs(base, unrecorded, lacks):
+    # V35 (QA qagitrecord4 finding 3): a branch on the remote that is a symbolic ref to a pull-request ref counted
+    # as proof, so an unrecorded commit only that pull-request ref holds pushed. The proof reads symbolic refs
+    # (protocol v2 ls-remote --symref) and drops a branch or tag naming a ref outside refs/heads and refs/tags:
+    # the push is refused and the remote never gets the branch. The flip: a symbolic branch naming a tag that
+    # holds the commit leaves it pushing.
+    repo, remote = unrecorded("v35")
+    git_out(repo, "push", "-q", "--no-verify", "origin", "HEAD:refs/pull/1/head")
+    git_out(remote, "symbolic-ref", "refs/heads/alias", "refs/pull/1/head")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v35-u")
+    check("V35/symbolic-branch-to-pull-ref-refused",
+          (done.returncode != 0, "missing" in done.stderr, lacks(remote, "refs/heads/v35-u")), (True, True, ""))
+    git_out(repo, "push", "-q", "--no-verify", "origin", "HEAD:refs/tags/v35-t")
+    git_out(remote, "symbolic-ref", "refs/heads/alias2", "refs/tags/v35-t")
+    git_out(remote, "update-ref", "-d", "refs/pull/1/head")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v35-u")
+    check("V35/flip-symbolic-branch-to-tag-pushes",
+          (done.returncode, lacks(remote, "refs/heads/v35-u") == head(repo)), (0, True))
 
 
 # --- the installer -----------------------------------------------------------------------------------------
