@@ -326,6 +326,7 @@ run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execut
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "dispatch-marker-selftest" python3 -I -B tools/check_selftest_execution.py --suite dispatch-marker-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "merge-pr-selftest" python3 -I -B tools/check_selftest_execution.py --suite merge-pr-selftest
 run_gate "ci-site-scope-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined

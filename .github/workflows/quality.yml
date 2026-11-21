@@ -15,8 +15,11 @@ on:
     # than the Secrets (gitleaks) step below pins. A label added to any other pull request into main
     # starts a run whose heavy jobs are skipped (the job-level if: below, the second layer), so its
     # Quality gates fails. A head with no run of this workflow reads as missing, never as passing:
-    # ci-status.sh requires a completed successful run of this workflow FILE on every read, other
-    # than a run whose event is schedule or workflow_dispatch, which it treats as advisory.
+    # ci-status.sh requires a completed successful run of this workflow FILE, its default required
+    # file, on every read of a commit's own runs (--require-base BRANCH --require-workflow PATH
+    # requires the file PATH instead; its --match-tree and --main-health reads have their own
+    # rules), other than a run whose event is schedule or workflow_dispatch, which it treats as
+    # advisory.
     # tools/check_ci_parity.py holds these types to exactly [labeled].
     # no `edited`: it fires on a PR title/body edit AND on a base-branch retarget, and would re-run
     # every job here. The title/body side matters only to the message/metadata leak scan
@@ -1370,6 +1373,10 @@ jobs:
       - name: CI-status behaviour self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+
+      - name: Merge entry point self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite merge-pr-selftest
 
       - name: Instruction-budget self-test (execution-reconciled)
         shell: bash
