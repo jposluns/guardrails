@@ -1286,7 +1286,7 @@ def _self_test_floor_probe(registry, directory, elsewhere):
 def _self_test_group_probe(registry):
     """Flip the group partition and the selector. Each synthetic grouping of the live registry must yield its
     fault; over a synthetic registry of recording callables, a group runs exactly its own labels in registry
-    order and forwards the worst outcome, a broken partition and an unknown name return 2 having run nothing,
+    order and forwards the aggregate outcome, a broken partition and an unknown name return 2 having run nothing,
     and main() hands `--self-test-group NAME` to the selector. Returns a list of the discrepancies."""
     from unittest.mock import patch
     misses = []
@@ -1336,7 +1336,7 @@ def _self_test_group_probe(registry):
 
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check. A helper returning a value
-    OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
+    OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero exit), never be
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
     the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
@@ -1380,6 +1380,21 @@ def _aggregator_self_test():
         ok = False
     if not ok:
         print("opf aggregator self-test: FAIL (fail-closed vocabulary check admitted a bad return)",
+              file=sys.stderr)
+        return EXIT_FINDING
+    # Verdict precedence (red-on-revert): a definite finding outranks cannot-evaluate, in either order and
+    # beside an out-of-range return, and cannot-evaluate outranks a clean pass.
+    misordered = []
+    for codes, want in (((2, 1), EXIT_FINDING), ((1, 2), EXIT_FINDING), ((0, 2, 1, 0), EXIT_FINDING),
+                        ((3, 1), EXIT_FINDING), ((2, 0), EXIT_MALFORMED), ((0, 3), EXIT_MALFORMED),
+                        ((1, 0), EXIT_FINDING)):
+        legs = tuple(("synthetic-precedence-{}".format(i), (lambda code=code: code))
+                     for i, code in enumerate(codes))
+        got = run_self_tests(legs)
+        if got != want:
+            misordered.append("{} -> {}, want {}".format(codes, got, want))
+    if misordered:
+        print("opf aggregator self-test: FAIL (verdict precedence: {})".format("; ".join(misordered)),
               file=sys.stderr)
         return EXIT_FINDING
     print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
@@ -1567,9 +1582,10 @@ def _watchdog_isolation_self_test(launch=None):
     case (a starved host can reach any bound): the distinct CANNOT-EVALUATE
     (EXIT_MALFORMED), never a pass and never a definite failure, while the
     marker on a nonzero exit stays a failure (_watchdog_completion_verdict);
-    the regression runner's scripted-launch vectors pin both mappings.
-    `launch` (label, mode, code) exists for those vectors; the default
-    launches the real fixture."""
+    a definite failure of any case outranks it (EXIT_FINDING, the
+    unevaluated cases still named); the regression runner's scripted-launch
+    vectors pin these mappings. `launch` (label, mode, code) exists for
+    those vectors; the default launches the real fixture."""
     import subprocess
     import signal
     from _opf_emit import run_status_owned
@@ -1634,13 +1650,15 @@ def _watchdog_isolation_self_test(launch=None):
     if not failed and not unevaluated:
         print("opf watchdog isolation: PASS (caller timers and signal state untouched)")
     if unevaluated:
-        # At least one case issued no verdict: the distinct CANNOT-EVALUATE
-        # (the worst outcome, per the runner's 2 > 1 > 0 ordering; any
-        # failures above are already printed), never a pass.
+        # At least one case issued no verdict: the distinct CANNOT-EVALUATE,
+        # never a pass. The verdict precedence is a definite failure over
+        # cannot-evaluate over pass, so a failure above (already printed)
+        # keeps EXIT_FINDING; the unevaluated cases are still named.
         print("opf watchdog isolation: CANNOT EVALUATE (no verdict from: "
               + ", ".join(unevaluated) + ")")
-        return EXIT_MALFORMED
-    return EXIT_FINDING if failed else EXIT_OK
+    if failed:
+        return EXIT_FINDING
+    return EXIT_MALFORMED if unevaluated else EXIT_OK
 
 
 # Load-flake bound: the execution-latency ceiling is a
@@ -15785,11 +15803,12 @@ def _watchdog_completion_verdict(returncode, stdout):
 def _watchdog_run_legs(cases, launch):
     """Launch each (label, code, timeout) leg in order through
     launch(label, code, timeout) and print one line per leg. The aggregate
-    is the WORST outcome: EXIT_MALFORMED when any leg issued no verdict
+    follows the verdict precedence, a definite failure over cannot-evaluate
+    over pass: EXIT_FINDING when any leg failed, whatever the other legs
+    gave; else EXIT_MALFORMED when any leg issued no verdict
     (_watchdog_completion_verdict's cannot-evaluate, or a leg killed at its
     own independent process bound, which a starved host can reach on a
-    correct leg and which therefore establishes nothing), else EXIT_FINDING
-    when any leg failed, else EXIT_OK."""
+    correct leg and which therefore establishes nothing); else EXIT_OK."""
     import subprocess
     failed = False
     unevaluated = []
@@ -15817,13 +15836,16 @@ def _watchdog_run_legs(cases, launch):
         print("opf watchdog regression:", label, "PASS" if verdict == "pass" else "FAIL", detail)
         failed = failed or verdict != "pass"
     if unevaluated:
-        # At least one leg issued no verdict: the distinct CANNOT-EVALUATE
-        # (the worst outcome, per run_self_tests_isolated's 2 > 1 > 0
-        # ordering; any leg failures above are already printed), never a pass.
+        # At least one leg issued no verdict: the distinct CANNOT-EVALUATE,
+        # never a pass. A definite failure outranks it (the verdict
+        # precedence run_self_tests_isolated also applies: 1 > 2 > 0), so a
+        # leg failure above (already printed) keeps EXIT_FINDING; the
+        # unevaluated legs are still named.
         print("opf watchdog regressions: CANNOT EVALUATE (no verdict from: "
               + ", ".join(unevaluated) + ")")
-        return EXIT_MALFORMED
-    return EXIT_FINDING if failed else EXIT_OK
+    if failed:
+        return EXIT_FINDING
+    return EXIT_MALFORMED if unevaluated else EXIT_OK
 
 
 def _watchdog_regression_self_test():
@@ -16672,13 +16694,15 @@ def _watchdog_regression_self_test():
         if got != want:
             flip_missed.append("completion verdict %r != %r" % (got, want))
     # The aggregate itself (red-on-revert): _watchdog_run_legs over scripted
-    # launches, its per-leg lines captured. A cannot-evaluate leg makes the
-    # aggregate EXIT_MALFORMED, even beside a failure; a leg killed at its
-    # own process bound is cannot-evaluate ON ITS OWN (the lone-bound-kill
-    # row below is red when such a kill is read as a definite failure
-    # again, and the kill beside a failure stays EXIT_MALFORMED, the worst
-    # outcome); failures alone make it EXIT_FINDING; the marker on a
-    # nonzero exit stays a failure.
+    # launches, its per-leg lines captured. The verdict precedence is a
+    # definite failure over cannot-evaluate over pass: a cannot-evaluate leg
+    # makes the aggregate EXIT_MALFORMED only when no leg failed; a leg
+    # killed at its own process bound is cannot-evaluate ON ITS OWN (the
+    # lone-bound-kill row below is red when such a kill is read as a
+    # definite failure again); a failure beside a cannot-evaluate leg, in
+    # either order, stays EXIT_FINDING (those rows are red when
+    # cannot-evaluate is let outrank a definite failure again); the marker
+    # on a nonzero exit stays a failure.
     def scripted(outcomes):
         def launch(label, code, timeout):
             outcome = outcomes[label]
@@ -16693,9 +16717,14 @@ def _watchdog_regression_self_test():
             (dict(a=(EXIT_OK, "ok\n"), b=(EXIT_OK, marked)), EXIT_MALFORMED),
             (dict(a=subprocess.TimeoutExpired("a", 1)), EXIT_MALFORMED),
             (dict(a=subprocess.TimeoutExpired("a", 1),
-                  b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+                  b=subprocess.CalledProcessError(1, "b")), EXIT_FINDING),
             (dict(a=subprocess.TimeoutExpired("a", 1), b=(EXIT_OK, marked)), EXIT_MALFORMED),
-            (dict(a=(EXIT_OK, marked), b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+            (dict(a=(EXIT_OK, marked), b=subprocess.CalledProcessError(1, "b")), EXIT_FINDING),
+            (dict(a=(EXIT_FINDING, "x FAIL\n"), b=(EXIT_OK, marked)), EXIT_FINDING),
+            (dict(a=(EXIT_OK, marked), b=(EXIT_FINDING, "x FAIL\n"), c=(EXIT_OK, "ok\n")),
+             EXIT_FINDING),
+            (dict(a=RuntimeError("cannot launch"), b=subprocess.TimeoutExpired("b", 1)),
+             EXIT_FINDING),
             (dict(a=subprocess.CalledProcessError(1, "a"), b=(EXIT_OK, "ok\n")), EXIT_FINDING),
             (dict(a=(EXIT_FINDING, marked)), EXIT_FINDING),
             (dict(a=RuntimeError("cannot launch")), EXIT_FINDING)):
@@ -16748,24 +16777,36 @@ def _watchdog_regression_self_test():
     # window exercise was never established), make that run the distinct
     # EXIT_MALFORMED (no verdict), never a definite failure; clean unmarked
     # launches keep EXIT_OK, failing ones EXIT_FINDING, and the marker on a
-    # failing exit is not honored (fail closed).
-    def isolation_scripted(outcome):
+    # failing exit is not honored (fail closed). The mixed rows give the
+    # first case its own outcome: a definite failure there beside
+    # no-verdict cases elsewhere stays EXIT_FINDING (red when
+    # cannot-evaluate is let outrank a definite failure again), and a lone
+    # no-verdict case beside passes stays EXIT_MALFORMED.
+    first_case = _watchdog_isolation_cases()[0]
+
+    def isolation_scripted(outcome, first=None):
         def launch(label, mode, code):
-            if isinstance(outcome, BaseException):
-                raise outcome
-            return subprocess.CompletedProcess([label], outcome[0], outcome[1], "")
+            own = first if first is not None and (label, mode) == first_case else outcome
+            if isinstance(own, BaseException):
+                raise own
+            return subprocess.CompletedProcess([label], own[0], own[1], "")
         return launch
 
-    for outcome, want in ((subprocess.TimeoutExpired("timer", 1), EXIT_MALFORMED),
-                          ((EXIT_OK, ""), EXIT_OK), ((EXIT_FINDING, ""), EXIT_FINDING),
-                          ((EXIT_OK, marked), EXIT_MALFORMED),
-                          ((EXIT_FINDING, marked), EXIT_FINDING)):
+    for first, outcome, want in (
+            (None, subprocess.TimeoutExpired("timer", 1), EXIT_MALFORMED),
+            (None, (EXIT_OK, ""), EXIT_OK), (None, (EXIT_FINDING, ""), EXIT_FINDING),
+            (None, (EXIT_OK, marked), EXIT_MALFORMED),
+            (None, (EXIT_FINDING, marked), EXIT_FINDING),
+            ((EXIT_FINDING, ""), (EXIT_OK, marked), EXIT_FINDING),
+            ((EXIT_FINDING, ""), subprocess.TimeoutExpired("timer", 1), EXIT_FINDING),
+            (subprocess.TimeoutExpired("timer", 1), (EXIT_FINDING, ""), EXIT_FINDING),
+            ((EXIT_OK, marked), (EXIT_OK, ""), EXIT_MALFORMED)):
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
-            got = _watchdog_isolation_self_test(launch=isolation_scripted(outcome))
+            got = _watchdog_isolation_self_test(launch=isolation_scripted(outcome, first))
         if got != want:
-            flip_missed.append("isolation no-verdict aggregate for %r: %r, want %r"
-                               % (outcome, got, want))
+            flip_missed.append("isolation no-verdict aggregate for %r beside %r: %r, want %r"
+                               % (first, outcome, got, want))
     # The TIMEOUT-to-marker connection inside the REAL timer fixture
     # (red-on-revert): _watchdog_timer_case itself runs here with its
     # bounded window run and its clock scripted (the "inactive" mode arms
@@ -24337,7 +24378,8 @@ def _self_test_group_faults(registry, groups):
 
 def run_self_test_group(name, groups=None, tests=None):
     """Run the one group of SELF_TEST_GROUPS named `name` through run_self_tests: its registered self-tests, in
-    registry order, with the aggregate's worst-outcome exit. Returns 2 (cannot evaluate) and runs nothing when the
+    registry order, with the aggregate's verdict-precedence exit (run_self_tests_isolated: a finding over
+    cannot-evaluate over clean). Returns 2 (cannot evaluate) and runs nothing when the
     groups are not a partition of the registry (_self_test_group_faults) or no group has that name."""
     groups = SELF_TEST_GROUPS if groups is None else groups
     tests = _self_tests() if tests is None else tests
@@ -25046,10 +25088,11 @@ def run_self_tests(tests=None):
 
 def run_self_tests_isolated(tests=None):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
-    is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
-    the whole leg, never masked by a later clean one. With no explicit `tests`, the registered set is built
-    by _self_tests() at call time (after _bootstrap() has bound the _opf_* helpers), never a module-level
-    default that would need those helpers imported at module top.
+    follows the verdict precedence (1 finding > 2 cannot-evaluate > 0 clean): a definite failure in any
+    helper is never reported as cannot-evaluate because another helper gave no verdict, and one degraded
+    or failing helper fails the whole leg, never masked by a later clean one. With no explicit `tests`,
+    the registered set is built by _self_tests() at call time (after _bootstrap() has bound the _opf_*
+    helpers), never a module-level default that would need those helpers imported at module top.
 
     Int-limit hermeticity guard: each helper in _INT_LIMIT_SELF_TESTS pins the int-string
     conversion limit to 4300 inside its fixtures and must RESTORE the ambient value afterward. That restore
@@ -25061,7 +25104,7 @@ def run_self_tests_isolated(tests=None):
     running them under the sentinel is exactly the hostile-ambient contract they already satisfy."""
     if tests is None:
         tests = _self_tests()
-    worst = EXIT_OK
+    found = unevaluated = False
     _idlimit_orig = sys.get_int_max_str_digits()
     _idlimit_sentinel = 271828 if _idlimit_orig != 271828 else 314159   # distinct from 4300 AND from ambient
     for label, fn in tests:
@@ -25078,22 +25121,25 @@ def run_self_tests_isolated(tests=None):
                 print("opf self-test: {} left sys.get_int_max_str_digits at {} (expected the sentinel {}); a "
                       "dropped int-limit restore is a hermeticity leak, failing closed".format(
                           label, _idlimit_after, _idlimit_sentinel), file=sys.stderr)
-                worst = EXIT_MALFORMED
+                unevaluated = True
         else:
             code = fn()
         if not (type(code) is int and code in (EXIT_OK, EXIT_FINDING, EXIT_MALFORMED)):
-            # A helper whose return is not an int of exactly {0,1,2} is itself a fault: fail closed (the
-            # worst outcome) rather than letting an unrecognized code read as clean. `type(code) is int`
-            # deliberately EXCLUDES bool (a subclass of int, where False == 0 and True == 1) and float
-            # (0.0 == 0), so a helper returning False or 0.0 can never be admitted as a clean pass.
+            # A helper whose return is not an int of exactly {0,1,2} is itself a fault: fail closed
+            # (cannot-evaluate, never clean) rather than letting an unrecognized code read as clean.
+            # `type(code) is int` deliberately EXCLUDES bool (a subclass of int, where False == 0 and
+            # True == 1) and float (0.0 == 0), so a helper returning False or 0.0 can never be admitted
+            # as a clean pass.
             print("opf self-test: {} returned out-of-range code {!r}; failing closed".format(label, code),
                   file=sys.stderr)
-            worst = EXIT_MALFORMED
+            unevaluated = True
         elif code == EXIT_MALFORMED:
-            worst = EXIT_MALFORMED
-        elif code == EXIT_FINDING and worst != EXIT_MALFORMED:
-            worst = EXIT_FINDING
-    return worst
+            unevaluated = True
+        elif code == EXIT_FINDING:
+            found = True
+    if found:
+        return EXIT_FINDING
+    return EXIT_MALFORMED if unevaluated else EXIT_OK
 
 
 def main(argv=None):

@@ -195,6 +195,16 @@ EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_ERROR = 2
 
+
+def _status_precedence(codes):
+    """The self-test's exit over its suites' statuses (each 0, 1 or 2): a failing assertion (1)
+    outranks a harness error (2), which outranks clean (0), so a definite failure in one suite is
+    never reported as a harness error because another suite could not run. Each suite's own lines
+    are already printed."""
+    codes = tuple(codes)
+    return EXIT_FINDING if EXIT_FINDING in codes else max(codes, default=EXIT_OK)
+
+
 # The GitHub Actions template's canonical EFFECTIVE text: the shipped file's whole text with
 # full-line comments and blank lines removed, and NOTHING else normalized (no whitespace, quote or
 # case folding). The self-test first BYTE-GATES the shipped file (raw bytes; anything outside
@@ -2536,12 +2546,20 @@ def _self_test_isolated():
             contract.append("failing-assertion body did not map to exit 1")
         if _classify(lambda: []) != EXIT_OK:
             contract.append("clean body did not map to exit 0")
+    # The aggregate over the two suites (red-on-revert): a failing assertion beside a harness error,
+    # in either order, stays exit 1; a harness error beside a clean suite stays exit 2.
+    for codes, want in (((EXIT_ERROR, EXIT_FINDING), EXIT_FINDING),
+                        ((EXIT_FINDING, EXIT_ERROR), EXIT_FINDING),
+                        ((EXIT_ERROR, EXIT_OK), EXIT_ERROR), ((EXIT_OK, EXIT_OK), EXIT_OK)):
+        if _status_precedence(codes) != want:
+            contract.append("suite statuses {} aggregated to {}, not {}".format(
+                codes, _status_precedence(codes), want))
     if contract:
         for c in contract:
             print("check_opf_doctor self-test: FAIL: status-contract: {}".format(c), file=sys.stderr)
         return EXIT_FINDING
 
-    rc = max(_classify(_doctor_suite), _classify(_precommit_suite))
+    rc = _status_precedence((_classify(_doctor_suite), _classify(_precommit_suite)))
     if rc == EXIT_OK:
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
