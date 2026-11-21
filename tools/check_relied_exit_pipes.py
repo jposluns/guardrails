@@ -1798,7 +1798,7 @@ def load_config(path):
             raise GateError("configuration {}: a [[binding]] has unknown key(s): {}".format(
                 CONFIG_REL, ", ".join(sorted(unknown))))
         bid = entry.get("id")
-        if not isinstance(bid, str) or not ID_RE.match(bid):
+        if not isinstance(bid, str) or not ID_RE.fullmatch(bid):
             raise GateError("configuration {}: binding id {!r} is not a kebab-case identifier".format(
                 CONFIG_REL, bid))
         if bid in seen_ids:
@@ -3491,6 +3491,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             _case("X7k", CFG.replace('paths = ["cmd/job.sh"]', 'paths = ["./cmd/job.sh"]'),
                   "tool write --row 9\n", 2, "a '.' selector component is cannot-evaluate",
                   needle="component")
+            _case("X7l", CFG.replace('id = "row-writer"', 'id = "row-writer\\n"'),
+                  "tool write --row 9\n", 2, "an id with one trailing newline is cannot-evaluate",
+                  needle="kebab-case")
             # X12: a declared command inside a function body (directly, or only inside a substitution
             # there) is refused: the body runs at its call sites, which this gate does not model.
             _case("X12a", CFG, "set -o pipefail\nf() {\n  tool write | tail -1\n}\nf\n", 2,

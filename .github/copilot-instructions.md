@@ -387,7 +387,12 @@ This manifests in three recurring forms. An asynchronous result is correlated to
 produced it only through the authoritative identifier that dispatch returns, a handle, a path, or an
 id, never by wall-clock proximity or arrival order, because two dispatches can complete out of order
 or at the same instant and ambient timing cannot tell them apart; a result with no identifier is
-surfaced as unbound, never assigned to the nearest or most recent dispatch. A command with side
+surfaced as unbound, never assigned to the nearest or most recent dispatch. A path is such an
+identifier only when no other dispatch can have written to it; a location reused across dispatches,
+such as a shared scratch directory or a fixed result file name, is not, so each dispatch writes into
+a location created exclusively for it, or its result carries an id the dispatcher issued before
+launch and is accepted only on a match, and deleting an earlier result first or comparing
+timestamps is not that binding. A command with side
 effects prefers to name its target on the command that performs the mutation, a repository or
 working tree bound by an on-command flag rather than left to the current working directory. Where
 the same command also shifts that target, a directory change chained ahead of the mutation or a
