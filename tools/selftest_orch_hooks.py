@@ -13931,6 +13931,100 @@ def _nrdo_unexercised(corpus, ran):
     return sorted((key, count) for key, (count, any_ran) in groups.items() if not any_ran)
 
 
+# The containment no-reduction differential (nrd-contain/): the command forms of the three guard
+# reviews of 2026-11-21 (round 1, round 2 and round 3 of the fbdff942 series), restated on the nrd/
+# fixture: drafts/ is nrd-stage/, <fx>/work is the parent of the declared directories (cwd key "tmp")
+# and <fx>/other is nrd-outside ("out"). Each row is (id, cwd key, template, verdict at fbdff942); the
+# verdict was taken from the fbdff942 guard on this fixture. In the 'none' and 'noexec-only' modes every
+# row must keep that verdict (nothing refused at fbdff942 may be allowed, and nothing else moves either).
+# Placeholders: @ST@, @HB@ and @OUT@ are the staging, hand-back and outside directories, @TMP@ their
+# parent and @STDLIB@ the running interpreter's standard library.
+_NRDC_REVIEW_FORMS = (
+    # round 3, "Newly denied at fbdff942" (the cost table) and "Denied at earlier heads too"
+    ("r3-cost/py-c-print", "tmp", "python3 -I -c 'print(1)'", "deny"),
+    ("r3-cost/arith-echo", "tmp", "echo $((1+2))", "deny"),
+    ("r3-cost/arith-sleep", "tmp", "sleep $((RANDOM % 1))", "deny"),
+    ("r3-cost/subst-date", "tmp", "echo \"$(date -u +%Y)\"", "deny"),
+    ("r3-cost/git-log-since", "tmp", "git log --since=\"$(date -u +%F)\"", "deny"),
+    ("r3-cost/awk", "tmp", "awk '{print $1}' a.txt", "deny"),
+    ("r3-cost/sed", "tmp", "sed 's/1/one/' a.txt", "deny"),
+    ("r3-cost/perl-e", "tmp", "perl -e 1", "deny"),
+    ("r3-cost/node-version", "tmp", "node --version", "deny"),
+    ("r3-cost/ssh-version", "tmp", "ssh -V", "deny"),
+    ("r3-cost/rsync", "tmp", "rsync -a x.txt y.txt", "deny"),
+    ("r3-cost/trap", "tmp", "trap 'rm -f t.tmp' EXIT; touch t.tmp", "deny"),
+    ("r3-cost/git-editor", "tmp", "GIT_EDITOR=true git commit --amend --no-edit", "deny"),
+    ("r3-cost/git-prompt", "tmp", "GIT_TERMINAL_PROMPT=0 git status", "deny"),
+    ("r3-cost/git-pager", "tmp", "GIT_PAGER=cat git log", "deny"),
+    ("r3-cost/git-c-gpgsign", "tmp", "git -c commit.gpgsign=false log", "deny"),
+    ("r3-cost/git-c-safedir", "tmp", "git -c safe.directory='*' status", "deny"),
+    ("r3-cost/git-config-set", "tmp", "git config pull.rebase false", "deny"),
+    ("r3-cost/git-dir", "out", "git --git-dir=../nrd-stage/.git --work-tree=../nrd-stage status", "deny"),
+    ("r3-cost/gitmodules", "tmp", "git config --file .gitmodules --get-regexp path", "deny"),
+    ("r3-cost/jq-claude", "tmp", "jq . .claude/settings.json", "deny"),
+    ("r3-cost/make-C", "tmp", "make -C nrd-outside -n", "deny"),
+    ("r3-cost/pytest-ancestor", "tmp", "python3 -I -m pytest nrd-outside", "deny"),
+    ("r3-cost/backquote-commit", "tmp", "git commit -m \"$(cat <<'EOF'\nuse `x`\nEOF\n)\"", "deny"),
+    ("r3-earlier/cd-toplevel", "tmp", "cd \"$(git rev-parse --show-toplevel)\" && git status", "deny"),
+    ("r3-earlier/find-exec", "tmp", "find . -name '*.txt' -exec grep -l 1 {} +", "deny"),
+    ("r3-earlier/wc-herestring", "tmp", "wc -l <<< 'x y'", "deny"),
+    # round 3 findings (B1-B2, M1-M4, N1)
+    ("r3-find/funsub", "tmp", "echo \"${ bash nrd-stage/x.sh; }\"", "allow"),
+    ("r3-find/valsub", "tmp", "echo \"${| python3 -m nrd-stage.x; }\"", "allow"),
+    ("r3-find/funsub-unquoted", "tmp", "echo ${ python3 -m nrd-stage.x; }", "deny"),
+    ("r3-find/pydoc", "tmp", "python3 -I @STDLIB@/pydoc.py nrd-stage.x", "allow"),
+    ("r3-find/pydoc3", "tmp", "pydoc3 nrd-stage.x", "allow"),
+    ("r3-find/execdir", "tmp", "find . -name x.sh -execdir sh x.sh \\;", "allow"),
+    ("r3-find/rebase-x", "tmp", "git rebase -q -x 'python3 nrd-stage/x.py' HEAD~1", "allow"),
+    ("r3-find/tar-checkpoint", "tmp",
+     "tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec='python3 nrd-stage/x.py' a.txt", "allow"),
+    ("r3-find/pytest-3", "tmp", "pytest-3 -q -p no:cacheprovider", "allow"),
+    ("r3-find/ed", "tmp", "printf '!sh nrd-stage/x.sh\\nq\\n' | ed -s", "allow"),
+    ("r3-find/dc", "tmp", "dc -e '!sh nrd-stage/x.sh'", "allow"),
+    ("r3-find/bash-aliases", "tmp", "cp nrd-stage/x.sh nrd-outside/.bash_aliases", "allow"),
+    # round 2 findings and its cost list
+    ("r2/herestring", "tmp", "grep -c x <<< 'xyz'", "deny"),
+    ("r2/unquoted-heredoc", "tmp", "cat <<EOF > out.txt\nhi\nEOF\n", "deny"),
+    ("r2/subst-py-m", "tmp", "echo \"$(python3 -m nrd-stage.x)\"", "deny"),
+    ("r2/subst-bash", "tmp", "echo \"$(bash nrd-stage/x.sh)\"", "deny"),
+    ("r2/subst-sibling", "out", "echo \"$(python3 ../nrd-stage/x.py)\"", "deny"),
+    ("r2/subst-dot", "tmp", "echo \"$(. nrd-stage/x.sh)\"", "deny"),
+    ("r2/git-alias", "tmp", "git -c alias.x='!python3 nrd-stage/x.py' x", "deny"),
+    ("r2/git-config-env", "tmp",
+     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!sh nrd-stage/x.sh' git x", "deny"),
+    ("r2/py-c-exec", "tmp", "python3 -I -c \"exec(open('nrd-stage/x.py').read())\"", "deny"),
+    ("r2/py-c-runpy", "out", "python3 -I -c \"import runpy; runpy.run_path('../nrd-stage/x.py')\"", "deny"),
+    ("r2/awk-system", "tmp", "awk 'BEGIN{system(\"python3 nrd-stage/x.py\")}'", "deny"),
+    ("r2/py-stdin-heredoc", "tmp", "python3 - <<'EOF'\nprint(1)\nEOF\n", "deny"),
+    ("r2/py-c-herestring", "tmp", "python3 -I -c 'import sys' <<< hello", "deny"),
+    ("r2/grep-glob", "tmp", "grep -rn python3 *.py", "deny"),
+    ("r2/make-test", "tmp", "make test", "deny"),
+    # round 1 findings and its cost list
+    ("r1/py-m-ancestor", "tmp", "python3 -m nrd-stage.x", "deny"),
+    ("r1/py-c-import", "tmp", "python3 -c \"import nrd-stage.x\"", "deny"),
+    ("r1/cd-then-m", "out", "cd @TMP@ && python3 -m nrd-stage.x", "deny"),
+    ("r1/subshell-cd", "out", "(cd @TMP@ && python3 -m nrd-stage.x)", "deny"),
+    ("r1/pythonpath-rel", "tmp", "PYTHONPATH=nrd-stage python3 -m x", "deny"),
+    ("r1/env-pythonpath", "tmp", "env PYTHONPATH=nrd-stage python3 -m x", "deny"),
+    ("r1/bash-env", "tmp", "BASH_ENV=nrd-stage/x.sh bash -c true", "deny"),
+    ("r1/tilde", "tmp", "python3 ~/nrd-stage/x.py", "deny"),
+    ("r1/home-var", "tmp", "python3 $HOME/nrd-stage/x.py", "deny"),
+    ("r1/glob-q", "tmp", "python3 @TMP@/nrd-sta?e/x.py", "deny"),
+    ("r1/glob-star", "tmp", "python3 @TMP@/nrd-stag*/x.py", "deny"),
+    ("r1/brace", "tmp", "python3 @TMP@/{nrd-stage,zz}/x.py", "deny"),
+    ("r1/ls-glob", "tmp", "ls @HB@/*.diff", "deny"),
+    ("r1/wc-glob", "tmp", "wc -l @HB@/*.diff", "deny"),
+    ("r1/sha-cut", "tmp", "sha256sum @HB@/d.diff | cut -c1-64", "deny"),
+)
+
+
+def _nrdc_expand(tmpl, places):
+    """One review-form template with its placeholders replaced (places maps each placeholder)."""
+    for key in ("@ST@", "@HB@", "@OUT@", "@TMP@", "@STDLIB@"):
+        tmpl = tmpl.replace(key, places[key])
+    return tmpl
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -18016,6 +18110,30 @@ def _main_isolated(report_path=None):
         _nrd_stdlib = os.path.dirname(os.__file__)
         st, hb, outd = str(nd_staging), str(nd_handback), str(nd_outside)
 
+        def _nrdc_forced(mode, fn):
+            # run fn with the containment probe replaced by one reporting mode (the self-test simulates
+            # noexec and sealing; it never changes the host)
+            real_probe = aiqt_hooks._nrd_containment
+            setattr(aiqt_hooks, "_nrd_containment", lambda dirs: (
+                mode, None if mode == "contained" else "forced by the self-test"))
+            try:
+                return fn()
+            finally:
+                setattr(aiqt_hooks, "_nrd_containment", real_probe)
+
+        # T2 (nrd-contain/): every nrd() call below, until the nrd-contain/ group stops the recording,
+        # is also judged with the probe forced to 'none', 'noexec-only' and 'contained', so the existing
+        # rows (whose verdicts the nrd/ checks pin) are replayed under each mode: (command, payload cwd,
+        # verdict as run, {mode: verdict})
+        # (the contained replay is taken only while no flip has replaced a guard helper: a flip's
+        # fixed-arity stand-in takes no contained argument, and a flipped guard is not the guard)
+        _nrdc_rows = []
+        _nrdc_recording = [True]
+        _nrdc_pristine = {k: v for k, v in vars(aiqt_hooks).items() if k.startswith("_nrd") and callable(v)}
+
+        def _nrdc_flipped():
+            return any(getattr(aiqt_hooks, k, None) is not v for k, v in _nrdc_pristine.items())
+
         def nrd(cmd, cwd=None, project=None):
             # The guard roots INDEPENDENTLY of the payload cwd: with no project env it arms through the
             # repository git toplevel; with a project env it arms through that path too, so a cwd inside
@@ -18028,8 +18146,15 @@ def _main_isolated(report_path=None):
                 os.environ["CLAUDE_PROJECT_DIR"] = project
             try:
                 extra = {"cwd": cwd} if cwd else None
-                return aiqt_hooks.orch_deliverable_exec_guard(
-                    nd.payload("PreToolUse", "Bash", {"command": cmd}, extra=extra))
+                payload = nd.payload("PreToolUse", "Bash", {"command": cmd}, extra=extra)
+                result = aiqt_hooks.orch_deliverable_exec_guard(payload)
+                if _nrdc_recording[0]:
+                    modes = ("none", "noexec-only") if _nrdc_flipped() else (
+                        "none", "noexec-only", "contained")
+                    _nrdc_rows.append((cmd, cwd, _verdict(result), {
+                        m: _verdict(_nrdc_forced(m, lambda: aiqt_hooks.orch_deliverable_exec_guard(payload)))
+                        for m in modes}))
+                return result
             finally:
                 if prev is None:
                     os.environ.pop("CLAUDE_PROJECT_DIR", None)
@@ -19549,7 +19674,234 @@ def _main_isolated(report_path=None):
                [:1] for k in range(nrdo_first, len(nrdo_corpus))],
               [["corpus-pin"]] * len(_NRDO_FORMS))
 
+        # ---------- nrd-contain/: the containment probe and the tripwire mode ----------
+        # The self-test cannot create a noexec mount or a custodian account without root, so it
+        # SIMULATES containment (a stubbed os.statvfs and os.access, or a probe forced to one mode): it
+        # proves the hook's logic, not the host (the host acceptance checks are ORCHESTRATION.md's).
+        _nrdc_recording[0] = False
+        _nrdc_dirs = (st, hb)
 
+        class _NrdcVfs(object):
+            def __init__(self, flag):
+                self.f_flag = flag
+
+        def _nrdc_probe(dirs, noexec, sealed, fail=None, drop_flag=False, ignore_flag=False):
+            # _nrd_containment with os.statvfs and os.access stubbed: noexec and sealed are the
+            # directories reported noexec and unopenable; fail raises OSError for that directory;
+            # drop_flag removes os.ST_NOEXEC; ignore_flag reports every directory noexec (the mutant
+            # probe that ignores the mount flag)
+            real_statvfs, real_access = os.statvfs, os.access
+            had_flag = hasattr(os, "ST_NOEXEC")
+            real_flag = getattr(os, "ST_NOEXEC", None)
+            flag = real_flag if isinstance(real_flag, int) and real_flag > 0 else 8
+
+            def fake_statvfs(path):
+                if fail is not None and path == fail:
+                    raise OSError(5, "stubbed probe failure")
+                return _NrdcVfs(flag if (ignore_flag or path in noexec) else 0)
+
+            def fake_access(path, how):
+                return path not in sealed
+
+            os.statvfs, os.access = fake_statvfs, fake_access
+            if drop_flag:
+                if had_flag:
+                    del os.ST_NOEXEC
+            elif not had_flag:
+                os.ST_NOEXEC = flag
+            try:
+                return aiqt_hooks._nrd_containment(tuple(dirs))
+            finally:
+                os.statvfs, os.access = real_statvfs, real_access
+                if had_flag:
+                    os.ST_NOEXEC = real_flag
+                elif hasattr(os, "ST_NOEXEC"):
+                    del os.ST_NOEXEC
+
+        both = {st, hb}
+        _nrdc_t1_rows = (
+            ("contained", dict(noexec=both, sealed=both)),
+            ("noexec-only", dict(noexec=both, sealed={st})),
+            ("none", dict(noexec=set(), sealed=set())),
+            ("mixed", dict(noexec={st}, sealed={st})),
+            ("sealed-only", dict(noexec=set(), sealed=both)),
+            ("statvfs-oserror", dict(noexec=both, sealed=both, fail=hb)),
+            ("no-st-noexec", dict(noexec=both, sealed=both, drop_flag=True)),
+        )
+        _nrdc_t1_want = ["contained", "noexec-only", "none", "none", "none", "none", "none"]
+
+        def _nrdc_t1(**extra):
+            return [_nrdc_probe(_nrdc_dirs, **dict(kw, **extra))[0] for _k, kw in _nrdc_t1_rows]
+
+        # T1: the probe gives contained, noexec-only and none; one contained and one uncontained
+        # directory is not contained; a failing statvfs and a missing os.ST_NOEXEC give none
+        check("nrd-contain/probe-modes", list(zip([k for k, _kw in _nrdc_t1_rows], _nrdc_t1())),
+              list(zip([k for k, _kw in _nrdc_t1_rows], _nrdc_t1_want)))
+        check("nrd-contain/probe-empty-dirs-none", _nrdc_probe((), set(), set())[0], "none")
+        # the detail names the directory and the property that failed (the deny text carries it)
+        _nrdc_noexec_only = _nrdc_probe(_nrdc_dirs, both, {st})
+        _nrdc_none = _nrdc_probe(_nrdc_dirs, {hb}, both)
+        check("nrd-contain/probe-detail-names-dir-and-property",
+              (_nrdc_noexec_only[1], _nrdc_none[1], _nrdc_probe(_nrdc_dirs, both, both)[1]),
+              ("{} is on a noexec mount but this account can open it (read or search permission)".format(hb),
+               "{} is not on a noexec mount".format(st), None))
+        # the probe on this host's real fixture: the suite never makes its own temp tree contained
+        check("nrd-contain/probe-fixture-not-contained",
+              aiqt_hooks._nrd_containment(_nrdc_dirs)[0] in ("none", "noexec-only"), True)
+        # T4: a probe that ignores the mount flag turns T1 red (sealed-only reads as contained)
+        check("nrd-contain/flip-probe-ignores-noexec-red", _nrdc_t1(ignore_flag=True) != _nrdc_t1_want, True)
+
+        # T2: no reduction outside containment. Every existing nrd/ row (each nrd() call above, its
+        # verdict pinned by its own nrd/ check) has the same verdict with the probe forced to 'none' and
+        # to 'noexec-only' as in the run itself.
+        check("nrd-contain/existing-rows-recorded", len(_nrdc_rows) > 300, True)
+        check("nrd-contain/existing-rows-same-verdict-none-noexec-only",
+              [(c, v, f) for c, _cw, v, f in _nrdc_rows
+               if f["none"] != v or f["noexec-only"] != v], [])
+        # every existing row that was refused and names a declared directory (its text, an absolute
+        # path in it, or its working directory) still refuses in tripwire mode
+        check("nrd-contain/existing-named-refusals-still-refuse-contained",
+              [(c, f.get("contained")) for c, cw, v, f in _nrdc_rows
+               if "contained" in f and v == "deny" and isinstance(c, str)
+               and (aiqt_hooks._nrd_raw_names(c, _nrdc_dirs)
+                    or (isinstance(cw, str) and aiqt_hooks._nrd_match(cw, None, _nrdc_dirs) is True))
+               and f["contained"] != "deny"], [])
+
+        def _nrdc_oracle():
+            # per corpus row, after the oracle's own reset: the verdict as the probe reports this host,
+            # then with the probe forced to 'none', 'noexec-only' and 'contained', all four on the same
+            # filesystem state (an earlier row's real-bash run can leave a copy or a link behind that
+            # the reader shapes then see, so a verdict is only compared with one taken beside it); never
+            # run
+            out = []
+            for n, (_cid, cwd_key, tmpl) in enumerate(nrdo_corpus):
+                _nrdo_reset(nrdo_fx)
+                cmd = _nrdo_expand(tmpl, nrdo_fx, n)
+                row = [_nrdo_guard(aiqt_hooks, nrdo_fx, cmd, nrdo_fx[cwd_key])]
+                for mode in ("none", "noexec-only", "contained"):
+                    row.append(_nrdc_forced(mode, lambda: _nrdo_guard(
+                        aiqt_hooks, nrdo_fx, cmd, nrdo_fx[cwd_key])))
+                out.append(tuple(row))
+            _nrdo_reset(nrdo_fx)
+            return out
+
+        _nrdc_oracle_rows = _nrdc_oracle()
+        check("nrd-contain/oracle-same-verdict-none-noexec-only",
+              [c[0] for c, (real, none, noexec, _cont) in zip(nrdo_corpus, _nrdc_oracle_rows)
+               if not (real == none == noexec)], [])
+        check("nrd-contain/oracle-corpus-pinned-unchanged", _nrdo_pin(nrdo_corpus), _NRDO_CORPUS_PIN)
+        # in tripwire mode every oracle row that ran declared code under real bash, names a declared
+        # directory (or runs inside one) and is refused outside containment is still refused
+        check("nrd-contain/oracle-named-ran-rows-still-refuse-contained",
+              [c[0] for n, (c, row, vs) in enumerate(zip(nrdo_corpus, nrdo_rows, _nrdc_oracle_rows))
+               if row[2] and vs[1] == "deny"
+               and (aiqt_hooks._nrd_raw_names(_nrdo_expand(c[2], nrdo_fx, n), nrdo_fx["dirs"])
+                    or aiqt_hooks._nrd_match(nrdo_fx[c[1]], None, nrdo_fx["dirs"]) is True)
+               and vs[3] != "deny"], [])
+
+        # the reviews' command forms: each keeps its fbdff942 verdict in 'none' and 'noexec-only'
+        _nrdc_places = {"@ST@": st, "@HB@": hb, "@OUT@": outd, "@TMP@": str(tmp),
+                        "@STDLIB@": os.path.dirname(os.__file__)}
+        _nrdc_cwds = {"tmp": str(tmp), "out": outd, "st": st}
+
+        def _nrdc_mode_verdict(mode, cmd, cwd):
+            return _nrdc_forced(mode, lambda: _verdict(nrd(cmd, cwd=cwd, project=str(nd.root))))
+
+        def _nrdc_review(mode):
+            return [(cid, _nrdc_mode_verdict(mode, _nrdc_expand(tmpl, _nrdc_places), _nrdc_cwds[key]))
+                    for cid, key, tmpl, _pin in _NRDC_REVIEW_FORMS]
+
+        _nrdc_review_pins = [(cid, pin) for cid, _key, _tmpl, pin in _NRDC_REVIEW_FORMS]
+        check("nrd-contain/review-forms-fbdff942-verdict-none", _nrdc_review("none"), _nrdc_review_pins)
+        check("nrd-contain/review-forms-fbdff942-verdict-noexec-only", _nrdc_review("noexec-only"),
+              _nrdc_review_pins)
+        # the comparator is live: a guard forced into tripwire mode in 'none' (the mode gate inverted)
+        # turns this differential red (T4: applying tripwire mode in none turns T2 red)
+        _nrdc_real_scan = aiqt_hooks._nrd_scope_scan
+
+        def _nrdc_always_contained(command, cwd, dirs, _depth=0, mode="none"):
+            return _nrdc_real_scan(command, cwd, dirs, _depth, mode="contained")
+
+        setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_always_contained)
+        try:
+            _nrdc_review_mut = _nrdc_review("none")
+        finally:
+            setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_real_scan)
+        check("nrd-contain/flip-tripwire-in-none-red",
+              len([1 for got, want in zip(_nrdc_review_mut, _nrdc_review_pins)
+                   if want[1] == "deny" and got[1] != "deny"]) > 0, True)
+
+        # T3: tripwire mode. These still deny (each names a declared directory, or runs inside one)
+        _nrdc_still_deny = ("python3 {}/x.py".format(hb), "bash {}/x.sh".format(st),
+                            "cd {} && python3 x.py".format(st), "PYTHONPATH={} python3 -m evil".format(st))
+        check("nrd-contain/tripwire-named-still-deny",
+              [_nrdc_mode_verdict(m, c, outd) for c in _nrdc_still_deny for m in
+               ("none", "noexec-only", "contained")], ["deny"] * 12)
+        # the cp source-only allowlist form keeps today's verdict in every mode
+        check("nrd-contain/cp-source-form-same-every-mode",
+              [_nrdc_mode_verdict(m, "cp {}/x.py {}/cpc.py".format(st, outd), outd)
+               for m in ("none", "noexec-only", "contained")], ["allow"] * 3)
+        # these name no declared directory: refused in 'none' and 'noexec-only', allowed when contained
+        _nrdc_wide = ("cat <<EOF > out.txt\nhi\nEOF\n", "grep -c x <<< 'xyz'", "python3 -c 'print(1)'",
+                      "echo \"$(date)\"", "git -c core.pager=less log")
+        check("nrd-contain/tripwire-unnamed-allows-contained",
+              [(_nrdc_mode_verdict("none", c, outd), _nrdc_mode_verdict("noexec-only", c, outd),
+                _nrdc_mode_verdict("contained", c, outd)) for c in _nrdc_wide],
+              [("deny", "deny", "allow")] * 5)
+        # T4: removing the mode gate (the scan ignores the mode) turns the allow rows red
+        setattr(aiqt_hooks, "_nrd_scope_scan",
+                lambda command, cwd, dirs, _depth=0, mode="none": _nrdc_real_scan(command, cwd, dirs, _depth))
+        try:
+            check("nrd-contain/flip-no-mode-gate-red",
+                  [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_wide], ["deny"] * 5)
+        finally:
+            setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_real_scan)
+        # the custodian reader form, judged in scope (from a working directory inside a declared
+        # directory): allowed only when contained, alone or feeding git apply from outside them
+        _nrdc_helper = "sudo -u orch-deliv /usr/local/bin/orch-deliverable"
+        _nrdc_helper_ok = ("{} cat 994/x.handback".format(_nrdc_helper), "{} ls 994".format(_nrdc_helper),
+                           "{} cat 994/x.handback | git -C {} apply --check".format(_nrdc_helper, outd))
+        check("nrd-contain/helper-form-allows-contained-only",
+              [(_nrdc_mode_verdict("none", c, st), _nrdc_mode_verdict("noexec-only", c, st),
+                _nrdc_mode_verdict("contained", c, st)) for c in _nrdc_helper_ok],
+              [("deny", "deny", "allow")] * 3)
+        # the helper form with an extra option, an absolute name, an assignment prefix, a '..' name or
+        # an extra word denies in every mode
+        _nrdc_helper_bad = ("{} -v cat 994/x".format(_nrdc_helper), "{} cat /994/x".format(_nrdc_helper),
+                            "X=1 {} cat 994/x".format(_nrdc_helper), "{} cat ../x".format(_nrdc_helper),
+                            "{} cat 994/x 994/y".format(_nrdc_helper),
+                            "sudo -u root /usr/local/bin/orch-deliverable cat 994/x",
+                            "sudo -u orch-deliv orch-deliverable cat 994/x")
+        check("nrd-contain/helper-variants-deny",
+              [_nrdc_mode_verdict(m, c, st) for c in _nrdc_helper_bad
+               for m in ("none", "noexec-only", "contained")], ["deny"] * 21)
+        # the shape test alone: exactly the two verbs with one relative name, nothing else
+        check("nrd-contain/helper-shape-unit",
+              [aiqt_hooks._nrd_helper_form(c.split()) for c in _nrdc_helper_ok[:2] + _nrdc_helper_bad[:5]],
+              [True, True, False, False, False, False, False])
+
+        def _nrdc_reason(mode, cmd, cwd):
+            res = _nrdc_forced(mode, lambda: nrd(cmd, cwd=cwd, project=str(nd.root)))
+            spec = (res[1] or {}).get("hookSpecificOutput", {}) if isinstance(res[1], dict) else {}
+            return spec.get("permissionDecisionReason", "")
+
+        # H3: the deny text names the helper route and the store when contained, and says containment
+        # was not observed (with the probe's detail) otherwise
+        _nrdc_r_cont = _nrdc_reason("contained", "python3 {}/x.py".format(hb), outd)
+        _nrdc_r_none = _nrdc_reason("none", "python3 {}/x.py".format(hb), outd)
+        check("nrd-contain/deny-text-modes",
+              ("/usr/local/bin/orch-deliverable" in _nrdc_r_cont, "/var/lib/orch-deliverables" in _nrdc_r_cont,
+               "Containment was not observed" in _nrdc_r_cont,
+               "Containment was not observed (forced by the self-test), so the strict guard applies."
+               in _nrdc_r_none, "/usr/local/bin/orch-deliverable" in _nrdc_r_none),
+              (True, True, False, True, False))
+        # the real probe's detail reaches the reason (the fixture is not contained)
+        _nrdc_r_real = (nrd("python3 {}/x.py".format(hb), cwd=outd, project=str(nd.root))[1] or {}).get(
+            "hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        check("nrd-contain/deny-text-real-probe-detail",
+              "Containment was not observed ({}".format(st) in _nrdc_r_real
+              or "Containment was not observed ({}".format(hb) in _nrdc_r_real
+              or "Containment was not observed ({}".format(os.path.realpath(st)) in _nrdc_r_real, True)
 
         # ---------- Surface B: the validation membrane ----------
         import time as _time

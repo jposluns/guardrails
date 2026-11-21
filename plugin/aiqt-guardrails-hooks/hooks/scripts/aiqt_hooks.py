@@ -29895,6 +29895,75 @@ def _nrd_dirs(value, root):
     return tuple(out)
 
 
+# Containment (the host half of wowo01's run-in-place control, ORCHESTRATION.md "Containment and
+# tripwire mode"): the declared directories sit on a noexec mount AND this hook's account cannot open
+# them (a custodian account owns them; a root-owned helper run through sudo is the only reader). Under
+# containment an in-place `python3 x.py` or `bash x.sh` fails at open() whatever its shell spelling, so
+# the guard runs as a TRIPWIRE: it keeps every test that relates a command to a declared directory and
+# drops only the session-wide refuse-wide tests that exist because an openable file could otherwise be
+# reached unseen. The three modes, probed once per hook call by _nrd_containment.
+_NRD_MODE_NONE = "none"
+_NRD_MODE_NOEXEC = "noexec-only"
+_NRD_MODE_CONTAINED = "contained"
+# The custodian route the contained mode allowlists, and the store it names in its deny text. The
+# reader form is exactly `sudo -u orch-deliv /usr/local/bin/orch-deliverable cat|ls <one relative name>`.
+_NRD_CUSTODIAN = "orch-deliv"
+_NRD_HELPER = "/usr/local/bin/orch-deliverable"
+_NRD_HELPER_VERBS = frozenset(("cat", "ls"))
+_NRD_STORE = "/var/lib/orch-deliverables"
+
+
+def _nrd_containment(dirs):
+    """(mode, detail) for the declared directories, read from the filesystem once per hook call after
+    the directories are known; it reads no file content. For each directory: noexec when
+    os.statvfs(d).f_flag carries os.ST_NOEXEC, sealed when os.access(d, os.R_OK) and os.access(d,
+    os.X_OK) are both False for this account. 'contained' only when EVERY directory (each declared
+    spelling and its resolved form, so the probe covers what the matching compares) is both noexec and
+    sealed; 'noexec-only' when every one is noexec and at least one is openable; 'none' otherwise, and
+    'none' on an empty set, a missing os.ST_NOEXEC or any failure of the probe (fail closed: no decision
+    moves toward allow unless containment is observed). detail is None when contained, else one clause
+    naming the directory and the property that failed, for the deny text."""
+    flag = getattr(os, "ST_NOEXEC", None)
+    if not isinstance(flag, int) or isinstance(flag, bool) or flag <= 0:
+        return (_NRD_MODE_NONE, "os.ST_NOEXEC is not available to this hook")
+    if not dirs:
+        return (_NRD_MODE_NONE, "no deliverable directory is declared")
+    first_exec = None
+    first_open = None
+    try:
+        for d in dirs:
+            noexec = bool(os.statvfs(d).f_flag & flag)
+            sealed = not os.access(d, os.R_OK) and not os.access(d, os.X_OK)
+            if not noexec and first_exec is None:
+                first_exec = d
+            if not sealed and first_open is None:
+                first_open = d
+    except Exception as exc:  # noqa: BLE001 - any probe failure is 'none' (the strict guard applies)
+        return (_NRD_MODE_NONE, "the containment probe failed ({})".format(exc.__class__.__name__))
+    if first_exec is not None:
+        return (_NRD_MODE_NONE, "{} is not on a noexec mount".format(first_exec))
+    if first_open is not None:
+        return (_NRD_MODE_NOEXEC, "{} is on a noexec mount but this account can open it (read or "
+                                  "search permission)".format(first_open))
+    return (_NRD_MODE_CONTAINED, None)
+
+
+def _nrd_helper_form(argv):
+    """True for exactly the custodian reader form the contained mode allowlists:
+    `sudo -u orch-deliv /usr/local/bin/orch-deliverable cat|ls <name>` with no other word, option or
+    assignment, where name is one relative path (no leading '/' or '-', no empty, '.' or '..'
+    component, no NUL). The helper validates its own argv as well; this shape only keeps the
+    allowlisted call from carrying anything else."""
+    if len(argv) != 6 or list(argv[:4]) != ["sudo", "-u", _NRD_CUSTODIAN, _NRD_HELPER]:
+        return False
+    if argv[4] not in _NRD_HELPER_VERBS:
+        return False
+    name = argv[5]
+    if not isinstance(name, str) or not name or "\x00" in name or name[0] in "/-":
+        return False
+    return all(part not in ("", ".", "..") for part in name.split("/"))
+
+
 def _nrd_match(path, eff_cwd, dirs):
     """True when the operand path resolves into a declared directory (either form of the operand at or
     below either form of a directory), False when it provably does not, None for a relative operand
@@ -30830,7 +30899,7 @@ def _nrd_cdpath_active(segments):
     return _nrd_cdpath_set_in_command(segments)
 
 
-def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
+def _nrd_segment_allowed(seg, eff_cwd, dirs, written, contained=False):
     """Judge one lexed segment against the closed read-only allowlist: (True, next effective working
     directory) when it matches a listed form, (False, eff_cwd) otherwise. BY CONSTRUCTION, not by
     exclusion: a segment carrying any unquoted expansion, substitution, glob, brace or tilde fails
@@ -30842,7 +30911,9 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
     absolute paths this command's earlier segments create (cp targets, write redirects, mkdir), so a git
     segment can refuse a repository the same call just built. The one segment that moves the effective
     working directory is the listed cd: exactly one literal absolute operand resolving outside every
-    declared directory (the session's exit from a declared cwd; entering one with cd is not listed)."""
+    declared directory (the session's exit from a declared cwd; entering one with cd is not listed).
+    In contained mode only (contained=True), the custodian reader form (_nrd_helper_form) is listed
+    too; in the none and noexec-only modes the allowlist is unchanged."""
     if seg.opaque_shell or any(seg.argv_opaque):
         return (False, eff_cwd)
     if "$'" in seg.raw:
@@ -30870,6 +30941,8 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
                 and _nrd_match(argv[1], None, dirs) is False:
             return (True, os.path.normpath(argv[1]))
         return (False, eff_cwd)
+    if contained and head == "sudo":
+        return (_nrd_helper_form(argv), eff_cwd)
     if head in _NRD_READ_FORMS:
         ok, _operands = _nrd_options_ok(argv[1:], _NRD_READ_FORMS[head])
         return (ok, eff_cwd)
@@ -31193,6 +31266,20 @@ def _nrd_path_parts(value, cwd):
     return out
 
 
+def _nrd_path_parts_tripwire(value, cwd, contained):
+    """_nrd_path_parts, except in contained mode with an unknown working directory: there a relative or
+    empty part is the unknown-cwd-counts-as-reaching reading the tripwire drops, so only the absolute
+    parts are placed (a part holding '$', a leading '~' or a NUL still cannot be placed: None). In every
+    other case the result is _nrd_path_parts' own."""
+    parts = _nrd_path_parts(value, cwd)
+    if parts is not None or not contained or cwd is not None:
+        return parts
+    split = value.split(":")
+    if any("$" in part or part.startswith("~") or "\x00" in part for part in split):
+        return None
+    return [os.path.normpath(part) for part in split if os.path.isabs(part)]
+
+
 class _NrdLaunchContext(object):
     """Per-call inputs of the launch test, read once per scope scan: the hook interpreter's module
     search directories (an approximation of the target interpreter's default sys.path), the hook
@@ -31237,19 +31324,20 @@ class _NrdLaunchContext(object):
                 self.sys_failed = True
         return None if self.sys_failed else self.sys_dirs
 
-    def path_hit(self, cwd, dirs):
+    def path_hit(self, cwd, dirs, contained=False):
         """True when a PATH directory of the hook environment lies inside a declared directory, or a
         relative or empty PATH entry cannot be placed (so a command word resolved through PATH may be a
-        declared file)."""
+        declared file). In contained mode a relative or empty entry under an unknown working directory
+        is not counted (_nrd_path_parts_tripwire)."""
         if not self.env_path:
             return False
-        parts = _nrd_path_parts(self.env_path, cwd)
+        parts = _nrd_path_parts_tripwire(self.env_path, cwd, contained)
         if parts is None:
             return True
         return any(_nrd_match(p, None, dirs) is True for p in parts)
 
 
-def _nrd_py_launch_unproven(args, cwd, dirs, ctx):
+def _nrd_py_launch_unproven(args, cwd, dirs, ctx, contained=False):
     """True when a python-family run with these words may import or run a file inside a declared
     directory that its words do not name: a module search directory (the hook interpreter's sys.path,
     the hook environment's PYTHONPATH, or a PYTHON*= value the command assigns) at or above a declared
@@ -31257,7 +31345,9 @@ def _nrd_py_launch_unproven(args, cwd, dirs, ctx):
     working directory for -c, -m and a stdin program; the script's directory for a script) at or above a
     declared directory or unknown. A script operand that is relative while the working directory is
     unknown cannot be placed either. Module names are never resolved: reaching the search root is
-    enough."""
+    enough. In contained mode (contained=True) an unknown working directory is not counted as reaching:
+    a relative search part, a relative script operand and the -c, -m or stdin search root are judged
+    only where the working directory is known; every other row is unchanged."""
     isolated, mode, target = _nrd_py_mode(args)
     if mode == "none":
         return False
@@ -31268,7 +31358,7 @@ def _nrd_py_launch_unproven(args, cwd, dirs, ctx):
         return True
     roots = list(module_dirs)
     for value in ctx.py_assigns + ([ctx.env_pythonpath] if ctx.env_pythonpath else []):
-        parts = _nrd_path_parts(value, cwd)
+        parts = _nrd_path_parts_tripwire(value, cwd, contained)
         if parts is None:
             return True
         roots.extend(parts)
@@ -31279,14 +31369,15 @@ def _nrd_py_launch_unproven(args, cwd, dirs, ctx):
             return True
         script_forms = _nrd_forms(target, cwd)
         if script_forms is None:
-            return True
+            # a relative operand under an unknown working directory (or an unusable value)
+            return not (contained and cwd is None and "\x00" not in target)
         if isolated:
             return False
         return any(_nrd_dir_reachable_from(os.path.dirname(f) or "/", dirs) for f in script_forms)
     if isolated:
         return False
     if cwd is None:
-        return True
+        return not contained
     return _nrd_dir_reachable_from(cwd, dirs)
 
 
@@ -31368,7 +31459,7 @@ def _nrd_wrapper_cwd(argv, oq, cwd):
     return cwd
 
 
-def _nrd_launch_unproven(seg, cwd, dirs, ctx):
+def _nrd_launch_unproven(seg, cwd, dirs, ctx, contained=False):
     """True when this segment runs an interpreter, sources a file, or runs a command-running wrapper,
     and this guard cannot show that every file it will execute or import lies outside the declared
     directories (the unread-launch-target class). cwd is the effective working directory the scope walk
@@ -31379,12 +31470,17 @@ def _nrd_launch_unproven(seg, cwd, dirs, ctx):
     without a slash (bash searches PATH and the working directory for it) while the working directory is
     unknown or a PATH directory lies inside a declared directory; a relative operand while the working
     directory is unknown; and any launch while a PATH directory of the hook environment lies inside a
-    declared directory (the launched word itself is found through PATH)."""
+    declared directory (the launched word itself is found through PATH). In contained mode
+    (contained=True) the unknown-cwd-counts-as-reaching part is dropped: a relative shell or source
+    operand, a relative python search part or script and the python -c, -m or stdin search root count
+    only where the working directory is known, and a relative PATH entry is not counted under an
+    unknown one; every other row is unchanged."""
     argv = seg.argv
     if not argv:
         return False
     oq = seg.argv_opaque
     cwd = _nrd_wrapper_cwd(argv, oq, cwd)
+    ckw = {"contained": True} if contained else {}
     launch = False
     k = 0
     while k < len(argv) and not oq[k] and (_ENV_ASSIGN_RE.match(argv[k]) or argv[k] in _NRD_RESERVED_LEAD):
@@ -31397,13 +31493,15 @@ def _nrd_launch_unproven(seg, cwd, dirs, ctx):
         word = tok.rsplit("/", 1)[-1]
         if _NRD_PY_WORD_RE.match(word):
             launch = True
-            if _nrd_py_launch_unproven(argv[j + 1:], cwd, dirs, ctx):
+            if _nrd_py_launch_unproven(argv[j + 1:], cwd, dirs, ctx, **ckw):
                 return True
         elif word in _NRD_LAUNCH_SHELLS or word in (".", "source"):
             launch = True
             operand = _nrd_shell_operand(argv[j + 1:], word)
             if isinstance(operand, str) and operand and not os.path.isabs(operand):
                 if cwd is None:
+                    if contained:
+                        continue
                     return True
                 if "/" not in operand and ctx.path_hit(cwd, dirs):
                     return True
@@ -31417,7 +31515,7 @@ def _nrd_launch_unproven(seg, cwd, dirs, ctx):
         return True
     if any("=~" in tok or ":~" in tok for tok in argv):
         return True
-    return ctx.path_hit(cwd, dirs)
+    return ctx.path_hit(cwd, dirs, contained)
 
 
 def _nrd_assigned_value_in(seg, cwd, dirs):
@@ -31775,7 +31873,7 @@ def _nrd_wide_unproven(seg, cwd, dirs):
     return False
 
 
-def _nrd_scope_scan(command, cwd, dirs, _depth=0):
+def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
     """The allowlist-by-construction judgement of one Bash command against the declared directories:
     (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text (or
     a copy with each $'...' ANSI-C span decoded to bash's spelling) names a declared directory
@@ -31811,7 +31909,21 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     peel does not read,
     and a program a non-shell, non-python interpreter or a wrapper outside the peel (xargs) reads from
     stdin: nothing in such a call's text or payload distinguishes it (disclosed in the manifest residue
-    and ORCHESTRATION.md)."""
+    and ORCHESTRATION.md).
+
+    mode is the containment mode (_nrd_containment). In 'none' and 'noexec-only' every test above runs
+    exactly as written (no decision moves toward allow unless containment is observed). In 'contained'
+    (tripwire mode) the tests that relate the command to a declared directory all stay (the payload
+    working directory, _nrd_raw_names on the raw and ANSI-C-decoded text, argv and redirect targets,
+    _nrd_assigned_value_in, the nested -c recursion, the CDPATH widening, and _nrd_launch_unproven
+    apart from its unknown-working-directory part), and only the session-wide refuse-wide tests are
+    skipped:
+    _nrd_unread_in_scope, _nrd_subst_unproven, _nrd_stdin_program, _nrd_env_opaque, _nrd_wide_unproven,
+    the lost-cwd relative-operand rule and the unknown-cwd-counts-as-reaching part of
+    _nrd_launch_unproven. Under containment the file cannot be opened, so those tests no longer guard
+    anything the host does not; the allowlist then also lists the custodian reader form."""
+    contained = mode == _NRD_MODE_CONTAINED
+    ckw = {"contained": True} if contained else {}
     eff_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd else None
     scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
         or _nrd_raw_names(command, dirs) \
@@ -31820,11 +31932,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
         segments = _lex_command(command)
     except ValueError:
         segments = None
-        if _nrd_unread_in_scope(dirs):
+        if not contained and _nrd_unread_in_scope(dirs):
             # A command the lexer cannot read (an unquoted here-document, a here-string and the rest) is
             # in scope and refuses whole; no re-reading of it can allow it.
             scope = True
-    if not scope and dirs and _nrd_subst_unproven(command):
+    if not scope and dirs and not contained and _nrd_subst_unproven(command):
         # a command substitution anywhere in the raw text, other than the quoted cat here-document
         # shape: its body is not in the lexed words, so nothing shows what it runs (refuse wide)
         scope = True
@@ -31835,25 +31947,25 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
         walk_cwd = eff_cwd
         cwd_lost = False
         for seg in walk:
-            if not scope and dirs and _nrd_stdin_program(seg):
+            if not scope and dirs and not contained and _nrd_stdin_program(seg):
                 # a shell or interpreter reading its program from stdin: the program is not in the
                 # lexed words, so nothing shows it names no declared directory (fail closed)
                 scope = True
-            if not scope and cwd_lost and _nrd_relative_operand(seg):
+            if not scope and not contained and cwd_lost and _nrd_relative_operand(seg):
                 # the working directory is unknown after cd -, a bare cd, an unreadable cd operand or
                 # a directory-stack builtin, so a relative operand may resolve inside one (fail closed)
                 scope = True
             body = _nrd_shell_c_body(seg)
             if body is not None and _depth < _NRD_MAX_C_DEPTH:
-                sub = _nrd_scope_scan(body, walk_cwd, dirs, _depth + 1)
+                sub = _nrd_scope_scan(body, walk_cwd, dirs, _depth + 1, mode=mode)
                 if sub is not None:
                     return sub
             prior = _nrd_shell_c_prior_body(seg)
             if prior is not None and prior != body and _depth < _NRD_MAX_C_DEPTH:
-                sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1)
+                sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1, mode=mode)
                 if sub is not None:
                     return sub
-            if not scope and _nrd_env_opaque(seg, walk_cwd, dirs):
+            if not scope and not contained and _nrd_env_opaque(seg, walk_cwd, dirs):
                 # an env call whose words the closed set does not parse, an assignment-shaped word its
                 # grammar rejects, or a value-bearing -S call whose words are not plainly outside the
                 # declared directories can run a command this guard cannot read: in scope, so only the
@@ -31867,11 +31979,13 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
                 # the value of an assignment or --option= word resolves into a declared directory
                 # (PYTHONPATH=drafts, BASH_ENV=drafts/x.sh, PATH=drafts:/usr/bin)
                 scope = True
-            if not scope and dirs and _nrd_launch_unproven(seg, None if cwd_lost else walk_cwd, dirs, ctx):
+            if not scope and dirs and _nrd_launch_unproven(seg, None if cwd_lost else walk_cwd, dirs, ctx,
+                                                           **ckw):
                 # an interpreter, source or command-running launch whose executed or imported files this
                 # guard cannot place outside the declared directories (the unread-launch-target class)
                 scope = True
-            if not scope and dirs and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs):
+            if not scope and dirs and not contained \
+                    and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs):
                 # a construct this guard does not fully read: program text, a collector or runner from an
                 # ancestor of a declared directory, git configuration that runs program text, or a word
                 # naming configuration that executes (refuse wide, allow narrow)
@@ -31900,7 +32014,7 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     for seg in segments:
         if not seg.argv and not seg.redirects:
             continue
-        ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs, written)
+        ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs, written, **ckw)
         if not ok:
             return (seg.argv[0] if seg.argv else "a redirect with no command",
                     "is not a closed-allowlist read-only form (or carries an option, operand shape, "
@@ -31948,10 +32062,32 @@ def _nrd_candidate(command):
     return False
 
 
-def _nrd_deny_text(subject, why):
+def _nrd_deny_text(subject, why, mode=None, detail=None):
     """The deny reason and banner for one refused in-scope command (strings only; the handler holds
     the constructor return sites). The reason names the judged subject, the rule, the closed allowlist
-    and the exits the rule leaves open."""
+    and the exits the rule leaves open. With a containment mode (_nrd_containment) it adds one closing
+    passage: in 'contained' mode it names the store and the custodian helper route; in 'none' and
+    'noexec-only' it says containment was not observed (detail names the directory and the property
+    that failed), so the strict guard applies. With mode None the text is the pre-containment text."""
+    reason, banner = _nrd_deny_text_base(subject, why)
+    if mode == _NRD_MODE_CONTAINED:
+        reason += (
+            " Containment is observed (every declared directory is on a noexec mount and this account "
+            "cannot open it), so this guard runs as a tripwire and refused this command because it "
+            "names, reaches or runs inside a declared directory. The deliverable store ({}/<UID>, the "
+            "declared directories) is read only through the custodian helper: exactly `sudo -u {} {} "
+            "cat <relative name>` or `... ls <relative name>`, piped into git apply or an allowlisted "
+            "reader. Running the bytes it prints is still the rule's judgement step: read them fully "
+            "first, then run a disposable copy.".format(_NRD_STORE, _NRD_CUSTODIAN, _NRD_HELPER))
+    elif mode in (_NRD_MODE_NONE, _NRD_MODE_NOEXEC):
+        reason += (" Containment was not observed ({}), so the strict guard applies.".format(
+            detail or "the probe reported no detail"))
+    return reason, banner
+
+
+def _nrd_deny_text_base(subject, why):
+    """The pre-containment deny reason and banner for one refused in-scope command (the shared body of
+    _nrd_deny_text)."""
     reason = (
         "AIQT rule wowo01 (workers produce inert data): {} {}. This command is in scope of a declared "
         "deliverable directory (the registry's deliverable_dirs: the draft staging and hand-back "
@@ -32019,9 +32155,13 @@ def orch_deliverable_exec_guard(data):
     candidates (_nrd_candidate), check-fails-closed-on-unreadable with a limited blast radius (the
     posture is unchanged from the per-form release); where another consulted root supplies usable
     directories both postures apply, deny-biased. With a usable key a MISSING or NON-STRING command in
-    scope denies (check-fails-closed-on-unreadable), never a clean pass. The judged surface is pinned
+    scope denies (check-fails-closed-on-unreadable), never a clean pass. Before the scan, the
+    containment probe (_nrd_containment) reads the declared directories' mount flag and this account's
+    access once per call: only 'contained' (every directory noexec and unopenable) runs the scan as a
+    tripwire; 'none' and 'noexec-only' run it exactly as before. The judged surface is pinned
     by the nrd/ cases of tools/selftest_orch_hooks.py, deny cases paired with real-bash evidence that
-    the refused form runs the file and allow cases with evidence that it does not."""
+    the refused form runs the file and allow cases with evidence that it does not, and the containment
+    modes by the nrd-contain/ cases."""
     tool_name = data.get("tool_name")
     if tool_name is None:
         return _deny_missing_tool_name(_NRD_RULE)
@@ -32074,9 +32214,12 @@ def orch_deliverable_exec_guard(data):
                                         unread)
     if not command:
         return _allow()                     # an empty command runs nothing: nothing to judge
-    hit = _nrd_scope_scan(command, data.get("cwd"), tuple(dirs))
+    # the containment probe, once per hook call now that the directories are known: 'contained' runs
+    # the scan as a tripwire; 'none' and 'noexec-only' run it exactly as before
+    mode, detail = _nrd_containment(tuple(dirs))
+    hit = _nrd_scope_scan(command, data.get("cwd"), tuple(dirs), mode=mode)
     if hit is not None:
-        reason, banner = _nrd_deny_text(hit[0], hit[1])
+        reason, banner = _nrd_deny_text(hit[0], hit[1], mode, detail)
         return _deny(reason, banner)
     if malformed is not None and _nrd_candidate(command):
         # Another consulted root's configuration is unusable: its candidate posture still applies.

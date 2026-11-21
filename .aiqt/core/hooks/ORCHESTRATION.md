@@ -655,10 +655,13 @@ segment wherever it stands for the rest. The constructs:
   or write-redirect destination in scope. An allowlisted reader still passes (`cat ~/.bashrc`,
   `ls .git/hooks`).
 
-Operator note: setting `deliverable_dirs` changes how the WHOLE session's Bash calls are judged, not
-only calls that name a declared directory: every construct above, a program on stdin (`python3 -` with
-a quoted here-document, a pipe into `bash`), an unquoted here-document or here-string, and a launch
-carrying any expansion deny wherever a directory is declared.
+Operator note: while containment is NOT observed (the `none` and `noexec-only` modes of "Containment
+and tripwire mode" below), setting `deliverable_dirs` changes how the WHOLE session's Bash calls are
+judged, not only calls that name a declared directory: every construct above, a program on stdin
+(`python3 -` with a quoted here-document, a pipe into `bash`), an unquoted here-document or here-string,
+and a launch carrying any expansion deny wherever a directory is declared. When containment is
+observed (the `contained` mode), only calls that name, reach or run inside a declared directory are
+judged.
 
 The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
 it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
@@ -791,6 +794,93 @@ session before any registry is read. It reads the command through the shared Bas
 key scope a missing, non-object or non-string command denies. Like the untracked wait-loop guard it is
 not lease-gated (a bounded worker running a deliverable in place is equally wrong) and never reads
 `AIQT_ORCH_REQUIRE_REGISTRY`.
+
+### Containment and tripwire mode
+
+The primary control for wowo01's run-in-place half is OS containment, not shell parsing: the declared
+directories live on a `noexec` mount that the orchestrator account cannot open, so `python3 x.py`,
+`bash x.sh` or `source x` run in place from there fail at `open()` whatever the shell spelling. `noexec`
+alone is not enough: it stops `execve()` and `mmap(PROT_EXEC)` (binaries, shared libraries, `./x`, a
+shebang script), but not an interpreter that reads the file as data. The guard stays as a disclosed
+best-effort tripwire.
+
+The probe. Once per hook call, after the directories are known, `_nrd_containment` reads, for each
+declared directory (as written and as `os.path.realpath` resolves it), whether `os.statvfs(d).f_flag`
+carries `os.ST_NOEXEC` (noexec) and whether `os.access(d, os.R_OK)` and `os.access(d, os.X_OK)` are both
+false for the hook's account (sealed). It reads no file content. The result is one of three modes:
+
+- `contained`: every directory is noexec and sealed. The scan runs as a tripwire.
+- `noexec-only`: every directory is noexec and at least one can be opened. The scan runs exactly as
+  before, row for row: `noexec` alone does not stop interpreters.
+- `none`: anything else, including no declared directory, a missing `os.ST_NOEXEC` and any failure of
+  the probe. The scan runs exactly as before, row for row.
+
+No decision moves toward allow unless containment is observed.
+
+Tripwire mode (`contained`) keeps every test that relates a command to a declared directory: a payload
+working directory inside one, the raw text (and its ANSI-C-decoded copy) naming one, an argv word or
+redirect target resolving into one, an assignment or `--option=` value resolving into one, the nested
+`-c` recursion, the CDPATH widening, and the unread-launch-target test apart from its
+unknown-working-directory part (so a python module search reaching a declared directory, a `PATH` entry
+inside one, and a launch carrying an expansion, glob, brace, tilde or ANSI-C quote still deny). It skips
+only the session-wide refuse-wide tests, which exist because the guard
+could not otherwise rule out reaching an openable file: the unreadable-command rule, the
+command-substitution rule, the stdin-program rule, the opaque-`env` rule, the refuse-wide segment test
+(program text, collectors, git configuration, configuration that executes), the lost-working-directory
+relative-operand rule, and the part of the launch test that counts an unknown working directory as
+reaching a declared one. In tripwire mode, and only there, the closed allowlist also lists the custodian
+reader form, exactly:
+
+    sudo -u orch-deliv /usr/local/bin/orch-deliverable cat <relative name>
+    sudo -u orch-deliv /usr/local/bin/orch-deliverable ls <relative name>
+
+with no other word, option or assignment, and a name with no leading `/` or `-` and no empty, `.` or
+`..` component. Its output may feed `git apply` (from a working directory outside the declared
+directories) or an allowlisted reader in a pipeline. The deny reason names the store and this route in
+tripwire mode; in the other two modes it adds one sentence saying containment was not observed, naming
+the directory and the property that failed, so the strict guard applies.
+
+Operator steps (host work, outside this repository; each is its own request to the host owner):
+
+1. R1, filesystem: a disk-backed filesystem (not tmpfs) mounted at `/var/lib/orch-deliverables` with
+   `rw,noexec,nosuid,nodev`, its own fstab entry, root directory `root:root 0711`.
+2. R2, account: a system user and group `orch-deliv` (no login, no home) owning
+   `/var/lib/orch-deliverables/<UID>/` for each adopting orchestrator UID, mode 0700, no ACL entries.
+3. R3, helper and sudoers: the root-owned helper `/usr/local/bin/orch-deliverable` (`put`, `cat`, `ls`;
+   it refuses symlinks, hard links, FIFOs, devices, oversize files, absolute names and `..`), and a
+   sudoers rule letting each adopting orchestrator run exactly that path as `orch-deliv`, NOPASSWD,
+   `env_reset`, no `SETENV`.
+4. R4, orch-verify: publish the deliverable and every sidecar through `orch-deliverable put`, and stage
+   hand-backs under an orchestrator-owned 0700 directory on the noexec mount.
+5. R5: stop offering the `/dev/shm` hand-back route to adopting orchestrators.
+6. R6: move the draft extraction directory into the store, written only through `put`.
+7. R7: confirm that no other mount of the same source lacks `noexec`.
+8. R8: run the host acceptance checks as the orchestrator account and keep the raw output.
+
+Only then point the live registry's `deliverable_dirs` at the store directories. The self-test
+(`nrd-contain/` in `tools/selftest_orch_hooks.py`) SIMULATES the three modes with a stubbed `os.statvfs`
+and `os.access` and a forced probe: it proves the hook's logic, not the host. Until the host steps are
+done and their checks pass, the probe reports `none` (or `noexec-only`) and the strict guard applies.
+
+Residuals the tripwire states (in addition to "Residuals" above):
+
+1. Copy-out and run: `orch-deliverable cat x > y.py; python3 y.py`. The helper gives the bytes, and
+   running them is the rule's judgement-level step; the tripwire catches only a launch that names the
+   store or runs inside it.
+2. The run scratch during a run: the orchestrator owns it and it is not contained.
+3. The stage window between the broker's staging and publication.
+4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.
+5. Host misconfiguration the probe cannot see at the moment of the run: a remount between the probe
+   and the run (time of check to time of use), another mount of the same filesystem without `noexec`,
+   root or `CAP_DAC_READ_SEARCH`, or a wider sudoers rule. The probe reads the hook's account, which is
+   assumed to be the account the Bash tool runs as.
+6. The existing residuals: same-UID registry edits and non-Bash tools (the write-scope guard covers the
+   structured write tools).
+7. In tripwire mode the constructs the skipped tests refused (a command substitution, program text, a
+   here-string, a stdin program, git configuration that runs program text) are allowed wherever they
+   name no declared directory; under containment a file there cannot be opened, so they no longer reach
+   one, but a host that only LOOKS contained to the probe (item 5) loses them.
+8. In the `noexec-only` and `none` modes every residual listed above still applies, unchanged.
 
 ## The lease heartbeat
 

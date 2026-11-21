@@ -677,6 +677,12 @@ corpus-id = "vrfdlv"
 status = "enforced"
 mechanisms = ["hook:orch-truncation-guard"]
 
+# wowo01, run-in-place half: OS containment is the primary control (the declared deliverable directories
+# on a noexec mount the orchestrator account cannot open, read only through a custodian helper; decided
+# 2026-11-21). The hook stays as a disclosed best-effort tripwire: it probes containment on every call
+# and keeps its strict rules until containment is observed (.aiqt/core/hooks/ORCHESTRATION.md,
+# "Containment and tripwire mode"). The host half is not built in this repository, and a partial row
+# carries no description, so this comment records the decision.
 [[rule]]
 corpus-id = "wowo01"
 status = "partial"
