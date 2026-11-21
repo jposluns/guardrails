@@ -44775,8 +44775,9 @@ class _DeadlineWindow:
 # URL already has it. A pushed tip this clone
 # holds no passing record for is accepted only when the remote at the push URL already has it (_gr_remote_has:
 # git ls-remote of that URL with the push's transport variables, never this clone's refs/remotes, reading only
-# the remote's branches and tags, then git rev-list over the commit objects); a remote that cannot be read, or a
-# URL ls-remote would rewrite to another one, then cannot evaluate. A record line is
+# the remote's branches and tags, then git rev-list over the commit objects); a remote that cannot be read, a
+# URL ls-remote would rewrite to another one, or a push a program or setting it chose could deliver elsewhere,
+# then cannot evaluate. A record line is
 # a JSON object with exactly _GR_KEYS, in that order: head is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
 # the check moved the tree, the index or HEAD, and a cannot-evaluate one when the check ran past its bound, a
 # process of its group outlived it, or the log was replaced or rewritten while it ran.
@@ -44810,7 +44811,12 @@ class _DeadlineWindow:
 # its branches and tags name (refs/heads and refs/tags only: pull-request refs and every other advertised ref are
 # not read), trusts whoever can write those refs on the remote (its own branch protection is the review), and
 # cannot evaluate a URL git ls-remote would rewrite (url.<base>.insteadOf, a remote named like the URL), checked
-# with ls-remote --get-url just before the read, so a same-user config change between the two is an R8 race.
+# with ls-remote --get-url just before the read, so a same-user config change between the two is an R8 race;
+# nor a push a program or setting it chose could deliver elsewhere than the read reaches (_gr_delivery_choice:
+# remote.<name>.receivepack, GIT_EXEC_PATH, an ssh or git:// proxy program, a transport helper), but git push
+# --receive-pack or --exec on the command line reaches no hook and can deliver a push to another repository than
+# its URL, which the proof then reads (open, like core.hooksPath on the command line), and an http.proxy the
+# push names is trusted to reach the URL's host.
 _GR_FORMAT = "aiqt-gate-record/2"
 _GR_OLD_FORMATS = ("aiqt-gate-record/1",)
 _GR_RECORDER = "aiqt_hooks gate-record 2"
@@ -44852,13 +44858,17 @@ _GR_HOOK_GIT_KEEP = frozenset((
 # Every other advertised ref (HEAD, refs/pull/*, refs/merge-requests/*, refs/notes/*, ...) is ignored.
 _GR_REMOTE_REVIEWED = ("refs/heads/", "refs/tags/")
 # The transport variables the remote proof's git ls-remote keeps from the environment git pushed with, so it
-# reaches the remote through the same ssh command, proxy, credentials and TLS settings as the push (dropping them
-# could make the read fail, or reach another host than the push did).
+# reaches the remote with the same credentials and TLS settings as the push (dropping them could make the read
+# fail). A program that carries the connection (GIT_SSH, GIT_SSH_COMMAND, GIT_PROXY_COMMAND) is not kept: it sees
+# which service git asks for, so it could send the read to one repository and the push to another
+# (_gr_delivery_choice, QA qagitrecord4); with one set, the proof is not read at all.
 _GR_TRANSPORT_KEEP = frozenset((
-    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_ALLOW_PROTOCOL",
+    "GIT_SSH_VARIANT", "GIT_ASKPASS", "GIT_ALLOW_PROTOCOL",
     "GIT_PROTOCOL_FROM_USER", "GIT_SSL_NO_VERIFY", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH", "GIT_SSL_CERT",
     "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_SSL_VERSION", "GIT_SSL_CIPHER_LIST",
     "GIT_HTTP_PROXY_AUTHMETHOD", "GIT_HTTP_USER_AGENT"))
+# The URL schemes git carries itself (no git-remote-<scheme> helper a same-user PATH entry could supply).
+_GR_BUILTIN_SCHEMES = frozenset(("file", "ssh", "git+ssh", "ssh+git", "git", "http", "https", "ftp", "ftps"))
 # The grafts file every git read here names: a path under /dev/null, which no process can create (ENOTDIR), so git
 # reads no grafts and, unlike an existing empty file, prints no graft-file deprecation hint.
 _GR_NO_GRAFTS = "/dev/null/aiqt-no-grafts"
@@ -45545,6 +45555,49 @@ def _gr_verify_commit():
     return 0
 
 
+def _gr_delivery_choice(env, url):
+    """Why git could have delivered this push to another repository than the one git ls-remote reads at url, or
+    None. git runs a program the push chose to carry the push (receive-pack) and another run of it to carry the
+    read (upload-pack), so such a program can send the two to different repositories (QA qagitrecord4, observed):
+    remote.<name>.receivepack naming another repository's receive-pack, GIT_EXEC_PATH (git --exec-path=) holding
+    another git-receive-pack, an ssh program (GIT_SSH, GIT_SSH_COMMAND, core.sshCommand) or a git:// proxy
+    (GIT_PROXY_COMMAND, core.gitProxy) that picks the repository by the service git asks for, or a transport
+    helper (a <helper>:: URL, or a scheme git does not carry itself). git push --receive-pack and --exec on the
+    command line reach no hook and stay open, like core.hooksPath on the command line."""
+    helper = re.match(r"([A-Za-z0-9][A-Za-z0-9+.-]*)::", url)
+    if helper:
+        return "the push URL runs the transport helper git-remote-{}".format(helper.group(1))
+    scheme = re.match(r"([A-Za-z][A-Za-z0-9+.-]*)://", url)
+    if scheme:
+        kind = scheme.group(1).lower()
+        if kind not in _GR_BUILTIN_SCHEMES:
+            return "the push URL runs the transport helper git-remote-{}".format(kind)
+    elif ":" in url and "/" not in url.split(":", 1)[0]:
+        kind = "ssh"  # host:path, git's scp-like ssh form
+    else:
+        kind = "file"
+    if kind in ("ssh", "git+ssh", "ssh+git"):
+        named = [key for key in ("GIT_SSH", "GIT_SSH_COMMAND") if os.environ.get(key)]
+        if _gr_git(env, "config", "--get", "core.sshCommand", check=False):
+            named.append("core.sshCommand")
+        if named:
+            return "the push carried ssh through {}".format(" and ".join(named))
+    if kind == "git":
+        named = ["GIT_PROXY_COMMAND"] if os.environ.get("GIT_PROXY_COMMAND") else []
+        if _gr_git(env, "config", "--get-all", "core.gitProxy", check=False):
+            named.append("core.gitProxy")
+        if named:
+            return "the push carried git:// through {}".format(" and ".join(named))
+    if _gr_git(env, "config", "--get-regexp", r"^remote\..*\.receivepack$", check=False):
+        return "a remote.<name>.receivepack setting names the program that receives a push"
+    pushed_with = os.environ.get("GIT_EXEC_PATH", "")
+    if pushed_with:
+        own = _gr_git(env, "--exec-path")
+        if os.path.realpath(pushed_with) != os.path.realpath(own):
+            return "git pushed with GIT_EXEC_PATH {!r}, not git's own {!r}".format(pushed_with, own)
+    return None
+
+
 def _gr_remote_tips(env, url):
     """The commit ids the remote at url advertises now (git ls-remote of the URL git pushes to, never this clone's
     own refs/remotes, which a same-user process can repoint) that this clone holds, as a list (peeled tags
@@ -45555,9 +45608,15 @@ def _gr_remote_tips(env, url):
     rewrite cannot evaluate. Only the remote's branches and tags (_GR_REMOTE_REVIEWED) count: a remote also
     advertises refs no review guards, such as the pull-request refs (refs/pull/*, refs/merge-requests/*) a
     hosted service makes from any user's unreviewed commits (QA qagitrecord3 finding 2). The read keeps the
-    transport variables git pushed with (_GR_TRANSPORT_KEEP), so it reaches the remote the way the push did."""
+    transport variables git pushed with (_GR_TRANSPORT_KEEP). When a program or setting the push chose could
+    have delivered it elsewhere than this read reaches (_gr_delivery_choice), the read cannot evaluate."""
     if not url or url.startswith("-"):
         raise _GateRecordError("git gave pre-push no remote URL this verifier can read ({!r})".format(url))
+    chosen = _gr_delivery_choice(env, url)
+    if chosen is not None:
+        raise _GateRecordError("{}, which could deliver the push to another repository than git ls-remote {} "
+                               "reads, so whether the remote git pushed to has the commit cannot be read; record "
+                               "the tree, or push without that setting".format(chosen, url))
     env = dict(env)
     env.update((key, value) for key, value in os.environ.items() if key in _GR_TRANSPORT_KEEP)
     env["GIT_TERMINAL_PROMPT"] = "0"

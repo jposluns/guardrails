@@ -44,9 +44,14 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          stays refused. Its flip: the same commit on a remote branch pushes.
   V31    a new branch at a shallow clone's boundary commit the remote has pushes. Its flip: once only a
          pull-request ref holds that commit, the push cannot evaluate.
-  V32    the remote proof reads through the push's transport variables (GIT_SSH_COMMAND): a commit the remote
-         has pushes. Its flip: an unrecorded commit through the same transport stays refused.
-  X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
+  V32    the remote proof is not read through an ssh program the push chose (GIT_SSH_COMMAND): even a commit the
+         remote has cannot evaluate. Its flip: over the plain URL, that commit pushes.
+  V33    a program or setting that could deliver the push elsewhere than the proof reads cannot evaluate, and the
+         unrecorded commit never reaches the remote: an ssh program or core.sshCommand that picks the repository by
+         service, remote.<name>.receivepack, GIT_EXEC_PATH with another git-receive-pack, a transport helper URL.
+         Its flip: an unrelated setting leaves a commit the remote has pushing.
+  X1-X4  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line, and git push
+         --receive-pack on the command line delivering to another repository than its URL.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
          and a missing configuration.
@@ -898,6 +903,7 @@ def rows_url_rewrite(base):
     rows_reviewed_refs(base)
     rows_shallow_remote(base)
     rows_transport(base)
+    rows_delivery(base)
 
 
 def rows_reviewed_refs(base):
@@ -958,10 +964,11 @@ def rows_shallow_remote(base):
 
 
 def rows_transport(base):
-    # V32 (QA qagitrecord3 finding 4): the remote proof's git ls-remote dropped the transport variables git pushed
-    # with (GIT_SSH_COMMAND and the like), so it reached the remote another way than the push did, or failed. It
-    # keeps them now: through a GIT_SSH_COMMAND transport (a local stand-in for ssh), a new branch at a commit the
-    # remote has pushes. The flip: through the same transport, an unrecorded commit stays refused.
+    # V32 (QA qagitrecord3 finding 4, then QA qagitrecord4): an ssh program the push names sees which service git
+    # asks for, so it can send the proof's read and the push to different repositories (V33). The proof is not
+    # read through one: through a GIT_SSH_COMMAND transport (a local stand-in for ssh), even a new branch at a
+    # commit the remote has cannot evaluate, and the remote never gets the branch. The flip: over the remote's
+    # plain URL, the same branch pushes.
     repo = fixture(base)
     remote = bare_remote(repo, "v32")
     other = TMP / "v32-other"
@@ -979,15 +986,115 @@ def rows_transport(base):
     transport = {"GIT_SSH_COMMAND": str(fake), "GIT_SSH_VARIANT": "simple"}
     git_out(repo, "switch", "-q", "-c", "v32-feature", "origin/main")
     done = git(repo, "push", "-q", "origin", "v32-feature", extra=transport)
-    check("V32/ssh-command-remote-commit-pushes",
+    check("V32/ssh-command-not-read-cannot-evaluate",
+          (done.returncode != 0, "GIT_SSH_COMMAND" in done.stderr,
+           git(remote, "rev-parse", "-q", "--verify", "refs/heads/v32-feature").stdout.strip()), (True, True, ""))
+    git_out(repo, "remote", "set-url", "origin", str(remote))
+    done = git(repo, "push", "-q", "origin", "v32-feature")
+    check("V32/flip-plain-url-remote-commit-pushes",
           (done.returncode, git(remote, "rev-parse", "-q", "--verify", "refs/heads/v32-feature").stdout.strip() != ""),
           (0, True))
-    stage(repo, "u.txt", "u\n")
-    commit(repo, "v32 unrecorded", "--no-verify")
-    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v32-u", extra=transport)
-    check("V32/flip-ssh-command-unrecorded-refused",
-          (done.returncode != 0, "missing" in done.stderr,
-           git(remote, "rev-parse", "-q", "--verify", "refs/heads/v32-u").stdout.strip()), (True, True, ""))
+
+
+SPLIT_SSH = """#!/bin/sh
+# a stand-in for ssh that picks the repository by the service git asks for: the read goes to {read},
+# the push to the URL's repository
+shift
+case "$1" in
+    git-upload-pack*) exec git upload-pack "{read}" ;;
+    *) exec sh -c "git ${{1#git-}}" ;;
+esac
+"""
+
+
+def rows_delivery(base):
+    # V33 (QA qagitrecord4): git ls-remote of the push URL reads the repository upload-pack serves, while the push
+    # goes where receive-pack runs, and a program or setting the push chose can make those differ: an ssh program
+    # that picks the repository by service, remote.<name>.receivepack naming another repository's receive-pack,
+    # GIT_EXEC_PATH holding another git-receive-pack, a transport helper. With each of the first four the proof read
+    # this clone, which has every commit, while the unrecorded commit reached the remote (QA saw it at ac5e2a42); a
+    # transport helper (ext:: here) is a program of the same kind. Each now cannot evaluate and the remote never
+    # gets the branch. The flip: an unrelated setting (core.sshCommand on a local URL) leaves a commit the remote
+    # has pushing.
+    def unrecorded(name):
+        repo = fixture(base)
+        remote = bare_remote(repo, name)
+        stage(repo, "u.txt", name + "\n")
+        commit(repo, name + " unrecorded", "--no-verify")
+        return repo, remote
+
+    def lacks(remote, ref):
+        return git(remote, "rev-parse", "-q", "--verify", ref).stdout.strip()
+
+    repo, remote = unrecorded("v33a")
+    write(TMP, "v33a-ssh", SPLIT_SSH.format(read=repo))
+    os.chmod(TMP / "v33a-ssh", 0o755)
+    git_out(repo, "remote", "set-url", "origin", "ssh://v33.invalid" + str(remote))
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v33-u",
+               extra={"GIT_SSH_COMMAND": str(TMP / "v33a-ssh"), "GIT_SSH_VARIANT": "simple"})
+    check("V33/ssh-command-service-split-cannot-evaluate",
+          (done.returncode != 0, "GIT_SSH_COMMAND" in done.stderr, lacks(remote, "refs/heads/v33-u")), (True, True, ""))
+
+    repo, remote = unrecorded("v33b")
+    write(TMP, "v33b-ssh", SPLIT_SSH.format(read=repo))
+    os.chmod(TMP / "v33b-ssh", 0o755)
+    git_out(repo, "remote", "set-url", "origin", "ssh://v33.invalid" + str(remote))
+    git_out(repo, "config", "core.sshCommand", str(TMP / "v33b-ssh"))
+    git_out(repo, "config", "ssh.variant", "simple")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v33-u")
+    check("V33/core-sshcommand-service-split-cannot-evaluate",
+          (done.returncode != 0, "core.sshCommand" in done.stderr, lacks(remote, "refs/heads/v33-u")),
+          (True, True, ""))
+
+    repo, remote = unrecorded("v33c")
+    git_out(repo, "remote", "add", "up", str(repo))
+    git_out(repo, "config", "remote.up.receivepack", "git receive-pack {} #".format(remote))
+    done = git(repo, "push", "-q", "up", "HEAD:refs/heads/v33-u")
+    check("V33/receivepack-config-cannot-evaluate",
+          (done.returncode != 0, "receivepack" in done.stderr, lacks(remote, "refs/heads/v33-u")), (True, True, ""))
+
+    repo, remote = unrecorded("v33d")
+    planted = TMP / "v33d-exec"
+    planted.mkdir()
+    write(planted, "git-receive-pack", '#!/bin/sh\nexec git receive-pack "{}"\n'.format(remote))
+    os.chmod(planted / "git-receive-pack", 0o755)
+    done = git(repo, "push", "-q", str(repo), "HEAD:refs/heads/v33-u",
+               extra={"GIT_EXEC_PATH": str(planted), "PATH": str(planted) + os.pathsep + ENV.get("PATH", "")})
+    check("V33/exec-path-receive-pack-cannot-evaluate",
+          (done.returncode != 0, "GIT_EXEC_PATH" in done.stderr, lacks(remote, "refs/heads/v33-u")), (True, True, ""))
+
+    repo, remote = unrecorded("v33e")
+    write(TMP, "v33e-ext", '#!/bin/sh\ncase "$1" in\n    git-upload-pack) exec git upload-pack "{}" ;;\n'
+          '    *) exec git receive-pack "{}" ;;\nesac\n'.format(repo, remote))
+    os.chmod(TMP / "v33e-ext", 0o755)
+    git_out(repo, "config", "protocol.ext.allow", "always")
+    done = git(repo, "push", "-q", "ext::{} %s".format(TMP / "v33e-ext"), "HEAD:refs/heads/v33-u")
+    check("V33/transport-helper-url-cannot-evaluate",
+          (done.returncode != 0, "git-remote-ext" in done.stderr, lacks(remote, "refs/heads/v33-u")),
+          (True, True, ""))
+
+    repo = fixture(base)
+    remote = bare_remote(repo, "v33f")
+    other = TMP / "v33f-other"
+    git_out(TMP, "clone", "-q", str(remote), str(other))
+    write(other, "s.txt", "elsewhere\n")
+    git_out(other, "add", "s.txt")
+    git_out(other, "commit", "-q", "-m", "made elsewhere")
+    git_out(other, "push", "-q", "origin", "main")
+    git_out(repo, "fetch", "-q", "origin")
+    git_out(repo, "config", "core.sshCommand", str(TMP / "v33b-ssh"))
+    git_out(repo, "switch", "-q", "-c", "v33-feature", "origin/main")
+    done = git(repo, "push", "-q", "origin", "v33-feature")
+    check("V33/flip-unrelated-config-remote-commit-pushes",
+          (done.returncode, lacks(remote, "refs/heads/v33-feature") != ""), (0, True))
+
+    # X4, a pinned residual: git push --receive-pack on the command line reaches no hook, so a push to this clone's
+    # own URL (".") whose receive-pack runs in the remote delivers the unrecorded commit there, the proof having read
+    # this clone. Open like core.hooksPath on the command line (X2).
+    repo, remote = unrecorded("x4")
+    done = git(repo, "push", "-q", "--receive-pack=git receive-pack {} #".format(remote), ".", "HEAD:refs/heads/x4-u")
+    check("X4/push-receive-pack-command-line-delivers",
+          (done.returncode, lacks(remote, "refs/heads/x4-u") != ""), (0, True))
 
 
 # --- the installer -----------------------------------------------------------------------------------------
