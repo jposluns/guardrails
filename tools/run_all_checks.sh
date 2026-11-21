@@ -252,6 +252,11 @@ run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monot
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
 run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
 run_gate "branch-root"          python3 -I -B tools/check_branch_root.py --max-lag 200
+# The committed-conflict-marker check runs at commit time (a pre-commit hook calls its --staged-scan mode;
+# the script's docstring gives the hook line); the roster runs its self-test over fixture repositories, also
+# under the execution gate, which reconciles the cases run against tools/selftest_checks.toml.
+run_gate "merge-markers-selftest" python3 -I -B tools/check_merge_markers.py --self-test
+run_gate "merge-markers-selftest-execution" python3 -I -B tools/check_selftest_execution.py --suite merge-markers-selftest
 run_gate "release-delta-selftest" python3 -I -B tools/check_release_delta.py --self-test
 run_gate "release-delta"          python3 -I -B tools/check_release_delta.py
 run_gate "release-build-selftest" python3 -I -B tools/check_release_build.py --self-test
