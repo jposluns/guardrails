@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a60ebcbb37abbf66c104cc30a4fe1a5484a116c208f7a200f7b35ad6c2ca2478"
+tree-sha256 = "18f401e006243dbb36aef693c6c18ee915d653f651e055e10067c2e3b86bb799"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4862,8 +4862,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 29411
-sha256 = "94d08fdf4f4ebd3d125c62ac83bf95c9a69563654634c8b7c5e2d5bda9a6374c"
+bytes = 29690
+sha256 = "643056d9ea5c1bf7fe73c591ffeab86e585957a81107c670afee0067727abdc1"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
