@@ -2667,6 +2667,11 @@ expected-check-ids = [
   "V25/flip-recorded-parent-commits",
   "V25/flip-check-not-moving-passes",
   "V25/check-moving-head-tree-moved",
+  "V26/replaced-config-not-read",
+  "V26/flip-replaced-config-real-pass-commits",
+  "V26/replaced-verifier-not-run",
+  "V26/replaced-commit-push-refused",
+  "V26/flip-recorded-commit-pushes",
   # ---------- the pinned residuals ----------
   "X1/no-verify-commits",
   "X2/hookspath-commits",

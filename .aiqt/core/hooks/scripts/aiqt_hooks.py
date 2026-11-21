@@ -44699,8 +44699,10 @@ class _DeadlineWindow:
 # set or the verifier that judges it. The check set's argv still runs the code of the tree under test, so a
 # commit that changes the check's own code (for example tools/run_all_checks.sh) is judged by that changed code.
 # No path, tree, parent or set is read from the environment (two bounds can only be lowered there, which can only
-# make the recorder cannot evaluate). A record line is a JSON object with exactly _GR_KEYS, in that order: head
-# is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
+# make the recorder cannot evaluate). Every git read of the recorder, the verifiers and the stubs runs with replace
+# objects and the grafts file turned off (_gr_env, _GR_STUB), so a git replace of the configuration, the verifier
+# or a pushed commit cannot change what is judged while git commits and pushes the real objects. A record line is
+# a JSON object with exactly _GR_KEYS, in that order: head is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
 # the check moved the tree, the index or HEAD, and a cannot-evaluate one when the check ran past its bound, a
 # process of its group outlived it, or the log was replaced or rewritten while it ran.
 # Disclosed residuals (each closed by the required Quality gates re-run on the merged tree, or disclosed): R1 git
@@ -44716,8 +44718,9 @@ class _DeadlineWindow:
 # code; git commit --amend runs pre-commit with HEAD still the replaced commit, so its pre-commit judges the
 # replaced commit's bar and parent, and its pre-push refuses until the tree is recorded on the real parent;
 # removing a linked worktree drops its records; R6 a stub reads the verifier from HEAD, so a commit that changes
-# it is judged by the old one, but the commit after it runs the new one; R7 pre-push checks tips only; R8
-# same-user races on the index, HEAD, the default branch or the log; the stubs bound their git and python3 calls
+# it is judged by the old one, but the commit after it runs the new one, and the same holds for the configuration
+# (a commit that lowers the set, having passed the old one, sets the bar for the commit after it); R7 pre-push
+# checks tips only; R8 same-user races on the index, HEAD, the default branch or the log; the stubs bound their git and python3 calls
 # only where a timeout command exists (the verifier bounds its own git calls); and an earlier failure older than
 # the 64 KiB tail the verifier reads is not seen.
 _GR_FORMAT = "aiqt-gate-record/2"
@@ -44757,6 +44760,9 @@ _GR_HOOK_GIT_KEEP = frozenset((
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"))
+# The grafts file every git read here names: a path under /dev/null, which no process can create (ENOTDIR), so git
+# reads no grafts and, unlike an existing empty file, prints no graft-file deprecation hint.
+_GR_NO_GRAFTS = "/dev/null/aiqt-no-grafts"
 # The configuration variables the recorder keeps for its own git reads (it is run by a person, not by git, so the
 # repository is the one its working directory names; GIT_DIR, GIT_INDEX_FILE and the like are dropped).
 _GR_CONFIG_KEEP = frozenset(("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS",
@@ -44773,13 +44779,18 @@ class _GateRecordRefusal(Exception):
 
 def _gr_env(keep):
     """os.environ with every GIT_ variable dropped except those in keep (and GIT_CONFIG_KEY_n/VALUE_n where keep
-    holds GIT_CONFIG_COUNT)."""
+    holds GIT_CONFIG_COUNT), and with replace objects and the grafts file turned off: a same-user git replace (an
+    ordinary command no guard reads) would otherwise swap the configuration, the verifier, a pushed commit's tree
+    or its parent for the git reads here while git commits and pushes the real objects."""
     env = {}
     for key, value in os.environ.items():
         if key.startswith("GIT_") and key not in keep and not (
                 "GIT_CONFIG_COUNT" in keep and key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))):
             continue
         env[key] = value
+    env.pop("GIT_REPLACE_REF_BASE", None)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = _GR_NO_GRAFTS
     return env
 
 
@@ -45459,6 +45470,11 @@ fail() {{
     printf '%s\\n' "aiqt gate-record: cannot evaluate: $1" >&2
     exit 2
 }}
+# Replace objects and grafts off, so a git replace cannot swap the verifier read from HEAD.
+unset GIT_REPLACE_REF_BASE
+GIT_NO_REPLACE_OBJECTS=1
+GIT_GRAFT_FILE={no_grafts}
+export GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE
 if command -v timeout >/dev/null 2>&1; then
     git_bound='timeout {git_seconds}'
     verify_bound='timeout {verify_seconds}'
@@ -45507,6 +45523,7 @@ exit 2
 def _gr_stub(hook):
     mode = "verify-push" if hook == "pre-push" else "verify-commit"
     return _GR_STUB.format(hook=hook, verifier=_GR_VERIFIER, mode=mode, refs=" ".join(_GR_DEFAULT_REFS),
+                           no_grafts=_GR_NO_GRAFTS,
                            git_seconds=_GR_STUB_GIT_SECONDS, verify_seconds=_GR_STUB_VERIFY_SECONDS)
 
 

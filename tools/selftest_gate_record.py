@@ -31,6 +31,8 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          the stub's verifier copy lives in the git directory; the lock wait and the check run are bounded;
          a symbolic-link aiqt directory is not followed; and the record binds the parent commit (another
          parent refuses, a check that moves HEAD records tree-moved). Each has its flip.
+  V26    replace objects are off: a git replace of the configuration, the verifier or a pushed commit does
+         not change what is recorded or judged. Each has its flip.
   X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
@@ -671,6 +673,56 @@ def rows_class(base):
     check("V25/flip-check-not-moving-passes", gate(repo, "run").returncode, 0)
     done = gate(repo, "run", extra={"FIXTURE_MOVE": "1"})
     check("V25/check-moving-head-tree-moved", (done.returncode, records(repo)[-1]["result"]), (1, "tree-moved"))
+    # V26 (QA qagitrecord2 finding 1): replace objects are off for every git read of the recorder, the verifiers
+    # and the stubs. A git replace of HEAD's configuration blob with one whose argv is ["true"] does not lower the
+    # set the recorder runs or the verifier judges; a replaced verifier blob is not what the stub runs; and a
+    # commit replaced by a recorded one is judged as itself at push. The flips: with the replacement present, the
+    # real set's pass commits, and the recorded commit itself pushes.
+    repo = fixture(base)
+    low = TMP / "v26-low.toml"
+    low.write_text(CONFIG.replace('argv = ["sh", "check.sh"]\n', 'argv = ["true"]\n', 1), encoding="utf-8")
+    git_out(repo, "replace", git_out(repo, "rev-parse", "HEAD:.aiqt/gate-record.toml"),
+            git_out(repo, "hash-object", "-w", str(low)))
+    stage(repo, "b.txt", "b\n")
+    done = gate(repo, "run", extra={"FIXTURE_EXIT": "1"})
+    before = head(repo)
+    result = commit(repo, "v26")
+    check("V26/replaced-config-not-read", (done.returncode, records(repo)[-1]["argv"],
+                                           refused_commit(repo, before, result, "failed")),
+          (1, ["sh", "check.sh"], (True, True)))
+    stage(repo, "c.txt", "c\n")
+    done = gate(repo, "run")
+    flip = commit(repo, "v26 flip")
+    check("V26/flip-replaced-config-real-pass-commits",
+          (done.returncode, flip.returncode, "graft" in (done.stderr + flip.stderr).lower()), (0, 0, False))
+    repo = fixture(base)
+    fake = TMP / "v26-fake-verifier.py"
+    fake.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    git_out(repo, "replace", git_out(repo, "rev-parse", "HEAD:" + HOOKS_REL),
+            git_out(repo, "hash-object", "-w", str(fake)))
+    stage(repo, "b.txt", "b\n")
+    before = head(repo)
+    result = commit(repo, "v26 verifier")
+    check("V26/replaced-verifier-not-run", refused_commit(repo, before, result, "missing"), (True, True))
+    repo = fixture(base)
+    remote = bare_remote(repo, "v26")
+    parent = head(repo)
+    stage(repo, "b.txt", "b\n")
+    gate(repo, "run")
+    commit(repo, "v26 recorded")
+    good = head(repo)
+    git_out(repo, "reset", "-q", "--hard", parent)
+    stage(repo, "c.txt", "c\n")
+    commit(repo, "v26 unrecorded", "--no-verify")
+    bad = head(repo)
+    git_out(repo, "replace", bad, good)
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v26")
+    check("V26/replaced-commit-push-refused", (done.returncode != 0, "missing" in done.stderr,
+                                               git(remote, "rev-parse", "-q", "--verify", "v26").stdout),
+          (True, True, ""))
+    git_out(repo, "replace", "-d", bad)
+    check("V26/flip-recorded-commit-pushes",
+          git(repo, "push", "-q", "origin", good + ":refs/heads/v26-recorded").returncode, 0)
 
 
 # --- the installer -----------------------------------------------------------------------------------------
