@@ -19685,15 +19685,22 @@ def _main_isolated(report_path=None):
             def __init__(self, flag):
                 self.f_flag = flag
 
-        def _nrdc_probe(dirs, noexec, sealed, fail=None, drop_flag=False, ignore_flag=False):
-            # _nrd_containment with os.statvfs and os.access stubbed: noexec and sealed are the
+        class _NrdcStat(object):
+            def __init__(self, uid):
+                self.st_uid = uid
+
+        def _nrdc_probe(dirs, noexec, sealed, fail=None, drop_flag=False, ignore_flag=False,
+                        owned=frozenset(), searchable=frozenset()):
+            # _nrd_containment with os.statvfs, os.access and os.stat stubbed: noexec and sealed are the
             # directories reported noexec and unopenable; fail raises OSError for that directory;
             # drop_flag removes os.ST_NOEXEC; ignore_flag reports every directory noexec (the mutant
-            # probe that ignores the mount flag)
-            real_statvfs, real_access = os.statvfs, os.access
+            # probe that ignores the mount flag); owned are owned by this account (an owner can chmod
+            # them back, so they are not sealed); searchable answer X_OK (only) even when in sealed
+            real_statvfs, real_access, real_stat = os.statvfs, os.access, os.stat
             had_flag = hasattr(os, "ST_NOEXEC")
             real_flag = getattr(os, "ST_NOEXEC", None)
             flag = real_flag if isinstance(real_flag, int) and real_flag > 0 else 8
+            me = os.geteuid()
 
             def fake_statvfs(path):
                 if fail is not None and path == fail:
@@ -19701,9 +19708,14 @@ def _main_isolated(report_path=None):
                 return _NrdcVfs(flag if (ignore_flag or path in noexec) else 0)
 
             def fake_access(path, how):
+                if how == os.X_OK and path in searchable:
+                    return True
                 return path not in sealed
 
-            os.statvfs, os.access = fake_statvfs, fake_access
+            def fake_stat(path, *args, **kwargs):
+                return _NrdcStat(me if path in owned else me + 1)
+
+            os.statvfs, os.access, os.stat = fake_statvfs, fake_access, fake_stat
             if drop_flag:
                 if had_flag:
                     del os.ST_NOEXEC
@@ -19712,7 +19724,7 @@ def _main_isolated(report_path=None):
             try:
                 return aiqt_hooks._nrd_containment(tuple(dirs))
             finally:
-                os.statvfs, os.access = real_statvfs, real_access
+                os.statvfs, os.access, os.stat = real_statvfs, real_access, real_stat
                 if had_flag:
                     os.ST_NOEXEC = real_flag
                 elif hasattr(os, "ST_NOEXEC"):
@@ -19727,8 +19739,13 @@ def _main_isolated(report_path=None):
             ("sealed-only", dict(noexec=set(), sealed=both)),
             ("statvfs-oserror", dict(noexec=both, sealed=both, fail=hb)),
             ("no-st-noexec", dict(noexec=both, sealed=both, drop_flag=True)),
+            # unreadable but searchable (mode 0711): a known name inside can still be opened
+            ("search-only", dict(noexec=both, sealed=both, searchable={hb})),
+            # unopenable but owned by this account (mode 0000, own uid): chmod restores access
+            ("owned-by-account", dict(noexec=both, sealed=both, owned={hb})),
         )
-        _nrdc_t1_want = ["contained", "noexec-only", "none", "none", "none", "none", "none"]
+        _nrdc_t1_want = ["contained", "noexec-only", "none", "none", "none", "none", "none",
+                         "noexec-only", "noexec-only"]
 
         def _nrdc_t1(**extra):
             return [_nrdc_probe(_nrdc_dirs, **dict(kw, **extra))[0] for _k, kw in _nrdc_t1_rows]

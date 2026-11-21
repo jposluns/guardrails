@@ -29917,12 +29917,16 @@ def _nrd_containment(dirs):
     """(mode, detail) for the declared directories, read from the filesystem once per hook call after
     the directories are known; it reads no file content. For each directory: noexec when
     os.statvfs(d).f_flag carries os.ST_NOEXEC, sealed when os.access(d, os.R_OK) and os.access(d,
-    os.X_OK) are both False for this account. 'contained' only when EVERY directory (each declared
-    spelling and its resolved form, so the probe covers what the matching compares) is both noexec and
-    sealed; 'noexec-only' when every one is noexec and at least one is openable; 'none' otherwise, and
-    'none' on an empty set, a missing os.ST_NOEXEC or any failure of the probe (fail closed: no decision
-    moves toward allow unless containment is observed). detail is None when contained, else one clause
-    naming the directory and the property that failed, for the deny text."""
+    os.X_OK) are both False for this account AND os.stat(d).st_uid is not this account's effective
+    uid (an owner can chmod its own directory back to openable, even in an earlier segment of the very
+    call the tripwire would then admit; the os.stat also fails, so the probe gives 'none', for a
+    directory that vanished after os.statvfs, which os.access alone would read as unopenable).
+    'contained' only when EVERY directory (each declared spelling and its resolved form, so the probe
+    covers what the matching compares) is both noexec and sealed; 'noexec-only' when every one is
+    noexec and at least one is openable or owned by this account; 'none' otherwise, and 'none' on an
+    empty set, a missing os.ST_NOEXEC or any failure of the probe (fail closed: no decision moves
+    toward allow unless containment is observed). detail is None when contained, else one clause naming
+    the directory and the property that failed, for the deny text."""
     flag = getattr(os, "ST_NOEXEC", None)
     if not isinstance(flag, int) or isinstance(flag, bool) or flag <= 0:
         return (_NRD_MODE_NONE, "os.ST_NOEXEC is not available to this hook")
@@ -29930,14 +29934,19 @@ def _nrd_containment(dirs):
         return (_NRD_MODE_NONE, "no deliverable directory is declared")
     first_exec = None
     first_open = None
+    first_owned = None
     try:
+        euid = os.geteuid()
         for d in dirs:
             noexec = bool(os.statvfs(d).f_flag & flag)
-            sealed = not os.access(d, os.R_OK) and not os.access(d, os.X_OK)
+            unopenable = not os.access(d, os.R_OK) and not os.access(d, os.X_OK)
+            owned = os.stat(d).st_uid == euid
             if not noexec and first_exec is None:
                 first_exec = d
-            if not sealed and first_open is None:
+            if not unopenable and first_open is None:
                 first_open = d
+            if unopenable and owned and first_owned is None:
+                first_owned = d
     except Exception as exc:  # noqa: BLE001 - any probe failure is 'none' (the strict guard applies)
         return (_NRD_MODE_NONE, "the containment probe failed ({})".format(exc.__class__.__name__))
     if first_exec is not None:
@@ -29945,6 +29954,9 @@ def _nrd_containment(dirs):
     if first_open is not None:
         return (_NRD_MODE_NOEXEC, "{} is on a noexec mount but this account can open it (read or "
                                   "search permission)".format(first_open))
+    if first_owned is not None:
+        return (_NRD_MODE_NOEXEC, "{} is on a noexec mount but this account owns it, so it can restore "
+                                  "read or search permission".format(first_owned))
     return (_NRD_MODE_CONTAINED, None)
 
 

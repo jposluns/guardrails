@@ -807,11 +807,14 @@ best-effort tripwire.
 The probe. Once per hook call, after the directories are known, `_nrd_containment` reads, for each
 declared directory (as written and as `os.path.realpath` resolves it), whether `os.statvfs(d).f_flag`
 carries `os.ST_NOEXEC` (noexec) and whether `os.access(d, os.R_OK)` and `os.access(d, os.X_OK)` are both
-false for the hook's account (sealed). It reads no file content. The result is one of three modes:
+false for the hook's account while `os.stat(d).st_uid` is not that account's effective uid (sealed: an
+owner can chmod its own directory back to openable, even in an earlier segment of the same call, so a
+directory the hook's account owns is never sealed). It reads no file content. The result is one of
+three modes:
 
 - `contained`: every directory is noexec and sealed. The scan runs as a tripwire.
-- `noexec-only`: every directory is noexec and at least one can be opened. The scan runs exactly as
-  before, row for row: `noexec` alone does not stop interpreters.
+- `noexec-only`: every directory is noexec and at least one can be opened or is owned by the hook's
+  account. The scan runs exactly as before, row for row: `noexec` alone does not stop interpreters.
 - `none`: anything else, including no declared directory, a missing `os.ST_NOEXEC` and any failure of
   the probe. The scan runs exactly as before, row for row.
 
@@ -835,8 +838,10 @@ reader form, exactly:
     sudo -u orch-deliv /usr/local/bin/orch-deliverable ls <relative name>
 
 with no other word, option or assignment, and a name with no leading `/` or `-` and no empty, `.` or
-`..` component. Its output may feed `git apply` (from a working directory outside the declared
-directories) or an allowlisted reader in a pipeline. The deny reason names the store and this route in
+`..` component. Its output is meant to feed `git apply` (from a working directory outside the declared
+directories) or an allowlisted reader in a pipeline. That is guidance, not a limit the guard enforces:
+the allowlist applies only to a call in scope, and a helper call names no declared directory, so out of
+scope its output may feed anything (residual 1 below). The deny reason names the store and this route in
 tripwire mode; in the other two modes it adds one sentence saying containment was not observed, naming
 the directory and the property that failed, so the strict guard applies.
 
@@ -858,21 +863,24 @@ Operator steps (host work, outside this repository; each is its own request to t
 8. R8: run the host acceptance checks as the orchestrator account and keep the raw output.
 
 Only then point the live registry's `deliverable_dirs` at the store directories. The self-test
-(`nrd-contain/` in `tools/selftest_orch_hooks.py`) SIMULATES the three modes with a stubbed `os.statvfs`
-and `os.access` and a forced probe: it proves the hook's logic, not the host. Until the host steps are
+(`nrd-contain/` in `tools/selftest_orch_hooks.py`) SIMULATES the three modes with a stubbed `os.statvfs`,
+`os.access` and `os.stat` and a forced probe: it proves the hook's logic, not the host. Until the host steps are
 done and their checks pass, the probe reports `none` (or `noexec-only`) and the strict guard applies.
 
 Residuals the tripwire states (in addition to "Residuals" above):
 
-1. Copy-out and run: `orch-deliverable cat x > y.py; python3 y.py`. The helper gives the bytes, and
-   running them is the rule's judgement-level step; the tripwire catches only a launch that names the
-   store or runs inside it.
+1. Copy-out and run: `orch-deliverable cat x > y.py; python3 y.py`, and the same bytes piped straight
+   into an interpreter (`orch-deliverable cat x.py | python3`, `... | bash`, `source <(...)`). The
+   helper gives the bytes, and running them is the rule's judgement-level step; the tripwire catches
+   only a launch that names the store or runs inside it.
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.
 5. Host misconfiguration the probe cannot see at the moment of the run: a remount between the probe
-   and the run (time of check to time of use), another mount of the same filesystem without `noexec`,
-   root or `CAP_DAC_READ_SEARCH`, or a wider sudoers rule. The probe reads the hook's account, which is
+   and the run (time of check to time of use), a permission, ACL or ownership change made between the
+   probe and the run by an account that may make it (root, a `CAP_FOWNER` holder, or the custodian),
+   another mount of the same filesystem without `noexec`, root or `CAP_DAC_READ_SEARCH`, or a wider
+   sudoers rule. The probe reads the hook's account, which is
    assumed to be the account the Bash tool runs as.
 6. The existing residuals: same-UID registry edits and non-Bash tools (the write-scope guard covers the
    structured write tools).
