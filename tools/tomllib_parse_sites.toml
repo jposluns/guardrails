@@ -1246,6 +1246,16 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+# the self-test helper that reads a shape's regex from the shipped review-label configuration
+# (_shipped_regex, called only by _grade_rows)
+[[site]]
+path = "tools/check_review_labels.py"
+function = "_shipped_regex"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "tools/check_selftest_execution.py"
 function = "self_test"
