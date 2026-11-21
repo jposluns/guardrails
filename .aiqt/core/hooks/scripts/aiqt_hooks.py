@@ -2429,17 +2429,58 @@ def _ansi_c_static_reading(command):
     _decoded_readings' readings, which remove every quote and so cannot be lexed. Unlike them it tracks quoting
     as bash does, so a $' or $" inside single quotes, or inside double quotes outside a '$(...)' or backquote
     substitution, stays as written (bash keeps it literal there: git commit -m "a $'\\x60'id$'\\x60' b" holds no
-    substitution); a '#' comment and a '${...}' expansion are not modelled. commit_msg_subst, commit_identity,
-    diff_source_pretool and git_explicit_binding read it BESIDE the command itself (_ansi_c_static_lexed), so it
-    can only add a deny or a note, never clear one. A word bash builds at run time (one whose spelling holds a '$'
-    expansion or substitution or a backquote outside single quotes, an unquoted glob character or brace, or that
-    uses a value assigned earlier in the same command) is not decoded: the disclosed run-time-word residual. Returns command itself when no such quote is
-    found, and the rest of the text unchanged from an ANSI-C quote that never closes. Linear, never raises."""
+    substitution). A '#' that starts a word outside quotes opens a comment, kept as written to its line's end
+    (or a backquote body's closing backquote), and a here-document's body is kept as written (a quoted
+    delimiter) or read as double-quoted text (an unquoted one), so a single quote in either (true # it's,
+    cat <<'EOF' / it's / EOF) neither hides a later $'...' quote nor is decoded; a body whose delimiter line
+    never comes is read as command text. A '${...}' expansion is not modelled. commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding
+    read it BESIDE the command itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear
+    one. A word bash builds at run time (one whose spelling holds a '$' expansion or substitution or a backquote
+    outside single quotes, an unquoted glob character or brace, or that uses a value assigned earlier in the
+    same command) is not decoded: the disclosed run-time-word residual. Returns command itself when no such
+    quote is found, and the rest of the text unchanged from an ANSI-C quote that never closes. Linear, never
+    raises."""
     if "$'" not in command and '$"' not in command:
         return command
+    return _ansi_c_static_scan(command, [])
+
+
+# A here-document operator (<< or <<-, not the <<< here-string) and its delimiter word, as bash reads them.
+_ANSI_C_HEREDOC_RE = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>\\'\"]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)")
+
+
+def _ansi_c_line_index(command):
+    """({line: [start, ...]}, {line with leading tabs removed: [start, ...]}) over every line of command, each
+    list ascending: built once per scan, so finding every here-document's end stays linear."""
+    plain, stripped = {}, {}
+    pos = 0
+    for line in command.split("\n"):
+        plain.setdefault(line, []).append(pos)
+        stripped.setdefault(line.lstrip("\t"), []).append(pos)
+        pos += len(line) + 1
+    return plain, stripped
+
+
+def _ansi_c_heredoc_end(command, start, delim, strip, index):
+    """The index just past the delimiter line of a here-document body that starts at start (a line start; leading
+    tabs removed first under <<-), or -1 when no line from start on is the delimiter. index is
+    _ansi_c_line_index(command)."""
+    starts = index[1 if strip else 0].get(delim, ())
+    at = bisect.bisect_left(starts, start)
+    if at == len(starts):
+        return -1
+    nl = command.find("\n", starts[at])
+    return len(command) if nl < 0 else nl + 1
+
+
+def _ansi_c_static_scan(command, stack):
+    """_ansi_c_static_reading's scan of command from the open contexts stack (innermost last: '"' double quotes,
+    'H' an unquoted here-document's body, read as double quotes that no '"' closes, '(' a '$(...)' with its
+    depth, '`' backquotes). Linear in the length of command, never raises."""
     out = []
-    stack = []  # open contexts, innermost last: '"' double quotes, '(' a '$(...)' (with its depth), '`' backquotes
     depth = [0]
+    pending = []  # here-documents opened on the current line: (delimiter, strip tabs, quoted)
+    index = None  # _ansi_c_line_index(command), built at the first here-document body
     i, n = 0, len(command)
     while i < n:
         c = command[i]
@@ -2448,8 +2489,8 @@ def _ansi_c_static_reading(command):
             out.append(command[i:i + 2])
             i += 2
             continue
-        if top == '"':
-            if c == '"':
+        if top in ('"', "H"):
+            if c == '"' and top == '"':
                 stack.pop()
             elif c == "`":
                 stack.append("`")
@@ -2461,6 +2502,43 @@ def _ansi_c_static_reading(command):
                 continue
             out.append(c)
             i += 1
+            continue
+        if c == "#" and (i == 0 or command[i - 1] in " \t\n;&|()<>"):
+            nl = command.find("\n", i)
+            end = n if nl < 0 else nl
+            if top == "`":  # bash cuts a backquote body at its closing backquote before it reads a comment
+                close = command.find("`", i, end)  # bounded by the line, so the scan stays linear
+                if close >= 0:
+                    end = close
+            out.append(command[i:end])
+            i = end
+            continue
+        if command.startswith("<<<", i):
+            out.append("<<<")  # a here-string: its word is ordinary command text
+            i += 3
+            continue
+        if command.startswith("<<", i):
+            match = _ANSI_C_HEREDOC_RE.match(command, i)
+            if match is not None:
+                word = match.group(2)
+                delim = re.sub(r"\\(.)", r"\1", word.replace("'", "").replace('"', ""))
+                pending.append((delim, bool(match.group(1)), any(q in word for q in "'\"\\")))
+                out.append(match.group(0))
+                i = match.end()
+                continue
+        if c == "\n" and pending:
+            out.append(c)
+            i += 1
+            if index is None:
+                index = _ansi_c_line_index(command)
+            for delim, strip, quoted in pending:
+                end = _ansi_c_heredoc_end(command, i, delim, strip, index)
+                if end < 0:
+                    break  # bash would read the rest as the body; reading it as command text can only add
+                body = command[i:end]
+                out.append(body if quoted else _ansi_c_static_scan(body, ["H"]))
+                i = end
+            pending = []
             continue
         if c == "'":
             close = command.find("'", i + 1)

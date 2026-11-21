@@ -6260,6 +6260,13 @@ _STATIC_DECODED_ROWS = (
     ("sdr-cnsdif-opt", "diff_source_pretool", "git log $'\\x2d'p", "deny", "allow-note"),
     ("sdr-cnsdif-plain", "diff_source_pretool", "git log -p", "deny", None),
     ("sdr-cnsdif-none", "diff_source_pretool", "git commit -m $'a\\tb'", "allow", None),
+    ("sdr-cnsdif-after-comment", "diff_source_pretool", "true # it's fine\n$'\\x67'it log -p", "deny", "allow"),
+    ("sdr-expbnd-after-comment", "git_explicit_binding", "git add -A # don't\ngit $'\\x70'ush", "deny", "allow"),
+    ("sdr-sectvl-after-heredoc", "commit_msg_subst",
+     "cat <<'EOF'\nit's here\nEOF\n$'\\x67'it commit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-cnsdif-comment-none", "diff_source_pretool", "ls # $'\\x67'it log -p", "allow", None),
+    ("sdr-cnsdif-backquote-comment", "diff_source_pretool", "echo \"`true # x`\"; git $'\\x6c'og -p", "deny",
+     "allow"),
 )
 
 
@@ -6279,7 +6286,18 @@ def _test_static_decoded_reading(failures):
             ("sdr-reading-dq-literal", "echo \"$'\\x60'\"", "echo \"$'\\x60'\""),
             ("sdr-reading-dq-subst", "echo \"$(git $'\\x6c'og)\"", "echo \"$(git log)\""),
             ("sdr-reading-locale", "gi$\"t\" log", "gi\"t\" log"),
-            ("sdr-reading-sq-literal", "echo '$\\x67'", "echo '$\\x67'")):
+            ("sdr-reading-sq-literal", "echo '$\\x67'", "echo '$\\x67'"),
+            ("sdr-reading-comment-apostrophe", "true # it's\n$'\\x67'it log", "true # it's\ngit log"),
+            ("sdr-reading-comment-literal", "ls # $'\\x67'it", "ls # $'\\x67'it"),
+            ("sdr-reading-heredoc-quoted", "cat <<'E'\nit's $'\\x67'\nE\ngi$'\\x74' log",
+             "cat <<'E'\nit's $'\\x67'\nE\ngit log"),
+            ("sdr-reading-heredoc-unquoted", "cat <<E\nit's $'\\x67' $($'\\x67'it log)\nE\ngi$'\\x74' log",
+             "cat <<E\nit's $'\\x67' $(git log)\nE\ngit log"),
+            ("sdr-reading-heredoc-tabs", "cat <<-E\n\tit's\n\tE\ngi$'\\x74' log", "cat <<-E\n\tit's\n\tE\ngit log"),
+            ("sdr-reading-herestring", "cat <<< $'\\x67'it", "cat <<< git"),
+            ("sdr-reading-arith-shift", "echo $(( 1 << 2 )); gi$'\\x74' log", "echo $(( 1 << 2 )); git log"),
+            ("sdr-reading-backquote-comment", "echo \"`true # x`\"; gi$'\\x74' log",
+             "echo \"`true # x`\"; git log")):
         got = aiqt_hooks._ansi_c_static_reading(command)
         if got != want:
             failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
