@@ -147,8 +147,9 @@ unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a dire
 walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier. A self-test launch
 row is no verdict either way only when every part of it that fails is a launch that reached the canonical
 probe's CHILD_TIMEOUT bound (host load); any other failing part, a finished launch included, keeps the row a
-failure. With no row failed, the self-test prints SELF-TEST CANNOT EVALUATE naming each no-verdict row and exits
-2, never 0; any failed row still makes it exit 1.
+failure. That bound is the probe's measured worst launch times its stated margin (verdict/launch-bound-measured).
+With no row failed, the self-test prints SELF-TEST CANNOT EVALUATE naming each no-verdict row and exits 2, never
+0; any failed row still makes it exit 1.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -3391,6 +3392,38 @@ def self_test(lane, report_path=None):
             ok, detail = _verdict_row(probe, Path(base) / "verdict-timed-out", _finished_none, (),
                                       _timeout_fails_verdict)
             check("verdict/all-timed-out-no-verdict", ok, detail)
+            # The launch bound is sized from its measured worst launch with a stated margin, never a flat
+            # constant that a loaded host's heaviest launch (opf.py --help, 61.67 s there) already reaches.
+            # The probe's own --self-test reads its launches the same way: every launch at its bound is no
+            # verdict (exit 2), and a finished failure beside one stays a failure (exit 1).
+            worst = getattr(probe, "CHILD_TIMEOUT_MEASURED_WORST", None)
+            margin = getattr(probe, "CHILD_TIMEOUT_MARGIN", None)
+            sized = all(isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+                        for value in (worst, margin, probe.CHILD_TIMEOUT)) and margin >= 5 \
+                and probe.CHILD_TIMEOUT >= worst * margin
+            routed = {}
+            for case, finished in (("all-timed-out", False), ("finished-beside-timeout", True)):
+                calls = []
+
+                def scripted_child(args, stdin="", calls=calls, finished=finished):
+                    calls.append(args)
+                    if finished and len(calls) == 1:
+                        return 1, "a launch that finished and failed\n", ""
+                    return LAUNCH_TIMED_OUT, "", ""
+
+                def scripted_bash(disposition, argv, stdin="", cwd=None, pass_fds=()):
+                    return None, LAUNCH_TIMED_OUT, ""
+
+                real_child, real_bash = probe.run_child, probe.through_bash
+                probe.run_child, probe.through_bash = scripted_child, scripted_bash
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        routed[case] = probe.self_test()
+                finally:
+                    probe.run_child, probe.through_bash = real_child, real_bash
+            check("verdict/launch-bound-measured",
+                  sized and routed == {"all-timed-out": 2, "finished-beside-timeout": 1},
+                  dict(bound=probe.CHILD_TIMEOUT, measured_worst=worst, margin=margin, self_test=routed))
         for check_id, _kind in (("behaviour/opf-cli-refuses", 0), ("behaviour/launcher-cli-refuses", 0),
                                 ("behaviour/coverage-gate-refuses", 0), ("behaviour/adopt-complete-refuses", 0),
                                 ("behaviour/adopt-complete-self-test-refuses", 0),
