@@ -412,7 +412,7 @@ DENY_CONSTRUCTORS = (
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
-    "_reset_ancestry_deny", "_wrtscp_deny")
+    "_reset_ancestry_deny", "_static_reading_uncertain_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -2429,63 +2429,233 @@ def _ansi_c_static_reading(command):
     _decoded_readings' readings, which remove every quote and so cannot be lexed. Unlike them it tracks quoting
     as bash does, so a $' or $" inside single quotes, or inside double quotes outside a '$(...)' or backquote
     substitution, stays as written (bash keeps it literal there: git commit -m "a $'\\x60'id$'\\x60' b" holds no
-    substitution). A '#' that starts a word outside quotes opens a comment, kept as written to its line's end
-    (or a backquote body's closing backquote), and a here-document's body is kept as written (a quoted
+    substitution). A '#' opens a comment only where bash opens one: at a word start (the command's start, or
+    right after an unescaped blank, newline or operator character, or after the opening of a '$(...)', '<(...)',
+    '>(...)' or backquote substitution), outside quotes, here-document bodies and '${...}' expansions, with no
+    parenthesis open in its command (_ansi_c_static_scan). The comment is kept as written to its line's end (or
+    a backquote body's first unescaped backquote), and a here-document's body is kept as written (a quoted
     delimiter) or read as double-quoted text (an unquoted one), so a single quote in either (true # it's,
     cat <<'EOF' / it's / EOF) neither hides a later $'...' quote nor is decoded; a body whose delimiter line
-    never comes is read as command text. A '${...}' expansion is not modelled. commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding
-    read it BESIDE the command itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear
-    one. A word bash builds at run time (one whose spelling holds a '$' expansion or substitution or a backquote
-    outside single quotes, an unquoted glob character or brace, or that uses a value assigned earlier in the
-    same command) is not decoded: the disclosed run-time-word residual. Returns command itself when no such
-    quote is found, and the rest of the text unchanged from an ANSI-C quote that never closes. Linear, never
-    raises."""
+    never comes is read as command text. A '#' after an escaped blank or operator, a line continuation inside a
+    word, or the ')' that closes a substitution is word text (echo a\\ #; and echo $(true)#; run what follows).
+    Where the scan cannot read a construct with certainty, or where its reading there could differ from the
+    comment and here-document reading before this one, ahead of a later $'...' or $"..." quote, it raises
+    _StaticReadingUncertain and each guard that reads it denies (_static_reading_uncertain_deny).
+    commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding read it BESIDE the command
+    itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear one. A word bash builds at
+    run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
+    unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
+    decoded: the disclosed run-time-word residual. Returns command itself when no such quote is found, and the
+    rest of the text unchanged from an ANSI-C quote that never closes. Linear; raises only
+    _StaticReadingUncertain."""
     if "$'" not in command and '$"' not in command:
         return command
-    return _ansi_c_static_scan(command, [])
+    return _ansi_c_static_scan(command)
 
 
 # A here-document operator (<< or <<-, not the <<< here-string) and its delimiter word, as bash reads them.
 _ANSI_C_HEREDOC_RE = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>\\'\"]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)")
 
 
+class _StaticReadingUncertain(Exception):
+    """The refusal of the static decoded reading (_ansi_c_static_reading): ahead of a later ANSI-C $'...' or locale
+    $"..." quote the scan met a construct it cannot read with certainty the way bash reads it, or one where its
+    reading could differ from the comment and here-document reading before this one, so which of those quotes
+    bash decodes as command text is not known. at is the construct's index. It is not a ValueError, so no lexer
+    fallback takes it for a parse failure that adds nothing: each guard that reads the static decoded reading
+    catches it and denies (_static_reading_uncertain_deny)."""
+
+    def __init__(self, message, at):
+        super().__init__(message)
+        self.at = at
+
+
+def _static_reading_uncertain_deny(rule, subject, exc):
+    """The deny a guard returns when the static decoded reading refuses a command (_StaticReadingUncertain): rule
+    names the rule, subject the shape the guard cannot rule out in the command's ANSI-C or locale quoting."""
+    return _deny(
+        "AIQT rule {}: this command holds an ANSI-C $'...' or locale $\"...\" quote after a construct the static "
+        "decoded reading cannot read with certainty the way bash reads it ({}), so this guard cannot tell which of "
+        "those quotes bash decodes as command text and cannot rule out {} spelled in them; it is denied rather than "
+        "allowed unread (check-fails-closed-on-unreadable). Write the quoted words plainly, put a comment's '#' "
+        "after a blank outside any grouping, substitution or expansion, or split the command.".format(
+            rule, exc, subject),
+        "AIQT guardrail: denied a command whose ANSI-C or locale quoting the static decoded reading could not read "
+        "(rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
 def _ansi_c_line_index(command):
-    """({line: [start, ...]}, {line with leading tabs removed: [start, ...]}) over every line of command, each
-    list ascending: built once per scan, so finding every here-document's end stays linear."""
+    """({line: [start, ...]}, {line with leading tabs removed: [start, ...]}, [index of each backslash-newline])
+    over every line of command, each list ascending: built once per scan, so finding every here-document's end
+    stays linear."""
     plain, stripped = {}, {}
     pos = 0
     for line in command.split("\n"):
         plain.setdefault(line, []).append(pos)
         stripped.setdefault(line.lstrip("\t"), []).append(pos)
         pos += len(line) + 1
-    return plain, stripped
+    return plain, stripped, [match.start() for match in re.finditer(r"\\\n", command)]
 
 
-def _ansi_c_heredoc_end(command, start, delim, strip, index):
+def _ansi_c_heredoc_end(command, start, delim, strip, index, bound):
     """The index just past the delimiter line of a here-document body that starts at start (a line start; leading
-    tabs removed first under <<-), or -1 when no line from start on is the delimiter. index is
-    _ansi_c_line_index(command)."""
+    tabs removed first under <<-), or -1 when no line from start on, before bound, is the delimiter. index is
+    _ansi_c_line_index(command); bound is the end of the text the body is read in (the command's length, or the
+    end of the unquoted here-document body that holds this one)."""
     starts = index[1 if strip else 0].get(delim, ())
     at = bisect.bisect_left(starts, start)
-    if at == len(starts):
+    if at == len(starts) or starts[at] >= bound:
         return -1
-    nl = command.find("\n", starts[at])
-    return len(command) if nl < 0 else nl + 1
+    nl = command.find("\n", starts[at], bound)
+    return bound if nl < 0 else nl + 1
 
 
-def _ansi_c_static_scan(command, stack):
-    """_ansi_c_static_reading's scan of command from the open contexts stack (innermost last: '"' double quotes,
-    'H' an unquoted here-document's body, read as double quotes that no '"' closes, '(' a '$(...)' with its
-    depth, '`' backquotes). Linear in the length of command, never raises."""
+def _ansi_c_heredoc_continued(index, start, end):
+    """True when a backslash-newline lies in a here-document body command[start:end] before its delimiter line's
+    own newline: bash joins the lines of an unquoted body there before it looks for the delimiter line (cat <<E /
+    x<backslash> / E / ... reads x E as one body line), which _ansi_c_heredoc_end does not model."""
+    at = bisect.bisect_left(index[2], start)
+    return at < len(index[2]) and index[2][at] < end - 1
+
+
+def _ansi_c_heredoc_word(command, i, limit):
+    """bash's reading of the here-document delimiter word that starts at i, before limit: (the index past it, the
+    delimiter, True when any of it is quoted), the delimiter with its quoting removed as bash removes it (a
+    backslash-escaped character, a single-quoted string, an ANSI-C $'...' string decoded, a double-quoted or
+    locale string with a backslash removed only before $, backquote, double quote or backslash), or None where the
+    word holds a construct this reading does not model: a backslash-newline, a quote that never closes, a '#'
+    that starts it (bash reads a comment there), or a '$(', '${', '$[' or backquote, quoted or not."""
     out = []
+    quoted = False
+    start = i
+    while i < limit:
+        c = command[i]
+        if c in " \t\n;&|()<>":
+            break
+        if c == "#" and i == start:
+            return None
+        if c == "\\":
+            if i + 1 >= limit or command[i + 1] == "\n":
+                return None
+            out.append(command[i + 1])
+            quoted = True
+            i += 2
+            continue
+        if c == "'":
+            close = command.find("'", i + 1, limit)
+            if close < 0:
+                return None
+            out.append(command[i + 1:close])
+            quoted = True
+            i = close + 1
+            continue
+        if command.startswith("$'", i):
+            match = _ANSI_C_QUOTE_RE.match(command, i, limit)
+            if match is None:
+                return None
+            out.append(_ansi_c_body(match))
+            quoted = True
+            i = match.end()
+            continue
+        if c == '"' or command.startswith('$"', i):
+            j = i + (2 if c == "$" else 1)
+            while j < limit and command[j] != '"':
+                if command[j] == "\\" and j + 1 < limit:
+                    if command[j + 1] == "\n":
+                        return None
+                    out.append(command[j + 1] if command[j + 1] in '$`"\\' else command[j:j + 2])
+                    j += 2
+                    continue
+                if command[j] == "`" or command.startswith(("$(", "${", "$["), j):
+                    return None
+                out.append(command[j])
+                j += 1
+            if j >= limit:
+                return None
+            quoted = True
+            i = j + 1
+            continue
+        if c == "`" or command.startswith(("$(", "${", "$["), i):
+            return None
+        out.append(c)
+        i += 1
+    return i, "".join(out), quoted
+
+
+# A comment's text that reads the same whether a '#' opens a comment or is word text: no quote, backslash, '$',
+# backquote, parenthesis, brace or redirection character (_ansi_c_static_scan).
+_ANSI_C_NEUTRAL_RE = re.compile(r"[^'\"`$\\(){}<>]*")
+
+
+def _ansi_c_static_scan(command):
+    """_ansi_c_static_reading's scan of command. stack holds the open contexts, innermost last: '"' double quotes,
+    'H' an unquoted here-document's body (read as double quotes that no '"' closes), '(' a '$(...)', '<(...)' or
+    '>(...)' substitution, '`' a backquote substitution and '{' a '${...}' expansion; depth holds, for the
+    command text at the top level and in each '(' or '`' context, how many plain parentheses are open there.
+
+    A '#' opens a comment only at a word start (word_at: the command's start, the index after an unescaped blank,
+    newline or operator character, after a line continuation that itself stands at a word start, or right inside
+    a substitution's opening), outside quotes, here-document bodies and '${...}' expansions, and only with no
+    parenthesis open in its command (in a subshell bash reads a comment there, but in a (( )) or $(( ))
+    arithmetic or a [[ =~ ]] group it reads text). A '#' anywhere else is word text: after an escaped blank or
+    operator (echo a\\ #;), a line continuation inside a word, or the ')' that closes a substitution
+    ($(true)#, $((1))#, <(true)#). The scan before this one took any '#' right after a blank, newline or one of
+    ;&|()<> for a comment and cut a backquote comment at the first backquote, escaped or not; where that test
+    and this one disagree the text from the '#' to its line's end reads the same both ways when it holds none
+    of _ANSI_C_NEUTRAL_RE's characters (it is kept as written), and otherwise the scan refuses.
+
+    It refuses (_StaticReadingUncertain) only ahead of the last ANSI-C or locale quote (past it nothing is
+    decoded, so the rest is kept as written): at a '#' at a word start with a parenthesis open, at such a
+    disagreement, at a '${' that opens a bash 5.3 command substitution (${ cmd; } or ${| cmd; }) or a '$['
+    arithmetic, at a here-document delimiter word whose bash reading (_ansi_c_heredoc_word) differs from the
+    one before this (<<$'E\\x41' ends at the line EA, <<"E\\"F" at E"F) or that it does not model, at a
+    here-document operator inside a '${...}' or with a parenthesis open ($(( 1 << 2 )) shifts) once its line
+    ends, and at an unquoted body that holds a line continuation (bash joins such lines before it looks for the
+    delimiter line). Bodies are read in place, not by a nested scan (frames holds each unquoted body being read:
+    its end, the heights of stack and depth to restore there, and the bodies after it on the same line), with
+    one line index per command, so nested here-documents cost no recursion and the scan is linear in the
+    length of command."""
+    out = []
+    stack = []
     depth = [0]
-    pending = []  # here-documents opened on the current line: (delimiter, strip tabs, quoted)
+    frames = []
+    queue = []  # here-document bodies still to read on the current line, the next one last: (start, end, quoted)
+    pending = []  # here-documents opened on the current line: (delimiter, strip tabs, quoted, certain)
     index = None  # _ansi_c_line_index(command), built at the first here-document body
+    word_at = 0
+    nl_at = -1  # the index of the first newline at or after i once looked up (len(command) when none)
+    last = max(command.rfind("$'"), command.rfind('$"'))
     i, n = 0, len(command)
-    while i < n:
+    while True:
+        if queue:
+            start, end, quoted = queue.pop()
+            if quoted:
+                out.append(command[start:end])
+                i = word_at = end
+                continue
+            frames.append((end, len(stack), len(depth), queue))
+            queue = []
+            stack.append("H")
+            i = start
+            continue
+        limit = frames[-1][0] if frames else n
+        if i >= limit:
+            if not frames:
+                break
+            _end, height, levels, queue = frames.pop()
+            del stack[height:]
+            del depth[levels:]
+            pending = []
+            word_at = i
+            continue
+        if i > last:
+            out.append(command[i:])  # no ANSI-C or locale quote from here on: nothing left to decode
+            break
         c = command[i]
         top = stack[-1] if stack else None
-        if c == "\\" and i + 1 < n:
+        if c == "\\" and i + 1 < limit:
+            if command[i + 1] == "\n" and word_at == i and top not in ('"', "H"):
+                word_at = i + 2  # bash removes a line continuation first, so a word start stays one
             out.append(command[i:i + 2])
             i += 2
             continue
@@ -2494,67 +2664,122 @@ def _ansi_c_static_scan(command, stack):
                 stack.pop()
             elif c == "`":
                 stack.append("`")
+                depth.append(0)
+                word_at = i + 1
             elif command.startswith("$(", i):
                 stack.append("(")
                 depth.append(0)
                 out.append("$(")
                 i += 2
+                word_at = i
                 continue
             out.append(c)
             i += 1
             continue
-        if c == "#" and (i == 0 or command[i - 1] in " \t\n;&|()<>"):
-            nl = command.find("\n", i)
-            end = n if nl < 0 else nl
-            if top == "`":  # bash cuts a backquote body at its closing backquote before it reads a comment
-                close = command.find("`", i, end)  # bounded by the line, so the scan stays linear
-                if close >= 0:
-                    end = close
-            out.append(command[i:end])
-            i = end
+        if c == "#":
+            if nl_at < i:
+                nl_at = command.find("\n", i)
+                if nl_at < 0:
+                    nl_at = n
+            eol = min(nl_at, limit)
+            before = i == 0 or command[i - 1] in " \t\n;&|()<>"  # the comment test before this scan
+            if top == "{":
+                if before:
+                    raise _StaticReadingUncertain("a '#' after a blank or operator inside a '${...}' expansion", i)
+                out.append(c)
+                i += 1
+                continue
+            if i == word_at:
+                if depth[-1]:
+                    raise _StaticReadingUncertain("a '#' at a word start inside an open parenthesis, a comment in "
+                                                  "a subshell but text in an arithmetic or [[ ]] group", i)
+                end = eol
+                if top == "`":  # bash cuts a backquote body at its first unescaped backquote before it reads it
+                    j = i
+                    while j < eol:
+                        if command[j] == "\\":
+                            j += 2
+                        elif command[j] == "`":
+                            end = j
+                            break
+                        else:
+                            j += 1
+                if before:
+                    was = eol
+                    if top == "`":
+                        close = command.find("`", i, eol)
+                        if close >= 0:
+                            was = close
+                    if was == end:
+                        out.append(command[i:end])
+                        i = end
+                        continue
+            elif not before:
+                out.append(c)
+                i += 1
+                continue
+            if _ANSI_C_NEUTRAL_RE.fullmatch(command, i + 1, eol) is None:
+                raise _StaticReadingUncertain("a '#' that bash reads {} where the reading before this one read {}"
+                                              .format(*(("as word text", "a comment") if i != word_at else
+                                                        ("as a comment", "it otherwise"))), i)
+            out.append(command[i:eol])  # the same text either way
+            i = eol
             continue
         if command.startswith("<<<", i):
             out.append("<<<")  # a here-string: its word is ordinary command text
             i += 3
+            word_at = i
             continue
         if command.startswith("<<", i):
-            match = _ANSI_C_HEREDOC_RE.match(command, i)
+            match = _ANSI_C_HEREDOC_RE.match(command, i, limit)
             if match is not None:
                 word = match.group(2)
                 delim = re.sub(r"\\(.)", r"\1", word.replace("'", "").replace('"', ""))
-                pending.append((delim, bool(match.group(1)), any(q in word for q in "'\"\\")))
+                quoted = any(q in word for q in "'\"\\")
+                if not delim or _ansi_c_heredoc_word(command, match.start(2), limit) != (match.end(), delim, quoted):
+                    raise _StaticReadingUncertain("a here-document delimiter word {!r} this reading does not read "
+                                                  "as bash does".format(word[:40]), i)
+                pending.append((delim, bool(match.group(1)), quoted, top != "{" and not depth[-1]))
                 out.append(match.group(0))
                 i = match.end()
                 continue
         if c == "\n" and pending:
+            if top == "{" or not all(certain for _delim, _strip, _quoted, certain in pending):
+                raise _StaticReadingUncertain("a '<<' inside a '${...}' expansion or an open parenthesis, a "
+                                              "here-document in a subshell but a shift in an arithmetic", i)
             out.append(c)
             i += 1
+            word_at = i
             if index is None:
                 index = _ansi_c_line_index(command)
-            for delim, strip, quoted in pending:
-                end = _ansi_c_heredoc_end(command, i, delim, strip, index)
+            at = i
+            for delim, strip, quoted, _certain in pending:
+                end = _ansi_c_heredoc_end(command, at, delim, strip, index, limit)
                 if end < 0:
-                    break  # bash would read the rest as the body; reading it as command text can only add
-                body = command[i:end]
-                out.append(body if quoted else _ansi_c_static_scan(body, ["H"]))
-                i = end
+                    break  # bash would read the rest as the body; it is read as command text instead
+                if not quoted and _ansi_c_heredoc_continued(index, at, end):
+                    raise _StaticReadingUncertain("an unquoted here-document body with a line continuation", at)
+                queue.append((at, end, quoted))
+                at = end
+            queue.reverse()
             pending = []
             continue
         if c == "'":
-            close = command.find("'", i + 1)
-            end = n if close < 0 else close + 1
+            close = command.find("'", i + 1, limit)
+            end = limit if close < 0 else close + 1
             out.append(command[i:end])
             i = end
             continue
-        if c == "$" and i + 1 < n and command[i + 1] == "'":
-            match = _ANSI_C_QUOTE_RE.match(command, i)
+        if c == "$" and i + 1 < limit and command[i + 1] == "'":
+            match = _ANSI_C_QUOTE_RE.match(command, i, limit)
             if match is None:
-                out.append(command[i:])
-                break
+                out.append(command[i:limit])
+                i = limit
+                continue
             out.append(_ansi_c_static_quote(match))
             i = match.end()
             continue
-        if c == "$" and i + 1 < n and command[i + 1] == '"':
+        if c == "$" and i + 1 < limit and command[i + 1] == '"':
             stack.append('"')
             out.append('"')
             i += 2
@@ -2564,22 +2789,45 @@ def _ansi_c_static_scan(command, stack):
         elif c == "`":
             if top == "`":
                 stack.pop()
+                depth.pop()
             else:
                 stack.append("`")
-        elif command.startswith("$(", i):
-            stack.append("(")
+                depth.append(0)
+                word_at = i + 1
+        elif command.startswith("$(", i) or (top != "{" and command.startswith(("<(", ">("), i)):
+            stack.append("(")  # a process substitution closes as $(...) does: <(true)# is one word
             depth.append(0)
-            out.append("$(")
+            out.append(command[i:i + 2])
+            i += 2
+            word_at = i
+            continue
+        elif command.startswith("${", i):
+            if command[i + 2:i + 3] in (" ", "\t", "\n", "|"):
+                raise _StaticReadingUncertain("a bash 5.3 '${ ...; }' command substitution", i)
+            stack.append("{")
+            out.append("${")
             i += 2
             continue
-        elif top == "(" and c == "(":
-            depth[-1] += 1
-        elif top == "(" and c == ")":
-            if depth[-1]:
-                depth[-1] -= 1
-            else:
+        elif command.startswith("$[", i):
+            raise _StaticReadingUncertain("a '$[...]' arithmetic expansion", i)
+        elif top == "{":
+            if c == "{":
+                stack.append("{")  # bash pairs the braces in an expansion's word: ${x:-{a}} is {a}
+            elif c == "}":
                 stack.pop()
+        elif c == "(":
+            depth[-1] += 1
+            word_at = i + 1
+        elif c == ")":
+            if top == "(" and not depth[-1]:
+                stack.pop()  # $(...)#x, $((...))#x and <(...)#x are one word: this ')' starts none
                 depth.pop()
+            else:
+                if depth[-1]:
+                    depth[-1] -= 1
+                word_at = i + 1
+        elif c in " \t\n;&|<>":
+            word_at = i + 1
         out.append(c)
         i += 1
     return "".join(out)
@@ -2589,8 +2837,10 @@ def _ansi_c_static_lexed(command, lex, **kwargs):
     """lex(_ansi_c_static_reading(command), **kwargs) when that reading differs from command, else []: the extra
     reading a guard reads beside its own lex of command. A reading lex refuses (any ValueError: a parse failure, an
     uncertain '#', the reading budget) adds nothing, since the guard's own reading of command, with its fallbacks,
-    still decides. The count of lexes that read a body main's reading fails (_SubstHeredocs.reads) is restored, so
-    the extra lex never moves the guard's MAIN'S DECISION AS A FLOOR comparison."""
+    still decides. A reading the scan itself refuses (_StaticReadingUncertain) is not caught here: the guard
+    denies (_static_reading_uncertain_deny). The count of lexes that read a body main's reading fails
+    (_SubstHeredocs.reads) is restored, so the extra lex never moves the guard's MAIN'S DECISION AS A FLOOR
+    comparison."""
     decoded = _ansi_c_static_reading(command)
     if decoded == command:
         return []
@@ -5208,8 +5458,13 @@ def diff_source_pretool(data):
     if kind != "deny":
         # The static decoded reading (_ansi_c_static_reading), judged the same way beside the command: a git word,
         # producer or option spelled with an ANSI-C escape (git $'\x6c'og -p) is judged as its plain spelling is,
-        # and only a stricter kind than the command's own is taken (deny over note over allow).
-        decoded = _ansi_c_static_lexed(command, _diff_static_kind)
+        # and only a stricter kind than the command's own is taken (deny over note over allow). A reading the
+        # scan cannot make with certainty denies (_StaticReadingUncertain).
+        try:
+            decoded = _ansi_c_static_lexed(command, _diff_static_kind)
+        except _StaticReadingUncertain as exc:
+            return _static_reading_uncertain_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that "
+                                                  "dumps a patch to the console", exc)
         if decoded == "deny" or (decoded == "note" and kind == "allow"):
             kind = decoded
     # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
@@ -7277,8 +7532,15 @@ def commit_identity(data):
     if hit is None:
         # The static decoded reading (_ansi_c_static_reading), read beside the command: a git word, subcommand,
         # option or trailer spelled with an ANSI-C escape (git $'\x63'ommit --author "<AI>") is found as its plain
-        # spelling is. A reading the reader refuses adds nothing (_ansi_c_static_lexed).
-        hit = _ansi_c_static_lexed(command, find_ai_authorship) or None
+        # spelling is. A reading the reader refuses adds nothing (_ansi_c_static_lexed); one the scan cannot make
+        # with certainty denies (_StaticReadingUncertain).
+        try:
+            hit = _ansi_c_static_lexed(command, find_ai_authorship) or None
+        except _StaticReadingUncertain as exc:
+            return _static_reading_uncertain_deny("cmtidn (commit-identity)", "a git command recording an AI "
+                                                  "identity (a co-author trailer, an --author value, a git "
+                                                  "identity variable, EMAIL, or a user, author or committer name "
+                                                  "or email value)", exc)
     if hit is None:
         # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
         # assigns an identity a value that names an AI, or a value it does not spell in a command that names an AI
@@ -10207,8 +10469,14 @@ def git_explicit_binding(data):
         return _expbnd_fallback(command)
     # The static decoded reading (_ansi_c_static_reading) adds its own readings after the lex's, each judged on its
     # own like them, so a git word, subcommand or option spelled with an ANSI-C escape (git add --all && git
-    # $'\x70'ush) is read as its plain spelling; a reading can only add a deny or a note.
-    readings = list(readings) + _ansi_c_static_lexed(command, _lex_readings_read, skip_empty=True)
+    # $'\x70'ush) is read as its plain spelling; a reading can only add a deny or a note, and one the scan cannot
+    # make with certainty denies (_StaticReadingUncertain).
+    try:
+        readings = list(readings) + _ansi_c_static_lexed(command, _lex_readings_read, skip_empty=True)
+    except _StaticReadingUncertain as exc:
+        return _static_reading_uncertain_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree "
+                                              "breadth stage (git add -A, git commit -a) followed by a git push "
+                                              "that publishes whatever the tree holds", exc)
 
     # BREADTH-THEN-PUBLISH PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
     # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the same reading DENIES-and-educates, regardless
@@ -21172,9 +21440,15 @@ def commit_msg_subst(data):
         return _commit_msg_subst_fallback(command)
     # The static decoded reading (_ansi_c_static_reading) is read beside the lex's own segments, so a git word,
     # subcommand or argument spelled with an ANSI-C escape ($'\x67'it commit -m "$(id)") denies like its plain
-    # spelling; its segments can only add a hit.
-    segments = list(segments) + _ansi_c_static_lexed(command, _lex_command_read, skip_empty=True)
-    named = _git_alias_outside(command) or _git_alias_outside(_ansi_c_static_reading(command))
+    # spelling; its segments can only add a hit, and a reading the scan cannot make with certainty denies
+    # (_StaticReadingUncertain).
+    try:
+        segments = list(segments) + _ansi_c_static_lexed(command, _lex_command_read, skip_empty=True)
+        named = _git_alias_outside(command) or _git_alias_outside(_ansi_c_static_reading(command))
+    except _StaticReadingUncertain as exc:
+        return _static_reading_uncertain_deny("sectvl (tool-argument-validation)", "a backtick or $( command "
+                                              "substitution in a git commit argument, which the shell runs before "
+                                              "git sees the argument", exc)
     for seg in segments:
         hit = _commit_msg_subst_hit(seg, named)
         if hit is None:

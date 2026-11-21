@@ -6267,6 +6267,48 @@ _STATIC_DECODED_ROWS = (
     ("sdr-cnsdif-comment-none", "diff_source_pretool", "ls # $'\\x67'it log -p", "allow", None),
     ("sdr-cnsdif-backquote-comment", "diff_source_pretool", "echo \"`true # x`\"; git $'\\x6c'og -p", "deny",
      "allow"),
+    # A '#' that is not a comment (the reading refuses ahead of a later ANSI-C quote): after an escaped blank or
+    # operator, a line continuation inside a word, the ')' closing a substitution, inside a backquote comment cut
+    # at an escaped backquote, in a '${...}' expansion, in a (( )) or [[ =~ ( ) ]] group; and a here-document
+    # delimiter read otherwise than bash reads it. Bash runs the command after each one (bash 5.3.9).
+    ("sdr-sectvl-escaped-blank", "commit_msg_subst", "echo a\\ #; $'\\x67'it commit -m \"$(hostname)\"", "deny",
+     "allow"),
+    ("sdr-cnsdif-escaped-operator", "diff_source_pretool", "echo a\\;#; git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-expbnd-continuation", "git_explicit_binding", "git add -A; echo a\\\n#; git $'\\x70'ush", "deny",
+     "allow"),
+    ("sdr-cnsdif-subst-close", "diff_source_pretool", "echo $(true)#; git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-cmtidn-arith-close", "commit_identity",
+     "echo $((1))#; git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny", "allow"),
+    ("sdr-cnsdif-escaped-backquote", "diff_source_pretool", "echo \"`true # a\\`b`\"; git $'\\x6c'og -p", "deny",
+     "allow"),
+    ("sdr-sectvl-param-blank", "commit_msg_subst", "echo ${x:- #}; $'\\x67'it commit -m \"$(hostname)\"", "deny",
+     "allow"),
+    ("sdr-expbnd-dparen", "git_explicit_binding", "git add -A; (( 1 #)); git $'\\x70'ush", "deny", "allow"),
+    ("sdr-cnsdif-regex-group", "diff_source_pretool", "[[ a =~ ( #) ]]; git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-sectvl-delim-escaped-quote", "commit_msg_subst",
+     "cat <<\"E\\\"F\"\nit's\nE\"F\n$'\\x67'it commit -m \"$(hostname)\"", "deny", "allow"),
+    ("sdr-cnsdif-word-hash-none", "diff_source_pretool", "echo a\\ #x\nprintf $'a\\tb'", "allow", None),
+)
+
+# Commands whose static decoded reading refuses (_StaticReadingUncertain): each holds, ahead of an ANSI-C quote, a
+# construct the reading cannot read with certainty, or one it reads otherwise than the reading before it did.
+_STATIC_DECODED_REFUSED = (
+    ("sdr-refuse-escaped-blank", "echo a\\ #; gi$'\\x74' log"),
+    ("sdr-refuse-escaped-operator", "echo a\\;#; gi$'\\x74' log"),
+    ("sdr-refuse-continuation", "echo a\\\n#; gi$'\\x74' log"),
+    ("sdr-refuse-subst-close", "echo $(true)#; gi$'\\x74' log"),
+    ("sdr-refuse-arith-close", "echo $((1))#; gi$'\\x74' log"),
+    ("sdr-refuse-procsub-close", "cat <(true)#; gi$'\\x74' log"),
+    ("sdr-refuse-escaped-backquote", "echo \"`true # a\\`b`\"; gi$'\\x74' log"),
+    ("sdr-refuse-param-blank", "echo ${x:- #}; gi$'\\x74' log"),
+    ("sdr-refuse-dparen", "(( 1 #)); gi$'\\x74' log"),
+    ("sdr-refuse-regex-group", "[[ a =~ ( #) ]]; gi$'\\x74' log"),
+    ("sdr-refuse-funsub", "echo ${ true; }; gi$'\\x74' log"),
+    ("sdr-refuse-dollar-bracket", "echo $[1]; gi$'\\x74' log"),
+    ("sdr-refuse-delim-ansi-c", "cat <<$'E\\x41'\nit's\nEA\ngi$'\\x74' log"),
+    ("sdr-refuse-delim-escaped-quote", "cat <<\"E\\\"F\"\nit's\nE\"F\ngi$'\\x74' log"),
+    ("sdr-refuse-heredoc-continuation", "cat <<E\nx\\\nE\nit's\nE\ngi$'\\x74' log"),
+    ("sdr-refuse-arith-shift-line", "echo $(( 1 << 2 ))\ngi$'\\x74' log\n2"),
 )
 
 
@@ -6297,11 +6339,38 @@ def _test_static_decoded_reading(failures):
             ("sdr-reading-herestring", "cat <<< $'\\x67'it", "cat <<< git"),
             ("sdr-reading-arith-shift", "echo $(( 1 << 2 )); gi$'\\x74' log", "echo $(( 1 << 2 )); git log"),
             ("sdr-reading-backquote-comment", "echo \"`true # x`\"; gi$'\\x74' log",
-             "echo \"`true # x`\"; git log")):
+             "echo \"`true # x`\"; git log"),
+            ("sdr-reading-word-hash-neutral", "echo a\\ #x\ngi$'\\x74' log", "echo a\\ #x\ngit log"),
+            ("sdr-reading-subshell-comment", "(true) # it's\ngi$'\\x74' log", "(true) # it's\ngit log"),
+            ("sdr-reading-param-braces", "echo ${x:-{a}}; gi$'\\x74' log", "echo ${x:-{a}}; git log"),
+            ("sdr-reading-param-hash", "echo ${x#a} ${#x}; gi$'\\x74' log", "echo ${x#a} ${#x}; git log"),
+            ("sdr-reading-heredoc-nested", "cat <<A\n$(cat <<B\nit's\nB\n)\nA\ngi$'\\x74' log",
+             "cat <<A\n$(cat <<B\nit's\nB\n)\nA\ngit log"),
+            ("sdr-reading-heredoc-pair", "cat <<'A' <<B\nit's\nA\n$($'\\x67'it log)\nB\ngi$'\\x74' log",
+             "cat <<'A' <<B\nit's\nA\n$(git log)\nB\ngit log")):
         got = aiqt_hooks._ansi_c_static_reading(command)
         if got != want:
             failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
                 label, command, want, got))
+    for label, command in _STATIC_DECODED_REFUSED:
+        try:
+            got = aiqt_hooks._ansi_c_static_reading(command)
+        except aiqt_hooks._StaticReadingUncertain:
+            continue
+        failures.append("({}) _ansi_c_static_reading({!r}) must refuse (_StaticReadingUncertain); it read {!r}"
+                        .format(label, command, got))
+    # (sdr-reading-nested-depth) Unquoted here-document bodies nested 3,000 deep are read in place, with no
+    # recursion, so the reading neither raises RecursionError nor loses the decoded word after them.
+    depth = 3000
+    command = ("".join("cat <<E{}\n$(".format(k) for k in range(depth)) + "x"
+               + "".join(")\nE{}\n".format(k) for k in reversed(range(depth))) + "gi$'\\x74' log")
+    try:
+        got = aiqt_hooks._ansi_c_static_reading(command)
+    except RecursionError:
+        got = "RecursionError"
+    if not got.endswith("\ngit log"):
+        failures.append("(sdr-reading-nested-depth) _ansi_c_static_reading of {} nested unquoted here-documents "
+                        "must end with the decoded git log; got {!r}".format(depth, got[-40:]))
     reading = aiqt_hooks._ansi_c_static_reading
     aiqt_hooks._ansi_c_static_reading = lambda command: command
     try:
