@@ -28,10 +28,14 @@ SHA; reads the repository's allowed merge methods, refusing (exit 1) when squash
 a WARNING when merge commits or rebase merges are allowed too; refuses any method but squash; runs
 `tools/ci-status.sh --main-health` and `tools/ci-status.sh <head> --require-base main` before the merge,
 reads the settings and the pull request again, sends one squash request pinned to the head SHA, requires
-a single-parent landing commit, and then runs `tools/ci-status.sh --main-health --merge-commit <landing
-SHA>`. Exit 1 is a refusal (or, after a merge, a landing commit that is not single-parent or a red main;
-its RESULT line says which); exit 2 is cannot-evaluate (settings or state unreadable: nothing was merged)
-or, once the request was sent, an UNKNOWN OUTCOME: read the pull request to reconcile and never resend.
+a single-parent landing commit whose parent is the base commit its last compare read named and whose tree
+is the head's tree, and then runs `tools/ci-status.sh --main-health --merge-commit <landing
+SHA>`. The request pins only the head: a base that moves between that read and the merge is caught after
+the landing, not prevented, unless branch protection requires an up-to-date branch. Exit 1 is a refusal
+(or, after a merge, a landing commit that is not single-parent, sits on another base commit, carries
+another tree, or a red main; its RESULT line says which); exit 2 is cannot-evaluate (settings or state
+unreadable: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME or a main push run
+that cannot be evaluated: read the pull request to reconcile and never resend.
 A WARNING means the hosting settings are wider than squash: the landing went ahead, and the maintainer
 disables the extra methods in the repository settings. The tool cannot stop a merge made outside it
 (the web interface or the API) while those settings allow another method; its BOUNDARY line says so.

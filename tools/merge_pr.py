@@ -9,9 +9,10 @@ commit the caller checked.
 Exit: 0 merged, a single-parent landing commit confirmed and main's push run for it green; 1 refused (a
 method other than squash, squash disabled on the hosting service, a pull request that is not the one
 named, a red gate or an API rejection; nothing was merged), or merged but the post-merge check found the
-landing commit is not single-parent or main red (the RESULT line says which); 2 cannot evaluate (a
-usage error, settings or state that cannot be read or are malformed, an identity mismatch; nothing was
-merged), or an UNKNOWN merge outcome (the request was sent and its result could not be read).
+landing commit is not single-parent, not on the checked base commit, not the head's tree, or main red
+(the RESULT line says which); 2 cannot evaluate (a usage error, settings or state that cannot be read or
+are malformed, an identity mismatch; nothing was merged), or an UNKNOWN merge outcome (the request was
+sent and its result could not be read), or merged with main's push run for it not evaluable.
 
 THE BINDING. Every read and the one action are bound to one validated target, fixed before the first
 read and never re-derived: the repository is the one this checkout's origin remote names (read with
@@ -40,7 +41,8 @@ repository settings; the squash landing then proceeds. Nothing here changes a ho
 THE SEQUENCE. (1) Bind the target and read the settings; (2) read the pull request and require it open,
 not a draft, not merged, at the named head and base, its head branch in this repository (with --train,
 also a merge-train-* head branch carrying the merge-train label); (3) require the head to be up to date
-with the base (the compare read's behind_by is 0); (4) run the existing gates in this checkout:
+with the base (the compare read's behind_by is 0, its base_commit and merge_base_commit the same full
+commit id, which is recorded as the checked base commit); (4) run the existing gates in this checkout:
 `tools/ci-status.sh --main-health` (main must be green) and `tools/ci-status.sh HEAD --require-base
 BASE`, plus `--pr N --require-status CONTEXT` when --require-status is given (its MERGE-SHA line must
 name the head); (5) read the settings, the pull request and the compare again and require the same
@@ -49,10 +51,15 @@ authorization carried over; (6) assert the method is squash and send exactly one
 repos/OWNER/REPO/pulls/N/merge with {"merge_method": "squash", "sha": HEAD}, so a head that moved after
 the last read is rejected by the hosting service itself; (7) require merged true and a full landing
 commit id, read the pull request back (merged, merge_commit_sha the same id) and the landing commit
-(exactly one parent), then run `tools/ci-status.sh --main-health --merge-commit SHA`. A rejection (HTTP
-405, 409 or 422 with a message) is exit 1 with no fallback to another method and no retry; any other
-failure after the request was sent is an UNKNOWN outcome (exit 2): reconcile by reading the pull request
-before any further landing, never by sending the request again. Deferred landing (auto-merge, a merge
+(exactly one parent, that parent the base commit the last compare read recorded, and its tree the head
+commit's tree), then run `tools/ci-status.sh --main-health --merge-commit SHA`. The request pins only the
+head, so a base that advanced between the last read and the merge is not refused by the hosting service
+unless its branch protection requires an up-to-date branch; this tool detects it after the landing
+(exit 1, the RESULT line says so) and cannot undo it. A rejection (HTTP 405, 409 or 422 with a message)
+is exit 1 with no fallback to another method and no retry; any other failure after the request was sent,
+an unexpected error included, is an UNKNOWN outcome (exit 2): reconcile by reading the pull request
+before any further landing, never by sending the request again. An unexpected error before the request
+is cannot-evaluate (exit 2), never a traceback. Deferred landing (auto-merge, a merge
 queue) and an administrator bypass are not offered: no option reaches them.
 
 THE ENFORCEMENT BOUNDARY (printed as the BOUNDARY line of every landing run). This tool makes squash the
@@ -223,7 +230,7 @@ def _no_duplicates(pairs):
 def _json(text, what):
     try:
         return json.loads(text, object_pairs_hook=_no_duplicates)
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, RecursionError) as exc:
         raise CannotEvaluate("{}: the response is not valid JSON ({})".format(what, exc)) from None
 
 
@@ -309,13 +316,29 @@ def judge_pr(pr, repo, opts):
             number, TRAIN_PREFIX, _shown(head_ref), TRAIN_LABEL, "present" if TRAIN_LABEL in labels else "absent"))
 
 
+def _sha_at(doc, *keys):
+    """The full commit id at doc[keys[0]][keys[1]]...; None when absent or not a full lowercase id."""
+    for key in keys:
+        if not isinstance(doc, dict):
+            return None
+        doc = doc.get(key)
+    return doc if isinstance(doc, str) and SHA_RE.fullmatch(doc) else None
+
+
 def judge_compare(doc, opts):
+    """The checked base commit id: the head is up to date with it (behind_by 0, and the compare's base
+    commit is the merge base); Refused or CannotEvaluate otherwise."""
     behind = doc.get("behind_by")
     if type(behind) is not int or behind < 0:
         raise CannotEvaluate("the compare read carries no usable behind_by")
     if behind != 0:
         raise Refused("the head is {} commit(s) behind {}; update the pull request and check it again".format(
             behind, opts["--base"]))
+    base_sha = _sha_at(doc, "base_commit", "sha")
+    if base_sha is None or _sha_at(doc, "merge_base_commit", "sha") != base_sha:
+        raise CannotEvaluate("the compare read does not name one full base commit that is also the merge "
+                             "base, so the base the head is checked against is unknown")
+    return base_sha
 
 
 # ---------- the landing ----------
@@ -327,7 +350,8 @@ class _Run:
         self.api, self.gate, self.origin, self.out, self.err = api, gate, origin, out, err
 
     def snapshot(self, repo, opts):
-        """(policy verdict tuple, pull request) from fresh reads; raises on anything not landable."""
+        """(policy verdict tuple, checked base commit id) from fresh reads; raises on anything not
+        landable."""
         settings = read_json(self.api, "repos/{}".format(repo), "repository settings")
         verdict = evaluate_policy(opts["--method"], settings, repo)
         if verdict[0] == "cannot":
@@ -338,8 +362,7 @@ class _Run:
         judge_pr(pr, repo, opts)
         compare = read_json(self.api, "repos/{}/compare/{}...{}".format(repo, opts["--base"], opts["--head"]),
                             "compare")
-        judge_compare(compare, opts)
-        return verdict
+        return verdict, judge_compare(compare, opts)
 
     def run_gate(self, args, what):
         try:
@@ -381,14 +404,14 @@ class _Run:
         endpoint = "repos/{}/pulls/{}/merge".format(repo, opts["--pr"])
         try:
             rc, out, err = self.api.put(endpoint, payload)
-        except (subprocess.TimeoutExpired, OSError) as exc:
+        except Exception as exc:  # a timeout, a failed start, an undecodable reply: the request may have landed
             self.err("UNKNOWN OUTCOME: the squash request for #{} was sent and did not complete ({}); do not "
                      "retry: read pull request #{} to reconcile before any further landing".format(
                          opts["--pr"], type(exc).__name__, opts["--pr"]))
             return EXIT_CANNOT, None
         try:
             doc = json.loads(out, object_pairs_hook=_no_duplicates)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             doc = None
         if rc == 0 and isinstance(doc, dict) and doc.get("merged") is True \
                 and isinstance(doc.get("sha"), str) and SHA_RE.fullmatch(doc["sha"]):
@@ -404,8 +427,9 @@ class _Run:
                      opts["--pr"], rc, opts["--pr"]))
         return EXIT_CANNOT, None
 
-    def confirm(self, repo, opts, sha):
-        """The post-merge reads and main's health for the landing commit sha; an exit code."""
+    def confirm(self, repo, opts, sha, base_sha):
+        """The post-merge reads and main's health for the landing commit sha, checked against the base
+        commit base_sha the last compare read recorded; an exit code."""
         try:
             pr = read_json(self.api, "repos/{}/pulls/{}".format(repo, opts["--pr"]), "pull request (after)")
             if pr.get("merged") is not True or pr.get("merge_commit_sha") != sha:
@@ -414,6 +438,13 @@ class _Run:
             parents = commit.get("parents")
             if not isinstance(parents, list):
                 raise CannotEvaluate("the landing commit read carries no parents list")
+            if len(parents) == 1:
+                parent = _sha_at(parents[0], "sha")
+                landed_tree = _sha_at(commit, "commit", "tree", "sha")
+                head_tree = _sha_at(read_json(self.api, "repos/{}/commits/{}".format(repo, opts["--head"]),
+                                              "head commit"), "commit", "tree", "sha")
+                if parent is None or landed_tree is None or head_tree is None:
+                    raise CannotEvaluate("the landing or head commit read carries no full parent or tree id")
         except CannotEvaluate as exc:
             self.err("UNKNOWN OUTCOME: merged as {} by the response, but {}; reconcile before any further "
                      "landing".format(sha, exc))
@@ -421,7 +452,16 @@ class _Run:
         if len(parents) != 1:
             self.out("RESULT: MERGED BUT NOT A SQUASH: landing commit {} has {} parents".format(sha, len(parents)))
             return EXIT_REFUSED
-        self.out("MERGED: #{} squashed onto {} as {}".format(opts["--pr"], opts["--base"], sha))
+        if parent != base_sha:
+            self.out("RESULT: MERGED ONTO A MOVED BASE: landing commit {}'s parent is {}, not the checked base "
+                     "commit {}; the landed tree was not the one checked".format(sha, parent, base_sha))
+            return EXIT_REFUSED
+        if landed_tree != head_tree:
+            self.out("RESULT: MERGED BUT THE TREE DIFFERS: landing commit {} has tree {}, not the head's tree "
+                     "{}".format(sha, landed_tree, head_tree))
+            return EXIT_REFUSED
+        self.out("MERGED: #{} squashed onto {} at {} as {}, tree {} (the head's)".format(
+            opts["--pr"], opts["--base"], base_sha, sha, landed_tree))
         try:
             rc, _lines = self.run_gate(["--main-health", "--merge-commit", sha], "post-merge main health")
         except CannotEvaluate as exc:
@@ -446,12 +486,13 @@ class _Run:
                                                                          opts["--head"]))
         self.out(BOUNDARY)
         try:
-            verdict = self.snapshot(repo, opts)
+            verdict, _base_sha = self.snapshot(repo, opts)
             if verdict[0] == "warn":
                 self.err(verdict[2])
             self.gates(opts)
-            # The fresh read governs: settings, pull request and compare are read again after the gates.
-            verdict = self.snapshot(repo, opts)
+            # The fresh read governs: settings, pull request and compare are read again after the gates,
+            # and the base commit this last compare names is the one the landing must sit on.
+            verdict, base_sha = self.snapshot(repo, opts)
             if verdict[0] == "warn":
                 self.err(verdict[2])
         except Refused as exc:
@@ -460,10 +501,19 @@ class _Run:
         except CannotEvaluate as exc:
             self.err("ERROR: cannot evaluate: {}; nothing was merged".format(exc))
             return EXIT_CANNOT
+        except Exception as exc:  # no traceback exit 1 ("refused") for an error nothing judged
+            self.err("ERROR: cannot evaluate: an unexpected {} before the merge request; nothing was "
+                     "merged".format(type(exc).__name__))
+            return EXIT_CANNOT
         code, sha = self.submit(repo, opts)
         if code != EXIT_OK:
             return code
-        return self.confirm(repo, opts, sha)
+        try:
+            return self.confirm(repo, opts, sha, base_sha)
+        except Exception as exc:  # after the merge: never a traceback exit 1, always the unknown outcome
+            self.err("UNKNOWN OUTCOME: merged as {} by the response, but the post-merge check raised an "
+                     "unexpected {}; reconcile before any further landing".format(sha, type(exc).__name__))
+            return EXIT_CANNOT
 
 
 class _GhApi:
@@ -518,7 +568,9 @@ def land_cli(argv, api=None, gate=None, origin=None, out=_print_out, err=_print_
         code, message = opts
         err(message if code == EXIT_REFUSED else "error: " + message + "; nothing was read or merged")
         return code
-    run = _Run(api or _GhApi(), gate or _live_gate, origin or _live_origin, out, err)
+    # `is None`, never truthiness: a falsy stub must not fall through to the live gh, git or ci-status.sh.
+    run = _Run(_GhApi() if api is None else api, _live_gate if gate is None else gate,
+               _live_origin if origin is None else origin, out, err)
     try:
         return run.land(opts)
     except CannotEvaluate as exc:
@@ -534,6 +586,8 @@ FAILURES = []
 FX_REPO = "aiqt-fixture/guardrails"
 FX_HEAD = "ab" * 20
 FX_LANDED = "cd" * 20
+FX_BASE = "ef" * 20
+FX_TREE = "12" * 20
 FX_ORIGIN = b"https://github.com/aiqt-fixture/guardrails.git\n"
 FX_ARGS = ["--pr", "7", "--head", FX_HEAD, "--base", "main", "--method", "squash"]
 
@@ -600,16 +654,25 @@ class _Recorded:
         return [call for call in self.calls if call[0] == "PUT"]
 
 
-def _gets(settings=None, pr=None, compare=None, after=None, commit=None):
+def _compare(behind=0, base=FX_BASE, merge_base=FX_BASE):
+    return {"behind_by": behind, "ahead_by": 1, "base_commit": {"sha": base},
+            "merge_base_commit": {"sha": merge_base}}
+
+
+def _commit(sha=FX_LANDED, parents=(FX_BASE,), tree=FX_TREE):
+    return {"sha": sha, "commit": {"tree": {"sha": tree}}, "parents": [{"sha": parent} for parent in parents]}
+
+
+def _gets(settings=None, pr=None, compare=None, after=None, commit=None, head_commit=None, repo=FX_REPO):
     pr_answers = [pr if pr is not None else _pr()]
     if after is not None:
         pr_answers = pr_answers * 2 + [after]
-    return {"repos/" + FX_REPO: settings if settings is not None else _settings(),
-            "repos/{}/pulls/7".format(FX_REPO): pr_answers,
-            "repos/{}/compare/main...{}".format(FX_REPO, FX_HEAD):
-                compare if compare is not None else {"behind_by": 0, "ahead_by": 1},
-            "repos/{}/commits/{}".format(FX_REPO, FX_LANDED):
-                commit if commit is not None else {"sha": FX_LANDED, "parents": [{"sha": "ef" * 20}]}}
+    return {"repos/" + repo: settings if settings is not None else _settings(),
+            "repos/{}/pulls/7".format(repo): pr_answers,
+            "repos/{}/compare/main...{}".format(repo, FX_HEAD): compare if compare is not None else _compare(),
+            "repos/{}/commits/{}".format(repo, FX_LANDED): commit if commit is not None else _commit(),
+            "repos/{}/commits/{}".format(repo, FX_HEAD):
+                head_commit if head_commit is not None else _commit(FX_HEAD, ("aa" * 20,))}
 
 
 def _gate_fn(calls, main=0, head=0, post=0, commit_line=None, merge_sha_line=None):
@@ -730,7 +793,10 @@ def _self_test_binding():
             ("args/base-missing-refused", ["--pr", "7", "--head", FX_HEAD, "--method", "squash"], EXIT_CANNOT),
             ("args/base-dotdot-refused", ["--pr", "7", "--head", FX_HEAD, "--base", "a..b", "--method", "squash"],
              EXIT_CANNOT),
-            ("args/hyphen-value-refused", ["--pr", "7", "--head", "--base", "main", "--method", "squash"], EXIT_CANNOT)):
+            ("args/hyphen-value-refused", ["--pr", "7", "--head", "--base", "main", "--method", "squash"], EXIT_CANNOT),
+            ("args/train-repeated-refused", FX_ARGS + ["--train", "--train"], EXIT_CANNOT),
+            ("args/base-double-slash-refused", ["--pr", "7", "--head", FX_HEAD, "--base", "a//b", "--method",
+                                                "squash"], EXIT_CANNOT)):
         code_got, api, gate_calls, _out, _err = _land(_gets(), argv=argv)
         check(name, (code_got, api.calls, gate_calls) == (code, [], []), (code_got, api.calls, gate_calls))
 
@@ -746,7 +812,8 @@ def _self_test_landing():
                       ("GET", "repos/" + FX_REPO), ("GET", "repos/{}/pulls/7".format(FX_REPO)),
                       ("GET", "repos/{}/compare/main...{}".format(FX_REPO, FX_HEAD)),
                       ("PUT", endpoint_put), ("GET", "repos/{}/pulls/7".format(FX_REPO)),
-                      ("GET", "repos/{}/commits/{}".format(FX_REPO, FX_LANDED))]
+                      ("GET", "repos/{}/commits/{}".format(FX_REPO, FX_LANDED)),
+                      ("GET", "repos/{}/commits/{}".format(FX_REPO, FX_HEAD))]
     check("land/squash-only-one-pinned-request",
           code == 0 and order == expected_order and api.puts() == [("PUT", endpoint_put, _good_put_payload())]
           and gates == [("--main-health",), (FX_HEAD, "--require-base", "main"),
@@ -796,7 +863,13 @@ def _self_test_landing():
             ("land/main-unknown-cannot", _gets(), {"main": 2}, FX_ORIGIN, 2),
             ("land/head-ci-red-refused", _gets(), {"head": 1}, FX_ORIGIN, 1),
             ("land/head-ci-unknown-cannot", _gets(), {"head": 2}, FX_ORIGIN, 2),
-            ("land/head-ci-other-commit-cannot", _gets(), {"commit_line": "COMMIT: " + "ee" * 20}, FX_ORIGIN, 2)):
+            ("land/head-ci-other-commit-cannot", _gets(), {"commit_line": "COMMIT: " + "ee" * 20}, FX_ORIGIN, 2),
+            ("land/pr-head-repo-null-refused", _gets(pr=_pr(head={"repo": None})), {}, FX_ORIGIN, 1),
+            ("land/compare-base-missing-cannot", _gets(compare={"behind_by": 0, "ahead_by": 1}), {}, FX_ORIGIN, 2),
+            ("land/compare-base-not-merge-base-cannot", _gets(compare=_compare(merge_base="11" * 20)), {},
+             FX_ORIGIN, 2),
+            ("land/unexpected-error-before-request-cannot",
+             _gets(settings=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")), {}, FX_ORIGIN, 2)):
         code, api, _gates, _out, _err = _land(gets, origin=origin, **gate_kwargs)
         check(name, code == code_expected and api.puts() == [], (code, api.calls, _err))
 
@@ -804,10 +877,7 @@ def _self_test_landing():
     # answers for another repository are never read in its place.
     adopter = "adopter-org/their-repo"
     adopter_pr = _pr(base={"repo": {"full_name": adopter}}, head={"repo": {"full_name": adopter}})
-    adopter_gets = {"repos/" + adopter: _settings(full_name=adopter),
-                    "repos/{}/pulls/7".format(adopter): [adopter_pr, adopter_pr, _merged_after()],
-                    "repos/{}/compare/main...{}".format(adopter, FX_HEAD): {"behind_by": 0},
-                    "repos/{}/commits/{}".format(adopter, FX_LANDED): {"parents": [{"sha": "ef" * 20}]}}
+    adopter_gets = _gets(settings=_settings(full_name=adopter), pr=adopter_pr, after=_merged_after(), repo=adopter)
     for name, gets, code_expected in (("land/adopter-target-only", adopter_gets, 0),
                                       ("land/adopter-never-reads-another-repo", _gets(), 2)):
         code, api, _gates, _out, _err = _land(gets, origin=b"git@github.com:adopter-org/their-repo.git\n")
@@ -847,7 +917,7 @@ def _self_test_landing():
              dict(_gets(), **{"repos/" + FX_REPO: [_settings(), (1, "", "gh: timeout")]}), 2),
             ("land/base-advanced-before-submit-refused",
              dict(_gets(), **{"repos/{}/compare/main...{}".format(FX_REPO, FX_HEAD):
-                              [{"behind_by": 0}, {"behind_by": 1}]}), 1)):
+                              [_compare(), _compare(behind=1)]}), 1)):
         code, api, _gates, _out, _err = _land(gets)
         check(name, code == code_expected and api.puts() == [], (code, api.calls))
 
@@ -862,7 +932,13 @@ def _self_test_landing():
             ("submit/timeout-unknown", subprocess.TimeoutExpired("gh", READ_TIMEOUT), 2, "UNKNOWN OUTCOME"),
             ("submit/malformed-success-unknown", (0, "not json", ""), 2, "UNKNOWN OUTCOME"),
             ("submit/merged-false-unknown", {"merged": False, "message": "not merged"}, 2, "UNKNOWN OUTCOME"),
-            ("submit/short-sha-unknown", {"merged": True, "sha": "cd" * 4}, 2, "UNKNOWN OUTCOME")):
+            ("submit/short-sha-unknown", {"merged": True, "sha": "cd" * 4}, 2, "UNKNOWN OUTCOME"),
+            ("submit/gh-error-with-merged-body-unknown",
+             (1, json.dumps({"merged": True, "sha": FX_LANDED}), "gh: Bad Gateway (HTTP 502)"), 2, "UNKNOWN OUTCOME"),
+            ("submit/rejection-body-claims-merged-unknown",
+             (1, json.dumps({"message": "conflict", "merged": True}), "gh: conflict (HTTP 409)"), 2, "UNKNOWN OUTCOME"),
+            ("submit/undecodable-reply-unknown", UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), 2,
+             "UNKNOWN OUTCOME")):
         code, api, gates, _out, err = _land(_gets(after=_merged_after()), put=put)
         check(name, code == code_expected and len(api.puts()) == 1
               and all(call[0] == "GET" for call in api.calls[api.calls.index(api.puts()[0]) + 1:])
@@ -873,9 +949,23 @@ def _self_test_landing():
     for name, gets, post, code_expected, needle in (
             ("after/landed-green", _gets(after=_merged_after()), 0, 0, "RESULT: LANDED:"),
             ("after/not-single-parent-refused",
-             _gets(after=_merged_after(), commit={"parents": [{"sha": "ef" * 20}, {"sha": FX_HEAD}]}), 0, 1,
-             "NOT A SQUASH"),
+             _gets(after=_merged_after(), commit=_commit(parents=(FX_BASE, FX_HEAD))), 0, 1, "NOT A SQUASH"),
+            ("after/moved-base-refused", _gets(after=_merged_after(), commit=_commit(parents=("11" * 20,))), 0, 1,
+             "MOVED BASE"),
+            ("after/tree-differs-refused", _gets(after=_merged_after(), commit=_commit(tree="13" * 20)), 0, 1,
+             "TREE DIFFERS"),
+            ("after/parents-not-list-unknown",
+             _gets(after=_merged_after(), commit=dict(_commit(), parents=None)), 0, 2, None),
+            ("after/landing-tree-missing-unknown",
+             _gets(after=_merged_after(), commit=dict(_commit(), commit={})), 0, 2, None),
+            ("after/head-commit-unreadable-unknown",
+             _gets(after=_merged_after(), head_commit=(1, "", "gh: Not Found (HTTP 404)")), 0, 2, None),
             ("after/readback-not-merged-unknown", _gets(after=_pr()), 0, 2, None),
+            ("after/readback-other-sha-unknown",
+             _gets(after=_pr(merged=True, state="closed", merge_commit_sha="11" * 20)), 0, 2, None),
+            ("after/unexpected-error-unknown",
+             _gets(after=_merged_after(), commit=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")),
+             0, 2, None),
             ("after/main-red-after-merge", _gets(after=_merged_after()), 1, 1, "MAIN IS RED"),
             ("after/main-unknown-after-merge", _gets(after=_merged_after()), 2, 2, None)):
         code, api, _gates, out, err = _land(gets, post=post)
@@ -894,10 +984,35 @@ def _self_test_landing():
     check("submit/final-assertion-refuses-non-squash", refused and run.api.puts() == [], run.api.calls)
 
 
+def _self_test_live_argv():
+    """The live wrappers' command lines, with subprocess.run replaced by a recorder for the duration (no
+    child process starts and nothing reaches the network): every gh call pins --hostname github.com and the
+    API headers, the PUT sends the payload on stdin, and the origin read asks git for every URL."""
+    recorded = []
+
+    def fake_run(argv, **kwargs):
+        recorded.append((list(argv), kwargs.get("input")))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"" if not kwargs.get("text") else "", stderr="")
+    from unittest import mock
+    with mock.patch.object(subprocess, "run", fake_run):
+        api = _GhApi()
+        api.get("repos/" + FX_REPO)
+        api.put("repos/{}/pulls/7/merge".format(FX_REPO), {"merge_method": "squash", "sha": FX_HEAD})
+        _live_origin()
+    pinned = ["gh", "api", "--hostname", "github.com", "-H", API_HEADERS[0], "-H", API_HEADERS[1]]
+    check("live/gh-calls-pin-hostname-and-headers",
+          len(recorded) == 3 and recorded[0][0] == pinned + ["--method", "GET", "repos/" + FX_REPO]
+          and recorded[1][0] == pinned + ["--method", "PUT", "repos/{}/pulls/7/merge".format(FX_REPO), "--input", "-"]
+          and json.loads(recorded[1][1]) == {"merge_method": "squash", "sha": FX_HEAD}, recorded)
+    check("live/origin-read-asks-for-every-url",
+          len(recorded) == 3 and recorded[2][0][-4:] == ["remote", "get-url", "--all", "origin"], recorded)
+
+
 def _self_test():
     _self_test_policy()
     _self_test_binding()
     _self_test_landing()
+    _self_test_live_argv()
     got = [_main_exit(argv) for argv in (["--self-test", "--bogus"], ["--execution-report", "relative/report"],
                                          [])]
     check("cli/unrecognized-arguments-exit-2", got == [2, 2, 2], got)
@@ -912,8 +1027,10 @@ def _self_test():
           "other-repository settings cannot evaluate; the origin binding; every argument refusal before any "
           "read; the landing's request order and exact pinned squash payload; every pre-request refusal "
           "sends no request; a fresh read before submission governs; a rejection is never retried or "
-          "replaced by another method; an unreadable outcome is unknown; the post-merge reads and main's "
-          "health decide the result)".format(len(EXECUTED)))
+          "replaced by another method; an unreadable or unexpected outcome is unknown; the post-merge reads "
+          "(single parent, the checked base commit as that parent, the head's tree) and main's health decide "
+          "the result; the live gh and git command lines pin the host and read every origin URL)".format(
+              len(EXECUTED)))
     return 0
 
 
