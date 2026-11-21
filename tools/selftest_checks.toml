@@ -2685,6 +2685,12 @@ expected-check-ids = [
   "V29/insteadof-read-elsewhere-cannot-evaluate",
   "V29/remote-named-like-url-cannot-evaluate",
   "V29/flip-unrelated-rewrite-remote-commit-pushes",
+  "V30/pull-request-ref-only-refused",
+  "V30/flip-branch-ref-pushes",
+  "V31/shallow-boundary-remote-has-pushes",
+  "V31/flip-shallow-boundary-remote-lacks-cannot-evaluate",
+  "V32/ssh-command-remote-commit-pushes",
+  "V32/flip-ssh-command-unrecorded-refused",
   # ---------- the pinned residuals ----------
   "X1/no-verify-commits",
   "X2/hookspath-commits",

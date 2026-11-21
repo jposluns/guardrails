@@ -40,6 +40,12 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          unreadable remote cannot evaluate; with no URL the refusal stands.
   V29    a URL ls-remote would read elsewhere (url.<base>.insteadOf, a remote named like the URL) cannot
          evaluate and pushes nothing. Its flip: an unrelated rewrite leaves a commit the remote has pushing.
+  V30    the remote proof reads only the remote's branches and tags: a commit only a pull-request ref holds
+         stays refused. Its flip: the same commit on a remote branch pushes.
+  V31    a new branch at a shallow clone's boundary commit the remote has pushes. Its flip: once only a
+         pull-request ref holds that commit, the push cannot evaluate.
+  V32    the remote proof reads through the push's transport variables (GIT_SSH_COMMAND): a commit the remote
+         has pushes. Its flip: an unrecorded commit through the same transport stays refused.
   X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
@@ -889,6 +895,99 @@ def rows_url_rewrite(base):
     check("V29/flip-unrelated-rewrite-remote-commit-pushes",
           (done.returncode, git(remote, "rev-parse", "-q", "--verify", "v29-feature").stdout.strip() != ""),
           (0, True))
+    rows_reviewed_refs(base)
+    rows_shallow_remote(base)
+    rows_transport(base)
+
+
+def rows_reviewed_refs(base):
+    # V30 (QA qagitrecord3 finding 2): the remote proof read every ref the remote advertises, so an unrecorded
+    # commit a pull-request ref holds (a hosted service makes refs/pull/<n>/head from any user's unreviewed
+    # commits; simulated here with a --no-verify push) pushed to a branch with no record. Only the remote's branches
+    # and tags count now: it stays refused and the remote never gets the branch. The flip: the same commit on a
+    # branch of the remote pushes.
+    repo = fixture(base)
+    remote = bare_remote(repo, "v30")
+    stage(repo, "u.txt", "u\n")
+    commit(repo, "v30 unrecorded", "--no-verify")
+    git_out(repo, "push", "-q", "--no-verify", "origin", "HEAD:refs/pull/1/head")
+    git_out(repo, "push", "-q", "--no-verify", "origin", "HEAD:refs/merge-requests/1/head")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v30-u")
+    check("V30/pull-request-ref-only-refused",
+          (done.returncode != 0, "missing" in done.stderr,
+           git(remote, "rev-parse", "-q", "--verify", "refs/heads/v30-u").stdout.strip()), (True, True, ""))
+    git_out(repo, "push", "-q", "--no-verify", "origin", "HEAD:refs/heads/v30-reviewed")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v30-u")
+    check("V30/flip-branch-ref-pushes",
+          (done.returncode, git(remote, "rev-parse", "-q", "--verify", "refs/heads/v30-u").stdout.strip() != ""),
+          (0, True))
+
+
+def rows_shallow_remote(base):
+    # V31 (QA qagitrecord3 finding 3): in a depth-1 clone, a new branch at the shallow boundary commit (which the
+    # remote has on its main branch) could not be evaluated, because the shallow error came before the remote
+    # proof; the proof reads the commit objects, which a shallow cut can only make accept less, so it now pushes.
+    # The flip: once the remote's branches no longer hold that commit (only a pull-request ref does), the same push
+    # cannot evaluate and the remote never gets the branch.
+    seed = fixture(base, installed=False)
+    remote = bare_remote(seed, "v31")
+    stage(seed, "d.txt", "d\n")
+    commit(seed, "v31 second", "--no-verify")
+    git_out(seed, "push", "-q", "--no-verify", "origin", "main")
+    boundary = head(seed)
+    _COUNTER[0] += 1
+    repo = TMP / "r{:03d}".format(_COUNTER[0])
+    git_out(TMP, "clone", "-q", "--depth", "1", "file://" + str(remote), str(repo))
+    done = gate(repo, "install")
+    if done.returncode != 0:
+        raise RuntimeError("fixture install failed: " + done.stderr.strip())
+    shallow = git_out(repo, "rev-parse", "--is-shallow-repository")
+    git_out(repo, "switch", "-q", "-c", "v31-new")
+    done = git(repo, "push", "-q", "origin", "v31-new")
+    check("V31/shallow-boundary-remote-has-pushes",
+          (shallow, head(repo) == boundary, done.returncode,
+           git(remote, "rev-parse", "-q", "--verify", "refs/heads/v31-new").stdout.strip() == boundary),
+          ("true", True, 0, True))
+    git_out(seed, "push", "-q", "--no-verify", "origin", "HEAD:refs/pull/1/head")
+    git_out(seed, "push", "-q", "--no-verify", "-f", "origin", "HEAD~1:refs/heads/main", ":refs/heads/v31-new")
+    git_out(repo, "switch", "-q", "-c", "v31-gone")
+    done = git(repo, "push", "-q", "origin", "v31-gone")
+    check("V31/flip-shallow-boundary-remote-lacks-cannot-evaluate",
+          (done.returncode != 0, "shallow" in done.stderr, "does not have it" in done.stderr,
+           git(remote, "rev-parse", "-q", "--verify", "refs/heads/v31-gone").stdout.strip()), (True, True, True, ""))
+
+
+def rows_transport(base):
+    # V32 (QA qagitrecord3 finding 4): the remote proof's git ls-remote dropped the transport variables git pushed
+    # with (GIT_SSH_COMMAND and the like), so it reached the remote another way than the push did, or failed. It
+    # keeps them now: through a GIT_SSH_COMMAND transport (a local stand-in for ssh), a new branch at a commit the
+    # remote has pushes. The flip: through the same transport, an unrecorded commit stays refused.
+    repo = fixture(base)
+    remote = bare_remote(repo, "v32")
+    other = TMP / "v32-other"
+    git_out(TMP, "clone", "-q", str(remote), str(other))
+    write(other, "s.txt", "elsewhere\n")
+    git_out(other, "add", "s.txt")
+    git_out(other, "commit", "-q", "-m", "made elsewhere")
+    git_out(other, "push", "-q", "origin", "main")
+    git_out(repo, "fetch", "-q", "origin")
+    fake = TMP / "v32-ssh"
+    write(TMP, "v32-ssh", '#!/bin/sh\n# a stand-in for ssh: run the git command git asks for, here\nshift\n'
+          'exec sh -c "git ${1#git-}"\n')
+    os.chmod(fake, 0o755)
+    git_out(repo, "remote", "set-url", "origin", "ssh://v32.invalid" + str(remote))
+    transport = {"GIT_SSH_COMMAND": str(fake), "GIT_SSH_VARIANT": "simple"}
+    git_out(repo, "switch", "-q", "-c", "v32-feature", "origin/main")
+    done = git(repo, "push", "-q", "origin", "v32-feature", extra=transport)
+    check("V32/ssh-command-remote-commit-pushes",
+          (done.returncode, git(remote, "rev-parse", "-q", "--verify", "refs/heads/v32-feature").stdout.strip() != ""),
+          (0, True))
+    stage(repo, "u.txt", "u\n")
+    commit(repo, "v32 unrecorded", "--no-verify")
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v32-u", extra=transport)
+    check("V32/flip-ssh-command-unrecorded-refused",
+          (done.returncode != 0, "missing" in done.stderr,
+           git(remote, "rev-parse", "-q", "--verify", "refs/heads/v32-u").stdout.strip()), (True, True, ""))
 
 
 # --- the installer -----------------------------------------------------------------------------------------

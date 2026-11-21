@@ -44771,10 +44771,12 @@ class _DeadlineWindow:
 # objects, the grafts file and the commit-graph turned off (_gr_env, _GR_GIT_PIN, _GR_STUB), so a git replace of
 # the configuration, the verifier or a pushed commit, or a written grafts or commit-graph file, cannot change what
 # is judged while git commits and pushes the real objects; in a shallow repository a pushed commit with no parent
-# git can read cannot evaluate (the shallow file hides parents as a grafts file does). A pushed tip this clone
+# git can read cannot evaluate (the shallow file hides parents as a grafts file does) unless the remote at the push
+# URL already has it. A pushed tip this clone
 # holds no passing record for is accepted only when the remote at the push URL already has it (_gr_remote_has:
-# git ls-remote of that URL, never this clone's refs/remotes, then git rev-list over the commit objects); a
-# remote that cannot be read, or a URL ls-remote would rewrite to another one, then cannot evaluate. A record line is
+# git ls-remote of that URL with the push's transport variables, never this clone's refs/remotes, reading only
+# the remote's branches and tags, then git rev-list over the commit objects); a remote that cannot be read, or a
+# URL ls-remote would rewrite to another one, then cannot evaluate. A record line is
 # a JSON object with exactly _GR_KEYS, in that order: head is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
 # the check moved the tree, the index or HEAD, and a cannot-evaluate one when the check ran past its bound, a
 # process of its group outlived it, or the log was replaced or rewritten while it ran.
@@ -44803,11 +44805,12 @@ class _DeadlineWindow:
 # all read alike (a receiving remote checks object names); the GIT_ variables git sets for a hook
 # (_GR_HOOK_GIT_KEEP), GIT_NAMESPACE and the configuration git passes on are read as git reads them; every git
 # call here pins core.commitGraph on git's command line, which is assumed (not tested here) to outrank a
-# GIT_CONFIG_COUNT entry; a pushed commit at a shallow boundary cannot evaluate even when it is a real root; and
-# the remote proof trusts the remote at the push URL to hold every ancestor of what it advertises, accepts a
-# commit reachable from any ref it advertises (pull-request refs other users create included), and cannot
-# evaluate a URL git ls-remote would rewrite (url.<base>.insteadOf, a remote named like the URL), checked with
-# ls-remote --get-url just before the read, so a same-user config change between the two is an R8 race.
+# GIT_CONFIG_COUNT entry; a pushed commit at a shallow boundary the remote does not have cannot evaluate even
+# when it is a real root; and the remote proof trusts the remote at the push URL to hold every ancestor of what
+# its branches and tags name (refs/heads and refs/tags only: pull-request refs and every other advertised ref are
+# not read), trusts whoever can write those refs on the remote (its own branch protection is the review), and
+# cannot evaluate a URL git ls-remote would rewrite (url.<base>.insteadOf, a remote named like the URL), checked
+# with ls-remote --get-url just before the read, so a same-user config change between the two is an R8 race.
 _GR_FORMAT = "aiqt-gate-record/2"
 _GR_OLD_FORMATS = ("aiqt-gate-record/1",)
 _GR_RECORDER = "aiqt_hooks gate-record 2"
@@ -44845,6 +44848,17 @@ _GR_HOOK_GIT_KEEP = frozenset((
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
     "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"))
+# The ref prefixes the remote proof reads (_gr_remote_tips): the remote's branches and tags, peeled tags included.
+# Every other advertised ref (HEAD, refs/pull/*, refs/merge-requests/*, refs/notes/*, ...) is ignored.
+_GR_REMOTE_REVIEWED = ("refs/heads/", "refs/tags/")
+# The transport variables the remote proof's git ls-remote keeps from the environment git pushed with, so it
+# reaches the remote through the same ssh command, proxy, credentials and TLS settings as the push (dropping them
+# could make the read fail, or reach another host than the push did).
+_GR_TRANSPORT_KEEP = frozenset((
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_ALLOW_PROTOCOL",
+    "GIT_PROTOCOL_FROM_USER", "GIT_SSL_NO_VERIFY", "GIT_SSL_CAINFO", "GIT_SSL_CAPATH", "GIT_SSL_CERT",
+    "GIT_SSL_KEY", "GIT_SSL_CERT_PASSWORD_PROTECTED", "GIT_SSL_VERSION", "GIT_SSL_CIPHER_LIST",
+    "GIT_HTTP_PROXY_AUTHMETHOD", "GIT_HTTP_USER_AGENT"))
 # The grafts file every git read here names: a path under /dev/null, which no process can create (ENOTDIR), so git
 # reads no grafts and, unlike an existing empty file, prints no graft-file deprecation hint.
 _GR_NO_GRAFTS = "/dev/null/aiqt-no-grafts"
@@ -44860,6 +44874,11 @@ _GR_CONFIG_KEEP = frozenset(("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONF
 
 class _GateRecordError(Exception):
     """A gate-record step that cannot evaluate (exit 2), with the reason."""
+
+
+class _GateRecordShallow(_GateRecordError):
+    """A pushed commit at a shallow boundary (no parent git can read): cannot evaluate from this clone's history,
+    unless the remote at the push URL already has the commit (_gr_verify_push)."""
 
 
 class _GateRecordRefusal(Exception):
@@ -45279,16 +45298,17 @@ def _gr_push_base(env, sha):
     """(sets, pre_push, head): the configuration a pushed commit sha is judged by and the parent its record must
     name. The first parent's; for a root commit the default branch contains, its own (the repository's first
     commit), with head ""; for any other root commit, the default branch's, refused unless the root keeps it.
-    In a shallow repository a commit with no parent git can read cannot evaluate: the shallow file, which a
-    same-user process can write like a grafts file, hides a listed commit's parents from every git read."""
+    In a shallow repository a commit with no parent git can read cannot evaluate (_GateRecordShallow): the
+    shallow file, which a same-user process can write like a grafts file, hides a listed commit's parents from
+    every git read."""
     parent = _gr_git(env, "rev-parse", "-q", "--verify", sha + "^1", check=False)
     if parent:
         sets, _, pre_push = _gr_config_at(env, parent + ":" + _GR_CONFIG, sha + "^1")
         return sets, pre_push, parent
     if _gr_git(env, "rev-parse", "--is-shallow-repository") != "false":
-        raise _GateRecordError("{} has no parent git can read, and this is a shallow repository, whose shallow "
-                               "file can hide a commit's real parents; deepen or unshallow the clone (git fetch "
-                               "--unshallow) and retry".format(sha))
+        raise _GateRecordShallow("{} has no parent git can read, and this is a shallow repository, whose shallow "
+                                 "file can hide a commit's real parents; deepen or unshallow the clone (git fetch "
+                                 "--unshallow) and retry".format(sha))
     base = _gr_default_base(env)
     if base is None:
         raise _GateRecordError("{} is a root commit and none of {} names a commit whose bar it must keep".format(
@@ -45532,22 +45552,30 @@ def _gr_remote_tips(env, url):
     git ls-remote reads the URL after the fetch rewrites (url.<base>.insteadOf, or a remote whose name is that
     text), while git pushed to the URL after the push rewrites (url.<base>.pushInsteadOf), so a same-user git
     config could point the read at another repository (QA qagitrecord3); a URL ls-remote --get-url would
-    rewrite cannot evaluate."""
+    rewrite cannot evaluate. Only the remote's branches and tags (_GR_REMOTE_REVIEWED) count: a remote also
+    advertises refs no review guards, such as the pull-request refs (refs/pull/*, refs/merge-requests/*) a
+    hosted service makes from any user's unreviewed commits (QA qagitrecord3 finding 2). The read keeps the
+    transport variables git pushed with (_GR_TRANSPORT_KEEP), so it reaches the remote the way the push did."""
     if not url or url.startswith("-"):
         raise _GateRecordError("git gave pre-push no remote URL this verifier can read ({!r})".format(url))
+    env = dict(env)
+    env.update((key, value) for key, value in os.environ.items() if key in _GR_TRANSPORT_KEEP)
+    env["GIT_TERMINAL_PROMPT"] = "0"
     resolved = _gr_git(env, "ls-remote", "--get-url", url)
     if resolved != url:
         raise _GateRecordError("git ls-remote would read {!r}, not the push URL {!r} (a url.<base>.insteadOf "
                                "rewrite, or a remote named like the URL), so whether the remote git pushes to "
                                "has the commit cannot be read; record the tree, or remove that rewrite and "
                                "retry".format(resolved, url))
-    listed = _gr_git_done(dict(env, GIT_TERMINAL_PROMPT="0"), ("ls-remote", url))
+    listed = _gr_git_done(env, ("ls-remote", url))
     if listed.returncode != 0:
         raise _GateRecordError("git ls-remote {} failed (exit {}): {}".format(
             url, listed.returncode, listed.stderr.decode("utf-8", "replace").strip()))
     oids = []
     for line in listed.stdout.decode("utf-8", "replace").split("\n"):
-        oid = line.split("\t", 1)[0]
+        oid, _, ref = line.partition("\t")
+        if not ref.startswith(_GR_REMOTE_REVIEWED):
+            continue  # HEAD, refs/pull/*, refs/merge-requests/*, notes and the like: not a reviewed ref
         if _GR_TREE_RE.fullmatch(oid) and oid not in oids:
             oids.append(oid)
     if not oids:
@@ -45559,9 +45587,9 @@ def _gr_remote_tips(env, url):
 
 def _gr_remote_has(env, url, sha, cache):
     """The commit sha names (a tag peeled to its commit) when the remote at url already has it, else None: it is
-    reachable from a commit the remote advertises (_gr_remote_tips), read with git rev-list over the commit objects
-    (replace objects, grafts and the commit-graph off), so a shallow cut can only make it None. A pushed tip the
-    remote already has carries no commit the remote lacks. A failed read cannot evaluate (_GateRecordError)."""
+    reachable from a branch or tag the remote advertises (_gr_remote_tips), read with git rev-list over the commit
+    objects (replace objects, grafts and the commit-graph off), so a shallow cut can only make it None. A pushed tip
+    the remote already has carries no commit the remote lacks. A failed read cannot evaluate (_GateRecordError)."""
     commit = _gr_git(env, "rev-parse", "-q", "--verify", sha + "^{commit}", check=False)
     if not commit:
         return None
@@ -45577,7 +45605,8 @@ def _gr_remote_has(env, url, sha, cache):
 def _gr_verify_push(stdin_text, url=None):
     """The pre-push verifier: each pushed tip's tree must have a passing record on its parent, unless the remote
     at url (pre-push's second argument) already has the commit (_gr_remote_has, read only for a tip it would
-    refuse). With no url, a refused tip stays refused."""
+    refuse, or for a tip at a shallow boundary, which cannot evaluate unless the remote has it). With no url, a
+    refused tip stays refused."""
     env = _gr_env(_GR_HOOK_GIT_KEEP)
     zero = re.compile(r"0+", re.ASCII)
     lines = stdin_text.split("\n")
@@ -45594,6 +45623,7 @@ def _gr_verify_push(stdin_text, url=None):
         if zero.fullmatch(sha):
             continue  # a deletion pushes no tree
         tree = _gr_git(env, "rev-parse", "--verify", sha + "^{tree}")
+        shallow = None
         try:
             sets, pre_push, head = _gr_push_base(env, sha)
             if logs is None:
@@ -45601,10 +45631,18 @@ def _gr_verify_push(stdin_text, url=None):
             refusal = _gr_judge_logs(logs, tree, head, pre_push, sets[pre_push])
         except _GateRecordRefusal as exc:
             refusal = str(exc)
+        except _GateRecordShallow as exc:
+            # A shallow boundary hides the parent the record binds, but not whether the remote has the commit:
+            # the remote proof reads the commit objects, and a shallow cut can only make it accept less.
+            shallow, refusal = exc, str(exc)
         held = _gr_remote_has(env, url, sha, cache) if refusal is not None and url is not None else None
+        if held is None and shallow is not None:
+            raise _GateRecordShallow("{} ({})".format(shallow, (
+                "git named no push URL, so whether the remote has it was not read" if url is None else
+                "the remote at the push URL does not have it on a branch or tag either")))
         if held is not None:
-            _stderr_note("aiqt gate-record: push of {}: the remote already has commit {} (read from its advertised "
-                         "refs), so this push carries no commit it lacks; accepted without a record of this "
+            _stderr_note("aiqt gate-record: push of {}: the remote already has commit {} (read from its branches "
+                         "and tags), so this push carries no commit it lacks; accepted without a record of this "
                          "clone".format(parts[0], held))
             continue
         if refusal is not None:
