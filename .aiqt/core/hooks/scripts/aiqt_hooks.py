@@ -32008,7 +32008,14 @@ def _nrd_word_names(argv, oq):
     operands read by exact name (_nrd_pkg_operand_start, _nrd_exact_prog_name)."""
     pkg = _nrd_pkg_operand_start(argv, oq)
     return [_nrd_exact_prog_name(tok) if pkg is not None and j > pkg and _nrd_pkg_name_word(tok)
+            and argv[j - 1] not in _NRD_PKG_HOOK_OPTIONS
             else _nrd_prog_name(tok) for j, tok in enumerate(argv)]
+
+
+# The dpkg options whose value is a command dpkg runs through sh -c (its pre-invoke and post-invoke
+# hooks and its status logger): the value word after one of them keeps the version-suffix reading
+# (dpkg --pre-invoke lua5.4 is lua), as the '=' spelling does.
+_NRD_PKG_HOOK_OPTIONS = frozenset(("--pre-invoke", "--post-invoke", "--status-logger"))
 
 
 def _nrd_pkg_name_word(tok):
@@ -32032,6 +32039,10 @@ def _nrd_pkg_name_word(tok):
 _NRD_PROC_LAUNCH_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?(?:exe|fd/[^/]+|map_files/[^/]+)\Z")
 _NRD_PROC_ROOT_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?root(?=/|\Z)")
 _NRD_PROC_CWD_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?cwd/")
+# A path below a descriptor (/dev/fd/N/..., /dev/stdin/..., /proc/<...>/fd/N/...): the descriptor can
+# name a directory, such as one opened with 3</proc/self.
+_NRD_PROC_BELOW_FD_RE = re.compile(
+    r"(?:/proc/[^/]+/(?:task/[^/]+/)?fd/[^/]+|/dev/fd/[^/]+|/dev/std(?:in|out|err))/[^/]")
 
 
 def _nrd_proc_launch(tok):
@@ -32051,6 +32062,11 @@ def _nrd_proc_launch(tok):
             # below the process's working directory: read as a relative word (fail closed)
             return _nrd_proc_launch("./" + path[m.end():])
         if _NRD_PROC_LAUNCH_RE.match(path) is not None or _nrd_stdin_device(path):
+            return True
+        if _NRD_PROC_BELOW_FD_RE.match(path) is not None:
+            # below a descriptor: a descriptor held open on a directory makes the rest of the path a
+            # lookup from that directory (/dev/fd/3/exe 3</proc/self is the running shell, and so is
+            # /dev/fd/3/self/exe 3</proc), so no such path is read as an ordinary program (fail closed)
             return True
         if ".." in tok.split("/"):
             # the kernel resolves a '..' after a symbolic link from the link's target, not lexically:

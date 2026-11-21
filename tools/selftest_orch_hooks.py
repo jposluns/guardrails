@@ -18538,7 +18538,10 @@ def _main_isolated(report_path=None):
             "echo hi | sudo /dev/fd/../exe", "env -S'/dev/fd/../exe -s'",
             "echo hi | PATH=/proc/self exe", "PATH=/proc/self; echo hi | exe",
             "echo hi | PATH=/dev/fd 3 3</bin/bash", "cd /proc/self && echo hi | PATH=. exe",
-            "echo hi | env PATH=/proc/self exe", "echo hi | PATH=/proc/self command exe")
+            "echo hi | env PATH=/proc/self exe", "echo hi | PATH=/proc/self command exe",
+            "echo hi | /dev/fd/3/exe 3</proc/self", "echo hi | /dev/fd/3/self/exe 3</proc",
+            "echo hi | /proc/self/fd/3/exe 3</proc/self", "echo hi | sudo /dev/fd/3/exe 3</proc/self",
+            "env -S'/dev/fd/3/exe -s' 3</proc/self", "echo hi | /dev/stdin/exe 0</proc/self")
         check("nrd/other-name-dotdot-path-denies",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more],
               ["deny"] * len(_nrd_other_more))
@@ -18547,11 +18550,15 @@ def _main_isolated(report_path=None):
         _nrd_pkg_hook = ("apt-get -o APT::Update::Pre-Invoke::=/usr/bin/lua5.4 update",
                          "dpkg --pre-invoke=/usr/bin/lua5.4 --configure -a",
                          "apt-get -o Dpkg::Pre-Invoke::=/usr/bin/php8.2 install x",
-                         "dpkg -L /usr/bin/lua5.4")
+                         "dpkg -L /usr/bin/lua5.4", "dpkg --pre-invoke lua5.4 --configure -a",
+                         "dpkg --post-invoke perl5.36.0 --configure -a",
+                         "dpkg --status-logger php8.2 --configure -a")
         check("nrd/package-name-option-value-denies",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_pkg_hook],
               ["deny"] * len(_nrd_pkg_hook))
-        _nrd_other_more_allow = ("doas --version", "timeout 3 ls", "ls /usr/lib/../bin")
+        _nrd_other_more_allow = ("doas --version", "timeout 3 ls", "ls /usr/lib/../bin",
+                                 "ls -l /dev/fd/3/ 3</proc/self", "cat /proc/self/fd/3/status 3</proc/self",
+                                 "dpkg -L lua5.4", "dpkg --pre-invoke true -L lua5.4")
         check("nrd/other-name-more-reads-allow",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more_allow],
               ["allow"] * len(_nrd_other_more_allow))

@@ -758,7 +758,8 @@ package name (no `/`, no `=` and no leading `-`), so `dpkg -L lua5.4`, `apt-get 
 `pip download node18` are allowed, while the exact listed names there still deny as at fbdff942
 (`dpkg -L lua`), and so do a path operand (`dpkg -L /usr/bin/lua5.4`), an option word or option value,
 which apt and dpkg can run as a command (`apt-get -o APT::Update::Pre-Invoke::=/usr/bin/lua5.4
-update`, `dpkg --pre-invoke=/usr/bin/lua5.4`), and the same operand behind a wrapper (`sudo
+update`, `dpkg --pre-invoke=/usr/bin/lua5.4`), the value word after dpkg's `--pre-invoke`,
+`--post-invoke` or `--status-logger` (`dpkg --pre-invoke lua5.4`), and the same operand behind a wrapper (`sudo
 apt-get download php8.2`) or after a path command word (`./dpkg -L lua5.4`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
 even where it only prints and names no declared directory from a working directory outside them all
@@ -883,7 +884,10 @@ declared, whatever the call names:
   or `--split-string` text. An absolute word holding a `..` component is also read like a relative
   one, since the kernel resolves a `..` after a link such as `/dev/fd`, `/proc/self/root`,
   `/proc/net` or `/proc/thread-self` from the link's target (`/dev/fd/../exe`,
-  `/proc/self/root/../proc/self/exe` and `/proc/net/../exe` are `/proc/self/exe`); and a bare command
+  `/proc/self/root/../proc/self/exe` and `/proc/net/../exe` are `/proc/self/exe`); an absolute word
+  below a descriptor (`/dev/fd/N/...`, `/dev/stdin/...`, `/proc/<...>/fd/N/...`) counts too, since a
+  descriptor held open on a directory makes the rest a lookup from it (`/dev/fd/3/exe 3</proc/self`
+  and `/dev/fd/3/self/exe 3</proc` are the running shell); and a bare command
   word (after the same peel) that is `exe`, all digits, `stdin`, `stdout` or `stderr` counts, since a
   `PATH` search can land it on such an entry (`PATH=/proc/self exe`, `PATH=/dev/fd 3 3</bin/bash`,
   `cd /proc/self && PATH=. exe`, or a `PATH` set in an earlier call).
