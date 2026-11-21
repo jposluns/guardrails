@@ -19,6 +19,23 @@ added to it (the merge lane adds the `merge-train` label), and its heavy jobs ru
 a `merge-train-*` branch of this repository, so "merged on green" means green on such a labelled train
 pull request (CLAUDE.md, Gates and CI).
 
+Every pull request below lands through the repository's merge entry point, by squash only, from a
+checkout of this repository that holds the head commit:
+`python3 -I -B tools/merge_pr.py --pr <N> --head <full head SHA> --base main --method squash --train`
+(add `--require-status local-quality` where that status is required). It binds every read and the merge
+request to the repository the checkout's origin names, that pull request, that base and that full head
+SHA; reads the repository's allowed merge methods, refusing (exit 1) when squash is disabled and printing
+a WARNING when merge commits or rebase merges are allowed too; refuses any method but squash; runs
+`tools/ci-status.sh --main-health` and `tools/ci-status.sh <head> --require-base main` before the merge,
+reads the settings and the pull request again, sends one squash request pinned to the head SHA, requires
+a single-parent landing commit, and then runs `tools/ci-status.sh --main-health --merge-commit <landing
+SHA>`. Exit 1 is a refusal (or, after a merge, a landing commit that is not single-parent or a red main;
+its RESULT line says which); exit 2 is cannot-evaluate (settings or state unreadable: nothing was merged)
+or, once the request was sent, an UNKNOWN OUTCOME: read the pull request to reconcile and never resend.
+A WARNING means the hosting settings are wider than squash: the landing went ahead, and the maintainer
+disables the extra methods in the repository settings. The tool cannot stop a merge made outside it
+(the web interface or the API) while those settings allow another method; its BOUNDARY line says so.
+
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. That run FAILS when gitleaks is not on
    PATH or reports another version than the `Secrets (gitleaks)` step of `.github/workflows/quality.yml`
@@ -258,10 +275,17 @@ pull request (CLAUDE.md, Gates and CI).
      `commondir`, `gitdir`), or an entry it cannot read; the message names the directory and the
      entry it found, or the entry it could not read; it also refuses (exit 2) when the gate module is
      imported and `main()` is called directly, with no arguments and no stage-1 hand-off recorded (the
-     single-stage checkout gate never falls back to the current directory). Merge without rewriting the
-     gated commit (no
-     squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
-     commit.
+     single-stage checkout gate never falls back to the current directory). Land it through
+     `tools/merge_pr.py` by squash, like every pull request. The squash writes a new commit, so the
+     commit post-tag certified does not itself reach main; the landing is bound to it instead. Main is
+     still frozen at the tagged commit, so the landing commit's one parent must be the tagged commit
+     (`git rev-list --parents -n 1 <landing SHA>` names exactly it) and its tree must equal the certified
+     commit's tree (`git rev-parse <landing SHA>^{tree}` equals `git rev-parse <attestation commit>^{tree}`).
+     Then run `python3 tools/check_release_build.py --post-tag --attestation-commit <full landing SHA>
+     --qa-path <QA object>` again, on the landing commit, and require exit 0 before step 6b. The release
+     row keeps the tagged commit's ids (`commit_sha`, `tag_object_sha`), never the landing SHA. A
+     mismatch, or a check whose result cannot be read, stops the release here: report the discrepancy
+     and take no later step. These checks detect a discrepancy after the landing; they do not undo it.
    - 6b. Tag key. Only after 6a has merged, record `tag = "vX.Y.Z"` in that release's `changelog.toml`
      entry: place the line inside that release's `[[release]]` table, immediately after its `version`
      line and before any sub-table header such as `[release.artifacts]` (a line appended at the end of

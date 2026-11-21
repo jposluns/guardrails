@@ -81,6 +81,11 @@
 #                                                   # of that workflow file on main for the merge commit
 #                                                   # SHA (a full commit id) and exit 1 loudly when red
 #
+# This script reads CI evidence and merges nothing. The merge itself is tools/merge_pr.py, which runs
+# --main-health and the head's --require-base read before its squash request, and --main-health
+# --merge-commit on the landing commit after it; a non-zero exit of a read before the request refuses the
+# merge, and one after it is that tool's non-zero exit.
+#
 # Exit codes (--match-tree and --main-health have their own, stated at THE TREE MATCH and THE MAIN
 # HEALTH below; --require-status adds those
 # stated at THE STATUS REQUIREMENT below): 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that

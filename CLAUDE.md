@@ -107,7 +107,8 @@ leg is local-only, and CI runs its self-test). Behind the trigger, as a second l
 the 45 host jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and run only on a push and on a pull
 request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
 label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
-`Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
+`Quality gates` fails by design, and a change merges only by riding a train: a squash merge, through
+`tools/merge_pr.py` (squash only; RELEASING.md, Steps), of an
 up-to-date, labelled `merge-train-*` pull request, whose run is the full suite (or the site fast
 lane below for a site-only train, the one skip `Quality gates` accepts), and the push to `main`
 runs the full suite again. A newer run of the same pull request cancels its superseded run; a push run has a
