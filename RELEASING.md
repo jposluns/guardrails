@@ -33,16 +33,23 @@ pull request (one that changes `.aiqt/core/releases.toml`), which step 6a lands 
 reads the settings, the pull request, the compare and the head commit again, sends one squash request
 pinned to the head SHA whose commit title is the pull request title and number and whose message is its
 body (an empty body is refused), requires a single-parent landing commit whose parent is `--expect-base`,
-whose tree is the head's tree and whose message is that title and body, and then runs
-`tools/ci-status.sh --main-health --merge-commit <landing SHA>`. The request pins only the head: a base
+whose tree is the head's tree and whose message is that title and body, then runs
+`tools/ci-status.sh --main-health --merge-commit <landing SHA>` and, when that is green, reads main's tip
+again and requires it to contain the landing commit. Every `tools/ci-status.sh` run it starts is bound to
+the same host and repository as its own reads (`--api-host github.com`, `GH_HOST=github.com`, `GH_REPO`
+removed, `CI_STATUS_REPO` set to the validated repository). The request pins only the head: a base
 that moves between the last read and the merge is caught after the landing, not prevented, unless branch
 protection requires an up-to-date branch. Exit 1 is a refusal (or, after a merge, a landing property that
-does not hold, or a red main; one RESULT line per property says which); exit 2 is cannot-evaluate
-(settings or state unreadable: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME or a
-main push run that cannot be evaluated: read the pull request to reconcile and never resend.
-A WARNING means the hosting settings are wider than squash: the landing went ahead, and the maintainer
-disables the extra methods in the repository settings. The tool cannot stop a merge made outside it
-(the web interface or the API) while those settings allow another method; its BOUNDARY line says so.
+does not hold, a red main, or a main whose tip no longer contains the landing; one RESULT line per
+property says which); exit 2 is cannot-evaluate (settings or state unreadable, or an interruption before
+the request: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME (an interruption
+included), or a main push run or main tip that cannot be evaluated: read the pull request to reconcile and
+never resend.
+A WARNING means the hosting settings are wider than squash. It does not mean anything landed: the settings
+let the run go on to its remaining checks, and only exit 0 with a `RESULT: LANDED:` line reports a
+landing. The maintainer disables the extra methods in the repository settings. The tool cannot stop a
+merge made outside it (the web interface or the API) while those settings allow another method; its
+BOUNDARY line says so.
 
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. That run FAILS when gitleaks is not on

@@ -80,6 +80,10 @@
 #                                                   # after a merge: wait, bounded, for the push run(s)
 #                                                   # of that workflow file on main for the merge commit
 #                                                   # SHA (a full commit id) and exit 1 loudly when red
+#   tools/ci-status.sh --api-host github.com ...     # any form above, with --hostname github.com passed
+#                                                   # to every gh api call, so neither GH_HOST nor gh's
+#                                                   # configured default host picks the API host (THE
+#                                                   # API HOST below); tools/merge_pr.py passes it
 #
 # This script reads CI evidence and merges nothing. The merge itself is tools/merge_pr.py, which runs
 # --main-health and the head's --require-base read before its squash request, and --main-health
@@ -150,6 +154,14 @@ HEAD_SET=0
 REQUIRE_JOBS=()
 MAIN_HEALTH=0
 MERGE_COMMIT=""
+# THE API HOST. Without --api-host, gh picks the host of every gh api call (see the RESIDUAL at THE
+# REPOSITORY IS THE CHECKOUT'S OWN). --api-host HOST, accepted only as github.com (the one host the
+# accepted origin forms name) and refused when repeated or given any other value (exit 2, before any read),
+# makes every gh api call below carry --hostname HOST, so GH_HOST and gh's configured default host select
+# nothing. GH_API_HOST_ARGS is expanded with the ${a[@]+"${a[@]}"} form, so an empty array expands to no
+# word at all under set -u on every bash.
+API_HOST=""
+GH_API_HOST_ARGS=()
 # The workflow FILE whose completed successful run every invocation demands (a conforming one
 # under --require-base), matched against each run's recorded workflow path (the runs API's .path),
 # never its display name: any workflow can carry name: Quality, so a name match would let a
@@ -170,6 +182,7 @@ for arg in "$@"; do
       --pr) label="pull-request number" ;;
       --require-status) label="status context" ;;
       --merge-commit) label="merge commit id" ;;
+      --api-host) label="API host" ;;
     esac
     case "$arg" in
       -*)
@@ -229,6 +242,17 @@ for arg in "$@"; do
         exit 2
       fi
       MERGE_COMMIT="$arg"
+    elif [ "$option" = "--api-host" ]; then
+      if [ -n "$API_HOST" ]; then
+        printf 'ERROR: --api-host is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      if [ "$arg" != "github.com" ]; then
+        printf 'ERROR: --api-host accepts only github.com, the one host the accepted origin forms name.\n' >&2
+        exit 2
+      fi
+      API_HOST="$arg"
+      GH_API_HOST_ARGS=(--hostname "$API_HOST")
     else
       for job in "${REQUIRE_JOBS[@]}"; do
         if [ "$job" = "$arg" ]; then
@@ -263,7 +287,8 @@ for arg in "$@"; do
       MAIN_HEALTH=1
       ;;
     --merge-commit) EXPECT_VALUE="--merge-commit" ;;
-    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH, --require-workflow PATH, --match-tree, --head REV, --require-job-success NAME, --pr N, --require-status CONTEXT, --main-health and --merge-commit SHA are supported).\n' "$arg" >&2; exit 2 ;;
+    --api-host) EXPECT_VALUE="--api-host" ;;
+    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH, --require-workflow PATH, --match-tree, --head REV, --require-job-success NAME, --pr N, --require-status CONTEXT, --main-health, --merge-commit SHA and --api-host github.com are supported).\n' "$arg" >&2; exit 2 ;;
     *)
       if [ "$SHA_IN_SET" -eq 1 ]; then
         printf 'ERROR: more than one rev was given; a repeated rev is refused rather than read last-wins.\n' >&2
@@ -283,6 +308,7 @@ if [ -n "$EXPECT_VALUE" ]; then
     --pr) label="pull-request number" ;;
     --require-status) label="status context" ;;
     --merge-commit) label="merge commit id" ;;
+    --api-host) label="API host" ;;
   esac
   printf 'ERROR: %s needs a %s and none was given.\n' "$EXPECT_VALUE" "$label" >&2
   exit 2
@@ -473,8 +499,10 @@ fi
 # variables such as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n>, and GIT_CONFIG_VALUE_<n>) can map the origin to
 # another accepted URL, whose repository's runs are then read. Whoever controls this checkout's git
 # configuration or its environment holds that power, as they do over a fetch. RESIDUAL (disclosed, not
-# closed): gh, not this script, picks the API host. No --hostname is passed, so GH_HOST or gh's own
-# configuration may send the same OWNER/REPO request to another host (gh's behaviour, not verified here).
+# closed without --api-host): gh, not this script, picks the API host. Without --api-host no --hostname is
+# passed, so GH_HOST or gh's own configuration may send the same OWNER/REPO request to another host (gh's
+# behaviour, not verified here). With --api-host github.com (THE API HOST above; tools/merge_pr.py passes
+# it) every gh api call carries --hostname github.com.
 # AVAILABILITY COST (disclosed, accepted): a real checkout whose origin names this repository in a form
 # the strict match refuses exits 2 and cannot use this script. Refused real-world forms include
 # credential-bearing https (a token added by an insteadOf rewrite included), an ssh host alias
@@ -691,13 +719,13 @@ main_health_read() {
       if [ "$left" -le 0 ]; then
         main_health_timeout "the deadline passed before page ${page_no} of the workflow-runs listing was read (window: page ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES} unread)"
       fi
-      raw="$(timeout "$left" gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
+      raw="$(timeout "$left" gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
       read_rc=$?
       if [ "$read_rc" -eq 124 ]; then
         main_health_timeout "the read of page ${page_no} of the workflow-runs listing did not finish within the ${left}s left before the deadline, and was stopped (window: page ${page_no} of at most ${MAIN_HEALTH_MAX_PAGES} unread)"
       fi
     else
-      raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
+      raw="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)"
       read_rc=$?
     fi
     [ "$read_rc" -eq 0 ] ||
@@ -1270,14 +1298,14 @@ ci_jq() {
 query() {
   local filtered raw step decision view page_no=1 scan_json=""
   {
-    filtered="$(gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" --paginate --slurp)" ||
+    filtered="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" --paginate --slurp)" ||
       return 1
     while :; do
       if [ "$page_no" -gt "$SCAN_MAX_PAGES" ]; then
         echo "unfiltered workflow-runs listing not bounded within $SCAN_MAX_PAGES pages"
         return 1
       fi
-      raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no")" || return 1
+      raw="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/actions/runs?per_page=100&page=$page_no")" || return 1
       step="$(printf '%s\n' "$raw" | ci_jq step)" || return 1
       decision="$(printf '%s\n' "$step" | sed -n 1p)"
       view="$(printf '%s\n' "$step" | sed -n 2p)"
@@ -1524,7 +1552,7 @@ pr_refused() {
 pr_probe_read() {
   local listing listed outcome associated merged number record checked records=""
   {
-    listing="$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --slurp)" || return 1
+    listing="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/pulls?state=open&per_page=100" --paginate --slurp)" || return 1
     if ! listed="$(printf '%s\n' "$listing" | pr_jq list)"; then
       pr_refused "$listing" "the open pull-request listing"
       return 1
@@ -1537,7 +1565,7 @@ pr_probe_read() {
           echo "unexpected pull-request probe output"
           return 1
         fi
-        record="$(gh api "repos/$REPO/pulls/$number")" || return 1
+        record="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/pulls/$number")" || return 1
         # Each response is checked on its own, before the reads are combined, so a record of another
         # pull request, or a second record in the same response, can never stand in for this one.
         if ! checked="$(printf '%s\n' "$record" | pr_jq record "$number")"; then
@@ -1556,7 +1584,7 @@ pr_probe_read() {
       # No open pull request at this head into PR_BASE reads MERGEABLE (none at this head is listed,
       # each targets another base, or the own reads show each one into PR_BASE CONFLICTING, UNKNOWN,
       # or no longer open at this head into PR_BASE): was one with this head merged into PR_BASE?
-      associated="$(gh api "repos/$REPO/commits/$SHA/pulls?per_page=100" --paginate --slurp)" ||
+      associated="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/commits/$SHA/pulls?per_page=100" --paginate --slurp)" ||
         return 1
       if ! merged="$(printf '%s\n' "$associated" | pr_jq associated)"; then
         pr_refused "$associated" "the pull requests associated with ${SHA}"
@@ -1818,7 +1846,7 @@ match_tree() {
   fi
   # The whole window is read first: a veto may be older than every candidate.
   while :; do
-    raw="$(gh api "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)" ||
+    raw="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/actions/runs?per_page=100&page=$page_no" 2>&1)" ||
       match_tree_error "the workflow-runs listing (page ${page_no}) could not be read" "$raw"
     step="$(printf '%s\n' "$raw" | tree_jq runs 2>&1)" ||
       match_tree_error "the workflow-runs listing (page ${page_no}) was refused" "$step"
@@ -1864,7 +1892,7 @@ match_tree() {
         unresolved[${run_ids[i]}]=1
         continue
       fi
-      raw="$(gh api "repos/$REPO/git/commits/$head_sha" 2>&1)" ||
+      raw="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/git/commits/$head_sha" 2>&1)" ||
         match_tree_error "the commit ${head_sha} of run ${run_ids[i]} could not be read" "$raw"
       tree_of[$head_sha]="$(printf '%s\n' "$raw" | tree_jq commit "$head_sha" 2>&1)" ||
         match_tree_error "the commit record of ${head_sha} (run ${run_ids[i]}) was refused" \
@@ -1913,7 +1941,7 @@ match_tree() {
     seen_runs+="${run_id} "
     [ "${tree_of[$head_sha]-}" = "$tree" ] || continue
     if [ "${#REQUIRE_JOBS[@]}" -ne 0 ]; then
-      raw="$(gh api "repos/$REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
+      raw="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "repos/$REPO/actions/runs/$run_id/jobs?filter=latest&per_page=100" \
         --paginate --slurp 2>&1)" ||
         match_tree_error "the jobs of run ${run_id} could not be read" "$raw"
       verdict="$(printf '%s\n' "$raw" | tree_jq jobs 2>&1)" ||
@@ -2040,7 +2068,7 @@ status_jq() {
 # cannot-evaluate, as a reply jq cannot parse is.
 status_gh() {
   local diagnostic rc
-  { diagnostic="$(gh api "$@" 2>&1 1>&3 3>&-; rc=$?; printf '.'; exit "$rc")"; rc=$?; } 3>&1
+  { diagnostic="$(gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} "$@" 2>&1 1>&3 3>&-; rc=$?; printf '.'; exit "$rc")"; rc=$?; } 3>&1
   diagnostic="${diagnostic%.}"
   if [ "$rc" -ne 0 ]; then
     printf '%s\n' "$diagnostic" >&2
