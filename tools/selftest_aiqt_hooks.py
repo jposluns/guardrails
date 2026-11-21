@@ -93,7 +93,8 @@ command that runs a check and names git (or holds a $ or backquote after the che
 shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which keeps its message; each flip row is
 red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
 (gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
-reverted; and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
+reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
+reverted); and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -5018,6 +5019,21 @@ _GPL_ROWS = (
     ("gpl-11", "git push origin feat", "allow", "allow", "keep"),
     ("gpl-12", "grep -n send-pack notes.txt", "allow", "allow", "keep"),
     ("gpl-13", "git commit-tree -p HEAD -m x T && git commit --no-verify -m y", "deny", "deny", "keep"),
+    # QA qagitrecord2 finding 3: a verb inside a quoted literal git commit, tag or merge message is data ("data"
+    # rows: allowed, and denied again with _gate_plumbing_inert reverted); every other place still denies.
+    ("gpl-14", "git commit -m 'fix the send-pack docs'", "allow", "allow", "data"),
+    ("gpl-15", 'git commit -am "commit-tree: document it"', "allow", "allow", "data"),
+    ("gpl-16", "git tag -a v1 -m 'http-push notes'", "allow", "allow", "data"),
+    ("gpl-17", "git merge -m 'send-pack fix' feat", "allow", "allow", "data"),
+    ("gpl-18", "git commit -m 'send-pack' && git send-pack /r.git main", "allow", "deny", "flip"),
+    ("gpl-19", "echo commit-tree | xargs git", "allow", "deny", "flip"),
+    ("gpl-20", "sh -c \"git commit -m 'x' && git send-pack /r main\"", "allow", "deny", "flip"),
+    ("gpl-21", "git commit -m send-pack", "allow", "deny", "flip"),  # an unquoted message stays denied
+    ("gpl-22", "git -c 'core.editor=git send-pack /r' commit", "allow", "deny", "flip"),
+    ("gpl-23", "git config alias.sp send-pack", "allow", "deny", "flip"),
+    ("gpl-24", "git commit -m 'commit-tree' && git commit-tree -m 'commit-tree' T", "allow", "deny", "flip"),
+    ("gpl-25", "git commit -m 'send-pack' ; git commit -m 'send-pack' ; git-send-pack /r main", "allow", "deny",
+     "flip"),
 )
 
 
@@ -5068,9 +5084,9 @@ def _test_gate_check_git(failures, tmp):
         failures.append("(gpl-msg) the plumbing deny does not name the routes it refuses")
     if "--no-verify" not in _gcg_reason("git commit-tree -p HEAD -m x T && git commit --no-verify -m y"):
         failures.append("(gpl-msg-bypass) the hook-bypass deny no longer keeps its own message before the plumbing deny")
-    saved_plumb = aiqt_hooks._gate_plumbing_git
+    saved_plumb, saved_inert = aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert
     try:
-        aiqt_hooks._gate_plumbing_git = lambda command: False
+        aiqt_hooks._gate_plumbing_git = lambda command, records=None: False
         for label, command, main, now, kind in _GPL_ROWS:
             got = _decision(aiqt_hooks.gate_weakening, command)
             if got != main:
@@ -5078,8 +5094,13 @@ def _test_gate_check_git(failures, tmp):
                                 "main's {}, got {}".format(label, command, main, got))
             if kind == "flip" and got == now:
                 failures.append("({}-revert) flip row is not red with the plumbing deny reverted".format(label))
-    finally:
         aiqt_hooks._gate_plumbing_git = saved_plumb
+        aiqt_hooks._gate_plumbing_inert = lambda command, records: command
+        for label, command, main, now, kind in _GPL_ROWS:
+            if kind == "data" and _decision(aiqt_hooks.gate_weakening, command) != "deny":
+                failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert = saved_plumb, saved_inert
     repo = _init_repo(Path(tmp) / "gcg-write-scope")
 
     def write(path):

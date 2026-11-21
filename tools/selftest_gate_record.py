@@ -33,6 +33,11 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          parent refuses, a check that moves HEAD records tree-moved). Each has its flip.
   V26    replace objects are off: a git replace of the configuration, the verifier or a pushed commit does
          not change what is recorded or judged. Each has its flip.
+  V27    other substituted git state: a shallow file naming a pushed commit cannot evaluate, and a forged
+         commit-graph parent does not prove a remote has a commit. Each has its flip.
+  V28    a new branch or a tag at a commit the remote already has pushes with no record (read from the
+         remote's own refs); a commit it lacks stays refused, also when a remote-tracking ref names it; an
+         unreadable remote cannot evaluate; with no URL the refusal stands.
   X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
@@ -60,6 +65,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -723,6 +729,117 @@ def rows_class(base):
     git_out(repo, "replace", "-d", bad)
     check("V26/flip-recorded-commit-pushes",
           git(repo, "push", "-q", "origin", good + ":refs/heads/v26-recorded").returncode, 0)
+    rows_substituted_state(base)
+    rows_remote_has(base)
+
+
+def forge_graph_parent(repo, commit, parent):
+    """Write the repository's commit-graph, then make it name parent as commit's first parent (a same-user write
+    of the file; git does not check its trailing checksum when it reads it)."""
+    git_out(repo, "commit-graph", "write", "--reachable")
+    path = Path(repo) / ".git" / "objects" / "info" / "commit-graph"
+    data = bytearray(path.read_bytes())
+    hashlen = 20 if data[5] == 1 else 32
+    chunks = {}
+    for index in range(data[6] + 1):
+        name, offset = struct.unpack(">4sQ", bytes(data[8 + 12 * index:20 + 12 * index]))
+        chunks[name] = offset
+    total = struct.unpack(">I", bytes(data[chunks[b"OIDF"] + 1020:chunks[b"OIDF"] + 1024]))[0]
+    oids = [bytes(data[chunks[b"OIDL"] + i * hashlen:chunks[b"OIDL"] + (i + 1) * hashlen]).hex() for i in range(total)]
+    at = chunks[b"CDAT"] + oids.index(commit) * (hashlen + 16) + hashlen
+    data[at:at + 4] = struct.pack(">I", oids.index(parent))
+    os.chmod(path, 0o644)
+    path.write_bytes(bytes(data))
+
+
+def push_line(sha, ref="refs/heads/x"):
+    return "refs/heads/main {} {} {}\n".format(sha, ref, "0" * len(sha))
+
+
+def rows_substituted_state(base):
+    # V27 (gitrecord3, the class of git state the same user can substitute): a shallow file naming a pushed commit
+    # hides its parent as a grafts file does, so pre-push judged it as a root commit whose tree a record on no
+    # parent admitted; it now cannot evaluate. The flip: a shallow file naming another commit leaves a recorded
+    # commit's push passing.
+    repo = fixture(base)
+    stage(repo, "b.txt", "b\n")
+    commit(repo, "v27 unrecorded parent", "--no-verify")
+    stage(repo, "c.txt", "c\n")
+    commit(repo, "v27 c", "--no-verify")
+    pushed = head(repo)
+    git_out(repo, "switch", "-q", "--orphan", "v27-orphan")
+    git_out(repo, "read-tree", pushed)
+    git_out(repo, "checkout-index", "-a", "-f")
+    recorded = gate(repo, "run").returncode
+    git_out(repo, "switch", "-q", "-f", "main")
+    (Path(repo) / ".git" / "shallow").write_text(pushed + "\n", encoding="ascii")
+    done = gate(repo, "verify-push", data=push_line(pushed))
+    check("V27/shallow-boundary-push-cannot-evaluate", (recorded, done.returncode, "shallow" in done.stderr),
+          (0, 2, True))
+    repo = fixture(base)
+    root = head(repo)
+    stage(repo, "b.txt", "b\n")
+    gate(repo, "run")
+    commit(repo, "v27 recorded")
+    (Path(repo) / ".git" / "shallow").write_text(root + "\n", encoding="ascii")
+    check("V27/flip-shallow-other-commit-pushes", gate(repo, "verify-push", data=push_line(head(repo))).returncode, 0)
+    # A commit-graph file that names an unrecorded commit as the first parent of the remote's tip would make the
+    # remote proof (rev-list over the parents) read the commit as one the remote has; git reads the commit objects
+    # (core.commitGraph=false), so it stays refused. The flip: with that file present, a commit the remote really
+    # has is accepted.
+    repo = fixture(base)
+    remote = bare_remote(repo, "v27")
+    root = head(repo)
+    git_out(repo, "switch", "-q", "-c", "v27-r")
+    stage(repo, "r.txt", "r\n")
+    commit(repo, "v27 on the remote", "--no-verify")
+    tip = head(repo)
+    git_out(repo, "push", "-q", "--no-verify", "origin", "v27-r")
+    git_out(repo, "switch", "-q", "-c", "v27-u", root)
+    stage(repo, "u.txt", "u\n")
+    commit(repo, "v27 unrecorded", "--no-verify")
+    unrecorded = head(repo)
+    forge_graph_parent(repo, tip, unrecorded)
+    done = gate(repo, "verify-push", "origin", str(remote), data=push_line(unrecorded))
+    check("V27/graph-forged-parent-remote-proof-refused", (done.returncode, "missing" in done.stderr), (1, True))
+    done = gate(repo, "verify-push", "origin", str(remote), data=push_line(tip))
+    check("V27/flip-graph-present-remote-commit-accepted", done.returncode, 0)
+
+
+def rows_remote_has(base):
+    # V28 (QA qagitrecord2 finding 2): a new branch or a tag at a commit the remote already has (made elsewhere,
+    # for example a hosted squash merge) pushes with no record in this clone; the proof is the remote's own refs
+    # (git ls-remote of the push URL). The flips: a commit the remote lacks stays refused, also when this clone's
+    # refs/remotes names it, an unreadable remote cannot evaluate, and with no URL the refusal stands.
+    repo = fixture(base)
+    remote = bare_remote(repo, "v28")
+    other = TMP / "v28-other"
+    git_out(TMP, "clone", "-q", str(remote), str(other))
+    write(other, "s.txt", "squash\n")
+    git_out(other, "add", "s.txt")
+    git_out(other, "commit", "-q", "-m", "squash merge made elsewhere")
+    git_out(other, "push", "-q", "origin", "main")
+    git_out(repo, "fetch", "-q", "origin")
+    git_out(repo, "switch", "-q", "-c", "v28-feature", "origin/main")
+    done = git(repo, "push", "-q", "-u", "origin", "v28-feature")
+    check("V28/new-branch-at-remote-commit-pushes",
+          (done.returncode, git(remote, "rev-parse", "-q", "--verify", "v28-feature").stdout.strip() != ""), (0, True))
+    git_out(repo, "tag", "v28-light", "origin/main")
+    check("V28/tag-at-remote-commit-pushes", git(repo, "push", "-q", "origin", "v28-light").returncode, 0)
+    git_out(repo, "tag", "-a", "-m", "annotated", "v28-annotated", "origin/main")
+    check("V28/annotated-tag-at-remote-commit-pushes", git(repo, "push", "-q", "origin", "v28-annotated").returncode, 0)
+    stage(repo, "u.txt", "u\n")
+    commit(repo, "v28 unrecorded", "--no-verify")
+    unrecorded = head(repo)
+    git_out(repo, "update-ref", "refs/remotes/origin/forged", unrecorded)
+    done = git(repo, "push", "-q", "origin", "HEAD:refs/heads/v28-u")
+    check("V28/flip-tracking-ref-names-it-refused",
+          (done.returncode != 0, "missing" in done.stderr,
+           git(remote, "rev-parse", "-q", "--verify", "v28-u").stdout.strip()), (True, True, ""))
+    done = gate(repo, "verify-push", "origin", str(TMP / "v28-no-such-remote.git"), data=push_line(unrecorded))
+    check("V28/flip-remote-unreadable-cannot-evaluate", (done.returncode, "ls-remote" in done.stderr), (2, True))
+    done = gate(repo, "verify-push", data=push_line(git_out(repo, "rev-parse", "origin/main")))
+    check("V28/flip-no-url-refused", (done.returncode, "missing" in done.stderr), (1, True))
 
 
 # --- the installer -----------------------------------------------------------------------------------------

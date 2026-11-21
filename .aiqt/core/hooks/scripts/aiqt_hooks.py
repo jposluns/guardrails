@@ -20246,11 +20246,76 @@ def _gate_check_then_git_deny():
 # fast-import with git update-ref, git receive-pack, a transport helper, a client that runs no hook) stay a
 # disclosed residual of the gate record (its R2), closed for main by the required Quality gates.
 _GATE_PLUMB_VERB_RE = re.compile(r"(?<![a-z0-9_])(?:commit-tree|send-pack|http-push)(?![a-z0-9_-])", re.ASCII)
+# QA qagitrecord2 finding 3: on the parsed path a verb is data, not a command, only where it sits in a quoted
+# literal that is the message of a git commit, tag or merge segment (git, global options, that literal subcommand,
+# then -m, a short cluster of no-value flags ending in m, --message or --message=); _gate_plumbing_inert removes
+# exactly those literals before the test, so every other spelling, a nested shell, xargs and an alias value
+# included, still denies. The global options of git that take their value as the next word.
+_GATE_PLUMB_MSG_SUBS = frozenset(("commit", "tag", "merge"))
+_GATE_PLUMB_GIT_VALUED = frozenset(("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+                                    "--config-env", "--attr-source"))
+_GATE_PLUMB_MSG_SHORT_RE = re.compile(r"-[aeqv]*m(.*)", re.ASCII | re.DOTALL)
 
 
-def _gate_plumbing_git(command):
+def _gate_plumbing_messages(seg):
+    """The message values of one parsed git commit, tag or merge segment (see _GATE_PLUMB_MSG_SUBS); a word built
+    at run time (argv_opaque) is never one."""
+    argv, opaque = seg.argv, seg.argv_opaque
+    if not argv or len(opaque) != len(argv) or argv[0] != "git" or opaque[0]:
+        return []
+    index = 1
+    while index < len(argv) and argv[index].startswith("-") and argv[index] != "--":
+        index += 2 if argv[index] in _GATE_PLUMB_GIT_VALUED else 1
+    if index >= len(argv) or opaque[index] or argv[index] not in _GATE_PLUMB_MSG_SUBS:
+        return []
+    values = []
+    at = index + 1
+    while at < len(argv) and argv[at] != "--":
+        word = argv[at]
+        short = _GATE_PLUMB_MSG_SHORT_RE.fullmatch(word)
+        if word == "--message" or (short is not None and short.group(1) == ""):
+            if at + 1 < len(argv) and not opaque[at + 1]:
+                values.append(argv[at + 1])
+            at += 2
+            continue
+        if not opaque[at] and word.startswith("--message="):
+            values.append(word[len("--message="):])
+        elif not opaque[at] and short is not None:
+            values.append(short.group(1))
+        at += 1
+    return values
+
+
+def _gate_plumbing_inert(command, records):
+    """command with each git commit, tag or merge message that is a quoted literal in its segment's raw text
+    ('...' holding no quote, or "..." holding no $, backquote, backslash, '!' or '"') replaced by '' (bash reads
+    such a word as exactly its text, and a message runs nothing)."""
+    for seg in records:
+        values = _gate_plumbing_messages(seg) if seg.raw else []
+        raw = seg.raw
+        for value in values:
+            for quoted in ("'" + value + "'", '"' + value + '"'):
+                if quoted[0] == "'" and "'" in value:
+                    continue
+                if quoted[0] == '"' and any(ch in value for ch in '$`\\"!'):
+                    continue
+                if quoted in raw:
+                    raw = raw.replace(quoted, "''", 1)
+                    break
+        if raw != seg.raw:
+            at = command.find(seg.raw)
+            if at >= 0:
+                command = command[:at] + raw + command[at + len(seg.raw):]
+    return command
+
+
+def _gate_plumbing_git(command, records=None):
     """True when command may run git plumbing that commits or pushes with no hook (commit-tree, send-pack,
-    http-push): its de-quoted lowercased text holds such a verb as a word, and it names git (_gate_names_git)."""
+    http-push): its de-quoted lowercased text holds such a verb as a word, and it names git (_gate_names_git).
+    With records (the parsed path) the literal messages of git commit, tag and merge are read as data first
+    (_gate_plumbing_inert); the fallback paths, with no records, read the whole raw text."""
+    if records is not None:
+        command = _gate_plumbing_inert(command, records)
     plain = command.replace("'", "").replace('"', "").replace("\\", "").lower()
     if _GATE_PLUMB_VERB_RE.search(plain) is None:
         return False
@@ -20535,8 +20600,10 @@ def gate_weakening(data):
     is two Bash calls. It holds until the git-side gate record (gate_record_main) is installed in the clone.
     INTERIM PLUMBING DENY (_gate_plumbing_git), right after it on the same three paths: a command whose de-quoted
     lowercased text holds git commit-tree, send-pack or http-push as a word and names git (or holds a '$' or
-    backquote) DENIES, since none of them runs the gate record's hooks; other spellings of those routes stay the
-    gate record's disclosed residual R2.
+    backquote) DENIES, since none of them runs the gate record's hooks; on the parsed path a quoted literal message
+    of git commit, tag or merge is read as data first (_gate_plumbing_inert), so git commit -m 'fix the send-pack
+    docs' allows, while a verb anywhere else (an unquoted or here-document message included) still denies; other
+    spellings of those routes stay the gate record's disclosed residual R2.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -20846,8 +20913,9 @@ def gate_weakening(data):
     # deny above (each keeps its message) and before any note or allow (_gate_check_then_git).
     if _gate_check_then_git(command, records):
         return _gate_check_then_git_deny()
-    # The interim plumbing deny (_gate_plumbing_git): git commit-tree, send-pack and http-push run no hook.
-    if _gate_plumbing_git(command):
+    # The interim plumbing deny (_gate_plumbing_git): git commit-tree, send-pack and http-push run no hook. The
+    # parsed records let a literal commit, tag or merge message name a verb as data (_gate_plumbing_inert).
+    if _gate_plumbing_git(command, records):
         return _gate_plumbing_deny()
     if pending_note is not None:
         return _allow_note(pending_note)
@@ -44700,8 +44768,13 @@ class _DeadlineWindow:
 # commit that changes the check's own code (for example tools/run_all_checks.sh) is judged by that changed code.
 # No path, tree, parent or set is read from the environment (two bounds can only be lowered there, which can only
 # make the recorder cannot evaluate). Every git read of the recorder, the verifiers and the stubs runs with replace
-# objects and the grafts file turned off (_gr_env, _GR_STUB), so a git replace of the configuration, the verifier
-# or a pushed commit cannot change what is judged while git commits and pushes the real objects. A record line is
+# objects, the grafts file and the commit-graph turned off (_gr_env, _GR_GIT_PIN, _GR_STUB), so a git replace of
+# the configuration, the verifier or a pushed commit, or a written grafts or commit-graph file, cannot change what
+# is judged while git commits and pushes the real objects; in a shallow repository a pushed commit with no parent
+# git can read cannot evaluate (the shallow file hides parents as a grafts file does). A pushed tip this clone
+# holds no passing record for is accepted only when the remote at the push URL already has it (_gr_remote_has:
+# git ls-remote of that URL, never this clone's refs/remotes, then git rev-list over the commit objects); a
+# remote that cannot be read then cannot evaluate. A record line is
 # a JSON object with exactly _GR_KEYS, in that order: head is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
 # the check moved the tree, the index or HEAD, and a cannot-evaluate one when the check ran past its bound, a
 # process of its group outlived it, or the log was replaced or rewritten while it ran.
@@ -44722,7 +44795,16 @@ class _DeadlineWindow:
 # (a commit that lowers the set, having passed the old one, sets the bar for the commit after it); R7 pre-push
 # checks tips only; R8 same-user races on the index, HEAD, the default branch or the log; the stubs bound their git and python3 calls
 # only where a timeout command exists (the verifier bounds its own git calls); and an earlier failure older than
-# the 64 KiB tail the verifier reads is not seen.
+# the 64 KiB tail the verifier reads is not seen; R9 the git state the reads still trust: the default branch refs
+# (refs/remotes/origin/HEAD, a symbolic ref, and refs/heads/main and master) are local refs a same-user process
+# can repoint (git symbolic-ref, git update-ref), so an orphan branch or a root commit keeps whichever bar they
+# name; the object store (alternates, and the GIT_OBJECT_DIRECTORY and GIT_ALTERNATE_OBJECT_DIRECTORIES git sets
+# for a hook) can hold an object file whose content does not match its name, which git, the hooks and the push
+# all read alike (a receiving remote checks object names); the GIT_ variables git sets for a hook
+# (_GR_HOOK_GIT_KEEP), GIT_NAMESPACE and the configuration git passes on are read as git reads them; every git
+# call here pins core.commitGraph on git's command line, which is assumed (not tested here) to outrank a
+# GIT_CONFIG_COUNT entry; a pushed commit at a shallow boundary cannot evaluate even when it is a real root; and
+# the remote proof trusts the remote at the push URL to hold every ancestor of what it advertises.
 _GR_FORMAT = "aiqt-gate-record/2"
 _GR_OLD_FORMATS = ("aiqt-gate-record/1",)
 _GR_RECORDER = "aiqt_hooks gate-record 2"
@@ -44763,6 +44845,10 @@ _GR_HOOK_GIT_KEEP = frozenset((
 # The grafts file every git read here names: a path under /dev/null, which no process can create (ENOTDIR), so git
 # reads no grafts and, unlike an existing empty file, prints no graft-file deprecation hint.
 _GR_NO_GRAFTS = "/dev/null/aiqt-no-grafts"
+# The configuration every git call of the recorder, the verifiers and the stubs sets on its own command line: no
+# commit-graph file, whose parent lists a same-user process can write to differ from the commit objects' and which
+# git's ancestry walks (rev-list, merge-base) read, so ancestry is read from the commit objects themselves.
+_GR_GIT_PIN = ("-c", "core.commitGraph=false")
 # The configuration variables the recorder keeps for its own git reads (it is run by a person, not by git, so the
 # repository is the one its working directory names; GIT_DIR, GIT_INDEX_FILE and the like are dropped).
 _GR_CONFIG_KEEP = frozenset(("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS",
@@ -44805,10 +44891,10 @@ def _gr_bound(variable, default):
 
 
 def _gr_git_done(env, args, cwd=None, data=None):
-    """The finished git run; a launch failure or a run past _GR_GIT_SECONDS cannot evaluate."""
+    """The finished git run (with _GR_GIT_PIN); a launch failure or a run past _GR_GIT_SECONDS cannot evaluate."""
     try:
-        return subprocess.run(("git",) + args, env=env, cwd=cwd, input=data, capture_output=True, check=False,
-                              timeout=_GR_GIT_SECONDS)
+        return subprocess.run(("git",) + _GR_GIT_PIN + args, env=env, cwd=cwd, input=data, capture_output=True,
+                              check=False, timeout=_GR_GIT_SECONDS)
     except subprocess.TimeoutExpired as exc:
         raise _GateRecordError("git {} did not finish within {} seconds".format(args[0], _GR_GIT_SECONDS)) from exc
     except OSError as exc:
@@ -45189,11 +45275,17 @@ def _gr_commit_base(env, head, index, judge, cwd=None):
 def _gr_push_base(env, sha):
     """(sets, pre_push, head): the configuration a pushed commit sha is judged by and the parent its record must
     name. The first parent's; for a root commit the default branch contains, its own (the repository's first
-    commit), with head ""; for any other root commit, the default branch's, refused unless the root keeps it."""
+    commit), with head ""; for any other root commit, the default branch's, refused unless the root keeps it.
+    In a shallow repository a commit with no parent git can read cannot evaluate: the shallow file, which a
+    same-user process can write like a grafts file, hides a listed commit's parents from every git read."""
     parent = _gr_git(env, "rev-parse", "-q", "--verify", sha + "^1", check=False)
     if parent:
         sets, _, pre_push = _gr_config_at(env, parent + ":" + _GR_CONFIG, sha + "^1")
         return sets, pre_push, parent
+    if _gr_git(env, "rev-parse", "--is-shallow-repository") != "false":
+        raise _GateRecordError("{} has no parent git can read, and this is a shallow repository, whose shallow "
+                               "file can hide a commit's real parents; deepen or unshallow the clone (git fetch "
+                               "--unshallow) and retry".format(sha))
     base = _gr_default_base(env)
     if base is None:
         raise _GateRecordError("{} is a root commit and none of {} names a commit whose bar it must keep".format(
@@ -45430,13 +45522,56 @@ def _gr_verify_commit():
     return 0
 
 
-def _gr_verify_push(stdin_text):
+def _gr_remote_tips(env, url):
+    """The commit ids the remote at url advertises now (git ls-remote of the URL git pushes to, never this clone's
+    own refs/remotes, which a same-user process can repoint) that this clone holds, as a list (peeled tags
+    included). A failed or unbounded read cannot evaluate: whether the remote has a commit is then unknown."""
+    if not url or url.startswith("-"):
+        raise _GateRecordError("git gave pre-push no remote URL this verifier can read ({!r})".format(url))
+    listed = _gr_git_done(dict(env, GIT_TERMINAL_PROMPT="0"), ("ls-remote", url))
+    if listed.returncode != 0:
+        raise _GateRecordError("git ls-remote {} failed (exit {}): {}".format(
+            url, listed.returncode, listed.stderr.decode("utf-8", "replace").strip()))
+    oids = []
+    for line in listed.stdout.decode("utf-8", "replace").split("\n"):
+        oid = line.split("\t", 1)[0]
+        if _GR_TREE_RE.fullmatch(oid) and oid not in oids:
+            oids.append(oid)
+    if not oids:
+        return []
+    found = _gr_git(env, "cat-file", "--batch-check=%(objectname) %(objecttype)",
+                    data=("\n".join(oids) + "\n").encode("ascii"))
+    return [line.split(" ")[0] for line in (found or "").split("\n") if line.endswith((" commit", " tag"))]
+
+
+def _gr_remote_has(env, url, sha, cache):
+    """The commit sha names (a tag peeled to its commit) when the remote at url already has it, else None: it is
+    reachable from a commit the remote advertises (_gr_remote_tips), read with git rev-list over the commit objects
+    (replace objects, grafts and the commit-graph off), so a shallow cut can only make it None. A pushed tip the
+    remote already has carries no commit the remote lacks. A failed read cannot evaluate (_GateRecordError)."""
+    commit = _gr_git(env, "rev-parse", "-q", "--verify", sha + "^{commit}", check=False)
+    if not commit:
+        return None
+    if "tips" not in cache:
+        cache["tips"] = _gr_remote_tips(env, url)
+    if not cache["tips"]:
+        return None
+    stdin = commit + "\n" + "".join("^" + oid + "\n" for oid in cache["tips"])
+    left = _gr_git(env, "rev-list", "-n", "1", "--stdin", data=stdin.encode("ascii"))
+    return commit if left == "" else None
+
+
+def _gr_verify_push(stdin_text, url=None):
+    """The pre-push verifier: each pushed tip's tree must have a passing record on its parent, unless the remote
+    at url (pre-push's second argument) already has the commit (_gr_remote_has, read only for a tip it would
+    refuse). With no url, a refused tip stays refused."""
     env = _gr_env(_GR_HOOK_GIT_KEEP)
     zero = re.compile(r"0+", re.ASCII)
     lines = stdin_text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
     logs = None
+    cache = {}
     refused = False
     for line in lines:
         parts = line.split(" ")
@@ -45448,13 +45583,17 @@ def _gr_verify_push(stdin_text):
         tree = _gr_git(env, "rev-parse", "--verify", sha + "^{tree}")
         try:
             sets, pre_push, head = _gr_push_base(env, sha)
+            if logs is None:
+                logs = [_gr_read_log_file(path) for path in _gr_log_paths(env)]
+            refusal = _gr_judge_logs(logs, tree, head, pre_push, sets[pre_push])
         except _GateRecordRefusal as exc:
-            _stderr_note("aiqt gate-record: push of {} refused: {}".format(parts[0], exc))
-            refused = True
+            refusal = str(exc)
+        held = _gr_remote_has(env, url, sha, cache) if refusal is not None and url is not None else None
+        if held is not None:
+            _stderr_note("aiqt gate-record: push of {}: the remote already has commit {} (read from its advertised "
+                         "refs), so this push carries no commit it lacks; accepted without a record of this "
+                         "clone".format(parts[0], held))
             continue
-        if logs is None:
-            logs = [_gr_read_log_file(path) for path in _gr_log_paths(env)]
-        refusal = _gr_judge_logs(logs, tree, head, pre_push, sets[pre_push])
         if refusal is not None:
             _stderr_note("aiqt gate-record: push of {} refused: {}".format(parts[0], refusal))
             refused = True
@@ -45470,11 +45609,12 @@ fail() {{
     printf '%s\\n' "aiqt gate-record: cannot evaluate: $1" >&2
     exit 2
 }}
-# Replace objects and grafts off, so a git replace cannot swap the verifier read from HEAD.
+# Replace objects, grafts and the commit-graph off, so none of them can swap the verifier read from HEAD.
 unset GIT_REPLACE_REF_BASE
 GIT_NO_REPLACE_OBJECTS=1
 GIT_GRAFT_FILE={no_grafts}
 export GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE
+pin='{git_pin}'
 if command -v timeout >/dev/null 2>&1; then
     git_bound='timeout {git_seconds}'
     verify_bound='timeout {verify_seconds}'
@@ -45482,17 +45622,17 @@ else
     git_bound=''
     verify_bound=''
 fi
-gitdir=$($git_bound git rev-parse --absolute-git-dir) || fail "git named no git directory"
-if $git_bound git rev-parse -q --verify 'HEAD^{{commit}}' >/dev/null; then
+gitdir=$($git_bound git $pin rev-parse --absolute-git-dir) || fail "git named no git directory"
+if $git_bound git $pin rev-parse -q --verify 'HEAD^{{commit}}' >/dev/null; then
     src='HEAD:{verifier}'
 else
-    any=$($git_bound git rev-list -n 1 --all) || fail "git rev-list failed"
+    any=$($git_bound git $pin rev-list -n 1 --all) || fail "git rev-list failed"
     if [ -z "$any" ]; then
         src=':{verifier}'
     else
         src=''
         for ref in {refs}; do
-            if $git_bound git rev-parse -q --verify "$ref^{{commit}}" >/dev/null; then
+            if $git_bound git $pin rev-parse -q --verify "$ref^{{commit}}" >/dev/null; then
                 src="$ref:{verifier}"
                 break
             fi
@@ -45510,7 +45650,7 @@ fi
 tmp=$(mktemp "$dir/verifier.XXXXXXXXXX") || fail "mktemp failed in $dir"
 trap 'rm -f "$tmp"' EXIT
 trap 'exit 2' HUP INT TERM
-$git_bound git show "$src" >"$tmp" || fail "$src is not readable"
+$git_bound git $pin show "$src" >"$tmp" || fail "$src is not readable"
 $verify_bound python3 -I -B "$tmp" gate-record {mode}
 rc=$?
 case "$rc" in
@@ -45521,9 +45661,9 @@ exit 2
 
 
 def _gr_stub(hook):
-    mode = "verify-push" if hook == "pre-push" else "verify-commit"
+    mode = 'verify-push "$1" "$2"' if hook == "pre-push" else "verify-commit"
     return _GR_STUB.format(hook=hook, verifier=_GR_VERIFIER, mode=mode, refs=" ".join(_GR_DEFAULT_REFS),
-                           no_grafts=_GR_NO_GRAFTS,
+                           no_grafts=_GR_NO_GRAFTS, git_pin=" ".join(_GR_GIT_PIN),
                            git_seconds=_GR_STUB_GIT_SECONDS, verify_seconds=_GR_STUB_VERIFY_SECONDS)
 
 
@@ -45608,7 +45748,7 @@ def gate_record_main(args):
         if command == "verify-commit" and len(args) == 1:
             return _gr_verify_commit()
         if command == "verify-push" and len(args) in (1, 3):
-            return _gr_verify_push(sys.stdin.read())
+            return _gr_verify_push(sys.stdin.read(), args[2] if len(args) == 3 else None)
         if command == "install" and len(args) == 1:
             return _gr_install()
         if command == "stub" and len(args) == 2 and args[1] in _GR_HOOKS:
