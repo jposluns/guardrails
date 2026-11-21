@@ -4871,8 +4871,14 @@ def _diff_source_fallback(command):
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
     broad raw probe) ASKS, everything else ALLOWS. An unparseable command can never earn an ALLOW from a
     summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
-    unparseable command is surfaced for confirmation rather than proven either way."""
-    if _RAW_DIFF_PRODUCER_RE.search(command):
+    unparseable command is surfaced for confirmation rather than proven either way. The probe reads the
+    de-quoted readings (_decoded_readings) BESIDE the raw text, so a producer split by quoting (git d''iff <<<x)
+    takes the note as its plain spelling (git diff <<<x) does; a reading can only add the note, never clear it.
+    The note is this fallback's only outcome for an apparent producer, which it never denies, since it cannot
+    tell a console dump from a summary or a redirect: a confirmed dump that the parsed path denies (git d''iff,
+    git diff) is noted, not denied, once a construct the lexer refuses is added, split or plain alike (the
+    disclosed residual of this convention-tier fallback)."""
+    if any(_RAW_DIFF_PRODUCER_RE.search(text) for text in (command,) + _decoded_readings(command)):
         return _allow_note(
             "AIQT guardrail (rule cnsdif, no-console-diff-dumps): the shared tokenizer could not parse this "
             "command and it appears to invoke a git diff-producer. This is a console-readability convention, "
@@ -6874,10 +6880,12 @@ def _commit_identity_fallback(command, error):
     unsupported construct), a command line that git runs from its operands was left unread, because the
     tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
-    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
-    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
-    git-identity env var or EMAIL, or a user, author or committer name or email config value
-    (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command, and
+    then each of its de-quoted readings (_cmtidn_fallback_texts, _decoded_readings), for an AI identity in a
+    Co-Authored-By trailer, an --author value (any prefix git reads as --author), a git-identity env var or
+    EMAIL, or a user, author or committer name or email config value (_RAW_IDENTITY_CONTEXTS), and denies on a
+    hit, so an option or trailer name split by quoting behind a here-string (git commit --au""thor="Claude
+    <...>" -m x <<<y) denies as it does where the command parses.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
     and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
@@ -6895,7 +6903,14 @@ def _commit_identity_fallback(command, error):
     single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
     at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
     33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
-    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. Those figures
+    measure the raw text's scan alone: a command that holds a quote, a backslash or an ANSI-C $'...' quote is
+    scanned again over each de-quoted reading that differs from it (one, or two with an ANSI-C quote), so it costs
+    more. On another, heavily loaded host, a command of 8,388,608 characters of repeated trailer names with a quote
+    and a newline before an AI name (so no reading finds one, and every pass runs whole) took 7.75 s of CPU time
+    with the de-quoted reading against 4.69 s for the raw scan alone (the highest of three runs each), about 1.7
+    times, so such a command can outlast the timeout at a shorter length than above; the two-reading case was not
+    measured. The platform
     contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
     call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
@@ -6938,19 +6953,35 @@ def _commit_identity_fallback(command, error):
             return _deny(reason,
                          "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
                          "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
-    for regex, label in _RAW_IDENTITY_CONTEXTS:
-        match = _ai_value_match(regex, command)
-        if match is not None:
-            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
-                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
-                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
-                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
-                      "closed. Remove it and commit as the maintainer.".format(hit))
-            return _deny(reason,
-                         "AIQT guardrail: denied a git command the check could not read in full that "
-                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
+    for text in _cmtidn_fallback_texts(command):
+        for regex, label in _RAW_IDENTITY_CONTEXTS:
+            match = _ai_value_match(regex, text)
+            if match is not None:
+                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+                reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                          "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                          "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                          "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                          "closed. Remove it and commit as the maintainer.".format(hit))
+                return _deny(reason,
+                             "AIQT guardrail: denied a git command the check could not read in full that "
+                             "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
+
+
+def _cmtidn_fallback_texts(command):
+    """The texts the raw-string contexts of _commit_identity_fallback read, in order: the raw command, then each
+    de-quoted reading (_decoded_readings) that differs from it, so an --author option or co-author trailer name
+    split by quoting (--au""thor=..., Co-Authored-""By: ...) is read as the word bash assembles, as the token
+    reader reads it when the command parses. The readings are made only after every context has read the raw
+    text and found nothing, so a raw hit denies with the same reason as before; a reading can only add a match,
+    never clear one. A de-quoted reading lets a co-author value run across a removed quote ('Co-Authored-By: J" -m
+    "Claude' reads 'Co-Authored-By: J -m Claude'), a safe-direction over-deny of a command whose quoted text
+    merely places an AI name after a trailer name."""
+    yield command
+    for text in _decoded_readings(command):
+        if text != command:
+            yield text
 
 
 def commit_identity(data):
@@ -9828,20 +9859,22 @@ def _expbnd_fallback_kind(command):
     command whose text names a git configuration variable, or that runs under a git alias the hook's environment
     carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
     parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
-    first, and one git word beside a cd notes. The breadth and push probes read the de-quoted readings
-    (_decoded_readings) BESIDE the raw text, as the parsed path's de-quoted words and the uncertain-'#' path's
-    _hash_doubt_scan do, so a push split by quoting (git add -A && git p''ush <<< x) denies like its plain
-    spelling; a reading can only add a match, never clear one."""
+    first, and one git word beside a cd notes. Every probe (the git-word count, the breadth and push probes, and
+    the cd, mutation and pruning-fetch probes) reads the de-quoted readings (_decoded_readings) BESIDE the raw
+    text, as the parsed path's de-quoted words and the uncertain-'#' path's _hash_doubt_scan do, so a push split
+    by quoting (git add -A && git p''ush <<< x) denies like its plain spelling, and a mutation or cd split by
+    quoting (cd /tmp && git co''mmit -m y <<<z) notes like its plain spelling; a reading can only add a match,
+    never clear one."""
     named = _git_alias_outside(command)
-    if named and len(_GIT_WORD_RE.findall(command)) > 1:
-        return "publish"
     texts = (command,) + _decoded_readings(command)
+    if named and any(len(_GIT_WORD_RE.findall(text)) > 1 for text in texts):
+        return "publish"
     if (any(_RAW_EXPBND_ADD_BREADTH_RE.search(text) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(text) for text in texts)
             and any(_RAW_EXPBND_PUSH_RE.search(text) for text in texts)):
         return "publish"
-    if (_RAW_EXPBND_CD_RE.search(command) and
-            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command)
-             or (named and _GIT_WORD_RE.search(command)))):
+    if (any(_RAW_EXPBND_CD_RE.search(text) for text in texts) and
+            any(_RAW_EXPBND_MUTATE_RE.search(text) or _RAW_EXPBND_PRUNING_FETCH_RE.search(text)
+                or (named and _GIT_WORD_RE.search(text)) for text in texts)):
         return "target"
     return None
 
@@ -19028,10 +19061,12 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
-    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    only note or allow ($G commit -nv <<<x) denies. The decision kind reads the de-quoted readings beside the
+    raw text (_gate_fallback_read_kind), so the note tier, like the deny tier, is earned by a checker or swallow
+    spelling split by quoting. kind, when given, is _gate_fallback_read_kind(command) as the caller has just
+    read it, so the probes are not run over the command a second time."""
     if kind is _GATE_KIND_UNREAD:
-        kind = _gate_weakening_fallback_kind(command)
+        kind = _gate_fallback_read_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -19269,6 +19304,23 @@ def _gate_weakening_fallback_kind(command):
             and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
+
+
+def _gate_fallback_read_kind(command, raw_kind=_GATE_KIND_UNREAD):
+    """The decision _gate_weakening_fallback gives command over its raw text AND its de-quoted readings
+    (_decoded_readings), raw_kind being _gate_weakening_fallback_kind(command) when the caller has read it: the
+    raw kind when it denies, else the first deny kind (_GATE_FALLBACK_DENIES) a de-quoted reading earns, else the
+    raw kind when it is the note ("swallow"), else the first kind a de-quoted reading earns, else None. So a
+    checker split by quoting (pyt''est || true <<<x) notes like its plain spelling, and a bypass spelled only
+    through quoting denies on every path that reads this; a reading can only add a deny or a note, never clear
+    one. A reading equal to the raw text is not read again."""
+    if raw_kind is _GATE_KIND_UNREAD:
+        raw_kind = _gate_weakening_fallback_kind(command)
+    if raw_kind in _GATE_FALLBACK_DENIES:
+        return raw_kind
+    kinds = [_gate_weakening_fallback_kind(text) for text in _decoded_readings(command) if text != command]
+    return (next((k for k in kinds if k in _GATE_FALLBACK_DENIES), None) or raw_kind
+            or next((k for k in kinds if k is not None), None))
 
 
 def _gate_partial_segments(command, doubt=None):
@@ -20499,9 +20551,8 @@ def gate_weakening(data):
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
             raw_kind = _gate_weakening_fallback_kind(command)
-            if (raw_kind not in _GATE_FALLBACK_DENIES
-                    and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
-                            for text in _decoded_readings(command))):
+            kind = _gate_fallback_read_kind(command, raw_kind)
+            if raw_kind not in _GATE_FALLBACK_DENIES and kind in _GATE_FALLBACK_DENIES:
                 return _deny(
                     "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell "
                     "lexer (an unbalanced quote or an unsupported construct such as a here-string or a "
@@ -20516,7 +20567,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
+            return _gate_weakening_fallback(command, runtime=True, kind=kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -20675,9 +20726,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        raw_kind = _gate_weakening_fallback_kind(command)
-        if raw_kind in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
+        floor_kind = _gate_fallback_read_kind(command)
+        if floor_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=floor_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -40438,9 +40489,26 @@ def _fsw_delim_cell_count(s):
     return s.count("|") + 1
 
 
+def _fsw_header_sched_cols(line, pipes):
+    """The column indexes of table header `line` (its unescaped pipes `pipes`) whose cell carries a scheduling
+    keyword (_FSW_SCHED_RE) that is written data: the cells are read from _fsw_sched_view(line, spans=...), the
+    header with every keyword inside an inline code span (_fsw_code_spans) blanked, so a keyword quoted as code
+    (| Item | `due` |) exempts no column, as a keyword inside a code span on an ordinary line exempts no literal
+    (_fsw_data_sched_exempter). The view keeps every position and blanks no pipe, so its cells are the raw
+    header's cells with those keywords blanked; a cell with a keyword outside every code span still counts. A
+    column counts only when its raw cell AND its cell in the view carry a keyword, so a blank that gives a
+    neighbouring word a new word start adds no column (a view can only remove an exemption, never add one)."""
+    cols = {k for k, c in enumerate(_fsw_table_cells(line, pipes)) if _FSW_SCHED_RE.search(c.strip())}
+    view = _fsw_sched_view(line, spans=_fsw_code_spans(line)) if cols and "`" in line else line
+    if view is line:
+        return cols
+    return cols & {k for k, c in enumerate(_fsw_table_cells(view, pipes)) if _FSW_SCHED_RE.search(c.strip())}
+
+
 def _fsw_row_exempter(line, pipes, sched_cols):
     """A predicate pos -> True when position `pos` of table row `line` lies in a column whose header cell
-    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos)."""
+    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos).
+    sched_cols comes from _fsw_header_sched_cols, which reads the header with its code-span keywords blanked."""
     lead = _fsw_leading_pipe(line, pipes)
 
     def exempt(pos):
@@ -40488,7 +40556,7 @@ def _fsw_table_walk(text, tables=True, ids=None):
                 hcells = _fsw_table_cells(*prev)
                 if ncols == len(hcells):
                     ctx = ids.setdefault((prev[0], line), len(ids))
-                    sched = {k for k, c in enumerate(hcells) if _FSW_SCHED_RE.search(c.strip())}
+                    sched = _fsw_header_sched_cols(*prev)
                     prev = None
                     yield line, None, None
                     continue
@@ -43192,7 +43260,9 @@ def future_stamp_write(data):
     Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
     markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same
     keyword regex, on the stripped header cell text), so `| Item | Due |` over `|---|---|` over a row whose Due
-    cell holds a future time is allowed. This is additive: the keyword-on-line rule above is unchanged. Table
+    cell holds a future time is allowed. Like the keyword-on-line rule, a header keyword counts only where it is
+    written data (_fsw_header_sched_cols): one inside an inline code span (| Item | `due` |) exempts no column.
+    This is additive: the keyword-on-line rule above is unchanged. Table
     context is tracked over EVERY line of the resulting file, including unchanged carry-over lines that are not
     themselves checked, so a new row under an existing header is exempt. The recognized forms follow GFM: a
     header is a line holding at least one unescaped `|` (a leading pipe is optional), immediately followed by a

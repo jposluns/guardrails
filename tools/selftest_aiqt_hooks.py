@@ -6155,11 +6155,17 @@ def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd
     return True
 
 
-# (fbv-*) The parse-failure fallbacks of commit_msg_subst (Fix A) and git_explicit_binding (Fix B) read the de-quoted
-# readings (_decoded_readings) beside the raw text. Each row is (label, handler name, command, want, pinned by the
-# flip): fbv-msg-split and fbv-expbnd-split, a subcommand split by empty quotes behind a here-string, each allowed
-# before; the -plain and -parsed rows hold the deny the split spelling now matches, and the -none rows hold the allow
-# of a command whose de-quoted readings spell no hazard either.
+# (fbv-*) The parse-failure fallbacks of commit_msg_subst (Fix A), git_explicit_binding (Fix B), commit_identity
+# (_commit_identity_fallback) and diff_source_pretool (_diff_source_fallback) read the de-quoted readings
+# (_decoded_readings) beside the raw text. Each row is (label, handler name, command, want, pinned by the flip):
+# fbv-msg-split, fbv-expbnd-split, fbv-cmtidn-author-split, fbv-cmtidn-trailer-split, fbv-cnsdif-split,
+# fbv-expbnd-target-split and fbv-gatdis-swallow-split, a subcommand, option, trailer name or checker split by empty
+# quotes behind a here-string, each allowed silently before (fbv-cmtidn-author-ansi-c builds the option from an
+# ANSI-C escape instead); the -plain and -parsed rows hold the deny or note the split spelling now matches (the
+# note where the fallback tier only notes: cnsdif's fallback never denies, and expbnd's cd target and gatdis's
+# swallow tiers are notes), and the -none rows hold the allow of a command whose de-quoted readings spell no
+# hazard either.
+_AI_TRAILER_VALUE = "Claude <noreply@anthropic.com>"
 _FALLBACK_VIEW_ROWS = (
     ("fbv-msg-split", "commit_msg_subst", "git co''mmit -m \"$(id)\" <<<x", "deny", True),
     ("fbv-msg-plain", "commit_msg_subst", "git commit -m \"$(id)\" <<<x", "deny", False),
@@ -6169,6 +6175,34 @@ _FALLBACK_VIEW_ROWS = (
     ("fbv-expbnd-plain", "git_explicit_binding", "git add -A && git push <<< x", "deny", False),
     ("fbv-expbnd-parsed", "git_explicit_binding", "git add -A && git p''ush", "deny", False),
     ("fbv-expbnd-none", "git_explicit_binding", "git add f && git p''ush <<< x", "allow", False),
+    ("fbv-cmtidn-author-split", "commit_identity",
+     "git commit --au\"\"thor=\"" + _AI_TRAILER_VALUE + "\" -m x <<<y", "deny", True),
+    ("fbv-cmtidn-author-plain", "commit_identity",
+     "git commit --author=\"" + _AI_TRAILER_VALUE + "\" -m x <<<y", "deny", False),
+    ("fbv-cmtidn-author-parsed", "commit_identity",
+     "git commit --au\"\"thor=\"" + _AI_TRAILER_VALUE + "\" -m x", "deny", False),
+    ("fbv-cmtidn-author-ansi-c", "commit_identity",
+     "git commit --au$'\\x74'hor=\"" + _AI_TRAILER_VALUE + "\" -m x <<<y", "deny", True),
+    ("fbv-cmtidn-trailer-split", "commit_identity",
+     "git commit -m \"x\n\nCo-Authored-\"\"By: " + _AI_TRAILER_VALUE + "\" <<<y", "deny", True),
+    ("fbv-cmtidn-trailer-plain", "commit_identity",
+     "git commit -m \"x\n\nCo-Authored-By: " + _AI_TRAILER_VALUE + "\" <<<y", "deny", False),
+    ("fbv-cmtidn-trailer-parsed", "commit_identity",
+     "git commit -m \"x\n\nCo-Authored-\"\"By: " + _AI_TRAILER_VALUE + "\"", "deny", False),
+    ("fbv-cmtidn-none", "commit_identity",
+     "git commit --au\"\"thor=\"Jeff Posluns <jeff@posluns.ca>\" -m x <<<y", "allow", False),
+    ("fbv-cnsdif-split", "diff_source_pretool", "git d''iff <<<x", "allow-note", True),
+    ("fbv-cnsdif-plain", "diff_source_pretool", "git diff <<<x", "allow-note", False),
+    ("fbv-cnsdif-parsed", "diff_source_pretool", "git d''iff", "deny", False),
+    ("fbv-cnsdif-none", "diff_source_pretool", "git st''atus <<<x", "allow", False),
+    ("fbv-expbnd-target-split", "git_explicit_binding", "cd /tmp && git co''mmit -m y <<<z", "allow-note", True),
+    ("fbv-expbnd-target-plain", "git_explicit_binding", "cd /tmp && git commit -m y <<<z", "allow-note", False),
+    ("fbv-expbnd-target-parsed", "git_explicit_binding", "cd /tmp && git co''mmit -m y", "allow-note", False),
+    ("fbv-expbnd-target-none", "git_explicit_binding", "cd /tmp && git st''atus <<<z", "allow", False),
+    ("fbv-gatdis-swallow-split", "gate_weakening", "pyt''est || true <<<x", "allow-note", True),
+    ("fbv-gatdis-swallow-plain", "gate_weakening", "pytest || true <<<x", "allow-note", False),
+    ("fbv-gatdis-swallow-parsed", "gate_weakening", "pyt''est || true", "allow-note", False),
+    ("fbv-gatdis-swallow-none", "gate_weakening", "ls || true <<<x", "allow", False),
 )
 
 
@@ -16521,6 +16555,24 @@ def _test_clock_hooks(failures, tmp):
                 "so the row pins the written-data view".format(label, what), tool, tool_input, "allow", cwd=cwd)
     finally:
         aiqt_hooks._fsw_sched_view = sched_view
+    # A header cell's keyword exempts its column only where it is written data (_fsw_header_sched_cols): one inside a
+    # code span exempts no column, so fsw-header-code-span-warns warns (it passed silently before), while
+    # fsw-write-due-column-silent above and fsw-header-keyword-outside-span-silent keep a plain keyword exempting. The
+    # -flip reads the raw header cells again and must pass silently.
+    header_row = {"file_path": st + "/state.md", "content": "| Item | `due` |\n|---|---|\n| x | " + future + " |\n"}
+    fsw("(fsw-header-code-span-warns) a future literal under a header keyword inside a code span warns", "Write",
+        header_row, "allow-note")
+    fsw("(fsw-header-keyword-outside-span-silent) a header keyword outside a code span still exempts its column",
+        "Write", {"file_path": st + "/state.md",
+                  "content": "| Item | Due `x` |\n|---|---|\n| x | " + future + " |\n"}, "allow")
+    header_cols = aiqt_hooks._fsw_header_sched_cols
+    aiqt_hooks._fsw_header_sched_cols = lambda line, pipes: {
+        k for k, c in enumerate(aiqt_hooks._fsw_table_cells(line, pipes)) if aiqt_hooks._FSW_SCHED_RE.search(c.strip())}
+    try:
+        fsw("(fsw-header-code-span-warns-flip) with the header cells read raw, the row must pass silently, so it pins "
+            "the written-data header view", "Write", header_row, "allow")
+    finally:
+        aiqt_hooks._fsw_header_sched_cols = header_cols
     fsw("(fsw-edit-future-warns) an Edit that brings a future literal into a store file warns", "Edit",
         {"file_path": st + "/edit.md", "old_string": "a", "new_string": "hb " + future}, "allow-note")
     fsw("(fsw-multiedit-future-warns) a MultiEdit that brings a future literal into a store file warns", "MultiEdit",
