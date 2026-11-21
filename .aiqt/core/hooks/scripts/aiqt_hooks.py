@@ -9828,12 +9828,16 @@ def _expbnd_fallback_kind(command):
     command whose text names a git configuration variable, or that runs under a git alias the hook's environment
     carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
     parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
-    first, and one git word beside a cd notes."""
+    first, and one git word beside a cd notes. The breadth and push probes read the de-quoted readings
+    (_decoded_readings) BESIDE the raw text, as the parsed path's de-quoted words and the uncertain-'#' path's
+    _hash_doubt_scan do, so a push split by quoting (git add -A && git p''ush <<< x) denies like its plain
+    spelling; a reading can only add a match, never clear one."""
     named = _git_alias_outside(command)
     if named and len(_GIT_WORD_RE.findall(command)) > 1:
         return "publish"
-    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
-            and _RAW_EXPBND_PUSH_RE.search(command)):
+    texts = (command,) + _decoded_readings(command)
+    if (any(_RAW_EXPBND_ADD_BREADTH_RE.search(text) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(text) for text in texts)
+            and any(_RAW_EXPBND_PUSH_RE.search(text) for text in texts)):
         return "publish"
     if (_RAW_EXPBND_CD_RE.search(command) and
             (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command)
@@ -20796,9 +20800,13 @@ def _commit_msg_subst_fallback(command):
     configuration variable and git, its text names git and defines one anywhere, past where the lexer stopped
     included, or a git segment a partial lex recovers defines one or runs under one the session environment
     carries) may run git commit under another name, so a marker anywhere in it denies too.
+    Both probes read the de-quoted readings (_decoded_readings) BESIDE the raw text, as the uncertain-'#'
+    path's _hash_doubt_scan does, so a subcommand split by quoting (git co''mmit -m "$(id)" <<<x) denies like
+    its plain spelling; a reading can only add a match, never clear one.
     Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
-    if (_RAW_COMMIT_MSG_MARKER_RE.search(command)
-            and (_RAW_COMMIT_MSG_GIT_RE.search(command) or _git_alias_recovered(command))):
+    texts = (command,) + _decoded_readings(command)
+    if (any(_RAW_COMMIT_MSG_MARKER_RE.search(text) for text in texts)
+            and (any(_RAW_COMMIT_MSG_GIT_RE.search(text) for text in texts) or _git_alias_recovered(command))):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
             "lexer and appears to carry a backtick or $( command substitution in a git commit argument, or in "
@@ -40324,6 +40332,37 @@ def _fsw_in_spans(spans, pos):
     return k >= 0 and pos < spans[k][1]
 
 
+def _fsw_sched_view(line, base=0, in_subst=None, spans=None):
+    """`line` with each scheduling keyword (_FSW_SCHED_RE) that is not written data blanked to spaces of the
+    same length: one whose first or last character lies inside an inline code span (`spans`), or, when
+    `in_subst` is given (the Bash route, where it is true for an absolute position base+pos that is not data
+    of a store write), one whose first or last character it marks, such as a keyword in shell code that writes
+    nothing. `line` itself (the same object) when no keyword is blanked. Positions are kept, so the view's
+    exempter (_fsw_sched_exempter) reads the same literal positions as the raw line's."""
+    out = None
+    for k in _FSW_SCHED_RE.finditer(line):
+        first, last = k.start(), k.end() - 1
+        if ((spans and (_fsw_in_spans(spans, first) or _fsw_in_spans(spans, last)))
+                or (in_subst is not None and (in_subst(base + first) or in_subst(base + last)))):
+            out = list(line) if out is None else out
+            out[k.start():k.end()] = " " * (k.end() - k.start())
+    return line if out is None else "".join(out)
+
+
+def _fsw_data_sched_exempter(line, base=0, in_subst=None, spans=None):
+    """The scheduling-keyword exemption of _fsw_future_on_line, read over the written data: a position is
+    exempt only when _fsw_sched_exempter exempts it on the raw line AND on _fsw_sched_view(line, ...), the
+    line with every keyword that is not written data blanked. A keyword inside a code span, or in Bash shell
+    code that writes nothing, so exempts no literal; the conjunction keeps every literal the raw line's
+    exemption warns on warning (a view can only remove an exemption, never add one)."""
+    raw = _fsw_sched_exempter(line)
+    view = _fsw_sched_view(line, base, in_subst, spans)
+    if view is line:
+        return raw
+    data = _fsw_sched_exempter(view)
+    return lambda pos: raw(pos) and data(pos)
+
+
 def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None,
                         nc_spans=None, nc_quoted=False):
     """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
@@ -40333,9 +40372,12 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
     `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
     APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
     clock comparison and under the same exemptions; `nc_spans` (code spans) and `nc_quoted` (the whole line is
-    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them."""
+    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them. The
+    scheduling-keyword exemption reads the written data (_fsw_data_sched_exempter): a keyword inside a code span
+    (`spans`, or `nc_spans` on the Bash route) or at a position `in_subst` marks exempts nothing."""
     found, seen, sched = [], set(), None
     cache = {} if cache is None else cache
+    sched_spans = spans if spans is not None else nc_spans
     for m in _FSW_STAMP_RE.finditer(line):
         lit = m.group(0)
         if lit in seen or (in_subst is not None and in_subst(base + m.start())) \
@@ -40347,7 +40389,7 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
         if got is None or got - now_us <= _FSW_FUTURE_SLACK_US:
             continue
         if sched is None:
-            sched = _fsw_sched_exempter(line)
+            sched = _fsw_data_sched_exempter(line, base, in_subst, sched_spans)
         if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
             seen.add(lit)
             found.append(lit)
@@ -40356,7 +40398,7 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
                 or (nc_spans and _fsw_in_spans(nc_spans, pos)):
             continue
         if sched is None:
-            sched = _fsw_sched_exempter(line)
+            sched = _fsw_data_sched_exempter(line, base, in_subst, sched_spans)
         if not sched(pos) and not (extra_exempt is not None and extra_exempt(pos)):
             seen.add(tok)
             found.append(_FswNonClock(tok))
@@ -43144,6 +43186,8 @@ def future_stamp_write(data):
     "target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
     through and valid. Each keyword matches as a WHOLE word, optionally plural (so "validated",
     "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
+    A keyword exempts only where it is written data (_fsw_data_sched_exempter): one inside an inline code span, or in
+    Bash shell code that writes nothing (": due; echo ... >> <store file>"), exempts nothing.
 
     Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
     markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same

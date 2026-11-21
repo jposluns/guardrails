@@ -6155,6 +6155,45 @@ def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd
     return True
 
 
+# (fbv-*) The parse-failure fallbacks of commit_msg_subst (Fix A) and git_explicit_binding (Fix B) read the de-quoted
+# readings (_decoded_readings) beside the raw text. Each row is (label, handler name, command, want, pinned by the
+# flip): fbv-msg-split and fbv-expbnd-split, a subcommand split by empty quotes behind a here-string, each allowed
+# before; the -plain and -parsed rows hold the deny the split spelling now matches, and the -none rows hold the allow
+# of a command whose de-quoted readings spell no hazard either.
+_FALLBACK_VIEW_ROWS = (
+    ("fbv-msg-split", "commit_msg_subst", "git co''mmit -m \"$(id)\" <<<x", "deny", True),
+    ("fbv-msg-plain", "commit_msg_subst", "git commit -m \"$(id)\" <<<x", "deny", False),
+    ("fbv-msg-parsed", "commit_msg_subst", "git co''mmit -m \"$(id)\"", "deny", False),
+    ("fbv-msg-none", "commit_msg_subst", "git co''mmit -m x <<<y", "allow", False),
+    ("fbv-expbnd-split", "git_explicit_binding", "git add -A && git p''ush <<< x", "deny", True),
+    ("fbv-expbnd-plain", "git_explicit_binding", "git add -A && git push <<< x", "deny", False),
+    ("fbv-expbnd-parsed", "git_explicit_binding", "git add -A && git p''ush", "deny", False),
+    ("fbv-expbnd-none", "git_explicit_binding", "git add f && git p''ush <<< x", "allow", False),
+)
+
+
+def _test_fallback_views(failures):
+    """(fbv-*) A parse-failure fallback reads the same view as the refusal it replaces: _FALLBACK_VIEW_ROWS. Each
+    row runs as given, then each pinned row runs again under a flip that restores the raw-only reading
+    (_decoded_readings read as no reading), where it must allow, so the row is red on the old reading."""
+    for label, name, command, want, _pinned in _FALLBACK_VIEW_ROWS:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+    readings = aiqt_hooks._decoded_readings
+    aiqt_hooks._decoded_readings = lambda command: ()
+    try:
+        for label, name, command, _want, pinned in _FALLBACK_VIEW_ROWS:
+            if not pinned:
+                continue
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != "allow":
+                failures.append("({}-flip) with the fallback reading the raw text alone the row must allow, so it "
+                                "pins the de-quoted readings; got {}".format(label, got))
+    finally:
+        aiqt_hooks._decoded_readings = readings
+
+
 def _test_heredoc_terminator(failures):
     """(hd-*) heredoc_terminator (sectvl): every heredoc opener bash acts on needs a later line exactly equal to
     its delimiter (after the line's leading tabs for <<-) before the end of the command, or the command is
@@ -16461,6 +16500,27 @@ def _test_clock_hooks(failures, tmp):
         {"file_path": st + "/state.md", "content": "> hb: " + future + "\n`" + future + "`\n"}, "allow")
     fsw("(fsw-write-due-column-silent) a future literal under a Due table header passes silently", "Write",
         {"file_path": st + "/state.md", "content": "| Item | Due |\n|---|---|\n| x | " + future + " |\n"}, "allow")
+    # A scheduling keyword exempts a literal only where it is written data (_fsw_data_sched_exempter): one inside an
+    # inline code span, or in Bash shell code that writes nothing, exempts nothing, so each sched-view row warns (each
+    # passed silently before); fsw-sched-data-silent keeps a keyword in the written data exempt. The -flip runs read
+    # the exemption over the raw line again (_fsw_sched_view returning the line unchanged) and must pass silently.
+    sched_view_rows = (
+        ("fsw-sched-view-code-span-warns", "a keyword inside a code span", "Write",
+         {"file_path": st + "/state.md", "content": "Status `due` " + future}, None),
+        ("fsw-sched-view-shell-code-warns", "a keyword in shell code that writes nothing", "Bash",
+         {"command": ": due; echo \"hb {}\" >> {}/state.md".format(future, st)}, "/"))
+    for label, what, tool, tool_input, cwd in sched_view_rows:
+        fsw("({}) a future literal after {} warns".format(label, what), tool, tool_input, "allow-note", cwd=cwd)
+    fsw("(fsw-sched-data-silent) a future literal after a keyword in the written data passes silently", "Bash",
+        {"command": "echo \"due {}\" >> {}/state.md".format(future, st)}, "allow", cwd="/")
+    sched_view = aiqt_hooks._fsw_sched_view
+    aiqt_hooks._fsw_sched_view = lambda line, base=0, in_subst=None, spans=None: line
+    try:
+        for label, what, tool, tool_input, cwd in sched_view_rows:
+            fsw("({}-flip) with the exemption read over the raw line, a future literal after {} must pass silently, "
+                "so the row pins the written-data view".format(label, what), tool, tool_input, "allow", cwd=cwd)
+    finally:
+        aiqt_hooks._fsw_sched_view = sched_view
     fsw("(fsw-edit-future-warns) an Edit that brings a future literal into a store file warns", "Edit",
         {"file_path": st + "/edit.md", "old_string": "a", "new_string": "hb " + future}, "allow-note")
     fsw("(fsw-multiedit-future-warns) a MultiEdit that brings a future literal into a store file warns", "MultiEdit",
@@ -38360,6 +38420,7 @@ def _main_isolated(monitor):
         _test_trkasy_heredoc_consumer(failures, tmp)
         _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
+        _test_fallback_views(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
