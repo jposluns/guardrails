@@ -13590,23 +13590,16 @@ _NRDO_FORMS = (
      "timeout 9 python3 -I -c \"import runpy; runpy.run_path('../stage/o.py')\""),
     ("fix/wide-awk-system", "base", "awk 'BEGIN{system(\"sh stage/o.sh\")}'"),
 )
-# The fixture rows this guard ALLOWS although real bash ran declared code for them: a program fed to a
-# shell through /dev/stdin, /dev/fd/0 or /proc/self/fd/0 or behind a reserved word, the dot
-# builtin, source or a wrapper the peel does not read; a shell word the guard does not list (rbash,
-# busybox); a directory change the scope walk does not model (eval, an alias, a sourced file,
-# cdable_vars, a symlink made in the same call, a cd that fails, is skipped or runs in a subshell, a
-# pipeline or the background); and a symlink followed by ".." in a relative operand. The oracle fails
-# on any allowed declared run outside this list.
+# The fixture rows this guard ALLOWS although real bash ran declared code for them: a directory change
+# the scope walk does not model (eval, an alias, a sourced file, cdable_vars, a symlink made in the
+# same call, a cd that fails, is skipped or runs in a subshell, a pipeline or the background); and a
+# symlink followed by ".." in a relative operand. The oracle fails on any allowed declared run outside
+# this list. No stdin row is listed: a program fed to a shell through /dev/stdin, /dev/fd/0 or
+# /proc/self/fd/0, behind a reserved word, through the dot builtin or source, or to rbash is refused
+# (nrd/oracle-stdin-denied-and-ran), and the busybox, nohup, stdbuf and xargs rows were refused already.
 _NRDO_KNOWN_ALLOWED_RUNS = (
-    "fix/cdable-vars", "fix/stdin-dev-stdin", "fix/stdin-dev-fd0", "fix/stdin-proc-fd0",
-    "fix/stdin-ddash-dev-stdin", "fix/stdin-sh-dev-stdin", "fix/stdin-e-dev-stdin",
-    "fix/stdin-nice-dev-stdin", "fix/stdin-timeout-dev-stdin", "fix/stdin-heredoc-dev-stdin",
-    "fix/stdin-nested-dev-stdin", "fix/stdin-if", "fix/stdin-while",
-    "fix/stdin-heredoc-bang", "fix/stdin-dot-heredoc",
-    "fix/stdin-source-pipe", "fix/stdin-dot-pipe", "fix/stdin-source-heredoc", "fix/stdin-rbash",
-    "fix/stdin-busybox-sh", "fix/stdin-nohup", "fix/stdin-stdbuf",
-    "fix/stdin-xargs-d", "fix/stdin-xargs-bash",
-    "fix/cwd-eval-cd-back", "fix/cwd-command-eval-cd-back", "fix/cwd-dot-heredoc-cd-back",
+    "fix/cdable-vars",
+    "fix/cwd-eval-cd-back", "fix/cwd-command-eval-cd-back",
     "fix/cwd-sourced-file", "fix/cwd-alias", "fix/symlink-made-then-run", "fix/symlink-made-then-cd",
     "fix/failed-cd-missing", "fix/failed-cd-notadir", "fix/failed-cd-P", "fix/failed-cd-ddash",
     "fix/skipped-cd-and", "fix/skipped-cd-or", "fix/subshell-cd", "fix/pipeline-cd",
@@ -13934,9 +13927,11 @@ def _nrdo_unexercised(corpus, ran):
 # The containment no-reduction differential (nrd-contain/): the command forms of the three guard
 # reviews of 2026-11-21 (round 1, round 2 and round 3 of the fbdff942 series), restated on the nrd/
 # fixture: drafts/ is nrd-stage/, <fx>/work is the parent of the declared directories (cwd key "tmp")
-# and <fx>/other is nrd-outside ("out"). Each row is (id, cwd key, template, verdict at fbdff942); the
-# verdict was taken from the fbdff942 guard on this fixture. In the 'none' and 'noexec-only' modes every
-# row must keep that verdict (nothing refused at fbdff942 may be allowed, and nothing else moves either).
+# and <fx>/other is nrd-outside ("out"). Each row is (id, cwd key, template, pinned verdict); the
+# verdict was taken from the fbdff942 guard on this fixture, except r3-find/ed and r3-find/dc, which
+# fbdff942 allowed and this guard refuses (tightened, marked at the row). In the 'none' and
+# 'noexec-only' modes every row must keep its pinned verdict (nothing refused at fbdff942 may be
+# allowed, and nothing else moves either).
 # Placeholders: @ST@, @HB@ and @OUT@ are the staging, hand-back and outside directories, @TMP@ their
 # parent and @STDLIB@ the running interpreter's standard library.
 _NRDC_REVIEW_FORMS = (
@@ -13979,8 +13974,10 @@ _NRDC_REVIEW_FORMS = (
     ("r3-find/tar-checkpoint", "tmp",
      "tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec='python3 nrd-stage/x.py' a.txt", "allow"),
     ("r3-find/pytest-3", "tmp", "pytest-3 -q -p no:cacheprovider", "allow"),
-    ("r3-find/ed", "tmp", "printf '!sh nrd-stage/x.sh\\nq\\n' | ed -s", "allow"),
-    ("r3-find/dc", "tmp", "dc -e '!sh nrd-stage/x.sh'", "allow"),
+    # ed and dc take program text (a ! command runs a shell command line): allowed at fbdff942, refused
+    # since they joined the program-text words (nrd/program-text-ed-dc-sqlite3-denies)
+    ("r3-find/ed", "tmp", "printf '!sh nrd-stage/x.sh\\nq\\n' | ed -s", "deny"),
+    ("r3-find/dc", "tmp", "dc -e '!sh nrd-stage/x.sh'", "deny"),
     ("r3-find/bash-aliases", "tmp", "cp nrd-stage/x.sh nrd-outside/.bash_aliases", "allow"),
     # round 2 findings and its cost list
     ("r2/herestring", "tmp", "grep -c x <<< 'xyz'", "deny"),
@@ -18392,6 +18389,81 @@ def _main_isolated(report_path=None):
                          ("nrd/stdin-bash-s-denies", _nrd_stdin_rows[3]),
                          ("nrd/stdin-python-dash-denies", _nrd_stdin_rows[4])):
             check(cid, nrd_got(cmd), DENY_RAN)
+        # --- the stdin-program class widened: a program read from a descriptor path (/dev/stdin,
+        # /dev/fd/N, /proc/self/fd/N) by python3, by a shell's startup variable, or by dash; a launch
+        # shell the guard's own shell words do not list; a shell's program-text option; and a shell or
+        # python behind a runner or privilege wrapper. Each was allowed in every mode before; real bash
+        # runs the declared file in each row it can run here (the others assert the verdict only). The
+        # payload working directory is the undeclared outside directory, which is not an ancestor of a
+        # declared one, and the guard arms through the project directory, as a session's would
+        _nrd_proj = str(nd.root)
+        _nrd_dev_rows = (
+            "echo 'exec(open(\"{}/x.py\").read())' | python3 /dev/stdin".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | BASH_ENV=/dev/stdin bash -c true".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | dash /dev/fd/0".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | bash /dev/fd/3 3<&0".format(_nrd_sp))
+        for cid, cmd in (("nrd/stdin-python-dev-stdin-denies", _nrd_dev_rows[0]),
+                         ("nrd/stdin-bash-env-dev-stdin-denies", _nrd_dev_rows[1]),
+                         ("nrd/stdin-dash-dev-fd-denies", _nrd_dev_rows[2]),
+                         ("nrd/stdin-bash-dev-fd-3-denies", _nrd_dev_rows[3])):
+            check(cid, nrd_got(cmd, cwd=outd, project=_nrd_proj), DENY_RAN)
+        _nrd_shell_rows = tuple((w, "echo 'bash {}/x.sh' | {}".format(_nrd_sp, w))
+                                for w in ("mksh", "yash", "ash", "posh", "fish", "csh", "tcsh"))
+        # (verdict, ran) where the shell is installed, (verdict, "absent") where it is not
+        check("nrd/stdin-launch-shells-deny",
+              [(w, nrd_got(c, cwd=outd, project=_nrd_proj) if shutil.which(w) else (_verdict(nrd(c, cwd=outd, project=_nrd_proj)), "absent"))
+               for w, c in _nrd_shell_rows],
+              [(w, DENY_RAN if shutil.which(w) else ("deny", "absent")) for w, _c in _nrd_shell_rows])
+        _nrd_text_opt_rows = ("fish -C 'bash {}/x.sh' {}/copy.sh".format(_nrd_sp, outd),
+                              "fish --init-command='bash {}/x.sh' {}/copy.sh".format(_nrd_sp, outd))
+        check("nrd/shell-text-option-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_text_opt_rows], ["deny"] * 2)
+        _nrd_wrap_rows = ("echo 'bash {}/x.sh' | poetry run bash".format(_nrd_sp),
+                          "echo 'bash {}/x.sh' | uv run bash".format(_nrd_sp),
+                          "echo 'bash {}/x.sh' | doas bash".format(_nrd_sp))
+        check("nrd/stdin-runner-wrapper-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_wrap_rows], ["deny"] * 3)
+        # --- a runner's own program text, from a working directory that is NOT an ancestor of a
+        # declared directory (the path test does not reach it): make --eval, -E and -f -, python -m
+        # timeit and code run the declared file under real bash; the rest assert the verdict only
+        _nrd_rt_ran = (
+            "make -s --eval='x: ; @bash {}/x.sh' x".format(_nrd_sp),
+            "make -s -E 'x: ; @bash {}/x.sh' x".format(_nrd_sp),
+            "printf 'x:\\n\\t@bash {}/x.sh\\n' | make -s -f - x".format(_nrd_sp),
+            "python3 -I -m timeit -n 1 -r 1 \"exec(open('{}/' 'nrd-sta' 'ge/x.py').read())\"".format(tmp),
+            "echo \"exec(open('{}/' 'nrd-sta' 'ge/x.py').read())\" | python3 -I -m code".format(tmp))
+        check("nrd/runner-text-ran-denies",
+              [nrd_got(c, cwd=outd, project=_nrd_proj) for c in _nrd_rt_ran], [DENY_RAN] * 5)
+        _nrd_rt_verdict = (
+            "npx -c 'bash {}/x.sh'".format(_nrd_sp), "npm exec -c 'bash {}/x.sh'".format(_nrd_sp),
+            "npx --call='bash {}/x.sh'".format(_nrd_sp),
+            "ipython -c \"exec(open('{}/' 'nrd-sta' 'ge/x.py').read())\"".format(tmp),
+            "echo \"exec(open('{}/' 'nrd-sta' 'ge/x.py').read())\" | ipython".format(tmp),
+            "coverage run -m timeit \"exec(open('{}/' 'nrd-sta' 'ge/x.py').read())\"".format(tmp),
+            "tox --override 'testenv.commands=bash {}/x.sh'".format(_nrd_sp),
+            "tox -x 'testenv.commands=bash {}/x.sh'".format(_nrd_sp),
+            "cargo --config 'target.x86_64-unknown-linux-gnu.runner=\"bash {}/x.sh\"' run".format(_nrd_sp),
+            "pytest -o addopts=-q", "python3 -I -m pytest -o addopts=-q",
+            "printf 'x:\\n\\t@bash {}/x.sh\\n' | make -s -f /dev/stdin x".format(_nrd_sp))
+        check("nrd/runner-text-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_rt_verdict], ["deny"] * 12)
+        # ed, dc and sqlite3 take program text (ed's and dc's ! command, sqlite3's .shell and .system
+        # dot-commands, read from an argument or stdin): real bash runs the declared file where the tool
+        # is installed, and the guard denies each from a non-ancestor working directory
+        _nrd_pt_rows = (("ed", "printf '!bash {}/x.sh\\nq\\n' | ed -s".format(_nrd_sp)),
+                        ("dc", "dc -e '!bash {}/x.sh'".format(_nrd_sp)),
+                        ("sqlite3", "sqlite3 :memory: '.shell bash {}/x.sh'".format(_nrd_sp)),
+                        ("sqlite3", "echo '.system bash {}/x.sh' | sqlite3 :memory:".format(_nrd_sp)))
+        check("nrd/program-text-ed-dc-sqlite3-denies",
+              [nrd_got(c, cwd=outd, project=_nrd_proj) if shutil.which(w) else (_verdict(nrd(c, cwd=outd, project=_nrd_proj)), "absent")
+               for w, c in _nrd_pt_rows],
+              [DENY_RAN if shutil.which(w) else ("deny", "absent") for w, _c in _nrd_pt_rows])
+        # ordinary commands from that working directory stay allowed
+        check("nrd/runner-text-ordinary-allows",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in (
+                  "pytest -q", "make test", "make -n -C {}".format(outd), "npm test",
+                  "python3 -m json.tool a.json", "echo hi | cat /dev/stdin", "echo hi | tee /dev/stderr",
+                  "bash {}/copy.sh".format(outd), "which bash", "which python3")], ["allow"] * 10)
         # the accepted over-denies of those two rules: an unrelated command after a lost working
         # directory, and an unrelated program fed to a shell or python on stdin, deny and run nothing
         check("nrd/over-deny-cwd-lost-unrelated", nrd_got("cd -; make -s nrd-none"), DENY_INERT)
@@ -18839,6 +18911,34 @@ def _main_isolated(report_path=None):
         check("nrd/flip-stdin-program-allows",
               [_flip_verdict("_nrd_stdin_program", lambda seg: False, c) for c in _nrd_stdin_rows],
               ["allow"] * 5)
+        # treating a descriptor path as an ordinary script again (the pre-fix reading) lets every
+        # descriptor row through
+        check("nrd/flip-stdin-device-allows",
+              _nrd_with((("_nrd_stdin_device", lambda path, bare_digits=False: False),),
+                        lambda: [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_dev_rows]), ["allow"] * 4)
+        # the stdin-program test on the guard's own five shell words again lets the other launch shells
+        # through
+        check("nrd/flip-stdin-launch-shells-allows",
+              _nrd_with((("_NRD_LAUNCH_SHELLS", aiqt_hooks._NRD_SHELL_WORDS),),
+                        lambda: [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for _w, c in _nrd_shell_rows]), ["allow"] * 7)
+        check("nrd/flip-shell-text-option-allows",
+              _nrd_with((("_nrd_shell_text_option", lambda word, args: False),),
+                        lambda: [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_text_opt_rows]), ["allow"] * 2)
+        check("nrd/flip-stdin-wrappers-allows",
+              _nrd_with((("_NRD_STDIN_WRAPPERS", aiqt_hooks._NRD_LAUNCH_WORDS),),
+                        lambda: [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_wrap_rows]), ["allow"] * 3)
+        # a runner whose program text is not read from a non-ancestor working directory (the pre-fix
+        # reading) lets every runner-text row through
+        _nrd_no_rt = (("_nrd_runner_text", lambda word, args, oq: False),
+                      ("_nrd_module_text", lambda module, args, oq: False))
+        check("nrd/flip-runner-text-allows",
+              _nrd_with(_nrd_no_rt, lambda: [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_rt_ran + _nrd_rt_verdict]),
+              ["allow"] * 17)
+        # the program-text words without ed, dc and sqlite3 (the pre-fix set) let those rows through
+        check("nrd/flip-program-text-ed-dc-sqlite3-allows",
+              _nrd_with((("_NRD_PROGRAM_TEXT_WORDS",
+                          aiqt_hooks._NRD_PROGRAM_TEXT_WORDS - {"ed", "dc", "sqlite3"}),),
+                        lambda: [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for _w, c in _nrd_pt_rows]), ["allow"] * 4)
 
         # the pre-fix helper bodies the new flips restore (each shows its fix is load-bearing)
         def _nrd_old_cp_targets(operands, eff_cwd):
@@ -19642,6 +19742,31 @@ def _main_isolated(report_path=None):
             finally:
                 setattr(aiqt_hooks, attr, real_helper)
 
+        # the stdin-program class: every stdin row (and the dot-heredoc cd-back row, which sources
+        # /dev/stdin) ran declared code under real bash, and the guard denies each; the previous head
+        # allowed 19 of them (a descriptor operand, a reserved-word lead, rbash: the three tuples below)
+        nrdo_stdin_ids = tuple(c[0] for c in _NRDO_FORMS if c[0].startswith("fix/stdin-"))
+        nrdo_dev_fixed = ("fix/stdin-dev-stdin", "fix/stdin-dev-fd0", "fix/stdin-proc-fd0",
+                          "fix/stdin-ddash-dev-stdin", "fix/stdin-sh-dev-stdin", "fix/stdin-e-dev-stdin",
+                          "fix/stdin-nice-dev-stdin", "fix/stdin-timeout-dev-stdin",
+                          "fix/stdin-heredoc-dev-stdin", "fix/stdin-nested-dev-stdin",
+                          "fix/stdin-dot-heredoc", "fix/stdin-source-pipe", "fix/stdin-dot-pipe",
+                          "fix/stdin-source-heredoc", "fix/cwd-dot-heredoc-cd-back")
+        nrdo_lead_fixed = ("fix/stdin-if", "fix/stdin-while", "fix/stdin-heredoc-bang")
+        nrdo_stdin_ids = nrdo_stdin_ids + ("fix/cwd-dot-heredoc-cd-back",)
+        check("nrd/oracle-stdin-denied-and-ran",
+              [(k, nrdo_by_id[k][0], nrdo_by_id[k][2]) for k in nrdo_stdin_ids],
+              [(k, "deny", True) for k in nrdo_stdin_ids])
+        # flips: a descriptor path read as an ordinary script, no reserved-word lead skipped, or the
+        # guard's own five shell words alone, each lets its rows through again
+        check("nrd/oracle-flip-stdin-device-red",
+              _nrdo_flip_red("_nrd_stdin_device", lambda path, bare_digits=False: False, nrdo_dev_fixed),
+              [c[0] for c in nrdo_corpus if c[0] in nrdo_dev_fixed])
+        check("nrd/oracle-flip-stdin-reserved-lead-red",
+              _nrdo_flip_red("_NRD_RESERVED_LEAD", frozenset(), nrdo_lead_fixed), list(nrdo_lead_fixed))
+        check("nrd/oracle-flip-stdin-launch-shells-red",
+              _nrdo_flip_red("_NRD_LAUNCH_SHELLS", aiqt_hooks._NRD_SHELL_WORDS, ("fix/stdin-rbash",)),
+              ["fix/stdin-rbash"])
         # a scope walk that does not follow a literal cd lets every cd-into row through
         # (flock and trap take program text, so the refuse-wide test, removed alongside, also denies them)
         check("nrd/oracle-flip-no-cd-walk-red",
@@ -19865,9 +19990,11 @@ def _main_isolated(report_path=None):
         check("nrd-contain/review-forms-fbdff942-verdict-noexec-only", _nrdc_review("noexec-only"),
               _nrdc_review_pins)
         # the comparator is live: a guard forced into tripwire mode in 'none' (the mode gate inverted)
-        # turns this differential red (T4: applying tripwire mode in none turns T2 red). The review
-        # forms hold no lost-working-directory form, the one relaxation left once the runner path test
-        # runs in every mode, so the two relaxation forms (refused in 'none') are judged beside them
+        # turns this differential red (T4: applying tripwire mode in none turns T2 red). Two relaxations
+        # are left once the runner path test runs in every mode, the lost-working-directory
+        # relative-operand rule and the unknown-working-directory part of the launch test, and the
+        # review forms hold a form of neither, so two lost-working-directory forms (refused in 'none')
+        # are judged beside them
         _nrdc_real_scan = aiqt_hooks._nrd_scope_scan
         _nrdc_lost_cwd = (("cd - && cat notes.txt", outd), ("cd - && python3 x.py", outd))
 
@@ -19932,15 +20059,23 @@ def _main_isolated(report_path=None):
               [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
                 _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_runner],
               [("deny", "deny", "deny")] * 7)
-        # flip: the tripwire as it was at c16aed7d (the runner path test skipped when contained) allows
-        # every one of them
-        _nrdc_real_runner_reaches = aiqt_hooks._nrd_runner_reaches
-        setattr(aiqt_hooks, "_nrd_runner_reaches", lambda *a, **kw: False)
-        try:
-            _nrdc_runner_mut = [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_runner]
-        finally:
-            setattr(aiqt_hooks, "_nrd_runner_reaches", _nrdc_real_runner_reaches)
+        # flip: the tripwire as it was at c16aed7d (the runner path test skipped when contained, and no
+        # runner program-text test) allows every one of them
+        _nrdc_runner_mut = _nrd_with(
+            (("_nrd_runner_reaches", lambda *a, **kw: False), ("_nrd_runner_text", lambda *a, **kw: False),
+             ("_nrd_module_text", lambda *a, **kw: False)),
+            lambda: [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_runner])
         check("nrd-contain/flip-tripwire-skips-runner-path-red", _nrdc_runner_mut, ["allow"] * 7)
+        # the tightened rows of tools/nrd_differential.py (allowed at fbdff942): the decoded helper call
+        # fed to a program read from stdin or a descriptor, to a launch shell the stdin-program test did
+        # not list, carried in a runner's own program text from a non-ancestor working directory, or run
+        # by ed, dc or sqlite3, are refused in every mode
+        _nrdc_tight = [(t, outd if k == "out" else str(tmp)) for cid, k, t in _nrdc_diff_extra
+                       if cid.startswith(_nrdc_diff.TIGHTENED)]
+        check("nrd-contain/tightened-rows-deny-every-mode",
+              [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
+                _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_tight],
+              [("deny", "deny", "deny")] * 34)
         # the hidden-spelling class: each builds `<helper> cat 994/x.py | python3` at run time, so neither
         # the custodian mark nor a privilege word is in the text (the forms of tools/nrd_differential.py
         # hidden/, refused at fbdff942). Tripwire mode keeps the substitution, stdin-program,
@@ -20122,6 +20257,20 @@ def _main_isolated(report_path=None):
             _nrdc_restore_wide()
         check("nrd-contain/flip-differential-refuse-wide-skipped-red",
               any(f.startswith("hidden/") and "allowed in 'contained'" in f for f in _nrdc_diff_skip), True)
+        # the comparator holds the tightened rows: with the descriptor, launch-shell, program-text word,
+        # wrapper and runner-text readings back to their pre-fix behaviour, every tightened row is a
+        # finding
+        _nrdc_pre_fix = (("_nrd_stdin_device", lambda path, bare_digits=False: False),
+                         ("_NRD_LAUNCH_SHELLS", aiqt_hooks._NRD_SHELL_WORDS),
+                         ("_NRD_PROGRAM_TEXT_WORDS", aiqt_hooks._NRD_PROGRAM_TEXT_WORDS - {"ed", "dc", "sqlite3"}),
+                         ("_NRD_STDIN_WRAPPERS", aiqt_hooks._NRD_LAUNCH_WORDS),
+                         ("_nrd_runner_text", lambda word, args, oq: False),
+                         ("_nrd_module_text", lambda module, args, oq: False))
+        _nrdc_diff_tight = _nrd_with(_nrdc_pre_fix, lambda: _nrdc_diff_run(
+            lambda c, cw, d, m: _nrdc_real_scan(c, cw, d, mode=m), "tight")[1])
+        check("nrd-contain/flip-differential-tightened-red",
+              sorted({f.split(":", 1)[0] for f in _nrdc_diff_tight if "a tightened row is allow" in f}),
+              sorted(cid for cid, _k, _t in _nrdc_diff_extra if cid.startswith(_nrdc_diff.TIGHTENED)))
 
         def _nrdc_reason(mode, cmd, cwd):
             res = _nrdc_forced(mode, lambda: nrd(cmd, cwd=cwd, project=str(nd.root)))

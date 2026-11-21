@@ -7,7 +7,10 @@ forms with the fbdff942 module and with the module in this checkout forced to ea
 any of them, and reports two properties:
 
   no reduction   in 'none' and 'noexec-only' every form keeps its fbdff942 verdict, row for row
-                 (nothing refused at fbdff942 is allowed, and nothing else moves either);
+                 (nothing refused at fbdff942 is allowed, and nothing else moves either), except
+                 the tightened rows (ids starting with one of TIGHTENED: stdin/, runner-text/ and
+                 program-text/),
+                 which fbdff942 allows and which must be refused in every mode;
   the class      in 'contained' a form refused at fbdff942 is allowed only when it reads a deliverable
                  only as data through the helper: (H1) every exact helper reader form in its text
                  starts a command (not inside a substitution, a process substitution or quotes) and
@@ -22,7 +25,14 @@ text joins it (make --eval, npx -c, ipython -c, python3 -I -m timeit, from an an
 directory or after cd -): tripwire mode keeps the substitution, stdin-program, program-text and
 collector/runner path tests, so each is refused as at fbdff942. The relaxations tripwire mode keeps
 (the lost-cwd relative-operand rule and the unknown-cwd part of the launch test) have no form in this
-corpus; the self-test pins them (nrd-contain/tripwire-relaxations-allow-contained).
+corpus; the self-test pins them (nrd-contain/tripwire-relaxations-allow-contained). The tightened
+rows are forms fbdff942 also allowed: the decoded call fed to a shell, source or python-family word
+reading its program from stdin or a descriptor path (bash /dev/stdin, . /dev/fd/0, python3
+/dev/stdin, BASH_ENV=/dev/stdin) or to a launch shell the stdin-program test did not list (mksh, yash,
+ash, posh, rbash, fish, csh, tcsh), and a runner's own program text from a working directory that is
+not an ancestor of a declared directory (make --eval, -E or -f -, npx -c, npm exec -c, ipython -c,
+python3 -m timeit or code, coverage run -m timeit, tox --override, cargo --config, pytest -o), and
+ed, dc or sqlite3 running it as a shell command line (their ! command or a .shell dot-command).
 
 The fbdff942 module is not read from git history (no git process is launched): pass the file that
 `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py` prints, and
@@ -183,8 +193,61 @@ EXTRA = (
      + "').decode())\""),
     ("runner/cd-minus-make-eval", "out",
      "cd - && make --eval='x: ; @echo " + _B64 + " | base64 -d | bash' x"),
+    # tightened past fbdff942 (allowed there, refused here in every mode): the same decoded call fed to
+    # a shell, source or python-family word that reads its program from stdin or a descriptor path, or
+    # to a shell the stdin-program test did not list, from a working directory that is not an ancestor
+    # of a declared directory
+    ("stdin/bash-dev-stdin", "out", "echo " + _B64 + " | base64 -d | bash /dev/stdin"),
+    ("stdin/bash-dev-fd-0", "out", "echo " + _B64 + " | base64 -d | bash /dev/fd/0"),
+    ("stdin/bash-proc-self-fd-0", "out", "echo " + _B64 + " | base64 -d | bash /proc/self/fd/0"),
+    ("stdin/bash-dev-fd-3", "out", "echo " + _B64 + " | base64 -d | bash /dev/fd/3 3<&0"),
+    ("stdin/source-dev-stdin", "out", "echo " + _B64 + " | base64 -d | source /dev/stdin"),
+    ("stdin/dot-dev-fd-0", "out", "echo " + _B64 + " | base64 -d | . /dev/fd/0"),
+    ("stdin/python3-dev-stdin", "out",
+     "echo aW1wb3J0IG9z | base64 -d | python3 /dev/stdin"),
+    ("stdin/bash-env-dev-stdin", "out", "echo " + _B64 + " | base64 -d | BASH_ENV=/dev/stdin bash -c true"),
+    ("stdin/nohup-bash-dev-stdin", "out", "echo " + _B64 + " | base64 -d | nohup bash /dev/stdin"),
+    ("stdin/bash-dev-stdin-ancestor", "tmp", "echo " + _B64 + " | base64 -d | bash /dev/stdin"),
+    ("stdin/mksh", "out", "echo " + _B64 + " | base64 -d | mksh"),
+    ("stdin/yash", "out", "echo " + _B64 + " | base64 -d | yash"),
+    ("stdin/ash", "out", "echo " + _B64 + " | base64 -d | ash"),
+    ("stdin/posh", "out", "echo " + _B64 + " | base64 -d | posh"),
+    ("stdin/rbash", "out", "echo " + _B64 + " | base64 -d | rbash"),
+    ("stdin/fish", "out", "echo " + _B64 + " | base64 -d | fish"),
+    ("stdin/csh", "out", "echo " + _B64 + " | base64 -d | csh"),
+    ("stdin/tcsh", "out", "echo " + _B64 + " | base64 -d | tcsh"),
+    ("stdin/poetry-run-python", "out", "echo " + _B64 + " | base64 -d | poetry run python3"),
+    # tightened past fbdff942: a runner's own program text (or a program it reads from stdin) from a
+    # working directory that is not an ancestor of a declared directory
+    ("runner-text/make-eval", "out", "make --eval='x: ; @echo " + _B64 + " | base64 -d | bash' x"),
+    ("runner-text/make-E", "out", "make -E 'x: ; @echo " + _B64 + " | base64 -d | bash' x"),
+    ("runner-text/make-f-dash", "out", "printf 'x:\\n\\techo " + _B64 + " | base64 -d | bash\\n' | make -f - x"),
+    ("runner-text/npx-c", "out", "npx -c 'echo " + _B64 + " | base64 -d | bash'"),
+    ("runner-text/npm-exec-c", "out", "npm exec -c 'echo " + _B64 + " | base64 -d | bash'"),
+    ("runner-text/ipython-c", "out",
+     "ipython -c \"import base64, os; os.system(base64.b64decode('" + _B64 + "').decode())\""),
+    ("runner-text/python-m-timeit", "out",
+     "python3 -I -m timeit -n 1 -r 1 \"import base64, os; os.system(base64.b64decode('" + _B64
+     + "').decode())\""),
+    ("runner-text/python-m-code", "out",
+     "echo aW1wb3J0IG9z | base64 -d | python3 -I -m code"),
+    ("runner-text/coverage-m-timeit", "out",
+     "coverage run -m timeit \"import base64, os; os.system(base64.b64decode('" + _B64 + "').decode())\""),
+    ("runner-text/tox-override", "out", "tox --override 'testenv.commands=bash -c \"echo " + _B64
+     + " | base64 -d | bash\"'"),
+    ("runner-text/cargo-config", "out", "cargo --config 'target.x86_64-unknown-linux-gnu.runner=\"bash "
+     "/dev/null\"' run"),
+    ("runner-text/pytest-o", "out", "pytest -o addopts=-q"),
+    # tightened past fbdff942: line editors and calculators whose ! command (or sqlite3 dot-command)
+    # runs the decoded call as a shell command line
+    ("program-text/ed", "out", "echo '!echo " + _B64 + " | base64 -d | bash' | ed -s"),
+    ("program-text/dc", "out", "dc -e '!echo " + _B64 + " | base64 -d | bash'"),
+    ("program-text/sqlite3", "out", "sqlite3 :memory: '.shell echo " + _B64 + " | base64 -d | bash'"),
 )
 CWDS = ("tmp", "out", "st")
+# Rows the guard refuses although fbdff942 allows them: each must be refused in every mode, and no
+# other row may change its fbdff942 verdict in 'none' or 'noexec-only'.
+TIGHTENED = ("stdin/", "runner-text/", "program-text/")
 
 
 def _load_hook(path, name):
@@ -296,6 +359,11 @@ def differential(base_scan, head_scan, head, workdir):
         base = _verdict(base_scan(command, cwd, dirs))
         got = {m: _verdict(head_scan(command, cwd, dirs, m)) for m in MODES}
         rows.append((cid, base, got))
+        if cid.startswith(TIGHTENED):
+            for m in MODES:
+                if got[m] != "deny":
+                    findings.append("{}: a tightened row is {} in '{}' ({!r})".format(cid, got[m], m, template))
+            continue
         for m in ("none", "noexec-only"):
             if got[m] != base:
                 findings.append("{}: {} is {} at fbdff942 and {} in '{}' ({!r})".format(
@@ -343,18 +411,24 @@ def main(argv=None):
         shutil.rmtree(workdir, ignore_errors=True)
     base_deny = sum(1 for _c, b, _g in rows if b == "deny")
     relaxed = sum(1 for _c, b, g in rows if b == "deny" and g["contained"] == "allow")
+    kept = [(c, b, g) for c, b, g in rows if not c.startswith(TIGHTENED)]
+    tight = [(c, b, g) for c, b, g in rows if c.startswith(TIGHTENED)]
     print("rows {}; refused at fbdff942 {}; changed in none {}; changed in noexec-only {}; "
-          "refused at fbdff942 and allowed in contained {}".format(
+          "refused at fbdff942 and allowed in contained {}; tightened rows {} (allowed at fbdff942 {}, "
+          "refused in every mode {})".format(
               len(rows), base_deny,
-              sum(1 for _c, b, g in rows if g["none"] != b),
-              sum(1 for _c, b, g in rows if g["noexec-only"] != b), relaxed))
+              sum(1 for _c, b, g in kept if g["none"] != b),
+              sum(1 for _c, b, g in kept if g["noexec-only"] != b), relaxed, len(tight),
+              sum(1 for _c, b, _g in tight if b == "allow"),
+              sum(1 for _c, _b, g in tight if all(g[m] == "deny" for m in MODES))))
     if findings:
         print("FAIL: {} finding(s):".format(len(findings)))
         for line in findings:
             print("  " + line)
         return 1
     print("PASS: no reduction in none and noexec-only; every contained-mode allow of a form refused "
-          "at fbdff942 is a helper data read into git apply or a read form")
+          "at fbdff942 is a helper data read into git apply or a read form; every tightened row is "
+          "refused in every mode")
     return 0
 
 

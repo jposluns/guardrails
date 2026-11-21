@@ -31231,20 +31231,73 @@ def _nrd_python_reads_stdin(args):
     return i >= n or args[i] == "-"
 
 
+# A path that names a descriptor rather than a file: the shell's own standard input (or output or
+# error), /dev/fd/N, and /proc/<pid, self or thread-self>/fd/N (also below a task directory). An
+# interpreter, shell or source given one as its program reads that program from the descriptor, which
+# a pipe, a here-document or an N<&0 duplication feeds, so the program is never among the lexed words.
+_NRD_STDIN_DEV_RE = re.compile(r"/(?:dev/(?:stdin|stdout|stderr|fd/[^/]+)|proc/[^/]+/(?:task/[^/]+/)?fd/[^/]+)\Z")
+_NRD_STDIN_DEV_NAMES = frozenset(("stdin", "stdout", "stderr"))
+
+
+def _nrd_stdin_device(path, bare_digits=False):
+    """True when a path names a descriptor rather than a file (_NRD_STDIN_DEV_RE). An absolute path is
+    judged after lexical normalisation (//dev/./stdin and /dev/../dev/stdin count). A relative path is
+    judged without its working directory, since a cd the walk tracks or loses can put it in /dev or
+    /proc/self (cd /dev && bash stdin): it counts when its last component is stdin, stdout or stderr or
+    its last-but-one component is fd, and, with bare_digits (a program operand), when its last
+    component is all digits (cd /dev/fd && bash 0). A script really named stdin is judged the same
+    (fail closed)."""
+    if not isinstance(path, str) or not path:
+        return False
+    if path.startswith("/"):
+        return _NRD_STDIN_DEV_RE.match("/" + os.path.normpath(path).lstrip("/")) is not None
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    if not parts:
+        return False
+    if parts[-1] in _NRD_STDIN_DEV_NAMES or (bare_digits and parts[-1].isdigit()):
+        return True
+    return len(parts) >= 2 and parts[-2] == "fd"
+
+
+def _nrd_launch_reads_stdin(word, args):
+    """True when a launch word given these arguments reads its program from standard input or a
+    descriptor: a shell (_NRD_LAUNCH_SHELLS) with -s or no script operand, or whose script operand is a
+    descriptor path; source or the dot builtin with a descriptor operand; a python-family word with a -
+    operand or no script operand, or a descriptor script operand (_nrd_stdin_device)."""
+    if word in (".", "source"):
+        return _nrd_stdin_device(_nrd_shell_operand(args, word), bare_digits=True)
+    if word in _NRD_LAUNCH_SHELLS:
+        return _nrd_shell_reads_stdin(args) or _nrd_stdin_device(_nrd_shell_operand(args, word),
+                                                                 bare_digits=True)
+    if _NRD_PY_WORD_RE.match(word):
+        if _nrd_python_reads_stdin(args):
+            return True
+        _isolated, mode, target = _nrd_py_mode(args)
+        return mode == "script" and _nrd_stdin_device(target, bare_digits=True)
+    return False
+
+
 def _nrd_stdin_program(seg):
-    """True when a segment runs a shell or python-family word that reads its program from standard
-    input (a pipe into bash, sh or python3, bash -s, python3 -, a quoted here-document or here-string
-    fed to one): its body is never in the call's lexed words, so the caller puts the call in scope
-    whenever any directory is declared. The command word is found after NAME=value prefixes, the env,
-    nice, timeout and time wrappers (_gate_peel), and exec, command or builtin with their options;
-    behind a wrapper carrying an option outside that grammar, the first shell or python-family word of
-    the segment is taken as the command word (fail closed: its own arguments decide)."""
-    eff = _gate_peel(seg.argv)
+    """True when a segment runs a shell, source or python-family word that reads its program from
+    standard input or a descriptor (a pipe into bash, sh, mksh, fish, csh or python3, bash -s, python3
+    -, bash /dev/stdin, source /dev/stdin, . /dev/fd/0, python3 /dev/fd/0, a quoted here-document or
+    here-string fed to one: _nrd_launch_reads_stdin): its body is never in the call's lexed words, so
+    the caller puts the call in scope whenever any directory is declared. The shells are the launch
+    shells (_NRD_LAUNCH_SHELLS), not only the guard's own shell words. The command word is found after
+    NAME=value prefixes, the env, nice, timeout and time wrappers (_gate_peel), and exec, command or
+    builtin with their options, and after any reserved word or grouping token that leads the segment
+    (if true; then bash; fi, while true; do bash; done, ! bash: _NRD_RESERVED_LEAD); behind a wrapper
+    carrying an option outside that grammar, the first shell, source or python-family word of the
+    segment is taken as the command word (fail closed: its own arguments decide)."""
+    lead = 0
+    while lead < len(seg.argv) and not seg.argv_opaque[lead] and seg.argv[lead] in _NRD_RESERVED_LEAD:
+        lead += 1
+    eff = _gate_peel(seg.argv[lead:])
     if eff is None:
         eff = []
         for k, tok in enumerate(seg.argv):
             name = tok.rsplit("/", 1)[-1]
-            if name in _NRD_SHELL_WORDS or _NRD_PY_WORD_RE.match(name):
+            if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name):
                 eff = seg.argv[k:]
                 break
     for _round in range(8):
@@ -31259,12 +31312,7 @@ def _nrd_stdin_program(seg):
         eff = nxt
     if not eff:
         return False
-    word = eff[0].rsplit("/", 1)[-1]
-    if word in _NRD_SHELL_WORDS:
-        return _nrd_shell_reads_stdin(eff[1:])
-    if _NRD_PY_WORD_RE.match(word):
-        return _nrd_python_reads_stdin(eff[1:])
-    return False
+    return _nrd_launch_reads_stdin(eff[0].rsplit("/", 1)[-1], eff[1:])
 
 
 # --- the unread-launch-target class ---------------------------------------------------------------------
@@ -31648,13 +31696,20 @@ def _nrd_assigned_value_in(seg, cwd, dirs):
 #   judged on its own.
 # - an unquoted here-document or a here-string (the lexer refuses both, so the command is unread and in
 #   scope; there is no re-reading of them).
-# - eval, trap and the other words that take program text (_NRD_PROGRAM_TEXT_WORDS), a python-family -c,
-#   a shell -c body the wrapper peel does not read (behind xargs, find -exec, sudo, a shell the guard does
-#   not list), a python or shell word reading its program from stdin behind a launch wrapper, and sed
-#   with any script outside line-number printing (sed's e command and s///e flag run shell commands).
+# - eval, trap and the other words that take program text (_NRD_PROGRAM_TEXT_WORDS, ed, dc and sqlite3
+#   among them), a python-family -c, a shell -c body the wrapper peel does not read (behind xargs, find
+#   -exec, sudo, a shell the guard does not list), a shell's --command or --init-command option and
+#   fish's -C, a python or shell word reading its program from stdin behind a launch, runner, privilege
+#   or sandbox wrapper (_NRD_STDIN_WRAPPERS), a shell, source or python program operand or a startup
+#   file (BASH_ENV=, ENV=, --rcfile, --init-file) naming a descriptor (_nrd_stdin_device), and sed with
+#   any script outside line-number printing (sed's e command and s///e flag run shell commands).
 # - a python -m run, a test collector or a build or task runner (_NRD_RUNNER_WORDS) whose working
 #   directory or any operand is at or above a declared directory (or unknown): collection and discovery
 #   put the start directory on sys.path themselves, so -I does not prevent the import.
+# - from any working directory, a runner word carrying its own program text or a program read from
+#   stdin or a descriptor (_nrd_runner_text: make --eval, -E or -f -, npx -c, npm exec -c, ipython -c,
+#   tox --override, cargo --config, pytest -o, coverage run -m timeit), and a python -m run of a module
+#   that takes program text or reads it from stdin (_nrd_module_text: timeit, code, pdb, asyncio).
 # - git configuration that can run program text: git -c (except a closed set of keys whose values are
 #   never run), --config-env, --exec-path=, a git config call that sets a key outside that set or opens
 #   an editor, and any GIT_* (or PAGER, EDITOR, VISUAL, LESSOPEN, LESSCLOSE, BROWSER, MANPAGER,
@@ -31667,7 +31722,7 @@ _NRD_PROGRAM_TEXT_WORDS = frozenset((
     "eval", "trap", "perl", "ruby", "irb", "node", "nodejs", "deno", "bun", "php", "lua", "luajit", "tclsh",
     "wish", "expect", "Rscript", "R", "julia", "guile", "awk", "gawk", "mawk", "nawk", "busybox", "pwsh",
     "osascript", "watch", "su", "runuser", "script", "flock", "ssh", "rsync", "parallel", "gdb", "vim", "vi",
-    "nvim", "ex", "emacs"))
+    "nvim", "ex", "emacs", "ed", "dc", "sqlite3"))
 _NRD_RUNNER_WORDS = frozenset((
     "pytest", "py.test", "nosetests", "nose2", "trial", "tox", "nox", "coverage", "behave", "ward", "make",
     "gmake", "npm", "npx", "yarn", "pnpm", "cargo", "go", "bazel", "gradle", "mvn", "ctest", "just", "rake",
@@ -31836,6 +31891,134 @@ def _nrd_runner_reaches(args, oq, cwd, dirs):
     return False
 
 
+# Standard-library and common python modules whose run takes program text on the command line or
+# reads a program from standard input (python -m timeit "stmt", python -m code, pdb and asyncio read
+# commands or statements from stdin, the IPython family takes -c and reads stdin).
+_NRD_PY_TEXT_MODULES = frozenset(("timeit", "code", "pdb", "asyncio", "IPython", "idlelib", "ipdb", "pudb",
+                                  "ptpython", "bpython"))
+# The words before a shell or python-family word that make it run behind them (the stdin-program test
+# reads only the wrappers _gate_peel peels): the launch wrappers, the runners (poetry run python, uv
+# run bash, npm exec bash) and privilege or sandbox wrappers.
+_NRD_STDIN_WRAPPERS = frozenset(_NRD_LAUNCH_WORDS | _NRD_RUNNER_WORDS | {
+    "doas", "pkexec", "runuser", "setpriv", "sudoedit", "chroot", "unshare", "nsenter", "firejail",
+    "bwrap", "systemd-run", "unbuffer", "chronic", "valgrind", "fakeroot", "faketime", "proot"})
+
+
+def _nrd_py_module_end(args):
+    """The index of the first word after the module name of a python -m run (the words the module
+    receives), read with _nrd_py_mode's option grammar; len(args) when there is no -m."""
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok in ("-", "--") or not tok.startswith("-") or len(tok) < 2:
+            return n
+        if tok.startswith("--"):
+            i += 2 if tok == "--check-hash-based-pycs" else 1
+            continue
+        skip = 0
+        for j, ch in enumerate(tok[1:], 1):
+            if ch == "m":
+                return i + 1 if tok[j + 1:] else i + 2
+            if ch in "WX":
+                skip = 0 if j + 1 < len(tok) else 1
+                break
+        i += 1 + skip
+    return n
+
+
+def _nrd_shell_text_option(word, args):
+    """True when a launch shell's words carry program text outside a -c cluster: a --command or
+    --init-command option (fish, in either = or separate form), or fish's -C cluster letter."""
+    for tok in args:
+        if tok.startswith(("--command", "--init-command")):
+            return True
+        if word == "fish" and len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "C" in tok[1:]:
+            return True
+    return False
+
+
+def _nrd_module_text(module, args, oq):
+    """True when python -m module (or coverage run -m module) with the words after it runs program
+    text the call carries or reads one from stdin: a module of _NRD_PY_TEXT_MODULES, or a runner module
+    (pytest, coverage, IPython and the rest of _NRD_RUNNER_WORDS, by its first dotted component) whose
+    own words do (_nrd_runner_text)."""
+    if not isinstance(module, str) or not module:
+        return False
+    head = module.split(".", 1)[0]
+    if module in _NRD_PY_TEXT_MODULES or head in _NRD_PY_TEXT_MODULES:
+        return True
+    if head in _NRD_RUNNER_WORDS or head.lower() in _NRD_RUNNER_WORDS:
+        return _nrd_runner_text(head.lower(), args, oq)
+    return False
+
+
+def _nrd_runner_text(word, args, oq):
+    """True when a collector, build or task runner given these words runs program text the call
+    carries, or reads a program from standard input or a descriptor, from ANY working directory (the
+    path test, _nrd_runner_reaches, covers only an ancestor of a declared directory): any word, or the
+    value after '=' in one, that names a descriptor (_nrd_stdin_device: make -f /dev/stdin, coverage run
+    /dev/stdin); make or gmake --eval or -E, or a makefile of - (-f -, --file=-, --makefile -); npm,
+    npx, pnpm or yarn -c, --call, --shell-mode, a --shell or --script-shell setting, npm explore or
+    yarn exec (each runs a shell command line); ipython -c or --c=, a configuration trait word
+    (--Class.trait=, such as exec_lines or code_to_run), or no script operand (a program from stdin);
+    jupyter with a configuration trait word or the console subcommand; tox -x or --override; cargo
+    --config; pytest or py.test -o or --override-ini; and coverage with -m or --module naming a module
+    that does (_nrd_module_text). A word the lexer reads as opaque counts in the path test already."""
+    n = len(args)
+    for tok in args:
+        value = tok.partition("=")[2]
+        if _nrd_stdin_device(tok) or (value and _nrd_stdin_device(value)):
+            return True
+    if word == "coverage":
+        for i, tok in enumerate(args):
+            if tok in ("-m", "--module") and i + 1 < n:
+                if _nrd_module_text(args[i + 1], args[i + 2:], oq[i + 2:]):
+                    return True
+            elif tok.startswith("--module="):
+                if _nrd_module_text(tok.partition("=")[2], args[i + 1:], oq[i + 1:]):
+                    return True
+        return False
+    if word in ("make", "gmake"):
+        for i, tok in enumerate(args):
+            if tok == "--eval" or tok.startswith("--eval="):
+                return True
+            if tok in ("--file", "--makefile") and i + 1 < n and args[i + 1] == "-":
+                return True
+            if tok.startswith(("--file=", "--makefile=")) and tok.partition("=")[2] == "-":
+                return True
+            if len(tok) > 1 and tok[0] == "-" and tok[1] != "-":
+                letters = tok[1:]
+                if "E" in letters:
+                    return True
+                k = letters.find("f")
+                if k >= 0 and (letters[k + 1:] or (args[i + 1] if i + 1 < n else "")) == "-":
+                    return True
+        return False
+    if word in ("npm", "npx", "pnpm", "yarn"):
+        operands = [t for t in args if not t.startswith("-")]
+        if any(tok in ("-c", "--call", "--shell-mode")
+               or tok.startswith(("--call=", "--shell-mode=", "--shell", "--script-shell")) for tok in args):
+            return True
+        return (word == "npm" and operands[:1] == ["explore"]) or (word == "yarn" and operands[:1] == ["exec"])
+    if word == "ipython":
+        if any(tok == "-c" or tok.startswith(("-c", "--c=")) or (tok.startswith("--") and "." in tok.partition("=")[0])
+               for tok in args):
+            return True
+        return not any(not tok.startswith("-") for tok in args)
+    if word == "jupyter":
+        operands = [t for t in args if not t.startswith("-")]
+        return operands[:1] in (["console"], ["qtconsole"]) or any(
+            tok.startswith("--") and "." in tok.partition("=")[0] for tok in args)
+    if word == "tox":
+        return any(tok == "--override" or tok.startswith(("--override=", "-x")) for tok in args)
+    if word == "cargo":
+        return any(tok == "--config" or tok.startswith("--config=") for tok in args)
+    if word in ("pytest", "py.test"):
+        return any(tok == "--override-ini" or tok.startswith(("--override-ini=", "-o")) for tok in args)
+    return False
+
+
 def _nrd_git_key_inert(key):
     """True when a git configuration key is in the closed set whose values git never runs."""
     return bool(_NRD_GIT_INERT_KEY_RE.match(key))
@@ -31916,9 +32099,11 @@ def _nrd_shell_has_c(args):
 
 def _nrd_wide_unproven(seg, cwd, dirs):
     """True when one lexed segment holds a construct this guard does not fully read (the block comment
-    above): a program-text word, a python -c, a shell -c body the peel does not reach, a python or
-    shell word reading its program from stdin behind a launch wrapper, a sed script outside line-number
-    printing, a python -m run, collector or runner that may start at or above a declared directory, git
+    above): a program-text word, a python -c, a shell -c body the peel does not reach, a shell
+    program-text option, a python or shell word reading its program from stdin behind a launch, runner,
+    privilege or sandbox wrapper, a shell, source or python program operand or startup file naming a
+    descriptor, a sed script outside line-number printing, a python -m run, collector or runner that may
+    start at or above a declared directory, a runner's own program text from any directory, git
     configuration that can run program text, a program-running environment assignment, or a word or
     redirect target naming configuration that executes. cwd is the effective working directory the
     scope walk knows, or None. Every test here runs in every containment mode: the path test of a
@@ -31949,24 +32134,55 @@ def _nrd_wide_unproven(seg, cwd, dirs):
             _isolated, mode, target = _nrd_py_mode(rest)
             if mode == "c":
                 return True
-            if mode == "stdin" and any(not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_LAUNCH_WORDS
+            if mode == "stdin" and any(not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_STDIN_WRAPPERS
                                        for k in range(j)):
                 return True
+            if mode == "script" and _nrd_stdin_device(target, bare_digits=True):
+                # a program read from a descriptor (python3 /dev/stdin), wherever the word stands
+                return True
+            if mode == "m":
+                # the words after the module (python3 -m timeit "stmt", python3 -m pytest -o ...)
+                after = _nrd_py_module_end(rest)
+                if _nrd_module_text(target, rest[after:], rest_oq[after:]):
+                    return True
+            if mode == "script" and isinstance(target, str) \
+                    and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS and target in rest:
+                at = rest.index(target) + 1
+                if _nrd_runner_text(target.rsplit("/", 1)[-1], rest[at:], rest_oq[at:]):
+                    return True
             if mode == "m" or (mode == "script" and isinstance(target, str)
                                and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS):
                 if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                     return True
         elif word in _NRD_RUNNER_WORDS:
-            if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+            if _nrd_runner_text(word, rest, rest_oq) or _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                 return True
         elif word in _NRD_LAUNCH_SHELLS:
             if _nrd_shell_has_c(rest) and _nrd_shell_c_body(seg) is None:
                 return True
+            if _nrd_shell_text_option(word, rest):
+                return True
+            if _nrd_stdin_device(_nrd_shell_operand(rest, word), bare_digits=True):
+                # a program read from a descriptor (bash /dev/stdin), wherever the word stands
+                return True
             if _nrd_shell_reads_stdin(rest) and any(
-                    not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_LAUNCH_WORDS for k in range(j)):
+                    not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_STDIN_WRAPPERS for k in range(j)):
+                return True
+        elif word in (".", "source"):
+            if _nrd_stdin_device(_nrd_shell_operand(rest, word), bare_digits=True):
                 return True
         elif word == "git":
             if _nrd_git_runs_config(rest, rest_oq):
+                return True
+    if any(not oq[k] and (_NRD_PY_WORD_RE.match(w) or w in _NRD_LAUNCH_SHELLS or w in (".", "source"))
+           for k, w in enumerate(t.rsplit("/", 1)[-1] for t in argv)):
+        # a startup file read from a descriptor (BASH_ENV=/dev/stdin bash -c true, ENV=/dev/fd/0 sh -i,
+        # bash --rcfile /dev/stdin -i): the startup program is read from stdin like a script
+        for k, tok in enumerate(argv):
+            if (_ENV_ASSIGN_RE.match(tok) or tok.startswith(("--rcfile=", "--init-file="))) \
+                    and _nrd_stdin_device(tok.partition("=")[2]):
+                return True
+            if tok in ("--rcfile", "--init-file") and k + 1 < len(argv) and _nrd_stdin_device(argv[k + 1]):
                 return True
     for r in seg.redirects:
         if r.target_class == "descriptor" or r.op.startswith("<<") or not isinstance(r.target, str):
@@ -31987,10 +32203,10 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
     could be a declared directory through a CDPATH entry, so it is treated as in scope). Once the walk
     loses the working directory (cd -, a bare cd, an unreadable cd operand, a cd it does not track, or
     any pushd, popd or dirs word: _nrd_cwd_lost), every later segment with a relative operand is in
-    scope (_nrd_relative_operand). A segment whose shell or python-family word reads its program from
-    stdin (a pipe into one, bash -s, python3 -, a quoted heredoc fed to one: _nrd_stdin_program) is in
-    scope whenever any directory is declared. A nested shell -c body is classified recursively in the
-    parent's effective working directory, so a declared directory a quote splice hides from the raw
+    scope (_nrd_relative_operand). A segment whose shell, source or python-family word reads its
+    program from stdin or a descriptor (a pipe into one, bash -s, python3 -, bash /dev/stdin, . /dev/fd/0,
+    a quoted heredoc fed to one: _nrd_stdin_program) is in scope whenever any directory is declared. A
+    nested shell -c body is classified recursively in the parent's effective working directory, so a declared directory a quote splice hides from the raw
     text is still reached. A command the lexer cannot read (an unquoted heredoc, a here-string, a
     process substitution, an unbalanced quote, a quoted heredoc the lexer cannot place) is IN SCOPE
     whenever any directory is declared (_nrd_unread_in_scope), and it has no segments to match, so it

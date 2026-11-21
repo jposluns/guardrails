@@ -496,11 +496,16 @@ HOME, a `cd` operand it cannot read, a `cd` it does not track such as one behind
 `builtin` or `command`, or any `pushd`, `popd` or `dirs` word, even as an argument), every later
 segment with a relative operand (any argument that is not an absolute path, options included, a
 relative command path, or a relative file redirect target) is in scope. A segment whose shell word
-(`sh`, `bash`, `dash`, `zsh`, `ksh`) or python-family word reads its program from stdin (no script
-operand, `-s` in a single-dash cluster, or a `-` operand, found after `NAME=value` prefixes, the `env`,
-`nice`, `timeout` and `time` wrappers, and `exec`, `command` or `builtin`) is in scope whenever any
-directory is declared, so a pipe into one, `bash -s`, `python3 -` and a quoted here-document fed to one
-deny. Out of scope the call passes untouched. IN SCOPE the call is
+(`sh`, `bash`, `dash`, `zsh`, `ksh` and the other launch shells `ash`, `mksh`, `rbash`, `yash`,
+`posh`, `busybox`, `fish`, `csh` and `tcsh`), `source` or dot builtin, or python-family word reads its
+program from stdin or a descriptor (no script operand, `-s` in a single-dash cluster, a `-` operand,
+or a program operand naming a descriptor: `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N` or
+`/proc/<pid>/fd/N` after lexical normalisation, or a relative operand whose last component is
+`stdin`, `stdout`, `stderr` or all digits or whose last-but-one component is `fd`; found after a
+leading reserved word or grouping token, `NAME=value` prefixes, the `env`, `nice`, `timeout` and
+`time` wrappers, and `exec`, `command` or `builtin`) is in scope whenever any directory is declared, so
+a pipe into one, `bash -s`, `python3 -`, `bash /dev/stdin`, `source /dev/stdin`, `. /dev/fd/0`,
+`python3 /dev/stdin`, `if true; then bash; fi` and a quoted here-document fed to one deny. Out of scope the call passes untouched. IN SCOPE the call is
 DENIED unless EVERY lexed segment is a closed-allowlist read-only form with its registered options:
 `cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`, `diff`, and the coreutils hash tools (`sha256sum`,
 `sha1sum`, `sha224sum`, `sha384sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `sum`); `cp` with the
@@ -633,15 +638,29 @@ segment wherever it stands for the rest. The constructs:
   substitution beside one through).
 - program text: `eval`, `trap`, `perl`, `ruby`, `node`, `php`, `lua`, `tclsh`, `Rscript`, `awk` (and
   `gawk`, `mawk`, `nawk`), `busybox`, `watch`, `su`, `script`, `flock`, `ssh`, `rsync`, `parallel`,
-  `gdb`, the vi and emacs editors and the other words `_NRD_PROGRAM_TEXT_WORDS` lists; a python-family
-  `-c`; a shell `-c` body the wrapper peel does not read (behind `xargs`, `find -exec`, `sudo`); a
-  python or shell word reading its program from stdin behind a launch wrapper; and `sed` with any script
-  other than line addresses with `p`, `d`, `n` and `q` (sed's `e` command runs a shell command).
+  `gdb`, the vi and emacs editors, `ed`, `dc` and `sqlite3` (a `!` command or a `.shell` or `.system`
+  dot-command runs a shell command line) and the other words `_NRD_PROGRAM_TEXT_WORDS` lists; a
+  python-family `-c`; a shell `-c` body the wrapper peel does not read (behind `xargs`, `find -exec`,
+  `sudo`); a shell's `--command` or `--init-command` option and fish's `-C`; a python or shell word
+  reading its program from stdin behind a launch wrapper, a runner or a privilege or sandbox wrapper
+  (`poetry run python`, `uv run bash`, `doas bash`); a shell, `source` or python-family program operand
+  naming a descriptor wherever the word stands, and a descriptor named as a startup file
+  (`BASH_ENV=/dev/stdin`, `ENV=/dev/fd/0`, `--rcfile /dev/stdin`); and `sed` with any script other
+  than line addresses with `p`, `d`, `n` and `q` (sed's `e` command runs a shell command).
 - a test collector or runner started from an ancestor of a declared directory: a `python3 -m` run (with
   `-I` too: `unittest discover` and pytest put their start directory on `sys.path` themselves), a
   python script named like a collector, and `pytest`, `tox`, `nox`, `coverage`, `make`, `npm`, `cargo`,
   `go` and the other words `_NRD_RUNNER_WORDS` lists, when the working directory is unknown or at or
   above a declared directory, or any word resolves to a path at or above one.
+- from ANY working directory, a runner carrying its own program text or a program read from stdin or a
+  descriptor (`_nrd_runner_text`): any word or `=`-value naming a descriptor; `make` or `gmake`
+  `--eval`, `-E` or a makefile of `-`; `npm`, `npx`, `pnpm` or `yarn` `-c`, `--call`, `--shell-mode`,
+  a `--shell` or `--script-shell` setting, `npm explore` or `yarn exec`; `ipython -c`, `--c=`, a
+  `--Class.trait=` word or no script operand; `jupyter console`, `qtconsole` or a `--Class.trait=`
+  word; `tox -x` or `--override`; `cargo --config`; `pytest` or `py.test` `-o` or `--override-ini`;
+  `coverage run -m` and a `python3 -m` run of `timeit`, `code`, `pdb`, `asyncio`, `IPython`, `idlelib`,
+  `ipdb`, `pudb`, `ptpython` or `bpython`, or of a runner module whose own words do
+  (`python3 -m pytest -o`).
 - git configuration that can run program text: `git -c` with a key outside a closed inert set
   (`color.*`, `core.quotepath`, `user.name`, `user.email`, `advice.*`, `init.defaultBranch`,
   `column.ui`, `i18n.*`, `core.autocrlf`), any `--config-env`, an `--exec-path=` value, a `git config`
@@ -696,7 +715,11 @@ even where it reaches none (`cd -; make test`, `pushd /tmp; git status`). A shel
 reading its program from stdin denies wherever a directory is declared, even where the program names
 none (`echo 'echo hi' | bash`, `python3 -` with a quoted here-document, a bare `bash`, `bash -s`,
 `bash --login`, and, behind a wrapper option the peel cannot parse, the first shell or python word
-with nothing after it even where it is only an argument, as in `env -vu FOO echo bash`). An unquoted
+with nothing after it even where it is only an argument, as in `env -vu FOO echo bash`). A program
+operand or runner word that only looks like a descriptor denies too (a script named `stdin` or `0`,
+`make stdin`), as do `ed`, `dc` and `sqlite3` with any script (`sqlite3 x.db 'select 1'`), `ipython`
+with no script operand (`ipython --version`), and a runner program-text option that runs nothing
+(`pytest -o addopts=-q`, `make -E ''`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
 even where it only prints and names no declared directory from a working directory outside them all
 (`cat <<EOF > out.txt`, `grep -c x <<< 'xyz'`, a here-document with a trailing space after its
@@ -774,9 +797,19 @@ script or reader the guard allows may still import siblings or run what it is ha
 whose command word is resolved through a PATH that only the session shell holds is not seen. Running an UNREAD copy outside the directories is also not caught: the rule's "full reading" half
 stays judgement-level, because no hook state could prove a full reading (Read limits and truncation
 stand in the way). A reader or script run outside the directories may itself import or run a path it is
-handed as data; the guard does not read it. A program fed on stdin to an interpreter other than a shell
-or python-family word (`perl`, `ruby`, `node`, `awk -f -`), or to a shell behind a wrapper the peel does
-not read (`xargs`, `sudo`, `stdbuf`), is not put in scope by the stdin rule. A payload with no absolute
+handed as data; the guard does not read it. A program fed on stdin to an interpreter other than a shell,
+`source` or python-family word (`perl`, `ruby`, `node`, `awk -f -`), or to a shell behind a wrapper the
+peel does not read (`xargs`, `sudo`, `stdbuf`), is not put in scope by the stdin rule (the program-text
+and wrapper parts of the refuse-wide test refuse those listed here). A shell or python word reading
+stdin behind a wrapper word outside the launch, runner, privilege and sandbox wrappers listed above is
+not refused. A descriptor reached through an alias the lexical test does not read (a symlink to
+`/dev/stdin` made in this or an earlier call, or a relative operand other than the listed names after
+the working directory moved into `/dev` or `/proc`) is read as an ordinary script. A runner's recipe
+or configuration FILE from a working directory that is not an ancestor of a declared directory, a
+runner option outside the listed program-text options, and a runner option carried in an environment
+variable (`MAKEFLAGS`, `PYTEST_ADDOPTS`, `TOX_OVERRIDE`, an `npm_config_*` name, a `CARGO_*` name,
+`RUSTC_WRAPPER`) are not read. `less` is not a program-text word: with no terminal it copies its input
+like `cat`, and its command keys come from the terminal, not the pipe. A payload with no absolute
 working directory leaves the walk's starting directory unknown, and a relative operand is then judged
 out of scope unless a `cd`, `pushd`, `popd` or `dirs` word in the call has lost the directory. A
 symlink swapped between the check and the run is not prevented; one already in place is caught in
@@ -927,9 +960,12 @@ Residuals the tripwire states (in addition to "Residuals" above):
    no longer reach one, but a host that only LOOKS contained to the probe (item 5) loses them. A test
    collector or build runner started at or above a declared directory (`pytest` or `make` there) is
    still refused in every mode, since its own program text can build the custodian route. From a
-   working directory that is not an ancestor of a declared directory a runner's program text
-   (`make --eval`, `npx -c`, `ipython -c`, `python3 -I -m timeit`) is not read, in every mode; under
-   containment such program text can build the custodian route from any such directory.
+   working directory that is not an ancestor of a declared directory a runner's listed program-text
+   options (`make --eval`, `npx -c`, `ipython -c`, `python3 -I -m timeit`, the full list above) are
+   refused in every mode, but its recipe or configuration file, an unlisted option and an option
+   carried in an environment variable are not read, in every mode; under containment such a file or
+   option can build the custodian route from any such directory. The host-side refusal of a pipe or
+   terminal on the custodian helper's output is a separate host change.
 8. In the `noexec-only` and `none` modes every residual listed above still applies, unchanged.
 
 ## The lease heartbeat
