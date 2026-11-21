@@ -18254,6 +18254,38 @@ def _gate_grammar_redirect(command, i, start, fd):
     return k, None
 
 
+# The work count of the guarded scans (_gate_closed_grammar_scan, _gate_novrf_dequoted_bypass, _gate_unread_bypass,
+# _gate_runtime_bypass), read by the self-test's growth rows (gw-lin-*), which judge how that count grows with the
+# input rather than how long a scan takes. None, the value the hook always runs with, counts nothing. The self-test
+# sets a one-element list here around one call and each pass of a scan adds the characters or words it read
+# (_gate_scan_count): a lex or reading of text adds the length of the text it reads, a walk or table fill adds
+# the words it visits, and a slice a scan copies to read adds its length. A walk counts the steps it takes, never
+# how far a cached pointer moved, and a reading reused from a cache or passed over by a skip adds nothing, so a
+# lost cache or skip shows as added work. The count changes no decision, no return value and no other state.
+_GATE_SCAN_COUNTER = None
+
+
+def _gate_scan_count(items):
+    """Add items, the characters or words one pass of a guarded scan read, to the work count when the self-test
+    has set _GATE_SCAN_COUNTER; do nothing when it is None."""
+    counter = _GATE_SCAN_COUNTER
+    if counter is not None:
+        counter[0] += items
+
+
+def _gate_scan_first(indices, test):
+    """The first index of indices (a range) for which test(index) is true, or None when none is, adding each index
+    it tried to the work count (_gate_scan_count), so the count is the steps the search took wherever it starts."""
+    tried = 0
+    for p in indices:
+        tried += 1
+        if test(p):
+            _gate_scan_count(tried)
+            return p
+    _gate_scan_count(tried)
+    return None
+
+
 def _gate_span_hides_roster_git(interior):
     """True when a quoted span's interior NAMES a roster git command: a 'git' word whose own next
     non-option word is a no-verify roster verb (git commit, git push, ...), OR a 'git' word whose
@@ -18280,14 +18312,27 @@ def _gate_span_hides_roster_git(interior):
             hides[k] = hides[k + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
         else:
             hides[k] = w.lower() in _NOVERIFY_VERBS
+    # The work count: the tokenizing regex pass and the table fill, then, for the git-word regex pass, the stretch
+    # of the interior it read to reach each match and each step the pointer walk takes, and the rest of the
+    # interior only when the pass runs to the end (a hit stops it).
+    _gate_scan_count(len(interior) + len(toks))
     base = 0
+    scanned = 0  # how far the git-word regex pass has read the interior
+    found = False
     for gm in _GATE_GIT_WORD_RE.finditer(interior):
         gend = gm.end()
+        visited = 0
         while base < len(toks) and toks[base][0] < gend:
+            visited += 1
             base += 1
+        _gate_scan_count(gend - scanned + visited)
+        scanned = gend
         if hides[base]:
-            return True
-    return False
+            found = True
+            break  # the first hit ends the pass
+    else:
+        _gate_scan_count(len(interior) - scanned)  # the work count: the pass read to the end of the interior
+    return found
 
 
 # The one here-document shape the closed literal grammar accepts (_gate_heredoc_message): from the opening
@@ -18375,6 +18420,7 @@ def _gate_grammar_lex(command, start, heredoc_message=False):
     _sub_off = [None]
 
     def result(end, bad):
+        _gate_scan_count(end - start)  # the work count: the characters the main pass read
         return words, end, bad, (end if data_stop is None else data_stop)
 
     def offroster_resolved():
@@ -18384,13 +18430,16 @@ def _gate_grammar_lex(command, start, heredoc_message=False):
         # it returns False, so the lexer keeps scanning and the segment still fails closed.
         if _sub_off[0] is None:
             p = _sub_scan[0]
+            visited = 0  # the work count: the steps this walk takes, not how far the cached pointer moved
             while p < len(words):
+                visited += 1
                 w = words[p]
                 if w.startswith("-") and w != "-":
                     p += 2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1
                     continue
                 _sub_off[0] = w.lower() not in _NOVERIFY_VERBS
                 break
+            _gate_scan_count(visited)
             _sub_scan[0] = p
         return _sub_off[0] is True
 
@@ -18421,6 +18470,7 @@ def _gate_grammar_lex(command, start, heredoc_message=False):
             j = command.find("'", i + 1)
             if j < 0:
                 return result(i, _gate_grammar_violation(command, i, i, n))
+            _gate_scan_count(j - i)  # the work count: the interior read to its closing quote
             if data_stop is None:
                 for k in range(i + 1, j):
                     ck = command[k]
@@ -18466,6 +18516,7 @@ def _gate_grammar_lex(command, start, heredoc_message=False):
             j = command.find('"', i + 1)
             if j < 0:
                 return result(i, _gate_grammar_violation(command, i, i, n))
+            _gate_scan_count(j - i)  # the work count: the interior read to its closing quote
             for k in range(i + 1, j):
                 ck = command[k]
                 if ck in "$`\\":
@@ -18526,7 +18577,9 @@ def _gate_grammar_sub(words):
     fails closed on the latter, since the verb bash will run cannot be known)."""
     i = 1
     n = len(words)
+    visited = 0  # the work count: the words this walk reads, never an option value it skips
     while i < n:
+        visited += 1
         w = words[i]
         if w.startswith("-") and w != "-":
             if "=" in w:
@@ -18536,7 +18589,9 @@ def _gate_grammar_sub(words):
             else:
                 i += 1
             continue
+        _gate_scan_count(visited + n - i - 1)  # the work count: the words walked and the copy of those after it
         return w, words[i + 1:], True
+    _gate_scan_count(visited)  # the work count: the words walked
     return None, [], False
 
 
@@ -18576,7 +18631,10 @@ def _gate_closed_grammar_scan(command, heredoc_message=False):
     (_gate_heredoc_message, read by _gate_grammar_lex). The parse-error fallback and the doubt path keep
     False, so on a command the lexer cannot parse that form still denies."""
     consumed = 0
+    scanned = 0  # how far the one regex pass over the command has read it
     for m in _GATE_GIT_WORD_RE.finditer(command):
+        _gate_scan_count(m.end() - scanned)  # the work count: the regex pass read to this git word
+        scanned = m.end()
         p = m.start()
         if p < consumed:
             continue
@@ -18596,6 +18654,7 @@ def _gate_closed_grammar_scan(command, heredoc_message=False):
         if bad is not None:
             return ("grammar",) + bad
         consumed = data_end
+    _gate_scan_count(len(command) - scanned)  # the work count: the regex pass read to the end of the command
     return None
 
 
@@ -19485,8 +19544,10 @@ def _gate_novrf_dequoted_bypass(words):
             subs[p] = subs[p + (2 if ("=" not in w and w in _GIT_ARG_OPTS) else 1)]
         else:
             subs[p] = p
+    _gate_scan_count(n)  # the work count: the table fill
     read_to = {}  # verb -> the end of the stretch a walk for that verb read without finding a bypass
     for idx in range(max(last, 0)):
+        _gate_scan_count(1)  # the work count: each word the git-word pass reads, to its return or its end
         if _gate_word(words[idx]) != "git":
             continue
         s = subs[idx + assigns[idx] + 1]  # skip the leading assignments and the command word itself
@@ -19496,10 +19557,12 @@ def _gate_novrf_dequoted_bypass(words):
         size = 16
         while True:  # the walk's end: its terminator, or the word after last
             stop = min(s + 1 + size, last + 1)
+            _gate_scan_count(stop - s - 1)  # the work count: the slice copied and read for the terminator
             end = s + 1 + _gate_terminator_index(sub, words[s + 1:stop])
             if end < stop or stop == last + 1:
                 break
             size *= 2
+        _gate_scan_count(end - s - 1)  # the work count: the slice copied and read for the spelling
         spelling = _no_verify_spelling(sub, words[s + 1:end])
         if spelling is not None:
             return sub, spelling
@@ -19630,6 +19693,7 @@ def _gate_dequoted_words(text):
     its escapes keep a NUL and the rest of the quote, and it splits at every character str.split() treats as
     whitespace; the bash-model readings (_gate_bash_readings) are read beside it, so a
     deny it gives is kept."""
+    _gate_scan_count(len(text))  # the work count: the passes over text
     words = []
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _GATE_ANSI_C_ESCAPE_RE.sub(_gate_ansi_c_escape, m.group(1)), text)
     for w in _dequoted_text(decoded).split():
@@ -19778,6 +19842,7 @@ def _gate_bash_readings(text):
     finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words.
     Readings that are the same text once made plain (_gate_reading_plain) have the same words, so those words are
     split once and the one list stands for each such reading; no reader of the lists changes one."""
+    _gate_scan_count(len(text))  # the work count: the passes over text
     joined = _join_continuations(text)[0]
     outer = _gate_shell_level(joined)
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
@@ -19786,6 +19851,7 @@ def _gate_bash_readings(text):
     for reading in (outer, _gate_shell_level(outer), decoded):
         plain = _gate_reading_plain(reading)
         if plain not in split:
+            _gate_scan_count(len(plain))  # the work count: each split this pass makes, none it reuses
             split[plain] = _gate_plain_words(plain)
         readings.append(split[plain])
     return tuple(readings)
@@ -19801,10 +19867,13 @@ def _gate_any_word_bypass(words, first=None):
     in the word count. first, when given, is the index of the word the walk reads after instead (a word built
     at run time that may be git, _gate_runtime_bypass)."""
     if first is None:
-        first = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
+        first = _gate_scan_first(range(len(words)), lambda k: _gate_word(words[k]) == "git")
+        first = len(words) if first is None else first
+    walk = range(len(words) - 1, first, -1)
+    _gate_scan_count(len(walk))  # the work count: the words the walk from the end reads (it never stops early)
     long_at = short_at = None  # the nearest long and short spelling words after the word being read
     found = None
-    for p in range(len(words) - 1, first, -1):
+    for p in walk:
         w = words[p]
         if w in _NOVERIFY_VERBS:
             if long_at is not None:
@@ -19855,6 +19924,7 @@ def _gate_text_bypass(text, skip_own=False):
     hold a git word (_gate_text_may_name_git) gives None before any reading is built, the result every walk
     gives it, so a long segment that names no git (echo and many plain words) costs a translate, not the
     readings."""
+    _gate_scan_count(len(text))  # the work count: the translate of text
     if not _gate_text_may_name_git(text):
         return None
     walked = []
@@ -19889,6 +19959,7 @@ def _gate_unread_bypass(text):
     <<<x reads a -n), any word whose basename is git starts the walk, so text that merely names such a command
     denies too, and the read from an ANSI-C escaped quote or a case word to the end spans separators."""
     for start, end in _gate_split_spans(text)[1]:
+        _gate_scan_count(end - start)  # the work count: the slice copied to read
         bypass = _gate_text_bypass(text[start:end])
         if bypass is not None:
             return bypass
@@ -19968,6 +20039,7 @@ def _gate_runtime_may_hit(text):
     character, gives None however it is read; a slice of text gives False wherever text does. A few translates and
     substring tests, where the readings take several passes per character and per word, so a long command that
     holds a '$' and no roster verb after it costs those passes, not the readings; one with no roster verb costs one."""
+    _gate_scan_count(len(text))  # the work count: the translates and substring tests over text
     if not _gate_runtime_text(text):
         return False
     if "$" in text and chr(92) in text:
@@ -19992,12 +20064,12 @@ def _gate_runtime_hit(words, k, tilde=False):
     bypass = _gate_any_word_bypass(words, k)
     if bypass is not None:
         return words[k], bypass[0], "{}, a hook-skip spelling for it".format(bypass[1])
-    verb = next((p for p in range(k + 1, len(words)) if words[p] in _NOVERIFY_VERBS), None)
+    verb = _gate_scan_first(range(k + 1, len(words)), lambda p: words[p] in _NOVERIFY_VERBS)
     if verb is not None:
-        later = next((words[p] for p in range(verb + 1, len(words)) if _gate_runtime_at(words, p, tilde)), None)
+        later = _gate_scan_first(range(verb + 1, len(words)), lambda p: _gate_runtime_at(words, p, tilde))
         if later is not None:
             return (words[k], words[verb], "the word {!r}, also built at run time, which may expand to a hook-skip "
-                    "spelling for it".format(later[:40]))
+                    "spelling for it".format(words[later][:40]))
     return None
 
 
@@ -20024,6 +20096,7 @@ def _gate_runtime_masked_git(text):
     builtin name like git-commit), so an option name like --git-dir keeps its text and the option-skip walk skips
     its value; the closed literal grammar still scans every '\\bgit\\b', a '-'-glued one included. Linear in the
     length of text."""
+    _gate_scan_count(len(text))  # the work count: the one regex pass over text
     return _GATE_RAW_GIT_RE.sub("xxx", text)
 
 
@@ -20031,7 +20104,7 @@ def _gate_runtime_reading(words, tilde):
     """(word, sub, what) for the words of one de-quoted reading of a raw piece (_gate_runtime_bypass), else None:
     the walk from its first word built at run time (_gate_runtime_at, _gate_runtime_hit; tilde as there). Linear
     in the word count."""
-    k = next((p for p in range(len(words)) if _gate_runtime_at(words, p, tilde)), None)
+    k = _gate_scan_first(range(len(words)), lambda p: _gate_runtime_at(words, p, tilde))
     if k is None:
         return None
     return _gate_runtime_hit(words, k, tilde)
@@ -20051,9 +20124,11 @@ def _gate_assembled_reading(words):
     (--git-dir) is read by the option skip and its value is not taken for the subcommand; the walk is linear in
     the word count however many git words the reading holds."""
     gits = [p for p, w in enumerate(words) if _gate_word(w) == "git"]
+    _gate_scan_count(len(words))  # the work count: the pass that finds the git words
     if not gits:
         return None
     n = len(words)
+    _gate_scan_count(n)  # the work count: the table fill from the end
     # From each index: the first word that is not a leading env assignment (_command_word_index), the subcommand
     # the option skip of _git_sub_and_args reaches, and the first word built at run time (a tilde word anywhere,
     # as after a roster verb); n where there is none.
@@ -20069,6 +20144,7 @@ def _gate_assembled_reading(words):
             sub_at[i] = i
         runtime_at[i] = i if _gate_runtime_word(w) or _gate_tilde_word(w) else runtime_at[i + 1]
     for g in gits:
+        _gate_scan_count(1)  # the work count: each git word the walk reads, to its first hit or its end
         s = sub_at[min(command_at[g] + 1, n)]
         if s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:
             return (words[g], words[s], "the word {!r}, built at run time, which may expand to a hook-skip spelling "
@@ -20153,8 +20229,15 @@ def _gate_piece_spans(pieces):
 
 def _gate_split_doubt_start(pieces, spans):
     """The start of the first of pieces, before the last, that holds a construct the split may cut inside
-    (_gate_split_doubt), spans being their (start, end) spans; None when none does."""
-    return next((start for (start, _end), piece in zip(spans, pieces[:-1]) if _gate_split_doubt(piece)), None)
+    (_gate_split_doubt), spans being their (start, end) spans; None when none does. The search stops at the first
+    such piece, and the work count adds each piece it tests with its separator, none after that one."""
+    start = None
+    for k in range(len(pieces) - 1):
+        _gate_scan_count(len(pieces[k]) + 1)  # the work count: the piece the doubt test reads and its separator
+        if _gate_split_doubt(pieces[k]):
+            start = spans[k][0]
+            break  # the first piece that holds such a construct ends the search
+    return start
 
 
 def _gate_split_spans(text):
@@ -20166,11 +20249,13 @@ def _gate_split_spans(text):
     case word (_gate_split_doubt), since either split may cut inside those, and a body quote that re-pairs the
     first split can carry such a construct across its pieces (Don't, then $G -c $'x.y=a;\\';b' commit -nv).
     Linear in the length of text."""
+    _gate_scan_count(2 * len(text))  # the work count: the split and the body mask (the doubt test counts its own)
     pieces = _raw_push_segments(text)
     spans = _gate_piece_spans(pieces)
     starts = [_gate_split_doubt_start(pieces, spans)]
     masked = _gate_heredoc_masked(text)
     if masked != text:
+        _gate_scan_count(len(text))  # the work count: the split of the masked text (the doubt test counts its own)
         masked_pieces = _raw_push_segments(masked)
         masked_spans = _gate_piece_spans(masked_pieces)
         seen = set(spans)
@@ -20190,6 +20275,7 @@ def _gate_runtime_piece_hit(piece):
     (_GATE_ASSEMBLY_CHARS) and no 'git' in any case, since then no reading of it names git."""
     if not _gate_runtime_may_hit(piece):
         return None
+    _gate_scan_count(len(piece))  # the work count: the tilde search over piece
     tilde = _GATE_TILDE_START_RE.search(piece) is not None
     readings = (_gate_dequoted_words(piece),) + _gate_bash_readings(piece)
     masked = _gate_runtime_masked_git(piece)
@@ -20277,13 +20363,15 @@ def _gate_runtime_bypass(text):
         return None
     pieces, spans = _gate_split_spans(text)
     for start, end in spans:
+        _gate_scan_count(end - start)  # the work count: the slice copied to read
         hit = _gate_runtime_piece_hit(text[start:end])
         if hit is not None:
             return hit
     if len(pieces) > 1 and "(" in text and not _GATE_EXTGLOB_HEADS.isdisjoint(text):
+        _gate_scan_count(len(text))  # the work count: the tilde search over text
         tilde = _GATE_TILDE_START_RE.search(text) is not None
         for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
-            k = next((k for k, w in enumerate(words) if _gate_extglob_word(w)), None)
+            k = _gate_scan_first(range(len(words)), lambda p: _gate_extglob_word(words[p]))
             if k is not None:
                 hit = _gate_runtime_hit(words, k, tilde)
                 if hit is not None:
@@ -48307,6 +48395,39 @@ def _exception_text(exc):
         return "<an exception whose type and message could not be read>"
 
 
+def _read_hook_input(stream):
+    """The hook payload text read from stream (sys.stdin), decoded the same way under every locale.
+
+    A real standard input is read once, as bytes, from its binary buffer and decoded as UTF-8 with
+    surrogateescape, so the text the handlers see does not depend on the locale the hook runs under. The
+    text stream this replaces decoded by the locale and the interpreter's UTF-8 mode: under the shipped
+    command line the C and POSIX locales turn UTF-8 mode on and C.UTF-8 decodes with surrogateescape, so
+    those already decoded as here, while a strict UTF-8 locale such as en_US.UTF-8 raised
+    UnicodeDecodeError on a byte that is not valid UTF-8, so the whole payload read as unreadable; only
+    with UTF-8 mode off did the C locale's ASCII codec turn every byte above 0x7f, valid UTF-8 included,
+    into a lone surrogate. Here valid UTF-8 decodes to its characters and each byte that is not valid UTF-8
+    becomes one lone surrogate (U+DC80 to U+DCFF), which json.loads keeps inside a string, so it reaches the
+    handler's own validation; malformed JSON, a non-object payload and a failed read still reach main()'s
+    unreadable-payload path and its mode's posture. Line ends are not translated: a CRLF or a lone CR
+    reaches json.loads unchanged, as it did through the text stream this replaces, which on POSIX does
+    not translate line ends either. A stream with no binary buffer (an already-decoded stream, such as the
+    io.StringIO and fault-injecting readers the self-tests install) is read with its own read(). The
+    payload is read once: a failed binary read propagates, never falling back to a second read through the
+    text layer, which would see a drained or half-read stream. A binary read that returns None (a
+    non-blocking standard input with no data ready) is a failed read too and raises BlockingIOError naming
+    it. This is the stdin decoding only: the strict UTF-8 readers of files, registries and records
+    elsewhere in this module are unchanged, and a later filesystem, child-process or output encoding can
+    still depend on the locale."""
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        return stream.read()
+    data = buffer.read()
+    if data is None:
+        raise BlockingIOError("standard input is non-blocking and had no data ready (its read "
+                              "returned None), so no hook payload was read")
+    return data.decode("utf-8", "surrogateescape")
+
+
 def main(argv):
     # The MODE (argv[0]) alone decides the error posture, never the payload (which may be unreadable).
     # A genuinely unknown mode is not identifiable as Stop and is a broken install, so it fails closed
@@ -48375,12 +48496,14 @@ def main(argv):
     try:
         with window:
             try:
-                payload = sys.stdin.read()
+                payload = _read_hook_input(sys.stdin)
                 data = json.loads(payload)
                 if not isinstance(data, dict):
                     raise ValueError("payload is not a JSON object")
             except Exception as exc:  # any failure to read the payload is an unreadable payload
-                # Unreadable/malformed stdin, JSON parse error, UnicodeDecodeError, or a non-dict payload, and
+                # Unreadable/malformed stdin (the read is decoded as UTF-8 with surrogateescape under every
+                # locale, so a byte that is not valid UTF-8 no longer fails it), JSON parse error, a
+                # UnicodeDecodeError from a test stream's own read, or a non-dict payload, and
                 # ALSO a RecursionError (deeply nested JSON) or a MemoryError: the old narrow except let those
                 # escape as a traceback with exit 1, which the platform treats as non-blocking. Every exception
                 # is named.

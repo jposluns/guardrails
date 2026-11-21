@@ -312,7 +312,7 @@ def load_config(path):
             raise GateError("configuration {}: a [[binding]] has unknown key(s): {}".format(
                 CONFIG_REL, ", ".join(sorted(unknown))))
         bid = entry.get("id")
-        if not isinstance(bid, str) or not ID_RE.match(bid):
+        if not isinstance(bid, str) or not ID_RE.fullmatch(bid):
             raise GateError("configuration {}: binding id {!r} is not a kebab-case identifier".format(
                 CONFIG_REL, bid))
         if bid in seen_ids:
@@ -800,6 +800,12 @@ def self_test_main(_mkdtemp=None, _symlink=None, _vectors=True):  # noqa: C901  
             r = _fresh("dup", dup_cfg, {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
             if _run_quiet(r) != 2:
                 failures.append("e2e: a duplicate binding id expected fail-closed exit 2")
+
+            # (f2) a binding id with one trailing newline (the TOML escape \n) fails closed exit 2.
+            r = _fresh("id-newline", good_cfg.replace('id = "repository-target"', 'id = "repository-target\\n"'),
+                       {"cmd/resume.md": "sample-tool --target $CURRENT_TARGET\n"})
+            if _run_quiet(r) != 2:
+                failures.append("e2e: a binding id with a trailing newline expected fail-closed exit 2")
 
             # (g) an empty paths roster fails closed exit 2.
             r = _fresh("empty-scope", good_cfg.replace('paths = ["cmd/resume.md"]', "paths = []"),
