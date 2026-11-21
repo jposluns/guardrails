@@ -645,7 +645,11 @@ segment wherever it stands for the rest. The constructs:
   reading its program from stdin behind a launch wrapper, a runner or a privilege or sandbox wrapper
   (`poetry run python`, `uv run bash`, `doas bash`); a shell, `source` or python-family program operand
   naming a descriptor wherever the word stands, and a descriptor named as a startup file
-  (`BASH_ENV=/dev/stdin`, `ENV=/dev/fd/0`, `--rcfile /dev/stdin`); and `sed` with any script other
+  (`BASH_ENV=/dev/stdin`, `ENV=/dev/fd/0`, `--rcfile /dev/stdin`); a descriptor handed to any
+  `python3 -m` module (`cProfile`, `profile`, `trace`, `doctest` and `pydoc` run the file they are
+  handed); an `env -S` or `--split-string` command line that holds a shell, `source`, python-family,
+  runner or program-text word (`env -S 'bash -s'`, `env -S 'bash -c ...'`: env re-splits it into the
+  command it runs, which no other test reads); and `sed` with any script other
   than line addresses with `p`, `d`, `n` and `q` (sed's `e` command runs a shell command).
 - a test collector or runner started from an ancestor of a declared directory: a `python3 -m` run (with
   `-I` too: `unittest discover` and pytest put their start directory on `sys.path` themselves), a
@@ -654,10 +658,13 @@ segment wherever it stands for the rest. The constructs:
   above a declared directory, or any word resolves to a path at or above one.
 - from ANY working directory, a runner carrying its own program text or a program read from stdin or a
   descriptor (`_nrd_runner_text`): any word or `=`-value naming a descriptor; `make` or `gmake`
-  `--eval`, `-E` or a makefile of `-`; `npm`, `npx`, `pnpm` or `yarn` `-c`, `--call`, `--shell-mode`,
-  a `--shell` or `--script-shell` setting, `npm explore` or `yarn exec`; `ipython -c`, `--c=`, a
-  `--Class.trait=` word or no script operand; `jupyter console`, `qtconsole` or a `--Class.trait=`
-  word; `tox -x` or `--override`; `cargo --config`; `pytest` or `py.test` `-o` or `--override-ini`;
+  `--eval`, `-E` or a makefile of `-` (an unambiguous long-option prefix too: `--ev=`, `--fil -`);
+  `npm`, `npx`, `pnpm` or `yarn` `-c`, `--call`, `--shell-mode`,
+  a `--shell` or `--script-shell` setting, `npm explore` or `yarn exec`; `ipython` or `ipython3` `-c`,
+  `--c=`, a `--Class.trait=` word or no script operand; `jupyter console`, `qtconsole` or a
+  `--Class.trait=` word, and `jupyter-console` or `jupyter-qtconsole`; `tox -x` (also inside a short
+  cluster such as `-qx`) or `--override`; `cargo --config`; `pytest`, `py.test`, `pytest-3`,
+  `py.test-3` or `pytest3` `-o` or `--override-ini`;
   `coverage run -m` and a `python3 -m` run of `timeit`, `code`, `pdb`, `asyncio`, `IPython`, `idlelib`,
   `ipdb`, `pudb`, `ptpython` or `bpython`, or of a runner module whose own words do
   (`python3 -m pytest -o`).
@@ -717,7 +724,12 @@ none (`echo 'echo hi' | bash`, `python3 -` with a quoted here-document, a bare `
 `bash --login`, and, behind a wrapper option the peel cannot parse, the first shell or python word
 with nothing after it even where it is only an argument, as in `env -vu FOO echo bash`). A program
 operand or runner word that only looks like a descriptor denies too (a script named `stdin` or `0`,
-`make stdin`), as do `ed`, `dc` and `sqlite3` with any script (`sqlite3 x.db 'select 1'`), `ipython`
+`make stdin`, `cargo test -p stdout`, and any relative path whose last-but-one component is `fd`, such
+as `python3 tools/fd/run.py`, `bash scripts/fd/build.sh` or `pytest tests/fd/test_io.py`, since the
+relative test does not resolve it against the working directory), a descriptor handed to a `python3
+-m` module that only reads it (`python3 -m json.tool /dev/stdin`; with no operand it reads stdin and
+passes), an `env -S` line holding a launch word even where what it runs is inert (`env -S'bash -c'
+'echo hi'`), as do `ed`, `dc` and `sqlite3` with any script (`sqlite3 x.db 'select 1'`), `ipython`
 with no script operand (`ipython --version`), and a runner program-text option that runs nothing
 (`pytest -o addopts=-q`, `make -E ''`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
@@ -802,7 +814,16 @@ handed as data; the guard does not read it. A program fed on stdin to an interpr
 peel does not read (`xargs`, `sudo`, `stdbuf`), is not put in scope by the stdin rule (the program-text
 and wrapper parts of the refuse-wide test refuse those listed here). A shell or python word reading
 stdin behind a wrapper word outside the launch, runner, privilege and sandbox wrappers listed above is
-not refused. A descriptor reached through an alias the lexical test does not read (a symlink to
+not refused (`setarch x86_64 bash`, `capsh --`, `newgrp`, `prlimit`, `numactl`, `rlwrap`,
+`dbus-run-session`, `conda run`, `pixi run`, `uvx`, and the like). A shell whose command word is not
+one of the launch shells listed above (a version-suffixed name such as `bash5.2` or `zsh5`, `toybox
+sh`, `elvish`, `nu`, `xonsh`) and an interpreter or command runner outside the program-text words (a
+version-suffixed `perl5.36.0`, `php8.2`, `lua5.4`, `tclsh8.6` or `ruby3.1`, `m4`, `gnuplot`, `psql`,
+`mysql`, `at`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip -TT`, `man
+-P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`) is not read either. A program
+decoded and written to a file outside the declared directories and run by a later segment of the
+same call (`echo ... | base64 -d > /tmp/f.sh && bash /tmp/f.sh`, or through a FIFO) is the
+copy-out-and-run residual: the run names only that file. A descriptor reached through an alias the lexical test does not read (a symlink to
 `/dev/stdin` made in this or an earlier call, or a relative operand other than the listed names after
 the working directory moved into `/dev` or `/proc`) is read as an ordinary script. A runner's recipe
 or configuration FILE from a working directory that is not an ancestor of a declared directory, a
@@ -897,8 +918,9 @@ names the store as the registry's `deliverable_dirs` declares it and this route 
 other two modes it adds one sentence saying containment was not observed, naming the directory and the
 property that failed, so the strict guard applies.
 
-`tools/nrd_differential.py --base <file>` judges a generated corpus (808 forms, 13 of them spellings
-that hide the helper route and 5 runners whose own program text joins it) with the fbdff942
+`tools/nrd_differential.py --base <file>` judges a generated corpus (855 forms, 13 of them spellings
+that hide the helper route, 5 runners whose own program text joins it, and 47 tightened rows that
+fbdff942 allows and that must be refused in every mode) with the fbdff942
 module (the file `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py`
 prints, checked by sha256) and with this hook forced to each mode, running none of them. It fails when a
 form changes verdict in `none` or `noexec-only`, or when `contained` allows a form fbdff942 refused that
@@ -941,8 +963,9 @@ Residuals the tripwire states (in addition to "Residuals" above):
    builds the call in a construct the guard does not read (base64 text decoded into a shell, program
    text joining the call, a command substitution) is refused by the unreadable-command, substitution,
    stdin-program and program-text tests, which tripwire mode keeps. A program in a file outside the
-   declared directories that builds the call (`python3 r.py`, written by an earlier call or another
-   tool) is not seen, as at fbdff942.
+   declared directories that builds the call (`python3 r.py`, written by an earlier call, another
+   tool, or an earlier segment of the same call that decodes text into the file) is not seen, as at
+   fbdff942.
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.

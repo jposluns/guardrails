@@ -29,10 +29,13 @@ corpus; the self-test pins them (nrd-contain/tripwire-relaxations-allow-containe
 rows are forms fbdff942 also allowed: the decoded call fed to a shell, source or python-family word
 reading its program from stdin or a descriptor path (bash /dev/stdin, . /dev/fd/0, python3
 /dev/stdin, BASH_ENV=/dev/stdin) or to a launch shell the stdin-program test did not list (mksh, yash,
-ash, posh, rbash, fish, csh, tcsh), and a runner's own program text from a working directory that is
-not an ancestor of a declared directory (make --eval, -E or -f -, npx -c, npm exec -c, ipython -c,
-python3 -m timeit or code, coverage run -m timeit, tox --override, cargo --config, pytest -o), and
-ed, dc or sqlite3 running it as a shell command line (their ! command or a .shell dot-command).
+ash, posh, rbash, fish, csh, tcsh, ksh93), or to a shell or python word inside an env -S or
+--split-string command line, or a descriptor handed to a python -m module (python3 -m cProfile, trace
+or doctest /dev/stdin), and a runner's own program text from a working directory that is not an
+ancestor of a declared directory (make --eval, -E or -f - and their abbreviated long spellings, npx
+-c, npm exec -c, ipython or ipython3 -c, jupyter-console, python3 -m timeit or code, coverage run -m
+timeit, tox --override or -x in a cluster, cargo --config, pytest or pytest-3 -o), and ed, dc or
+sqlite3 running it as a shell command line (their ! command or a .shell dot-command).
 
 The fbdff942 module is not read from git history (no git process is launched): pass the file that
 `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py` prints, and
@@ -217,6 +220,16 @@ EXTRA = (
     ("stdin/csh", "out", "echo " + _B64 + " | base64 -d | csh"),
     ("stdin/tcsh", "out", "echo " + _B64 + " | base64 -d | tcsh"),
     ("stdin/poetry-run-python", "out", "echo " + _B64 + " | base64 -d | poetry run python3"),
+    ("stdin/env-split-string-bash-s", "out", "echo " + _B64 + " | base64 -d | env -S 'bash -s'"),
+    ("stdin/env-split-string-python", "out", "echo " + _B64 + " | base64 -d | env --split-string='python3 -'"),
+    ("stdin/env-split-string-bash-c", "out", "env -S 'bash -c \"echo " + _B64 + " | base64 -d | bash\"'"),
+    ("stdin/ksh93", "out", "echo " + _B64 + " | base64 -d | ksh93"),
+    ("stdin/python-m-cprofile-dev-stdin", "out",
+     "echo aW1wb3J0IG9z | base64 -d | python3 -I -m cProfile /dev/stdin"),
+    ("stdin/python-m-trace-dev-fd-0", "out",
+     "echo aW1wb3J0IG9z | base64 -d | python3 -m trace --trace /dev/fd/0"),
+    ("stdin/python-m-doctest-dev-stdin", "out",
+     "echo aW1wb3J0IG9z | base64 -d | python3 -m doctest /dev/stdin"),
     # tightened past fbdff942: a runner's own program text (or a program it reads from stdin) from a
     # working directory that is not an ancestor of a declared directory
     ("runner-text/make-eval", "out", "make --eval='x: ; @echo " + _B64 + " | base64 -d | bash' x"),
@@ -238,6 +251,15 @@ EXTRA = (
     ("runner-text/cargo-config", "out", "cargo --config 'target.x86_64-unknown-linux-gnu.runner=\"bash "
      "/dev/null\"' run"),
     ("runner-text/pytest-o", "out", "pytest -o addopts=-q"),
+    ("runner-text/make-eval-abbrev", "out", "make --ev='x: ; @echo " + _B64 + " | base64 -d | bash' x"),
+    ("runner-text/make-file-abbrev-dash", "out",
+     "printf 'x:\\n\\techo " + _B64 + " | base64 -d | bash\\n' | make --fil - x"),
+    ("runner-text/tox-cluster-x", "out", "tox -qx 'testenv.commands=bash -c \"echo " + _B64
+     + " | base64 -d | bash\"'"),
+    ("runner-text/ipython3-c", "out",
+     "ipython3 -c \"import base64, os; os.system(base64.b64decode('" + _B64 + "').decode())\""),
+    ("runner-text/pytest-3-o", "out", "pytest-3 -o addopts=-q"),
+    ("runner-text/jupyter-console", "out", "echo aW1wb3J0IG9z | base64 -d | jupyter-console"),
     # tightened past fbdff942: line editors and calculators whose ! command (or sqlite3 dot-command)
     # runs the decoded call as a shell command line
     ("program-text/ed", "out", "echo '!echo " + _B64 + " | base64 -d | bash' | ed -s"),

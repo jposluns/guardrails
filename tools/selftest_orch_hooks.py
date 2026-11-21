@@ -13973,7 +13973,9 @@ _NRDC_REVIEW_FORMS = (
     ("r3-find/rebase-x", "tmp", "git rebase -q -x 'python3 nrd-stage/x.py' HEAD~1", "allow"),
     ("r3-find/tar-checkpoint", "tmp",
      "tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec='python3 nrd-stage/x.py' a.txt", "allow"),
-    ("r3-find/pytest-3", "tmp", "pytest-3 -q -p no:cacheprovider", "allow"),
+    # pytest-3 is the Debian name of pytest: allowed at fbdff942, refused since it joined the runner
+    # words (a collector started from an ancestor of a declared directory, as pytest is)
+    ("r3-find/pytest-3", "tmp", "pytest-3 -q -p no:cacheprovider", "deny"),
     # ed and dc take program text (a ! command runs a shell command line): allowed at fbdff942, refused
     # since they joined the program-text words (nrd/program-text-ed-dc-sqlite3-denies)
     ("r3-find/ed", "tmp", "printf '!sh nrd-stage/x.sh\\nq\\n' | ed -s", "deny"),
@@ -18423,6 +18425,20 @@ def _main_isolated(report_path=None):
                           "echo 'bash {}/x.sh' | doas bash".format(_nrd_sp))
         check("nrd/stdin-runner-wrapper-denies",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_wrap_rows], ["deny"] * 3)
+        # a shell or python word inside an env -S command line (env re-splits it into the command it
+        # runs, so neither the stdin-program test nor the -c recursion reads it), and a descriptor
+        # handed to a python -m module that runs the file it is handed: real bash runs the declared
+        # file in each row, and each was allowed in every mode before
+        _nrd_env_rows = ("echo 'bash {}/x.sh' | env -S'bash -s'".format(_nrd_sp),
+                         "env -S'bash -c' 'bash {}/x.sh'".format(_nrd_sp),
+                         "echo 'exec(open(\"{}/x.py\").read())' | env --split-string='python3 -'".format(_nrd_sp))
+        check("nrd/env-split-launch-denies",
+              [nrd_got(c, cwd=outd, project=_nrd_proj) for c in _nrd_env_rows], [DENY_RAN] * 3)
+        _nrd_m_dev_rows = (
+            "echo 'exec(open(\"{}/x.py\").read())' | python3 -I -m cProfile /dev/stdin".format(_nrd_sp),
+            "echo 'exec(open(\"{}/x.py\").read())' | python3 -I -m trace --trace /dev/fd/0".format(_nrd_sp))
+        check("nrd/python-m-descriptor-denies",
+              [nrd_got(c, cwd=outd, project=_nrd_proj) for c in _nrd_m_dev_rows], [DENY_RAN] * 2)
         # --- a runner's own program text, from a working directory that is NOT an ancestor of a
         # declared directory (the path test does not reach it): make --eval, -E and -f -, python -m
         # timeit and code run the declared file under real bash; the rest assert the verdict only
@@ -18733,7 +18749,10 @@ def _main_isolated(report_path=None):
         # directory, and a -S call every word of which a plain reading (quote and backslash stripped)
         # shows outside the declared directories, so the unreadable-S denial does not fire
         check("nrd/env-split-inert-allows", nrd_got("env -S'echo hi'"), ALLOW_INERT)
-        check("nrd/env-split-rest-inert-allows", nrd_got("env -S'bash -c' 'echo hi'"), ALLOW_INERT)
+        # (a -S line holding a launch word is refused wherever a directory is declared, even
+        # env -S'bash -c' 'echo hi': env re-splits it into a shell -c body no test reads; see
+        # nrd/env-split-launch-denies)
+        check("nrd/env-split-rest-inert-allows", nrd_got("env -S'echo -n' 'hi'"), ALLOW_INERT)
         check("nrd/env-argv0-inert-allows", nrd_got("env -a foo echo hi"), ALLOW_INERT)
         # the disclosed command -v/-V over-deny, pinned: the wrapper peel reaches the -c body and
         # classifies it, though command -v/-V then only prints the operand's name and runs nothing
@@ -19352,9 +19371,11 @@ def _main_isolated(report_path=None):
                   "allow")
         # removing the unreadable-env scope forcing (so a value-bearing -S call is no longer put in
         # scope) reopens a -S env call whose body hides the declared directory behind a quote splice
+        # (the env -S launch-word test refuses the same form on its own, so the flip removes both)
         check("nrd/flip-c-env-split-string-allows",
-              _flip_verdict("_nrd_env_opaque", lambda seg, *a: False,
-                            "env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp)), "allow")
+              _flip_verdict_pair((("_nrd_env_opaque", lambda seg, *a: False),
+                                  ("_nrd_env_split_launch", lambda args, oq: False)),
+                                 "env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp)), "allow")
 
         def _nrd_prev_c_peel(argv, oq):
             # the earlier enumerated peel: env options it does not know are skipped one token at a
@@ -20067,15 +20088,16 @@ def _main_isolated(report_path=None):
             lambda: [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_runner])
         check("nrd-contain/flip-tripwire-skips-runner-path-red", _nrdc_runner_mut, ["allow"] * 7)
         # the tightened rows of tools/nrd_differential.py (allowed at fbdff942): the decoded helper call
-        # fed to a program read from stdin or a descriptor, to a launch shell the stdin-program test did
-        # not list, carried in a runner's own program text from a non-ancestor working directory, or run
-        # by ed, dc or sqlite3, are refused in every mode
+        # fed to a program read from stdin or a descriptor (a descriptor handed to a python -m module
+        # too), to a launch shell the stdin-program test did not list, to a shell or python word inside
+        # an env -S command line, carried in a runner's own program text from a non-ancestor working
+        # directory, or run by ed, dc or sqlite3, are refused in every mode
         _nrdc_tight = [(t, outd if k == "out" else str(tmp)) for cid, k, t in _nrdc_diff_extra
                        if cid.startswith(_nrdc_diff.TIGHTENED)]
         check("nrd-contain/tightened-rows-deny-every-mode",
               [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
                 _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_tight],
-              [("deny", "deny", "deny")] * 34)
+              [("deny", "deny", "deny")] * 47)
         # the hidden-spelling class: each builds `<helper> cat 994/x.py | python3` at run time, so neither
         # the custodian mark nor a privilege word is in the text (the forms of tools/nrd_differential.py
         # hidden/, refused at fbdff942). Tripwire mode keeps the substitution, stdin-program,
@@ -20258,9 +20280,10 @@ def _main_isolated(report_path=None):
         check("nrd-contain/flip-differential-refuse-wide-skipped-red",
               any(f.startswith("hidden/") and "allowed in 'contained'" in f for f in _nrdc_diff_skip), True)
         # the comparator holds the tightened rows: with the descriptor, launch-shell, program-text word,
-        # wrapper and runner-text readings back to their pre-fix behaviour, every tightened row is a
-        # finding
+        # wrapper, env -S and runner-text readings back to their pre-fix behaviour, every tightened row
+        # is a finding
         _nrdc_pre_fix = (("_nrd_stdin_device", lambda path, bare_digits=False: False),
+                         ("_nrd_env_split_launch", lambda args, oq: False),
                          ("_NRD_LAUNCH_SHELLS", aiqt_hooks._NRD_SHELL_WORDS),
                          ("_NRD_PROGRAM_TEXT_WORDS", aiqt_hooks._NRD_PROGRAM_TEXT_WORDS - {"ed", "dc", "sqlite3"}),
                          ("_NRD_STDIN_WRAPPERS", aiqt_hooks._NRD_LAUNCH_WORDS),

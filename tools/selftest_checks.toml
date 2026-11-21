@@ -1431,6 +1431,8 @@ expected-check-ids = [
   "nrd/stdin-launch-shells-deny",
   "nrd/shell-text-option-denies",
   "nrd/stdin-runner-wrapper-denies",
+  "nrd/env-split-launch-denies",
+  "nrd/python-m-descriptor-denies",
   "nrd/runner-text-ran-denies",
   "nrd/runner-text-denies",
   "nrd/program-text-ed-dc-sqlite3-denies",

@@ -31326,7 +31326,8 @@ def _nrd_stdin_program(seg):
 # `echo python3`, is judged as a launch too), and so does a command word that holds a slash (a path
 # run directly) or that the lexer reads as opaque.
 _NRD_LAUNCH_SHELLS = frozenset(_NRD_SHELL_WORDS | {"ash", "mksh", "rbash", "yash", "posh", "busybox",
-                                                   "fish", "csh", "tcsh"})
+                                                   "fish", "csh", "tcsh", "ksh93", "oksh", "loksh",
+                                                   "lksh", "pdksh"})
 _NRD_LAUNCH_WORDS = frozenset(("eval", "exec", "perl", "ruby", "node", "nodejs", "php", "lua", "tclsh",
                                "Rscript", "awk", "gawk", "mawk", "nawk", "make", "gmake", "xargs", "find",
                                "parallel", "nohup", "setsid", "stdbuf", "sudo", "su", "watch", "flock",
@@ -31701,14 +31702,18 @@ def _nrd_assigned_value_in(seg, cwd, dirs):
 #   -exec, sudo, a shell the guard does not list), a shell's --command or --init-command option and
 #   fish's -C, a python or shell word reading its program from stdin behind a launch, runner, privilege
 #   or sandbox wrapper (_NRD_STDIN_WRAPPERS), a shell, source or python program operand or a startup
-#   file (BASH_ENV=, ENV=, --rcfile, --init-file) naming a descriptor (_nrd_stdin_device), and sed with
+#   file (BASH_ENV=, ENV=, --rcfile, --init-file) naming a descriptor (_nrd_stdin_device), a descriptor
+#   handed to any python -m module (cProfile, profile, trace, doctest and pydoc run what they are
+#   handed), an env -S or --split-string command line holding a shell, source, python, runner or
+#   program-text word (_nrd_env_split_launch: env re-splits it into the command it runs), and sed with
 #   any script outside line-number printing (sed's e command and s///e flag run shell commands).
 # - a python -m run, a test collector or a build or task runner (_NRD_RUNNER_WORDS) whose working
 #   directory or any operand is at or above a declared directory (or unknown): collection and discovery
 #   put the start directory on sys.path themselves, so -I does not prevent the import.
 # - from any working directory, a runner word carrying its own program text or a program read from
-#   stdin or a descriptor (_nrd_runner_text: make --eval, -E or -f -, npx -c, npm exec -c, ipython -c,
-#   tox --override, cargo --config, pytest -o, coverage run -m timeit), and a python -m run of a module
+#   stdin or a descriptor (_nrd_runner_text: make --eval, -E or -f - and any unambiguous long-option
+#   prefix of them, npx -c, npm exec -c, ipython or ipython3 -c, jupyter-console, tox --override or -x
+#   in a cluster, cargo --config, pytest or pytest-3 -o, coverage run -m timeit), and a python -m run of a module
 #   that takes program text or reads it from stdin (_nrd_module_text: timeit, code, pdb, asyncio).
 # - git configuration that can run program text: git -c (except a closed set of keys whose values are
 #   never run), --config-env, --exec-path=, a git config call that sets a key outside that set or opens
@@ -31726,7 +31731,8 @@ _NRD_PROGRAM_TEXT_WORDS = frozenset((
 _NRD_RUNNER_WORDS = frozenset((
     "pytest", "py.test", "nosetests", "nose2", "trial", "tox", "nox", "coverage", "behave", "ward", "make",
     "gmake", "npm", "npx", "yarn", "pnpm", "cargo", "go", "bazel", "gradle", "mvn", "ctest", "just", "rake",
-    "hatch", "poetry", "pipenv", "uv", "pdm", "ipython", "jupyter"))
+    "hatch", "poetry", "pipenv", "uv", "pdm", "ipython", "jupyter", "ipython3", "pytest-3", "py.test-3",
+    "pytest3", "jupyter-console", "jupyter-qtconsole"))
 _NRD_SED_WORDS = frozenset(("sed", "gsed"))
 # sed scripts the guard clears: line addresses, ranges, negation and the p, d, n and q commands only.
 _NRD_SED_INERT_SCRIPT_RE = re.compile(r"[0-9,$;!pdnq \t\n]*\Z")
@@ -31981,12 +31987,13 @@ def _nrd_runner_text(word, args, oq):
         return False
     if word in ("make", "gmake"):
         for i, tok in enumerate(args):
-            if tok == "--eval" or tok.startswith("--eval="):
+            # make takes any unambiguous prefix of a long option (--ev= is --eval=, --fil - is --file -)
+            name, eq, value = tok.partition("=")
+            if len(name) >= 4 and "--eval".startswith(name):
                 return True
-            if tok in ("--file", "--makefile") and i + 1 < n and args[i + 1] == "-":
-                return True
-            if tok.startswith(("--file=", "--makefile=")) and tok.partition("=")[2] == "-":
-                return True
+            if (len(name) >= 3 and "--file".startswith(name)) or (len(name) >= 5 and "--makefile".startswith(name)):
+                if (value if eq else (args[i + 1] if i + 1 < n else "")) == "-":
+                    return True
             if len(tok) > 1 and tok[0] == "-" and tok[1] != "-":
                 letters = tok[1:]
                 if "E" in letters:
@@ -32001,20 +32008,24 @@ def _nrd_runner_text(word, args, oq):
                or tok.startswith(("--call=", "--shell-mode=", "--shell", "--script-shell")) for tok in args):
             return True
         return (word == "npm" and operands[:1] == ["explore"]) or (word == "yarn" and operands[:1] == ["exec"])
-    if word == "ipython":
+    if word in ("ipython", "ipython3"):
         if any(tok == "-c" or tok.startswith(("-c", "--c=")) or (tok.startswith("--") and "." in tok.partition("=")[0])
                for tok in args):
             return True
         return not any(not tok.startswith("-") for tok in args)
+    if word in ("jupyter-console", "jupyter-qtconsole"):
+        return True
     if word == "jupyter":
         operands = [t for t in args if not t.startswith("-")]
         return operands[:1] in (["console"], ["qtconsole"]) or any(
             tok.startswith("--") and "." in tok.partition("=")[0] for tok in args)
     if word == "tox":
-        return any(tok == "--override" or tok.startswith(("--override=", "-x")) for tok in args)
+        # -x in a short-option cluster too (tox -qx testenv.commands=...)
+        return any(tok == "--override" or tok.startswith("--override=")
+                   or (len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "x" in tok[1:]) for tok in args)
     if word == "cargo":
         return any(tok == "--config" or tok.startswith("--config=") for tok in args)
-    if word in ("pytest", "py.test"):
+    if word in ("pytest", "py.test", "pytest-3", "py.test-3", "pytest3"):
         return any(tok == "--override-ini" or tok.startswith(("--override-ini=", "-o")) for tok in args)
     return False
 
@@ -32091,6 +32102,51 @@ def _nrd_git_runs_config(args, oq):
     return not _nrd_git_config_reads(args[i + 1:], oq[i + 1:])
 
 
+def _nrd_env_split_launch(args, oq):
+    """True when the words after an env word carry a -S or --split-string command line (separate,
+    attached, = or cluster spelling) that holds a launch shell, source or the dot builtin, a
+    python-family word, a runner or a program-text word, or an opaque value: env re-splits that text
+    into the command it runs (env -S 'bash -s' reads its program from stdin, env -S 'bash -c ...' runs
+    a body the -c recursion never sees), and neither the stdin-program test nor the words above read
+    inside it. The option words end at the first word that is neither an option nor an assignment."""
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if tok == "--" or not (tok.startswith("-") or "=" in tok):
+            return False
+        text = None
+        if tok in ("-S", "--split-string"):
+            if i + 1 >= n:
+                return False
+            if oq[i + 1]:
+                return True
+            text = args[i + 1]
+        elif tok.startswith("--split-string="):
+            text = tok.partition("=")[2]
+        elif tok.startswith("-") and not tok.startswith("--") and "S" in tok[1:]:
+            text = tok[tok.index("S") + 1:]
+            if not text:
+                if i + 1 >= n:
+                    return False
+                if oq[i + 1]:
+                    return True
+                text = args[i + 1]
+        elif tok in ("-u", "--unset", "-C", "--chdir", "-a", "--argv0"):
+            i += 2
+            continue
+        if text is not None:
+            if oq[i]:
+                return True
+            for w in text.split():
+                name = w.strip("'\"").rsplit("/", 1)[-1]
+                if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name) \
+                        or name in _NRD_RUNNER_WORDS or name in _NRD_PROGRAM_TEXT_WORDS:
+                    return True
+        i += 1
+    return False
+
+
 def _nrd_shell_has_c(args):
     """True when any single-dash option cluster among a shell word's following words holds c (the
     widest reading: a -c anywhere after the word counts, not only before the first operand)."""
@@ -32102,7 +32158,8 @@ def _nrd_wide_unproven(seg, cwd, dirs):
     above): a program-text word, a python -c, a shell -c body the peel does not reach, a shell
     program-text option, a python or shell word reading its program from stdin behind a launch, runner,
     privilege or sandbox wrapper, a shell, source or python program operand or startup file naming a
-    descriptor, a sed script outside line-number printing, a python -m run, collector or runner that may
+    descriptor, a descriptor handed to a python -m module, an env -S command line holding a launch
+    word, a sed script outside line-number printing, a python -m run, collector or runner that may
     start at or above a declared directory, a runner's own program text from any directory, git
     configuration that can run program text, a program-running environment assignment, or a word or
     redirect target naming configuration that executes. cwd is the effective working directory the
@@ -32145,6 +32202,10 @@ def _nrd_wide_unproven(seg, cwd, dirs):
                 after = _nrd_py_module_end(rest)
                 if _nrd_module_text(target, rest[after:], rest_oq[after:]):
                     return True
+                if any(_nrd_stdin_device(t) or _nrd_stdin_device(t.partition("=")[2]) for t in rest[after:]):
+                    # a descriptor handed to any module (python3 -m cProfile /dev/stdin, -m trace,
+                    # -m doctest, -m pydoc run the program they are handed), as for a runner
+                    return True
             if mode == "script" and isinstance(target, str) \
                     and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS and target in rest:
                 at = rest.index(target) + 1
@@ -32173,6 +32234,9 @@ def _nrd_wide_unproven(seg, cwd, dirs):
                 return True
         elif word == "git":
             if _nrd_git_runs_config(rest, rest_oq):
+                return True
+        elif word == "env":
+            if _nrd_env_split_launch(rest, rest_oq):
                 return True
     if any(not oq[k] and (_NRD_PY_WORD_RE.match(w) or w in _NRD_LAUNCH_SHELLS or w in (".", "source"))
            for k, w in enumerate(t.rsplit("/", 1)[-1] for t in argv)):
