@@ -17,10 +17,12 @@ any of them, and reports two properties:
 
 H1 is a textual test written for this corpus, independent of the hook's own helper rules. The corpus
 includes spellings that hide the helper route from the text (base64 or hex text decoded into a shell,
-program text joining the call at run time, git alias program text): tripwire mode keeps the
-substitution, stdin-program and program-text tests, so each is refused as at fbdff942. The relaxations
-tripwire mode keeps (the lost-cwd and unknown-cwd rules and the collector/runner path test) have no
-form in this corpus; the self-test pins them (nrd-contain/tripwire-relaxations-allow-contained).
+program text joining the call at run time, git alias program text) and runners whose own program
+text joins it (make --eval, npx -c, ipython -c, python3 -I -m timeit, from an ancestor of a declared
+directory or after cd -): tripwire mode keeps the substitution, stdin-program, program-text and
+collector/runner path tests, so each is refused as at fbdff942. The relaxations tripwire mode keeps
+(the lost-cwd relative-operand rule and the unknown-cwd part of the launch test) have no form in this
+corpus; the self-test pins them (nrd-contain/tripwire-relaxations-allow-contained).
 
 The fbdff942 module is not read from git history (no git process is launched): pass the file that
 `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py` prints, and
@@ -169,6 +171,18 @@ EXTRA = (
      "awk 'BEGIN { system(\"s\" \"udo -u orch-\" \"deliv /usr/local/bin/orch-\" \"deliverable "
      "cat 994/x.py | python3\") }'"),
     ("hidden/git-alias", "tmp", "git -c alias.x='!echo " + _B64 + " | base64 -d | bash' x"),
+    # a collector or runner from an ancestor of a declared directory (or after the walk loses the
+    # working directory) whose own program text builds the same call at run time: the runner path test,
+    # which tripwire mode keeps, refuses each as fbdff942 did
+    ("runner/make-eval", "tmp", "make --eval='x: ; @echo " + _B64 + " | base64 -d | bash' x"),
+    ("runner/npx-c", "tmp", "npx -c 'echo " + _B64 + " | base64 -d | bash'"),
+    ("runner/ipython-c", "tmp",
+     "ipython -c \"import base64, os; os.system(base64.b64decode('" + _B64 + "').decode())\""),
+    ("runner/python-isolated-m-timeit", "tmp",
+     "python3 -I -m timeit -n 1 -r 1 \"import base64, os; os.system(base64.b64decode('" + _B64
+     + "').decode())\""),
+    ("runner/cd-minus-make-eval", "out",
+     "cd - && make --eval='x: ; @echo " + _B64 + " | base64 -d | bash' x"),
 )
 CWDS = ("tmp", "out", "st")
 

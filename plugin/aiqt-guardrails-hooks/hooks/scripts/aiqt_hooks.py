@@ -29903,8 +29903,10 @@ def _nrd_dirs(value, root):
 # every test of a construct whose program it does not read (a command the lexer cannot read, a command
 # substitution, a program read from stdin, program text, an opaque env call), since such a construct can
 # build the custodian route at run time, and drops only the session-wide tests that exist solely because
-# a declared file could be opened (the lost-cwd and unknown-cwd rules and the collector/runner path
-# test). The three modes, probed once per hook call by _nrd_containment.
+# a declared file could be opened (the lost-cwd and unknown-cwd rules). The collector/runner path test
+# stays: a runner takes program text on its command line or stdin (make --eval, npx -c, ipython -c,
+# python -m timeit), which can build the custodian route at run time. The three modes, probed once per
+# hook call by _nrd_containment.
 _NRD_MODE_NONE = "none"
 _NRD_MODE_NOEXEC = "noexec-only"
 _NRD_MODE_CONTAINED = "contained"
@@ -31912,18 +31914,18 @@ def _nrd_shell_has_c(args):
     return any(len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "c" in tok[1:] for tok in args)
 
 
-def _nrd_wide_unproven(seg, cwd, dirs, contained=False):
+def _nrd_wide_unproven(seg, cwd, dirs):
     """True when one lexed segment holds a construct this guard does not fully read (the block comment
     above): a program-text word, a python -c, a shell -c body the peel does not reach, a python or
     shell word reading its program from stdin behind a launch wrapper, a sed script outside line-number
     printing, a python -m run, collector or runner that may start at or above a declared directory, git
     configuration that can run program text, a program-running environment assignment, or a word or
     redirect target naming configuration that executes. cwd is the effective working directory the
-    scope walk knows, or None. In contained mode (contained=True) only the path test of a python -m
-    run, collector or runner (_nrd_runner_reaches) is skipped: it exists solely because such a run
-    could open a file in a declared directory, which containment rules out. Every program-text,
-    stdin, git configuration, environment and executing-configuration test stays, since that program
-    can build the custodian route at run time."""
+    scope walk knows, or None. Every test here runs in every containment mode: the path test of a
+    python -m run, collector or runner (_nrd_runner_reaches) stays in tripwire mode too, since such a
+    run takes program text on its command line or stdin (make --eval, npx -c, ipython -c, python -m
+    timeit) that can build the custodian route at run time, as every program-text, stdin, git
+    configuration, environment and executing-configuration test here can."""
     argv = seg.argv
     oq = seg.argv_opaque
     run_cwd = _nrd_wrapper_cwd(argv, oq, cwd) if argv else cwd
@@ -31952,10 +31954,10 @@ def _nrd_wide_unproven(seg, cwd, dirs, contained=False):
                 return True
             if mode == "m" or (mode == "script" and isinstance(target, str)
                                and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS):
-                if not contained and _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+                if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                     return True
         elif word in _NRD_RUNNER_WORDS:
-            if not contained and _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+            if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                 return True
         elif word in _NRD_LAUNCH_SHELLS:
             if _nrd_shell_has_c(rest) and _nrd_shell_c_body(seg) is None:
@@ -32019,13 +32021,12 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
     _nrd_assigned_value_in, the nested -c recursion, the CDPATH widening, and _nrd_launch_unproven
     apart from its unknown-working-directory part), and so do the tests of a construct whose program
     this guard does not read (_nrd_unread_in_scope, _nrd_subst_unproven, _nrd_stdin_program,
-    _nrd_env_opaque, and every program-text, stdin, git configuration, environment and
-    executing-configuration test of _nrd_wide_unproven): such a program can build the custodian route
-    at run time (encoded text decoded into a shell, program text joining the call), where no text test
-    sees it. Only the session-wide tests that exist solely because a declared file could be opened are
-    skipped: the lost-cwd relative-operand rule, the unknown-cwd-counts-as-reaching part of
-    _nrd_launch_unproven, and the collector/runner path test of _nrd_wide_unproven
-    (_nrd_runner_reaches). Under containment the file cannot be opened, so those tests no longer guard
+    _nrd_env_opaque, and all of _nrd_wide_unproven, its collector/runner path test included): such a
+    program can build the custodian route at run time (encoded text decoded into a shell, program text
+    joining the call, a runner's program text such as make --eval or npx -c), where no text test sees
+    it. Only the session-wide tests that exist solely because a declared file could be opened are
+    skipped: the lost-cwd relative-operand rule and the unknown-cwd-counts-as-reaching part of
+    _nrd_launch_unproven. Under containment the file cannot be opened, so those tests no longer guard
     anything the host does not; the allowlist then also lists the custodian reader form. The custodian
     route is the one way this account reads a deliverable, so tripwire mode puts in scope every call
     that shows it (_nrd_custodian_reach: the custodian mark in the text or a word, or a privilege word),
@@ -32102,11 +32103,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
                 # an interpreter, source or command-running launch whose executed or imported files this
                 # guard cannot place outside the declared directories (the unread-launch-target class)
                 scope = True
-            if not scope and dirs and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs, **ckw):
+            if not scope and dirs and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs):
                 # a construct this guard does not fully read: program text, a collector or runner from an
                 # ancestor of a declared directory, git configuration that runs program text, or a word
-                # naming configuration that executes (refuse wide, allow narrow; tripwire mode skips only
-                # the collector/runner path test)
+                # naming configuration that executes (refuse wide, allow narrow; in every mode, since a
+                # runner's program text can build the custodian route at run time)
                 scope = True
             if cdpath and seg.argv:
                 w = 0

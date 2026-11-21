@@ -1727,6 +1727,8 @@ expected-check-ids = [
   "nrd-contain/refuse-wide-same-every-mode",
   "nrd-contain/tripwire-relaxations-allow-contained",
   "nrd-contain/flip-no-mode-gate-red",
+  "nrd-contain/runner-path-test-same-every-mode",
+  "nrd-contain/flip-tripwire-skips-runner-path-red",
   "nrd-contain/hidden-helper-spellings-deny-every-mode",
   "nrd-contain/flip-tripwire-skips-refuse-wide-red",
   "nrd-contain/helper-form-allows-contained-only",

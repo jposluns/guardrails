@@ -19865,8 +19865,11 @@ def _main_isolated(report_path=None):
         check("nrd-contain/review-forms-fbdff942-verdict-noexec-only", _nrdc_review("noexec-only"),
               _nrdc_review_pins)
         # the comparator is live: a guard forced into tripwire mode in 'none' (the mode gate inverted)
-        # turns this differential red (T4: applying tripwire mode in none turns T2 red)
+        # turns this differential red (T4: applying tripwire mode in none turns T2 red). The review
+        # forms hold no lost-working-directory form, the one relaxation left once the runner path test
+        # runs in every mode, so the two relaxation forms (refused in 'none') are judged beside them
         _nrdc_real_scan = aiqt_hooks._nrd_scope_scan
+        _nrdc_lost_cwd = (("cd - && cat notes.txt", outd), ("cd - && python3 x.py", outd))
 
         def _nrdc_always_contained(command, cwd, dirs, _depth=0, mode="none"):
             return _nrdc_real_scan(command, cwd, dirs, _depth, mode="contained")
@@ -19874,11 +19877,13 @@ def _main_isolated(report_path=None):
         setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_always_contained)
         try:
             _nrdc_review_mut = _nrdc_review("none")
+            _nrdc_lost_cwd_mut = [_nrdc_mode_verdict("none", c, cw) for c, cw in _nrdc_lost_cwd]
         finally:
             setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_real_scan)
         check("nrd-contain/flip-tripwire-in-none-red",
               len([1 for got, want in zip(_nrdc_review_mut, _nrdc_review_pins)
-                   if want[1] == "deny" and got[1] != "deny"]) > 0, True)
+                   if want[1] == "deny" and got[1] != "deny"])
+              + _nrdc_lost_cwd_mut.count("allow") > 0, True)
 
         # T3: tripwire mode. These still deny (each names a declared directory, or runs inside one)
         _nrdc_still_deny = ("python3 {}/x.py".format(hb), "bash {}/x.sh".format(st),
@@ -19900,25 +19905,42 @@ def _main_isolated(report_path=None):
                 _nrdc_mode_verdict("contained", c, outd)) for c in _nrdc_wide],
               [("deny", "deny", "deny")] * 5)
         # the relaxations tripwire mode keeps, each existing only because a declared file could be
-        # opened: a lost working directory (cd -) with a relative operand or an interpreter launch, and a
-        # collector or runner started at an ancestor of a declared directory. Refused in 'none' and
-        # 'noexec-only', allowed when contained
-        _nrdc_relaxed = (("cd - && cat notes.txt", outd), ("cd - && python3 x.py", outd),
-                         ("pytest -q", str(tmp)), ("make test", str(tmp)))
+        # opened: a lost working directory (cd -) with a relative operand or an interpreter launch.
+        # Refused in 'none' and 'noexec-only', allowed when contained
+        _nrdc_relaxed = (("cd - && cat notes.txt", outd), ("cd - && python3 x.py", outd))
         check("nrd-contain/tripwire-relaxations-allow-contained",
               [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
                 _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_relaxed],
-              [("deny", "deny", "allow")] * 4)
+              [("deny", "deny", "allow")] * 2)
         # T4: removing the mode gate (the scan ignores the mode) turns the allow rows red
         setattr(aiqt_hooks, "_nrd_scope_scan",
                 lambda command, cwd, dirs, _depth=0, mode="none": _nrdc_real_scan(command, cwd, dirs, _depth))
         try:
             check("nrd-contain/flip-no-mode-gate-red",
-                  [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_relaxed], ["deny"] * 4)
+                  [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_relaxed], ["deny"] * 2)
         finally:
             setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_real_scan)
         import nrd_differential as _nrdc_diff
         _nrdc_diff_extra = _nrdc_diff.EXTRA
+        # the collector/runner path test stays in tripwire mode: a collector or runner from an ancestor
+        # of a declared directory, or after cd -, runs program text of its own (make --eval, npx -c,
+        # ipython -c, python3 -I -m timeit) that can build the custodian route at run time (the runner/
+        # rows of tools/nrd_differential.py, refused at fbdff942), as can plain pytest or make there
+        _nrdc_runner = [(t, outd if k == "out" else str(tmp)) for cid, k, t in _nrdc_diff_extra
+                        if cid.startswith("runner/")] + [("pytest -q", str(tmp)), ("make test", str(tmp))]
+        check("nrd-contain/runner-path-test-same-every-mode",
+              [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
+                _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_runner],
+              [("deny", "deny", "deny")] * 7)
+        # flip: the tripwire as it was at c16aed7d (the runner path test skipped when contained) allows
+        # every one of them
+        _nrdc_real_runner_reaches = aiqt_hooks._nrd_runner_reaches
+        setattr(aiqt_hooks, "_nrd_runner_reaches", lambda *a, **kw: False)
+        try:
+            _nrdc_runner_mut = [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_runner]
+        finally:
+            setattr(aiqt_hooks, "_nrd_runner_reaches", _nrdc_real_runner_reaches)
+        check("nrd-contain/flip-tripwire-skips-runner-path-red", _nrdc_runner_mut, ["allow"] * 7)
         # the hidden-spelling class: each builds `<helper> cat 994/x.py | python3` at run time, so neither
         # the custodian mark nor a privilege word is in the text (the forms of tools/nrd_differential.py
         # hidden/, refused at fbdff942). Tripwire mode keeps the substitution, stdin-program,
