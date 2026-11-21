@@ -19686,21 +19686,28 @@ def _main_isolated(report_path=None):
                 self.f_flag = flag
 
         class _NrdcStat(object):
-            def __init__(self, uid):
+            def __init__(self, uid, ino=1):
                 self.st_uid = uid
+                self.st_dev = 1
+                self.st_ino = ino
 
         def _nrdc_probe(dirs, noexec, sealed, fail=None, drop_flag=False, ignore_flag=False,
-                        owned=frozenset(), searchable=frozenset()):
+                        owned=frozenset(), searchable=frozenset(), vanished=frozenset(),
+                        replaced=frozenset()):
             # _nrd_containment with os.statvfs, os.access and os.stat stubbed: noexec and sealed are the
             # directories reported noexec and unopenable; fail raises OSError for that directory;
             # drop_flag removes os.ST_NOEXEC; ignore_flag reports every directory noexec (the mutant
             # probe that ignores the mount flag); owned are owned by this account (an owner can chmod
-            # them back, so they are not sealed); searchable answer X_OK (only) even when in sealed
+            # them back, so they are not sealed); searchable answer X_OK (only) even when in sealed;
+            # vanished are removed by the time os.access runs (os.access answers False, every later
+            # os.stat raises FileNotFoundError); replaced are removed and recreated as another directory
+            # object by then (every later os.stat gives another st_ino)
             real_statvfs, real_access, real_stat = os.statvfs, os.access, os.stat
             had_flag = hasattr(os, "ST_NOEXEC")
             real_flag = getattr(os, "ST_NOEXEC", None)
             flag = real_flag if isinstance(real_flag, int) and real_flag > 0 else 8
             me = os.geteuid()
+            gone = set()
 
             def fake_statvfs(path):
                 if fail is not None and path == fail:
@@ -19708,12 +19715,18 @@ def _main_isolated(report_path=None):
                 return _NrdcVfs(flag if (ignore_flag or path in noexec) else 0)
 
             def fake_access(path, how):
+                if path in vanished or path in replaced:
+                    gone.add(path)
+                    if path in vanished:
+                        return False
                 if how == os.X_OK and path in searchable:
                     return True
                 return path not in sealed
 
             def fake_stat(path, *args, **kwargs):
-                return _NrdcStat(me if path in owned else me + 1)
+                if path in gone and path in vanished:
+                    raise FileNotFoundError(2, "stubbed vanished directory", path)
+                return _NrdcStat(me if path in owned else me + 1, 2 if path in gone else 1)
 
             os.statvfs, os.access, os.stat = fake_statvfs, fake_access, fake_stat
             if drop_flag:
@@ -19743,9 +19756,13 @@ def _main_isolated(report_path=None):
             ("search-only", dict(noexec=both, sealed=both, searchable={hb})),
             # unopenable but owned by this account (mode 0000, own uid): chmod restores access
             ("owned-by-account", dict(noexec=both, sealed=both, owned={hb})),
+            # removed after os.statvfs (os.access answers False for a path that is gone): not sealed
+            ("vanished-mid-probe", dict(noexec=both, sealed=both, vanished={hb})),
+            # removed and recreated as another directory object during the probe: not sealed
+            ("replaced-mid-probe", dict(noexec=both, sealed=both, replaced={hb})),
         )
         _nrdc_t1_want = ["contained", "noexec-only", "none", "none", "none", "none", "none",
-                         "noexec-only", "noexec-only"]
+                         "noexec-only", "noexec-only", "none", "none"]
 
         def _nrdc_t1(**extra):
             return [_nrdc_probe(_nrdc_dirs, **dict(kw, **extra))[0] for _k, kw in _nrdc_t1_rows]
@@ -19767,6 +19784,21 @@ def _main_isolated(report_path=None):
               aiqt_hooks._nrd_containment(_nrdc_dirs)[0] in ("none", "noexec-only"), True)
         # T4: a probe that ignores the mount flag turns T1 red (sealed-only reads as contained)
         check("nrd-contain/flip-probe-ignores-noexec-red", _nrdc_t1(ignore_flag=True) != _nrdc_t1_want, True)
+
+        # F4 flip: the per-directory read as it was before the identity test (os.statvfs, os.access, one
+        # os.stat) reads the replaced directory as sealed, so the probe says contained
+        def _nrdc_probe_dir_one_stat(d, flag, euid):
+            noexec = bool(os.statvfs(d).f_flag & flag)
+            unopenable = not os.access(d, os.R_OK) and not os.access(d, os.X_OK)
+            return noexec, unopenable, os.stat(d).st_uid == euid
+
+        _nrdc_real_probe_dir = aiqt_hooks._nrd_probe_dir
+        setattr(aiqt_hooks, "_nrd_probe_dir", _nrdc_probe_dir_one_stat)
+        try:
+            _nrdc_replaced_mut = _nrdc_probe(_nrdc_dirs, both, both, replaced={hb})[0]
+        finally:
+            setattr(aiqt_hooks, "_nrd_probe_dir", _nrdc_real_probe_dir)
+        check("nrd-contain/flip-probe-no-identity-red", _nrdc_replaced_mut, "contained")
 
         # T2: no reduction outside containment. Every existing nrd/ row (each nrd() call above, its
         # verdict pinned by its own nrd/ check) has the same verdict with the probe forced to 'none' and
@@ -19894,8 +19926,112 @@ def _main_isolated(report_path=None):
                for m in ("none", "noexec-only", "contained")], ["deny"] * 21)
         # the shape test alone: exactly the two verbs with one relative name, nothing else
         check("nrd-contain/helper-shape-unit",
-              [aiqt_hooks._nrd_helper_form(c.split()) for c in _nrdc_helper_ok[:2] + _nrdc_helper_bad[:5]],
+              [aiqt_hooks._nrd_helper_form(c.split(), c) for c in _nrdc_helper_ok[:2] + _nrdc_helper_bad[:5]],
               [True, True, False, False, False, False, False])
+
+        # F7: the name is [A-Za-z0-9._-] components joined by '/', and the six words are spelled
+        # literally; a quoted glob, a newline, a space, a semicolon, a quoted or re-spelled path or verb
+        # denies in tripwire mode (judged in scope, from a working directory inside a declared directory)
+        _nrdc_helper_spelled = ("{} cat '*.py'".format(_nrdc_helper), "{} cat 'a\nb'".format(_nrdc_helper),
+                                "{} cat 'a b'".format(_nrdc_helper), "{} cat 'a;b'".format(_nrdc_helper),
+                                "sudo -u orch-deliv '/usr/local/bin/orch-deliverable' cat 994/x",
+                                "sudo -u orch-deliv /usr/local/bin/orch-deliverable 'cat' 994/x",
+                                "sudo -u orch-deliv /usr/local/bin//orch-deliverable cat 994/x",
+                                "{} cat 994/./x".format(_nrdc_helper))
+        check("nrd-contain/helper-name-grammar-deny-contained",
+              [_nrdc_mode_verdict("contained", c, st) for c in _nrdc_helper_spelled], ["deny"] * 8)
+        check("nrd-contain/helper-name-grammar-allows-plain",
+              [_nrdc_mode_verdict("contained", "{} cat {}".format(_nrdc_helper, n), st)
+               for n in ("994/x.handback", "a-b_c.d/e", "994/a/-x")], ["allow"] * 3)
+
+        # F7 flip: the shape test as it was (argv only, any non-empty name) allows the quoted forms
+        def _nrdc_old_helper_form(argv, raw=None):
+            if len(argv) != 6 or list(argv[:4]) != ["sudo", "-u", "orch-deliv",
+                                                    "/usr/local/bin/orch-deliverable"]:
+                return False
+            if argv[4] not in ("cat", "ls"):
+                return False
+            name = argv[5]
+            if not name or "\x00" in name or name[0] in "/-":
+                return False
+            return all(part not in ("", ".", "..") for part in name.split("/"))
+
+        _nrdc_real_helper_form = aiqt_hooks._nrd_helper_form
+        setattr(aiqt_hooks, "_nrd_helper_form", _nrdc_old_helper_form)
+        try:
+            _nrdc_spelled_mut = [_nrdc_mode_verdict("contained", c, st) for c in _nrdc_helper_spelled[:6]]
+        finally:
+            setattr(aiqt_hooks, "_nrd_helper_form", _nrdc_real_helper_form)
+        check("nrd-contain/flip-helper-name-grammar-red", _nrdc_spelled_mut, ["allow"] * 6)
+
+        # F2: in tripwire mode a call that shows the custodian route is in scope, and the helper's output
+        # may feed only git apply or a read form. Each of these was refused at fbdff942 and allowed by
+        # the tripwire before this rule (working directory outside every declared directory).
+        _nrdc_reader = Path(outd) / "nrdc-reader.py"
+        _nrdc_reader.write_text("import sys\nsys.stdout.write(sys.stdin.read())\n", encoding="utf-8")
+        _nrdc_h = "{} cat 994/x.py".format(_nrdc_helper)
+        _nrdc_sink_bad = ("{} | python3".format(_nrdc_h), "{} | python3 -".format(_nrdc_h),
+                          "{} | bash".format(_nrdc_h), "{} | sh -s".format(_nrdc_h),
+                          "{} |& bash".format(_nrdc_h), "source <({})".format(_nrdc_h),
+                          ". <({})".format(_nrdc_h), "echo \"$({})\"".format(_nrdc_h),
+                          "{} | cat | python3".format(_nrdc_h), "eval \"{}\"".format(_nrdc_h),
+                          "s\"\"udo -u o\"\"rch-deliv /usr/local/bin/o\"\"rch-deliverable cat x.py | python3",
+                          "{} | python3 -I {}".format(_nrdc_h, _nrdc_reader),
+                          "{} | cat | python3 -I {}".format(_nrdc_h, _nrdc_reader))
+        check("nrd-contain/helper-output-sink-deny-contained",
+              [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_bad], ["deny"] * 13)
+        _nrdc_sink_ok = ("{} | git -C {} apply --check".format(_nrdc_h, outd), "{} | wc -l".format(_nrdc_h),
+                         "{} | cat | grep -c x".format(_nrdc_h), "{} > {}/nrdc-copy.txt".format(_nrdc_h, outd),
+                         _nrdc_h)
+        check("nrd-contain/helper-output-sink-allows-contained",
+              [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_ok], ["allow"] * 5)
+        # F2 flips: without the custodian scope rule every out-of-scope row is allowed again; without
+        # the sink rule the reader-script rows (which pass the allowlist on their own) are allowed
+        _nrdc_real_reach = aiqt_hooks._nrd_custodian_reach
+        _nrdc_real_sink = aiqt_hooks._nrd_helper_sink_ok
+        setattr(aiqt_hooks, "_nrd_custodian_reach", lambda command, segments: False)
+        try:
+            _nrdc_reach_mut = [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_bad]
+        finally:
+            setattr(aiqt_hooks, "_nrd_custodian_reach", _nrdc_real_reach)
+        check("nrd-contain/flip-custodian-scope-red", _nrdc_reach_mut, ["allow"] * 13)
+        setattr(aiqt_hooks, "_nrd_helper_sink_ok", lambda seg: True)
+        try:
+            _nrdc_sink_mut = [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_bad[-2:]]
+        finally:
+            setattr(aiqt_hooks, "_nrd_helper_sink_ok", _nrdc_real_sink)
+        check("nrd-contain/flip-helper-sink-red", _nrdc_sink_mut, ["allow"] * 2)
+
+        # F6: the fbdff942 differential's comparator (tools/nrd_differential.py), run here with a
+        # stand-in base (this hook forced to 'none'), so it is pinned without git history: clean on the
+        # real hook, red when tripwire mode leaks into 'none', and red when the custodian route rules are
+        # removed (the tool itself judges against the fbdff942 module by sha256)
+        import nrd_differential as _nrdc_diff
+
+        def _nrdc_diff_run(head_scan, tag):
+            work = tmp / ("nrdc-diff-" + tag)
+            work.mkdir()
+            return _nrdc_diff.differential(
+                lambda c, cw, d: _nrdc_real_scan(c, cw, d, mode="none"), head_scan, aiqt_hooks, str(work))
+
+        _nrdc_diff_rows, _nrdc_diff_findings = _nrdc_diff_run(
+            lambda c, cw, d, m: aiqt_hooks._nrd_scope_scan(c, cw, d, mode=m), "real")
+        check("nrd-contain/differential-stand-in-clean",
+              (len(_nrdc_diff_rows) > 700, _nrdc_diff_findings), (True, []))
+        _nrdc_diff_leak = _nrdc_diff_run(
+            lambda c, cw, d, m: aiqt_hooks._nrd_scope_scan(c, cw, d, mode="contained"), "leak")[1]
+        check("nrd-contain/flip-differential-tripwire-in-none-red",
+              any("in 'none'" in f for f in _nrdc_diff_leak), True)
+        setattr(aiqt_hooks, "_nrd_custodian_reach", lambda command, segments: False)
+        setattr(aiqt_hooks, "_nrd_helper_sink_ok", lambda seg: True)
+        try:
+            _nrdc_diff_route = _nrdc_diff_run(
+                lambda c, cw, d, m: aiqt_hooks._nrd_scope_scan(c, cw, d, mode=m), "route")[1]
+        finally:
+            setattr(aiqt_hooks, "_nrd_custodian_reach", _nrdc_real_reach)
+            setattr(aiqt_hooks, "_nrd_helper_sink_ok", _nrdc_real_sink)
+        check("nrd-contain/flip-differential-helper-route-red",
+              any("allowed in 'contained'" in f for f in _nrdc_diff_route), True)
 
         def _nrdc_reason(mode, cmd, cwd):
             res = _nrdc_forced(mode, lambda: nrd(cmd, cwd=cwd, project=str(nd.root)))
@@ -19907,11 +20043,26 @@ def _main_isolated(report_path=None):
         _nrdc_r_cont = _nrdc_reason("contained", "python3 {}/x.py".format(hb), outd)
         _nrdc_r_none = _nrdc_reason("none", "python3 {}/x.py".format(hb), outd)
         check("nrd-contain/deny-text-modes",
-              ("/usr/local/bin/orch-deliverable" in _nrdc_r_cont, "/var/lib/orch-deliverables" in _nrdc_r_cont,
+              ("/usr/local/bin/orch-deliverable" in _nrdc_r_cont,
+               "the declared directories: " in _nrdc_r_cont and st in _nrdc_r_cont and hb in _nrdc_r_cont,
                "Containment was not observed" in _nrdc_r_cont,
                "Containment was not observed (forced by the self-test), so the strict guard applies."
                in _nrdc_r_none, "/usr/local/bin/orch-deliverable" in _nrdc_r_none),
               (True, True, False, True, False))
+        # F8: the store the deny text names is the registry's declared directories, not a literal path
+        check("nrd-contain/deny-text-store-from-registry",
+              ("/var/lib/orch-deliverables" in _nrdc_r_cont,
+               aiqt_hooks._nrd_store_names(("/a/one", "/a/two", "/a/one")),
+               aiqt_hooks._nrd_store_names(())),
+              (False, "/a/one, /a/two", "none declared"))
+        _nrdc_real_store_names = aiqt_hooks._nrd_store_names
+        setattr(aiqt_hooks, "_nrd_store_names", lambda dirs: "/var/lib/orch-deliverables/<UID>")
+        try:
+            _nrdc_r_cont_mut = _nrdc_reason("contained", "python3 {}/x.py".format(hb), outd)
+        finally:
+            setattr(aiqt_hooks, "_nrd_store_names", _nrdc_real_store_names)
+        check("nrd-contain/flip-deny-text-literal-store-red",
+              ("/var/lib/orch-deliverables" in _nrdc_r_cont_mut, st in _nrdc_r_cont_mut), (True, False))
         # the real probe's detail reaches the reason (the fixture is not contained)
         _nrdc_r_real = (nrd("python3 {}/x.py".format(hb), cwd=outd, project=str(nd.root))[1] or {}).get(
             "hookSpecificOutput", {}).get("permissionDecisionReason", "")

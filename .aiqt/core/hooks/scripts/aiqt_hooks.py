@@ -29905,22 +29905,49 @@ def _nrd_dirs(value, root):
 _NRD_MODE_NONE = "none"
 _NRD_MODE_NOEXEC = "noexec-only"
 _NRD_MODE_CONTAINED = "contained"
-# The custodian route the contained mode allowlists, and the store it names in its deny text. The
-# reader form is exactly `sudo -u orch-deliv /usr/local/bin/orch-deliverable cat|ls <one relative name>`.
+# The custodian route the contained mode allowlists. The reader form is exactly
+# `sudo -u orch-deliv /usr/local/bin/orch-deliverable cat|ls <one relative name>`, spelled literally.
+# The deny text names the store as the registry declares it (the deliverable_dirs entries), never a
+# literal path.
 _NRD_CUSTODIAN = "orch-deliv"
 _NRD_HELPER = "/usr/local/bin/orch-deliverable"
 _NRD_HELPER_VERBS = frozenset(("cat", "ls"))
-_NRD_STORE = "/var/lib/orch-deliverables"
+# a helper name: one or more components of [A-Za-z0-9._-] joined by '/', so no quote, glob, space,
+# newline or other shell-special character can appear in it (the '.', '..' and leading '-' tests follow)
+_NRD_HELPER_NAME_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\Z")
+# In tripwire mode a call whose text or words name the custodian (orch-deliv, which the helper's own
+# name holds) or a privilege word is put in scope (_nrd_custodian_reach), so the helper is only ever
+# judged under the closed allowlist.
+_NRD_CUSTODIAN_MARK = "orch-deliv"
+_NRD_PRIV_WORDS = frozenset(("sudo", "sudoedit", "su", "doas", "pkexec", "runuser", "setpriv"))
+_NRD_PRIV_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:sudo|sudoedit|su|doas|pkexec|runuser|setpriv)"
+                          r"(?![A-Za-z0-9_.-])")
+
+
+def _nrd_probe_dir(d, flag, euid):
+    """(noexec, unopenable, owned) for one declared directory, read without opening it: os.stat, then
+    os.statvfs and os.access, then os.stat again. Raises OSError when any read fails or when the two
+    os.stat reads are not the same directory object (st_dev and st_ino): a directory removed, or removed
+    and replaced, during the probe is not read as unopenable (os.access answers False for a path that is
+    gone). owned is True when either os.stat read gives this account's effective uid."""
+    before = os.stat(d)
+    noexec = bool(os.statvfs(d).f_flag & flag)
+    unopenable = not os.access(d, os.R_OK) and not os.access(d, os.X_OK)
+    after = os.stat(d)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise OSError("{} changed during the containment probe".format(d))
+    return noexec, unopenable, euid in (before.st_uid, after.st_uid)
 
 
 def _nrd_containment(dirs):
     """(mode, detail) for the declared directories, read from the filesystem once per hook call after
-    the directories are known; it reads no file content. For each directory: noexec when
-    os.statvfs(d).f_flag carries os.ST_NOEXEC, sealed when os.access(d, os.R_OK) and os.access(d,
+    the directories are known; it reads no file content. For each directory (_nrd_probe_dir): noexec
+    when os.statvfs(d).f_flag carries os.ST_NOEXEC, sealed when os.access(d, os.R_OK) and os.access(d,
     os.X_OK) are both False for this account AND os.stat(d).st_uid is not this account's effective
     uid (an owner can chmod its own directory back to openable, even in an earlier segment of the very
-    call the tripwire would then admit; the os.stat also fails, so the probe gives 'none', for a
-    directory that vanished after os.statvfs, which os.access alone would read as unopenable).
+    call the tripwire would then admit). os.stat is read before and after the other reads: a directory
+    that vanished (os.stat fails) or was replaced (another st_dev or st_ino) during the probe is a probe
+    failure, so it gives 'none', never the 'unopenable' that os.access alone would report.
     'contained' only when EVERY directory (each declared spelling and its resolved form, so the probe
     covers what the matching compares) is both noexec and sealed; 'noexec-only' when every one is
     noexec and at least one is openable or owned by this account; 'none' otherwise, and 'none' on an
@@ -29938,9 +29965,7 @@ def _nrd_containment(dirs):
     try:
         euid = os.geteuid()
         for d in dirs:
-            noexec = bool(os.statvfs(d).f_flag & flag)
-            unopenable = not os.access(d, os.R_OK) and not os.access(d, os.X_OK)
-            owned = os.stat(d).st_uid == euid
+            noexec, unopenable, owned = _nrd_probe_dir(d, flag, euid)
             if not noexec and first_exec is None:
                 first_exec = d
             if not unopenable and first_open is None:
@@ -29960,20 +29985,73 @@ def _nrd_containment(dirs):
     return (_NRD_MODE_CONTAINED, None)
 
 
-def _nrd_helper_form(argv):
+def _nrd_helper_form(argv, raw):
     """True for exactly the custodian reader form the contained mode allowlists:
     `sudo -u orch-deliv /usr/local/bin/orch-deliverable cat|ls <name>` with no other word, option or
-    assignment, where name is one relative path (no leading '/' or '-', no empty, '.' or '..'
-    component, no NUL). The helper validates its own argv as well; this shape only keeps the
-    allowlisted call from carrying anything else."""
+    assignment, where name is one relative path of [A-Za-z0-9._-] components joined by '/' (no quote,
+    glob, space, newline or other shell-special character; no leading '/' or '-'; no '.' or '..'
+    component). raw is the segment's raw text: it must begin (after leading blanks) with those six
+    words spelled literally, single-spaced and unquoted, followed by the end or a blank, so a quoted,
+    escaped or re-spelled path or verb never matches. The helper validates its own argv as well; this
+    shape only keeps the allowlisted call from carrying anything else."""
     if len(argv) != 6 or list(argv[:4]) != ["sudo", "-u", _NRD_CUSTODIAN, _NRD_HELPER]:
         return False
     if argv[4] not in _NRD_HELPER_VERBS:
         return False
     name = argv[5]
-    if not isinstance(name, str) or not name or "\x00" in name or name[0] in "/-":
+    if not isinstance(name, str) or not _NRD_HELPER_NAME_RE.match(name) or name[0] == "-":
         return False
-    return all(part not in ("", ".", "..") for part in name.split("/"))
+    if any(part in (".", "..") for part in name.split("/")):
+        return False
+    if not isinstance(raw, str):
+        return False
+    spelled = " ".join(argv)
+    text = raw.lstrip(" \t")
+    return text.startswith(spelled) and (len(text) == len(spelled) or text[len(spelled)] in " \t\n")
+
+
+def _nrd_custodian_reach(command, segments):
+    """True when a call can reach the custodian route in a way the text shows: the raw or ANSI-C-decoded
+    text holds the custodian mark (orch-deliv, which the helper's name holds too); or a lexed word, its
+    last path component, is a privilege word (_NRD_PRIV_WORDS), or a lexed word or redirect target holds
+    the mark (a quote splice such as o""rch-deliv is joined by the lexer); or, for a call the lexer cannot
+    read, a privilege word stands as a whole word in the raw or decoded text. In tripwire mode such a call
+    is in scope, so every segment must pass the closed allowlist (where the helper reader form is
+    listed) and the helper's output may feed only git apply or a read form. A spelling that hides both
+    the mark and the privilege word from the text (a variable, an encoding) is not seen (a disclosed
+    residual)."""
+    texts = (command, _nrd_ansi_c_spelling(command))
+    if any(_NRD_CUSTODIAN_MARK in t for t in texts):
+        return True
+    if segments is None:
+        return any(_NRD_PRIV_RE.search(t) for t in texts)
+    for seg in segments:
+        for tok in seg.argv:
+            if _NRD_CUSTODIAN_MARK in tok or tok.rsplit("/", 1)[-1] in _NRD_PRIV_WORDS:
+                return True
+        for r in seg.redirects:
+            if isinstance(r.target, str) and _NRD_CUSTODIAN_MARK in r.target:
+                return True
+    return False
+
+
+def _nrd_helper_sink_ok(seg):
+    """True when a segment that reads the custodian helper's output through a pipe is one the tripwire
+    lets consume it: a read form (_NRD_READ_FORMS: cat, wc, head, tail, ls, file, grep, diff, the hash
+    tools) or git apply (after any `-C <dir>` pairs). An interpreter, a shell, a python or shell reader
+    script, a wrapper, tee, xargs and every other command is refused; the segment must also pass the
+    closed allowlist on its own."""
+    argv = seg.argv
+    if not argv or seg.opaque_shell or any(seg.argv_opaque):
+        return False
+    if argv[0] in _NRD_READ_FORMS:
+        return True
+    if argv[0] != "git":
+        return False
+    i = 1
+    while i + 1 < len(argv) and argv[i] == "-C":
+        i += 2
+    return i < len(argv) and argv[i] == "apply"
 
 
 def _nrd_match(path, eff_cwd, dirs):
@@ -30954,7 +31032,7 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs, written, contained=False):
             return (True, os.path.normpath(argv[1]))
         return (False, eff_cwd)
     if contained and head == "sudo":
-        return (_nrd_helper_form(argv), eff_cwd)
+        return (_nrd_helper_form(argv, seg.raw), eff_cwd)
     if head in _NRD_READ_FORMS:
         ok, _operands = _nrd_options_ok(argv[1:], _NRD_READ_FORMS[head])
         return (ok, eff_cwd)
@@ -31933,7 +32011,12 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
     _nrd_unread_in_scope, _nrd_subst_unproven, _nrd_stdin_program, _nrd_env_opaque, _nrd_wide_unproven,
     the lost-cwd relative-operand rule and the unknown-cwd-counts-as-reaching part of
     _nrd_launch_unproven. Under containment the file cannot be opened, so those tests no longer guard
-    anything the host does not; the allowlist then also lists the custodian reader form."""
+    anything the host does not; the allowlist then also lists the custodian reader form. The custodian
+    route is the one way this account reads a deliverable, so tripwire mode puts in scope every call
+    that shows it (_nrd_custodian_reach: the custodian mark in the text or a word, or a privilege word),
+    and in scope a segment fed through a pipe by a helper reader form (directly or through read forms)
+    must be git apply or a read form (_nrd_helper_sink_ok): the helper's output never reaches an
+    interpreter, a shell or a reader script in a call the guard reads."""
     contained = mode == _NRD_MODE_CONTAINED
     ckw = {"contained": True} if contained else {}
     eff_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd else None
@@ -31948,6 +32031,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
             # A command the lexer cannot read (an unquoted here-document, a here-string and the rest) is
             # in scope and refuses whole; no re-reading of it can allow it.
             scope = True
+    if not scope and contained and _nrd_custodian_reach(command, segments):
+        # tripwire mode: a call that names the custodian route or a privilege word is in scope, so every
+        # segment must pass the closed allowlist and the helper's output may feed only git apply or a
+        # read form (an unreadable such call refuses whole)
+        scope = True
     if not scope and dirs and not contained and _nrd_subst_unproven(command):
         # a command substitution anywhere in the raw text, other than the quoted cat here-document
         # shape: its body is not in the lexed words, so nothing shows what it runs (refuse wide)
@@ -32023,7 +32111,14 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
                                 "can be matched against the closed read-only allowlist; restate it in "
                                 "a form the lexer reads, or write file content with the Write tool")
     written = set()
+    fed_by_helper = False
     for seg in segments:
+        if fed_by_helper and not _nrd_helper_sink_ok(seg):
+            # tripwire mode: this segment reads the custodian helper's output through a pipe
+            return (seg.argv[0] if seg.argv else "a pipe stage with no command",
+                    "reads the custodian helper's output through a pipe, and in tripwire mode that output "
+                    "may feed only git apply or a read form (cat, wc, head, tail, ls, file, grep, diff "
+                    "or a hash tool), never an interpreter, a shell, a reader script or any other command")
         if not seg.argv and not seg.redirects:
             continue
         ok, eff_cwd = _nrd_segment_allowed(seg, eff_cwd, dirs, written, **ckw)
@@ -32032,6 +32127,9 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
                     "is not a closed-allowlist read-only form (or carries an option, operand shape, "
                     "expansion or redirect outside the registered grammar)")
         written |= _nrd_segment_writes(seg, eff_cwd, dirs)
+        # a pipeline stage downstream of a helper reader form, through any number of read forms
+        fed_by_helper = contained and seg.sep_after in ("|", "|&") and (
+            fed_by_helper or (bool(seg.argv) and _nrd_helper_form(seg.argv, seg.raw)))
     return None
 
 
@@ -32074,23 +32172,36 @@ def _nrd_candidate(command):
     return False
 
 
-def _nrd_deny_text(subject, why, mode=None, detail=None):
+def _nrd_store_names(dirs):
+    """The declared directories as the deny text names them: each distinct registry entry form, in
+    order, joined by ', ' (the store is whatever deliverable_dirs declares, never a literal path)."""
+    names = []
+    for d in dirs or ():
+        if isinstance(d, str) and d not in names:
+            names.append(d)
+    return ", ".join(names) if names else "none declared"
+
+
+def _nrd_deny_text(subject, why, mode=None, detail=None, dirs=()):
     """The deny reason and banner for one refused in-scope command (strings only; the handler holds
     the constructor return sites). The reason names the judged subject, the rule, the closed allowlist
     and the exits the rule leaves open. With a containment mode (_nrd_containment) it adds one closing
-    passage: in 'contained' mode it names the store and the custodian helper route; in 'none' and
-    'noexec-only' it says containment was not observed (detail names the directory and the property
-    that failed), so the strict guard applies. With mode None the text is the pre-containment text."""
+    passage: in 'contained' mode it names the store (the declared directories, dirs, through
+    _nrd_store_names) and the custodian helper route; in 'none' and 'noexec-only' it says containment
+    was not observed (detail names the directory and the property that failed), so the strict guard
+    applies. With mode None the text is the pre-containment text."""
     reason, banner = _nrd_deny_text_base(subject, why)
     if mode == _NRD_MODE_CONTAINED:
         reason += (
             " Containment is observed (every declared directory is on a noexec mount and this account "
             "cannot open it), so this guard runs as a tripwire and refused this command because it "
-            "names, reaches or runs inside a declared directory. The deliverable store ({}/<UID>, the "
-            "declared directories) is read only through the custodian helper: exactly `sudo -u {} {} "
-            "cat <relative name>` or `... ls <relative name>`, piped into git apply or an allowlisted "
-            "reader. Running the bytes it prints is still the rule's judgement step: read them fully "
-            "first, then run a disposable copy.".format(_NRD_STORE, _NRD_CUSTODIAN, _NRD_HELPER))
+            "names, reaches or runs inside a declared directory, or names the custodian route and "
+            "does not keep to its form. The deliverable store (the declared directories: {}) is read "
+            "only through the custodian helper: exactly `sudo -u {} {} cat <relative name>` or `... ls "
+            "<relative name>`, alone or piped into git apply or a read form (cat, wc, head, tail, ls, "
+            "file, grep, diff or a hash tool); any other consumer of its output is refused. Running the "
+            "bytes it prints is still the rule's judgement step: read them fully first, then run a "
+            "disposable copy.".format(_nrd_store_names(dirs), _NRD_CUSTODIAN, _NRD_HELPER))
     elif mode in (_NRD_MODE_NONE, _NRD_MODE_NOEXEC):
         reason += (" Containment was not observed ({}), so the strict guard applies.".format(
             detail or "the probe reported no detail"))
@@ -32231,7 +32342,7 @@ def orch_deliverable_exec_guard(data):
     mode, detail = _nrd_containment(tuple(dirs))
     hit = _nrd_scope_scan(command, data.get("cwd"), tuple(dirs), mode=mode)
     if hit is not None:
-        reason, banner = _nrd_deny_text(hit[0], hit[1], mode, detail)
+        reason, banner = _nrd_deny_text(hit[0], hit[1], mode, detail, tuple(dirs))
         return _deny(reason, banner)
     if malformed is not None and _nrd_candidate(command):
         # Another consulted root's configuration is unusable: its candidate posture still applies.

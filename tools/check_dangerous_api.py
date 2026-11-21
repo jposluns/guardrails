@@ -744,6 +744,11 @@ ALLOWLIST = (
      "self-test differential oracle loader: exec_module of the repository's own hook source at the"
      " fixed base commit _CMO_BASE, read by git show (replacement objects disabled) from this"
      " checkout and written under the self-test's temporary directory; no external input"),
+    ("tools/nrd_differential.py", "_load_hook", "code", 1,
+     "differential loader: exec_module of the fbdff942 hook module the operator passes, refused"
+     " before loading unless its sha256 is the pinned BASE_SHA256, and of the repository's own hook"
+     " source (the core copy, or the plugin copy with --plugin) resolved from this file; no other"
+     " input"),
     ("tools/_close_selftest.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),

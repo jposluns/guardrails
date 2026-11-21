@@ -809,8 +809,10 @@ declared directory (as written and as `os.path.realpath` resolves it), whether `
 carries `os.ST_NOEXEC` (noexec) and whether `os.access(d, os.R_OK)` and `os.access(d, os.X_OK)` are both
 false for the hook's account while `os.stat(d).st_uid` is not that account's effective uid (sealed: an
 owner can chmod its own directory back to openable, even in an earlier segment of the same call, so a
-directory the hook's account owns is never sealed). It reads no file content. The result is one of
-three modes:
+directory the hook's account owns is never sealed). `os.stat` is read before and after the other reads:
+a directory that vanishes (the second `os.stat` fails) or is replaced (another `st_dev` or `st_ino`)
+during the probe is a probe failure, never read as sealed (`os.access` answers false for a path that is
+gone). It reads no file content. The result is one of three modes:
 
 - `contained`: every directory is noexec and sealed. The scan runs as a tripwire.
 - `noexec-only`: every directory is noexec and at least one can be opened or is owned by the hook's
@@ -837,13 +839,32 @@ reader form, exactly:
     sudo -u orch-deliv /usr/local/bin/orch-deliverable cat <relative name>
     sudo -u orch-deliv /usr/local/bin/orch-deliverable ls <relative name>
 
-with no other word, option or assignment, and a name with no leading `/` or `-` and no empty, `.` or
-`..` component. Its output is meant to feed `git apply` (from a working directory outside the declared
-directories) or an allowlisted reader in a pipeline. That is guidance, not a limit the guard enforces:
-the allowlist applies only to a call in scope, and a helper call names no declared directory, so out of
-scope its output may feed anything (residual 1 below). The deny reason names the store and this route in
-tripwire mode; in the other two modes it adds one sentence saying containment was not observed, naming
-the directory and the property that failed, so the strict guard applies.
+spelled literally (single-spaced, unquoted, the exact path and one of the two verbs) with no other
+word, option or assignment, and a name made of `[A-Za-z0-9._-]` components joined by `/`, with no
+leading `/` or `-` and no `.` or `..` component (no quote, glob, space or newline can appear in it).
+
+Tripwire mode puts in scope every call that shows the custodian route: its raw or ANSI-C-decoded text
+holds `orch-deliv` (which the helper's name holds too), or a lexed word holds it or is a privilege word
+(`sudo`, `sudoedit`, `su`, `doas`, `pkexec`, `runuser`, `setpriv`), or, for a call the lexer cannot
+read, such a word stands in its text. In scope every segment must pass the closed allowlist, and a
+segment that reads the helper's output through a pipe (directly or through read forms) must be
+`git apply` (after any `-C <dir>`) or a read form (`cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`,
+`diff` or a hash tool). So `... cat x.py | python3`, `... | bash`, `... | sh -s`, `... | python3 -I
+reader.py`, `source <(...)` and `echo "$(...)"` are refused, as fbdff942 refused them; the helper alone,
+redirected to a file outside the declared directories, or piped into `git apply` or a read form, is
+allowed. A call that names `sudo` for anything else is refused in tripwire mode too. The deny reason
+names the store as the registry's `deliverable_dirs` declares it and this route in tripwire mode; in the
+other two modes it adds one sentence saying containment was not observed, naming the directory and the
+property that failed, so the strict guard applies.
+
+`tools/nrd_differential.py --base <file>` judges a generated corpus (790 forms) with the fbdff942
+module (the file `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py`
+prints, checked by sha256) and with this hook forced to each mode, running none of them. It fails when a
+form changes verdict in `none` or `noexec-only`, or when `contained` allows a form fbdff942 refused that
+is neither the tripwire relaxation (no declared directory, custodian mark or privilege word in its text,
+and a working directory outside them) nor a helper data read (with each helper form replaced by `cat` of
+a file outside the declared directories, fbdff942 allows it). The self-test runs the same comparator
+with a stand-in base (`nrd-contain/differential-*`).
 
 Operator steps (host work, outside this repository; each is its own request to the host owner):
 
@@ -869,10 +890,14 @@ done and their checks pass, the probe reports `none` (or `noexec-only`) and the 
 
 Residuals the tripwire states (in addition to "Residuals" above):
 
-1. Copy-out and run: `orch-deliverable cat x > y.py; python3 y.py`, and the same bytes piped straight
-   into an interpreter (`orch-deliverable cat x.py | python3`, `... | bash`, `source <(...)`). The
-   helper gives the bytes, and running them is the rule's judgement-level step; the tripwire catches
-   only a launch that names the store or runs inside it.
+1. Copy-out and run: `orch-deliverable cat x > y.py`, then `python3 y.py` (in the same call or a later
+   one). The helper gives the bytes, and running them is the rule's judgement-level step; the copy
+   names no declared directory, so its run is not refused. Piping the helper's output straight into an
+   interpreter, a shell or a reader script is refused (above) wherever the call's text shows the
+   custodian route; a spelling that hides both `orch-deliv` and the privilege word from the text (a
+   variable or an encoding built in the call, such as base64 text decoded into a shell) is not seen,
+   and in tripwire mode the stdin-program and substitution rules that refused such forms at fbdff942
+   are skipped.
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.
