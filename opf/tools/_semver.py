@@ -5,6 +5,11 @@ This is the single implementation of the pack's `MAJOR.MINOR.PATCH` grammar (pol
 from `check_versions._parse` so the OPF tooling under `opf/tools/` is dependency-closed (imports nothing
 upward into `tools/`), while AIQT's `tools/check_versions.py` re-imports `_parse` (and `SEMVER`) from here,
 keeping ONE source with no fork. Offline, stdlib only, pure.
+
+It also holds the one tree-version grammar (`parse_tree_version`): between release cuts the root VERSION file
+and the manifest release-version carry the planned next version with the fixed `-dev` suffix, `X.Y.Z-dev`,
+and at a cut or tag the bare `X.Y.Z`. That grammar is closed: no counter, no other suffix, no build metadata.
+Every other version (release rows, tags, declarations, opf-version, born-release) keeps the bare grammar.
 """
 import re
 
@@ -34,3 +39,68 @@ def _parse(version):
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
+
+
+# The fixed development suffix. Generators append it to the authored [unreleased] version; it is never
+# authored, and it carries no counter, so every development build of one planned version shares one string.
+DEV_SUFFIX = "-dev"
+# The tree-version grammar: exactly a bare X.Y.Z, or a bare X.Y.Z followed by DEV_SUFFIX. Same ASCII digit
+# class and re.ASCII flag as SEMVER; matched with fullmatch, so a trailing newline is refused.
+TREE_VERSION = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev)?$", re.ASCII)
+
+
+def parse_tree_version(text):
+    """Return ((major, minor, patch), is_dev) for exactly `X.Y.Z` or `X.Y.Z-dev`, else None.
+
+    Anything else is None: a non-string, `-dev.0`, `-DEV`, `-rc1`, `+dev`, a leading zero, surrounding or
+    trailing whitespace (a trailing newline included). The int() conversions are guarded as in _parse."""
+    if type(text) is not str:
+        return None
+    m = TREE_VERSION.fullmatch(text)
+    if m is None:
+        return None
+    try:
+        parsed = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+    return parsed, m.group(4) is not None
+
+
+def tree_precedence(parsed_tree_version):
+    """The SemVer precedence key of a parse_tree_version result: X.Y.Z-dev sorts below X.Y.Z, and both
+    below any greater X.Y.Z, so 1.0.5 < 1.1.1-dev < 1.1.1 < 1.1.2-dev."""
+    triple, is_dev = parsed_tree_version
+    return triple + (0 if is_dev else 1,)
+
+
+# The optional changelog.toml [unreleased] table: the planned next version (bare X.Y.Z, required) plus an
+# optional title and optional items, the release notes collected before the cut folds them into a release.
+UNRELEASED_KEYS = frozenset({"version", "title", "items"})
+
+
+def unreleased_problem(table):
+    """Return why a changelog.toml [unreleased] table is malformed, or None when its shape is valid.
+
+    Shape only: a table whose keys are a subset of version, title and items; version present and a bare
+    X.Y.Z (the -dev suffix is generated, never authored); title, when present, a nonblank string; items,
+    when present, an array of strings. Whether version is above the latest release is the caller's
+    comparison, because callers report it with their own exit code."""
+    if not isinstance(table, dict):
+        return "[unreleased] must be a table"
+    extra = sorted(str(key) for key in set(table) - UNRELEASED_KEYS)
+    if extra:
+        return "[unreleased] carries unsupported key(s) {} (allowed: items, title, version)".format(
+            ", ".join(extra))
+    if "version" not in table:
+        return "[unreleased] has no version"
+    value = table["version"]
+    if not isinstance(value, str) or _parse(value) is None:
+        return ("[unreleased] version {!r} is not a bare SemVer X.Y.Z (the {} suffix is generated, never "
+                "authored)".format(value, DEV_SUFFIX))
+    if "title" in table and not (isinstance(table["title"], str) and table["title"].strip()):
+        return "[unreleased] title must be a nonblank string"
+    if "items" in table and not (isinstance(table["items"], list)
+                                 and all(isinstance(item, str) for item in table["items"])):
+        return "[unreleased] items must be an array of strings"
+    return None

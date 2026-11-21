@@ -9,8 +9,11 @@ rendered on the site or written in the declared public Markdown files, of the ex
 or `AIQT pack X.Y.Z` (qualified), names a version that is currently valid, so a stale version left behind
 after a release bump is caught and the release process is forced to update the public text.
 
-The valid set is the released pack version plus the hand-maintained in-development allowlist below. A token
-whose version is outside that set is a finding.
+The valid set is the released pack version plus the hand-maintained in-development allowlist below, plus,
+on a development tree, the planned next version the optional changelog.toml [unreleased] table declares. A
+token whose version is outside that set is a finding. A development token `AIQT X.Y.Z-dev` (or
+`AIQT pack X.Y.Z-dev`) is valid only when X.Y.Z is the [unreleased] version; with no [unreleased] table (a
+cut or tag tree) no development token is valid, so a development label left behind after a cut is a finding.
 
 Two rules share the one scan:
   - CURRENCY (blocking). Every bare or qualified token under site/**/*.html, opf/site/**/*.html and the
@@ -58,9 +61,11 @@ is unmatched even though the page renders `AIQT 1.0.0`; likewise a token separat
 value in any such form would pass; none exists in current site content (verified as of the 2026-08-29
 audit). A 4th-segment, pre-release, or build-suffixed form (`AIQT 1.0.0.0`, `AIQT 1.0.0-rc1`,
 `AIQT 1.0.0+build`, and the same after `pack`) is deliberately out of scope (unmatched, not read as its
-3-segment prefix; no gate scans the site for those), while a leading-zero form (`AIQT 01.0.0`) IS matched
-and flagged as unknown (the safe direction). A sentence-final period is allowed, so a stale token ending a
-sentence is still caught. A symlinked DIRECTORY inside site/ is not descended by the shared os.walk-based
+3-segment prefix; no gate scans the site for those), except the one development suffix `-dev`
+(`AIQT 1.0.0-dev`), which is matched and held to the [unreleased] version; a continuation of it
+(`AIQT 1.0.0-dev.0`, `-dev1`, `-devel`, `-dev+b`) is out of scope like the other suffixed forms. A
+leading-zero form (`AIQT 01.0.0`) IS matched and flagged as unknown (the safe direction). A sentence-final
+period is allowed, so a stale token ending a sentence is still caught. A symlinked DIRECTORY inside site/ is not descended by the shared os.walk-based
 walker, so pages behind it are not scanned; committed symlinks are rejected by the manifest gate
 (gen_manifest rejects any tracked symlink repo-wide), and the proper fix for the not-descended directory is
 the tracked shared-walker redesign, not this gate.
@@ -75,7 +80,9 @@ Exit convention (matches the repo's gates):
   1  a real finding (a stale/unknown product version in the scanned text), or, once QUALIFICATION_ENFORCED
      is True, a bare `AIQT X.Y.Z` token in guardrails public text
   2  malformed input or a read error (fail-closed, cannot evaluate): unreadable changelog.toml, a malformed
-     or missing [[release]]/version, an absent/symlinked/unreadable/unlistable/page-less site/, a non-UTF-8
+     or missing [[release]]/version, a malformed [unreleased] table (tools/check_versions.py
+     unreleased_problem) or one whose version is not strictly greater than the latest release, an
+     absent/symlinked/unreadable/unlistable/page-less site/, a non-UTF-8
      page, an absent/symlinked/non-regular/unreadable/non-UTF-8 declared public Markdown file, or a
      non-bool QUALIFICATION_ENFORCED
 """
@@ -99,6 +106,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from _gen_common import load_toml  # noqa: E402
+# The fixed development suffix and the [unreleased] shape check, from the one shared source
+# (opf/tools/_semver.py, re-exported by tools/check_versions.py), never a copy here. check_versions puts opf/tools/
+# at the front of sys.path to reach _semver; the path is put back after the import, so no later import resolves a
+# tools/ module name to an opf/tools/ namesake.
+_saved_sys_path = list(sys.path)
+try:
+    from check_versions import DEV_SUFFIX, unreleased_problem  # noqa: E402
+finally:
+    sys.path[:] = _saved_sys_path
+del _saved_sys_path
 
 SKIP_DIRS = set()  # scan the whole of site/ (matching check_newtab); skipping no content directory means a
 # page under a node_modules/, __pycache__/, or similar cannot escape the currency check.
@@ -133,6 +150,18 @@ QUALIFICATION_ENFORCED = False
 # sentence ("...on AIQT 9.9.9.") still matches and is caught.
 VERSION_TOKEN = re.compile(r"\bAIQT[ \t]+(pack[ \t]+)?(\d+\.\d+\.\d+)(?!\.\d)(?![\w+-])")
 
+# Development-version token: the same prefix and optional `pack` qualifier, a 3-segment X.Y.Z, then exactly the
+# fixed DEV_SUFFIX (`-dev`, no counter). Group 1 is the qualifier, group 2 the X.Y.Z. VERSION_TOKEN never reads
+# this form (its lookahead rejects the `-`), so the two scans never count one token twice. The valid development
+# set holds at most one string, the changelog.toml [unreleased] version plus DEV_SUFFIX, and is empty when there
+# is no [unreleased] table (a cut or tag tree), so any other development token, a label left behind after a cut
+# included, is a finding. The trailing lookaheads reject a continuation of the suffix (`-dev.0`, `-dev1`,
+# `-devel`, `-dev-x`, `-dev+b`), which stays out of scope like the other suffixed forms, while a sentence-final
+# period (`.` not followed by a letter, digit or underscore) is allowed, so a stale development token ending a
+# sentence is still caught. The digits are `\d`, as in VERSION_TOKEN: a non-ASCII digit is matched and, never
+# equal to the ASCII valid string, flagged (the safe direction).
+DEV_TOKEN = re.compile(r"\bAIQT[ \t]+(pack[ \t]+)?(\d+\.\d+\.\d+)" + re.escape(DEV_SUFFIX) + r"(?!\.\w)(?![\w+-])")
+
 # A released version read from changelog must itself be a clean bare SemVer, matching check_versions.py's
 # grammar (no leading zeros, no suffix, no trailing whitespace); anything else is a malformed source and is
 # fail-closed rather than admitted to the valid set.
@@ -157,35 +186,43 @@ IN_DEVELOPMENT_VERSIONS = {"1.2.0"}
 
 
 def _current_version(root):
-    """Return (version, None) for the latest released pack version from changelog.toml, or (None, exit_code)
-    on a fail-closed condition (2), matching check_versions.py's single-source parsing and error messages."""
+    """Return (version, planned, None): the latest released pack version from changelog.toml and the planned
+    next version its optional [unreleased] table declares (None when the table is absent); or (None, None,
+    exit_code) on a fail-closed condition (2), matching check_versions.py's single-source parsing and error
+    messages. A present [unreleased] table whose shape is malformed (unreleased_problem) cannot be evaluated."""
     changelog = root / "changelog.toml"
     if changelog.is_symlink():
         print("error: changelog.toml is a symlink; the authoritative version source must not be redirected "
               "out of tree; fail-closed", file=sys.stderr)
-        return None, 2
+        return None, None, 2
     try:
         data = load_toml(changelog)
     except (OSError, ValueError) as exc:
         print("error: cannot read changelog.toml: {}; fail-closed".format(exc), file=sys.stderr)
-        return None, 2
+        return None, None, 2
     releases = data.get("release")
     if not isinstance(releases, list) or not releases:
         print("error: changelog.toml has no [[release]] tables; fail-closed", file=sys.stderr)
-        return None, 2
+        return None, None, 2
     latest = releases[-1]
     if not isinstance(latest, dict):
         print("error: the latest release is not a table ({!r}); fail-closed".format(latest), file=sys.stderr)
-        return None, 2
+        return None, None, 2
     version = latest.get("version")
     if not isinstance(version, str) or not version:
         print("error: the latest release has no string `version`; fail-closed", file=sys.stderr)
-        return None, 2
+        return None, None, 2
     if SEMVER.fullmatch(version) is None:
         print("error: the latest release version {!r} is not a bare SemVer X.Y.Z; fail-closed".format(
             version), file=sys.stderr)
-        return None, 2
-    return version, None
+        return None, None, 2
+    if "unreleased" not in data:
+        return version, None, None
+    problem = unreleased_problem(data["unreleased"])
+    if problem is not None:
+        print("error: changelog.toml {}; fail-closed".format(problem), file=sys.stderr)
+        return None, None, 2
+    return version, data["unreleased"]["version"], None
 
 
 def run(root):
@@ -194,7 +231,7 @@ def run(root):
     if not isinstance(QUALIFICATION_ENFORCED, bool):
         print("error: QUALIFICATION_ENFORCED must be a bool; fail-closed", file=sys.stderr)
         return 2
-    version, code = _current_version(root)
+    version, planned, code = _current_version(root)
     if code is not None:
         return code
     # The in-development allowlist is a guard input: validate it against the source rather than trusting it.
@@ -217,26 +254,49 @@ def run(root):
                   "released {!r}; drop or update IN_DEVELOPMENT_VERSIONS; fail-closed".format(dev, version),
                   file=sys.stderr)
             return 2
+    # The planned next version ([unreleased]) is held to the same rule: strictly greater than the released
+    # version, so a table left behind after its cut, or one naming an old version, fails closed rather than
+    # keeping that version's tokens valid.
+    if planned is not None:
+        pv = _semver_tuple(planned)
+        if pv is None or pv <= rel:
+            print("error: changelog.toml [unreleased] version {!r} is not strictly greater than the released "
+                  "{!r}; fail-closed".format(planned, version), file=sys.stderr)
+            return 2
     valid = {version, *IN_DEVELOPMENT_VERSIONS}
+    # A development tree declares its planned version in [unreleased]: the bare planned version is valid, and
+    # its X.Y.Z-dev form is the one valid development token. With no [unreleased] there is none.
+    if planned is not None:
+        valid.add(planned)
+    dev_valid = {planned + DEV_SUFFIX} if planned is not None else set()
 
     bare = []  # qualification findings across all guardrails public text, reported once below
     worst = 0
     for subdir in COVERAGE_ROOTS:
-        worst = max(worst, _scan_root(root, subdir, valid, bare if subdir in QUALIFIED_ROOTS else None))
-    worst = max(worst, _scan_public_files(root, valid, bare))
+        worst = max(worst, _scan_root(root, subdir, valid, bare if subdir in QUALIFIED_ROOTS else None,
+                                      dev_valid))
+    worst = max(worst, _scan_public_files(root, valid, bare, dev_valid))
     worst = max(worst, _report_qualification(bare))
     return worst
 
 
-def _scan_text(name, text, valid, stale, bare):
-    """Scan one document's text line by line. Append currency findings to `stale`; when `bare` is a list
-    (guardrails public text), append each bare `AIQT X.Y.Z` token to it as a qualification finding."""
+def _scan_text(name, text, valid, stale, bare, dev_valid):
+    """Scan one document's text line by line. Append currency findings to `stale`: an `AIQT X.Y.Z` token
+    outside `valid`, or an `AIQT X.Y.Z-dev` token outside `dev_valid`. When `bare` is a list (guardrails
+    public text), append each bare token of either form to it as a qualification finding."""
     for number, line in enumerate(text.splitlines(), 1):
         for match in VERSION_TOKEN.finditer(line):
             qualified, ver = match.group(1) is not None, match.group(2)
             if ver not in valid:
                 stale.append("{}:{}: AIQT {}{} is not a current version (valid: {})".format(
                     name, number, "pack " if qualified else "", ver, sorted(valid)))
+            if bare is not None and not qualified:
+                bare.append("{}:{}: bare `AIQT {}`; write `AIQT pack {}`".format(name, number, ver, ver))
+        for match in DEV_TOKEN.finditer(line):
+            qualified, ver = match.group(1) is not None, match.group(2) + DEV_SUFFIX
+            if ver not in dev_valid:
+                stale.append("{}:{}: AIQT {}{} is not the current development version (valid: {})".format(
+                    name, number, "pack " if qualified else "", ver, sorted(dev_valid)))
             if bare is not None and not qualified:
                 bare.append("{}:{}: bare `AIQT {}`; write `AIQT pack {}`".format(name, number, ver, ver))
 
@@ -246,15 +306,17 @@ def _report_currency(findings, where):
         print("FAIL: {} stale/unknown product-version token(s) in {}".format(len(findings), where))
         for finding in findings:
             print("  " + finding)
-        print("update the public text to the current version, or reconcile IN_DEVELOPMENT_VERSIONS")
+        print("update the public text to the current version, or reconcile IN_DEVELOPMENT_VERSIONS or the "
+              "changelog.toml [unreleased] table")
         return 1
     return 0
 
 
-def _scan_root(root, subdir, valid, bare):
-    """Scan one coverage root (root/subdir) for stale product-version tokens against `valid`, and (when
-    `bare` is a list) collect its bare tokens as qualification findings. Return an exit code: 0 clean, 1 a
-    stale/unknown token, 2 a missing/symlinked/unreadable/page-less required input."""
+def _scan_root(root, subdir, valid, bare, dev_valid):
+    """Scan one coverage root (root/subdir) for stale product-version tokens against `valid` (development
+    tokens against `dev_valid`), and (when `bare` is a list) collect its bare tokens as qualification
+    findings. Return an exit code: 0 clean, 1 a stale/unknown token, 2 a missing/symlinked/unreadable/
+    page-less required input."""
     site = root / subdir
     if site.is_symlink() or not site.is_dir():
         print("error: {}/ absent or a symlink; the version-currency gate cannot evaluate; fail-closed"
@@ -282,16 +344,16 @@ def _scan_root(root, subdir, valid, bare):
         except (OSError, UnicodeDecodeError) as exc:
             print("error: cannot load {} ({}); fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-        _scan_text(f.relative_to(root), text, valid, findings, bare)
+        _scan_text(f.relative_to(root), text, valid, findings, bare, dev_valid)
 
     if _report_currency(findings, "{}/".format(subdir)):
         return 1
-    print("PASS: every product-version token under {}/ is a current version (valid: {})".format(
-        subdir, sorted(valid)))
+    print("PASS: every product-version token under {}/ is a current version (valid: {}; development: {})"
+          .format(subdir, sorted(valid), sorted(dev_valid)))
     return 0
 
 
-def _scan_public_files(root, valid, bare):
+def _scan_public_files(root, valid, bare, dev_valid):
     """Scan the declared guardrails public Markdown files (PUBLIC_TEXT_FILES) for both rules. Each is a
     required input: absent, symlinked, non-regular, unreadable or non-UTF-8 is cannot-evaluate (2)."""
     findings = []
@@ -307,7 +369,7 @@ def _scan_public_files(root, valid, bare):
             print("error: cannot load declared public text {} ({}); fail-closed".format(rel, exc),
                   file=sys.stderr)
             return 2
-        _scan_text(rel, text, valid, findings, bare)
+        _scan_text(rel, text, valid, findings, bare, dev_valid)
     if _report_currency(findings, "the declared public Markdown files"):
         return 1
     print("PASS: every product-version token in {} is a current version".format(", ".join(PUBLIC_TEXT_FILES)))
@@ -345,6 +407,10 @@ def _self_test():
     import io
 
     good_toml = b'[[release]]\nversion = "1.0.0"\ntitle = "r"\n'
+    # A development tree: release 1.0.0 with [unreleased] 1.1.0 planned. And the same changelog after the 1.1.0
+    # cut: the table folded into a 1.1.0 release, so no [unreleased] remains.
+    dev_toml = b'[unreleased]\nversion = "1.1.0"\n\n' + good_toml
+    cut_toml = good_toml + b'\n[[release]]\nversion = "1.1.0"\ntitle = "r2"\n'
 
     def write(p, content):
         if isinstance(content, bytes):
@@ -437,6 +503,29 @@ def _self_test():
          {"i.html": "<p>AIQT 01.0.0</p>"}, 1),
         ("z: an oversized released version component fails closed (not a traceback)",
          b'[[release]]\nversion = "' + b"9" * 5000 + b'.0.0"\ntitle = "r"\n', {"i.html": "<p>ok</p>"}, 2),
+        # Development tokens (test J): the one valid development token is the [unreleased] version plus -dev;
+        # any other, and any development token once no [unreleased] table remains (after the cut), is a finding.
+        ("ja: AIQT 1.1.0-dev with [unreleased] 1.1.0 is clean", dev_toml,
+         {"i.html": "<p>AIQT 1.1.0-dev; AIQT pack 1.1.0-dev.</p>"}, 0),
+        ("jb: AIQT 1.0.9-dev with [unreleased] 1.1.0 is a finding", dev_toml, {"i.html": "<p>AIQT 1.0.9-dev</p>"}, 1),
+        ("jc: AIQT 1.1.0-dev after the cut (no [unreleased]) is a finding", cut_toml,
+         {"i.html": "<p>AIQT 1.1.0-dev</p>"}, 1),
+        ("jd: sentence-final stale 'AIQT pack 1.0.9-dev.' is a finding", dev_toml,
+         {"i.html": "<p>runs on AIQT pack 1.0.9-dev.</p>"}, 1),
+        ("je: suffix continuations ('-dev.0', '-dev1', '-devel', '-dev+b') are out of scope", dev_toml,
+         {"i.html": "<p>AIQT 1.0.9-dev.0, AIQT 1.0.9-dev1, AIQT 1.0.9-devel, AIQT 1.0.9-dev+b</p>"}, 0),
+        ("jf: the bare [unreleased] version 'AIQT 1.1.0' is valid", dev_toml, {"i.html": "<p>AIQT 1.1.0</p>"}, 0),
+        ("jg: a malformed [unreleased] (an unsupported key, the version itself sound) cannot be evaluated",
+         good_toml.replace(b"[[release]]", b'[unreleased]\nversion = "1.1.0"\nnote = "x"\n\n[[release]]'),
+         {"i.html": "<p>ok</p>"}, 2),
+        ("jg2: a malformed [unreleased] (an authored -dev suffix) cannot be evaluated",
+         good_toml.replace(b"[[release]]", b'[unreleased]\nversion = "1.1.0-dev"\n\n[[release]]'),
+         {"i.html": "<p>ok</p>"}, 2),
+        ("jh: an [unreleased] that is not a table cannot be evaluated",
+         b'unreleased = "1.1.0"\n' + good_toml, {"i.html": "<p>ok</p>"}, 2),
+        ("ji: an [unreleased] version not above the latest release cannot be evaluated",
+         good_toml.replace(b"[[release]]", b'[unreleased]\nversion = "1.0.0"\n\n[[release]]'),
+         {"i.html": "<p>ok</p>"}, 2),
     ]
     failures = []
     # The declared public Markdown files are pinned literally, so narrowing the set is a deliberate edit of this
@@ -484,6 +573,22 @@ def _self_test():
             got, _ = run_quiet(build(tmp, good_toml, pages, files), enforced)
             if got != want:
                 failures.append("{}: expected exit {} got {}".format(label, want, got))
+
+    # Qualification reads the development token too: a bare current `AIQT 1.1.0-dev` in guardrails public text
+    # is a qualification finding (exit 1 when enforcing, printed with its count in report-only mode), and the
+    # qualified `AIQT pack 1.1.0-dev` is not.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = build(tmp, dev_toml, {"i.html": "<p>AIQT 1.1.0-dev</p>"})
+        got, out = run_quiet(root, False)
+        if got != 0 or "REPORT: 1 bare `AIQT X.Y.Z` token(s)" not in out \
+                or "site/i.html:1: bare `AIQT 1.1.0-dev`" not in out:
+            failures.append("jj: a bare current development token expected a report-only finding, got {}".format(
+                got))
+        if run_quiet(root, True)[0] != 1:
+            failures.append("jk: a bare current development token expected exit 1 when enforcing")
+    with tempfile.TemporaryDirectory() as tmp:
+        if run_quiet(build(tmp, dev_toml, {"i.html": "<p>AIQT pack 1.1.0-dev</p>"}), True)[0] != 0:
+            failures.append("jl: a qualified current development token expected exit 0 when enforcing")
 
     # A declared Markdown path that is a directory (not a regular file) cannot be evaluated.
     with tempfile.TemporaryDirectory() as tmp:
@@ -604,7 +709,10 @@ def _self_test():
           "qualification: bare 'AIQT X.Y.Z' in site/ or a declared Markdown file is a finding (report-only "
           "exits 0 and prints it with its count, enforcing exits 1), qualified current/in-dev pass, "
           "qualified stale fails, opf/site is outside the rule, and a missing/non-regular/non-UTF-8/symlinked declared "
-          "file or a non-bool mode cannot be evaluated ({}+ cases)".format(len(cases) + len(qcases) + 9))
+          "file or a non-bool mode cannot be evaluated; development tokens: 'AIQT X.Y.Z-dev' matching [unreleased] "
+          "passes (bare form a qualification finding), any other or one after the cut is a finding, suffix "
+          "continuations are out of scope, the bare [unreleased] version is valid, and a malformed or not-above "
+          "[unreleased] cannot be evaluated ({}+ cases)".format(len(cases) + len(qcases) + 12))
     return 0
 
 

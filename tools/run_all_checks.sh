@@ -243,6 +243,7 @@ run_gate "opf-standalone-closure-f" python3 -I -B tools/check_opf_standalone_clo
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
+run_gate "versions-selftest" python3 -I -B tools/check_versions.py --self-test
 run_gate "versions"        python3 -I -B tools/check_versions.py
 run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
