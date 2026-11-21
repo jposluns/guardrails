@@ -325,6 +325,7 @@ run_gate "hook-coverage-selftest" python3 -I -B tools/check_hook_coverage.py --s
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "dispatch-marker-selftest" python3 -I -B tools/check_selftest_execution.py --suite dispatch-marker-selftest
+run_gate "round-gate-selftest" python3 -I -B tools/check_selftest_execution.py --suite round-gate-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 run_gate "ci-site-scope-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core

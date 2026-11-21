@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ab955db51e984fd2fae29881a46c4b49b08c3c666fcb360af475f5d8c824a3d4"
+tree-sha256 = "adf77dbba98265c30e645d1136cee97abe115ac1e0bf8482cc4e7c095fb5caf5"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -142,8 +142,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9790
-sha256 = "69e0b07ef95c38077f88b3db002d5fa04f94dfc6ff3d4536a8ca501901d817d9"
+bytes = 9863
+sha256 = "6dbb863d18f1cb2cbd07833468e48ef0646d8adbe59ec4d332c91394c196ddac"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2372,8 +2372,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 55219
-sha256 = "e60b6218d3231e58fcef06d223dcc2c47d0a7a6fb4841e6b6ceab09f67cdb5ca"
+bytes = 55302
+sha256 = "d6c963224044d9bf25cce7b2c02e3f7c424d24ed444e9a68e20ba84571beb3a8"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -4791,6 +4791,11 @@ bytes = 316154
 sha256 = "638d00c75327faadbffdc5ac9d902ca0e22adb76f91b612260dc66766f24062d"
 
 [[sources]]
+path = "tools/orch_round_gate.py"
+bytes = 28403
+sha256 = "851b267c1c89506c538ac3390743b5a31340c91c0921399b54df95f3e2bfc2f2"
+
+[[sources]]
 path = "tools/pin.py"
 bytes = 115525
 sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
@@ -4802,8 +4807,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 36514
-sha256 = "79f6c00cd6de672fb5cf826f75744c54c80f70118b09bab6ed1080d69eff703b"
+bytes = 36621
+sha256 = "2cfce4db7dea4d8c4809cf3362b8807e2063b275ad50f665401e1195a7e6c979"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4817,8 +4822,8 @@ sha256 = "c0ac9c0f2224547a138f7ffb81befc8e2e6420fb2589fd49d9a9c7b44974d9f3"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 317260
-sha256 = "53c1c470c4c690f17e414316d0781b2c60aaba9cddfcc44e5388f2c2c82a24d5"
+bytes = 322443
+sha256 = "cff504c3ccfe81248da209070bf74c368312859259485c0c950faf89bca0ed56"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4864,6 +4869,11 @@ sha256 = "214663def7b706dca28182628e5fa57efc902f94726e5cdd60026027a7d6f3c8"
 path = "tools/selftest_orch_hooks.py"
 bytes = 1599007
 sha256 = "88a060b1f8044a865934a73d2ac24d0a91f459e15c454de45f89f326a8efe89d"
+
+[[sources]]
+path = "tools/selftest_orch_round_gate.py"
+bytes = 36734
+sha256 = "7fef154a6720514e1afbec9a8f29d70064e3f5e8bb93bf0a15f8b11ea2a1d174"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
