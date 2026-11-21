@@ -18530,6 +18530,31 @@ def _main_isolated(report_path=None):
         check("nrd/other-name-reads-allow",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_allow],
               ["allow"] * len(_nrd_other_allow))
+        # a '..' after a /proc or /dev link, and a bare name a PATH search lands on /proc or a
+        # descriptor, run the same interpreter (verdict only; nothing here is run)
+        _nrd_other_more = (
+            "echo hi | /dev/fd/../exe", "echo hi | /proc/self/root/../proc/self/exe",
+            "echo hi | /proc/net/../exe", "echo hi | /proc/thread-self/../../exe",
+            "echo hi | sudo /dev/fd/../exe", "env -S'/dev/fd/../exe -s'",
+            "echo hi | PATH=/proc/self exe", "PATH=/proc/self; echo hi | exe",
+            "echo hi | PATH=/dev/fd 3 3</bin/bash", "cd /proc/self && echo hi | PATH=. exe",
+            "echo hi | env PATH=/proc/self exe", "echo hi | PATH=/proc/self command exe")
+        check("nrd/other-name-dotdot-path-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more],
+              ["deny"] * len(_nrd_other_more))
+        # a package tool's option value or path operand keeps the version-suffix reading: apt and dpkg
+        # run some option values as commands
+        _nrd_pkg_hook = ("apt-get -o APT::Update::Pre-Invoke::=/usr/bin/lua5.4 update",
+                         "dpkg --pre-invoke=/usr/bin/lua5.4 --configure -a",
+                         "apt-get -o Dpkg::Pre-Invoke::=/usr/bin/php8.2 install x",
+                         "dpkg -L /usr/bin/lua5.4")
+        check("nrd/package-name-option-value-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_pkg_hook],
+              ["deny"] * len(_nrd_pkg_hook))
+        _nrd_other_more_allow = ("doas --version", "timeout 3 ls", "ls /usr/lib/../bin")
+        check("nrd/other-name-more-reads-allow",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more_allow],
+              ["allow"] * len(_nrd_other_more_allow))
         # a listed name's lone --version or --help, for the words fbdff942 did not refuse in that form
         # (_NRD_INFO_WORDS), prints and exits: allowed, in any listed spelling. Anything more after it,
         # a wrapper before it, and the program-text words fbdff942 refused in every form still deny

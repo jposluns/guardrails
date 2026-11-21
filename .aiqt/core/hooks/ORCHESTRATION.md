@@ -753,9 +753,12 @@ stands, even as an argument that names no program (`openssl genpkey -algorithm e
 as `ed`, and `mkdir -p build/node18` reads `node18` as `node`), with one exception: an operand of a
 package tool (`dpkg`, `dpkg-query`, `apt`, `apt-get`, `apt-cache`, `pip` or `pip3`) that is the
 segment's command word, spelled bare or under `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` or
-`/usr/local/bin`, with no `PATH` assignment before it, is read by its exact name, so `dpkg -L lua5.4`,
-`apt-get download php8.2` and `pip download node18` are allowed, while the exact listed names there
-still deny as at fbdff942 (`dpkg -L lua`), and so does the same operand behind a wrapper (`sudo
+`/usr/local/bin`, with no `PATH` assignment before it, is read by its exact name when it is a bare
+package name (no `/`, no `=` and no leading `-`), so `dpkg -L lua5.4`, `apt-get download php8.2` and
+`pip download node18` are allowed, while the exact listed names there still deny as at fbdff942
+(`dpkg -L lua`), and so do a path operand (`dpkg -L /usr/bin/lua5.4`), an option word or option value,
+which apt and dpkg can run as a command (`apt-get -o APT::Update::Pre-Invoke::=/usr/bin/lua5.4
+update`, `dpkg --pre-invoke=/usr/bin/lua5.4`), and the same operand behind a wrapper (`sudo
 apt-get download php8.2`) or after a path command word (`./dpkg -L lua5.4`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
 even where it only prints and names no declared directory from a working directory outside them all
@@ -857,7 +860,10 @@ words (`eval`, `exec`, `perl`, `ruby`, `node`, `nodejs`, `php`, `lua`, `tclsh`, 
 whose name is none of the launch shells under any version suffix (`toybox sh`, `elvish`, `nu`,
 `xonsh`) and an interpreter or command runner outside the program-text words (`m4`, `gnuplot`,
 `psql`, `mysql`, `at`, `batch`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip
--TT`, `man -P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`) is not read either, nor
+-TT`, `man -P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`, the python debugger
+launcher `pdb3`, and a hook command an `apt-get -o` or `dpkg` option names, such as
+`APT::Update::Pre-Invoke::=bash` or `dpkg --pre-invoke=bash`, whose value the guard reads only as one
+word) is not read either, nor
 is a listed name under a suffix outside the version grammar (`bash-static`, `python3-dbg`,
 `perl5.36-thread`) or a renamed copy (the launch-under-another-name list below).
 
@@ -874,7 +880,13 @@ declared, whatever the call names:
   (`... | /proc/self/exe`, `exec /proc/self/exe`, `nice /proc/self/exe`, `/proc/self/exe -c '...'`,
   `/dev/fd/3 3</bin/bash`); an `exe` or `map_files` word of those (absolute, or led by `./` or
   `../`) anywhere after a stdin wrapper (`sudo /proc/self/exe`); and any R1 word inside an `env -S`
-  or `--split-string` text.
+  or `--split-string` text. An absolute word holding a `..` component is also read like a relative
+  one, since the kernel resolves a `..` after a link such as `/dev/fd`, `/proc/self/root`,
+  `/proc/net` or `/proc/thread-self` from the link's target (`/dev/fd/../exe`,
+  `/proc/self/root/../proc/self/exe` and `/proc/net/../exe` are `/proc/self/exe`); and a bare command
+  word (after the same peel) that is `exe`, all digits, `stdin`, `stdout` or `stderr` counts, since a
+  `PATH` search can land it on such an entry (`PATH=/proc/self exe`, `PATH=/dev/fd 3 3</bin/bash`,
+  `cd /proc/self && PATH=. exe`, or a `PATH` set in an earlier call).
 - R2, a privilege or session word that starts a shell itself: `sudo` with `-s`, `-i`, `--shell` or
   `--login` (a short cluster holding `s` or `i` before a letter that takes a value, such as `-Es`; a
   long prefix of at least four characters, such as `--sh`; an opaque option word), `doas -s`,
@@ -899,13 +911,16 @@ also placed in a `PATH` directory and run by a bare name. U2, a binding made in 
 through a name built at run time (`v=BASH_; v+=CMDS; declare "${v}[ls]=/bin/bash"`), the existing
 earlier-call-variable and concatenation residuals. U3, a wrapper that starts the account's shell
 when it is given no command, with no shell word in the segment (`unshare`, `nsenter`, `chroot <dir>`,
-`fakeroot`, `firejail`, `proot`, `systemd-run --shell`, `tmux`, `screen`), since the guard does
+`fakeroot`, `firejail`, `proot`, `systemd-run --shell` or `-S`, `setarch x86_64` or `linux32` with no
+command, `capsh --`, `tmux`, `screen`), since the guard does
 not hold each one's option grammar to tell a command from an option value; `script`, `su` and
 `runuser` are program-text words and refused. U4, a `/proc` or descriptor path reached by a relative
 word other than the R1 spellings after a `cd` into `/proc/<...>` or `/dev/fd` (`cd /proc/self/fd &&
 sudo 3`), a relative word without a leading `./` or `../` behind a stdin wrapper (`sudo
 fd/3`), and a descriptor path as the command word behind a stdin wrapper (`sudo /dev/fd/3
-3</bin/bash`, `nohup /proc/self/fd/3`), where the guard reads such a path as an operand. U5, a
+3</bin/bash`, `nohup /proc/self/fd/3`), where the guard reads such a path as an operand, and a bare
+`exe` behind a stdin wrapper or inside an `env -S` text (`setsid exe`, `env -S'PATH=/proc/self exe'`),
+where `exe` is read as an operand too. U5, a
 shell or python reached through the dynamic loader or another program that runs the next word (`/lib64/ld-linux-x86-64.so.2 /bin/bash`, `setarch x86_64 bash` and the other words
 listed above) and a shell whose name is no listed launch shell (`toybox sh`, `elvish`, above). U6,
 `sudo -e` or `sudoedit`, which run an editor named by `SUDO_EDITOR`, `VISUAL` or `EDITOR` set in an

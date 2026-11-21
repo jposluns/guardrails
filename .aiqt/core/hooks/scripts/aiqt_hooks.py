@@ -31316,7 +31316,7 @@ def _nrd_stdin_program(seg):
         eff = nxt
     if not eff:
         return False
-    if _nrd_proc_launch(eff[0]):
+    if _nrd_proc_launch(eff[0]) or _nrd_proc_bare(eff[0]):
         # /proc/self/exe, /dev/fd/3 and the rest: an interpreter whose name and grammar are not read
         return True
     eff_oq = seg.argv_opaque[len(seg.argv) - len(eff):] if len(eff) <= len(seg.argv) else []
@@ -32007,8 +32007,16 @@ def _nrd_word_names(argv, oq):
     """Each word's listed program name for the every-word tests (_nrd_prog_name), with a package tool's
     operands read by exact name (_nrd_pkg_operand_start, _nrd_exact_prog_name)."""
     pkg = _nrd_pkg_operand_start(argv, oq)
-    return [_nrd_prog_name(tok) if pkg is None or j <= pkg else _nrd_exact_prog_name(tok)
-            for j, tok in enumerate(argv)]
+    return [_nrd_exact_prog_name(tok) if pkg is not None and j > pkg and _nrd_pkg_name_word(tok)
+            else _nrd_prog_name(tok) for j, tok in enumerate(argv)]
+
+
+def _nrd_pkg_name_word(tok):
+    """True when a package tool's operand is a bare package name: no slash, no '=' and no leading '-'.
+    An option word or an option value keeps the version-suffix reading, since apt and dpkg run some of
+    them as commands (apt-get -o APT::Update::Pre-Invoke::=/usr/bin/lua5.4, dpkg
+    --pre-invoke=/usr/bin/lua5.4), and so does a path operand (dpkg -L /usr/bin/lua5.4)."""
+    return isinstance(tok, str) and "/" not in tok and "=" not in tok and not tok.startswith("-")
 
 
 # A command word that runs an interpreter its name does not show (F2): /proc/<pid, self or
@@ -32042,12 +32050,30 @@ def _nrd_proc_launch(tok):
         if m is not None:
             # below the process's working directory: read as a relative word (fail closed)
             return _nrd_proc_launch("./" + path[m.end():])
-        return _NRD_PROC_LAUNCH_RE.match(path) is not None or _nrd_stdin_device(path)
+        if _NRD_PROC_LAUNCH_RE.match(path) is not None or _nrd_stdin_device(path):
+            return True
+        if ".." in tok.split("/"):
+            # the kernel resolves a '..' after a symbolic link from the link's target, not lexically:
+            # /dev/fd/../exe is /proc/self/exe (/dev/fd links to /proc/self/fd), and so are
+            # /proc/self/root/../proc/self/exe, /proc/net/../exe and /proc/thread-self/../../exe, which
+            # normpath reads as /dev/exe and the like. Such a word is read as a relative one (fail closed)
+            return _nrd_proc_launch("./" + tok.lstrip("/"))
+        return False
     parts = [p for p in tok.split("/") if p not in ("", ".")]
     if not parts:
         return False
     return parts[-1] == "exe" or (len(parts) >= 2 and parts[-2] == "map_files") \
         or _nrd_stdin_device(tok, bare_digits=True)
+
+
+def _nrd_proc_bare(tok):
+    """True when a bare command word (no slash) is exe, all digits, stdin, stdout or stderr: a PATH
+    search can land it on a /proc or descriptor entry (PATH=/proc/self exe, PATH=/dev/fd 3 3</bin/bash,
+    cd /proc/self && PATH=. exe, or a PATH set in an earlier call), and no ordinary program has these
+    names. Read as the command word after the stdin-program peel only (fail closed); a digit word is
+    common as an operand (timeout 3), so the every-word tests do not use it."""
+    return isinstance(tok, str) and bool(tok) and "/" not in tok \
+        and (tok == "exe" or tok.isdigit() or tok in _NRD_STDIN_DEV_NAMES)
 
 
 def _nrd_proc_exe(tok):
@@ -32109,6 +32135,11 @@ def _nrd_starts_shell(word, args, oq=None):
                 return True
             takes = "=" not in tok and len(name) >= 3 and any(o.startswith(name) for o in _NRD_SUDO_VALUE_LONG)
             i += 2 if takes else 1
+            continue
+        if tok.startswith("--") and len(tok) > 2:
+            # doas has no long options: getopt rejects --version and the shell never starts, so its
+            # letters are not read as a cluster (doas --version holds an s)
+            i += 1
             continue
         if len(tok) > 1 and tok[0] == "-":
             shell_letters = "si" if word == "sudo" else "s"
