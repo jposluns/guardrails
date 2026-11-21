@@ -19,23 +19,27 @@ added to it (the merge lane adds the `merge-train` label), and its heavy jobs ru
 a `merge-train-*` branch of this repository, so "merged on green" means green on such a labelled train
 pull request (CLAUDE.md, Gates and CI).
 
-Every pull request below lands through the repository's merge entry point, by squash only, from a
-checkout of this repository that holds the head commit:
-`python3 -I -B tools/merge_pr.py --pr <N> --head <full head SHA> --base main --method squash --train`
+Every pull request below except the step 6a attestation pull request lands through the repository's
+merge entry point, by squash only, from a checkout of this repository that holds the head commit:
+`python3 -I -B tools/merge_pr.py --pr <N> --head <full head SHA> --base main --method squash
+--expect-base <full SHA of the main commit the head was checked on> --train`
 (add `--require-status local-quality` where that status is required). It binds every read and the merge
-request to the repository the checkout's origin names, that pull request, that base and that full head
-SHA; reads the repository's allowed merge methods, refusing (exit 1) when squash is disabled and printing
-a WARNING when merge commits or rebase merges are allowed too; refuses any method but squash; runs
+request to the repository the checkout's origin names, that pull request, main and that full head SHA;
+reads the repository's allowed merge methods, refusing (exit 1) when squash is disabled and printing
+a WARNING when merge commits or rebase merges are allowed too; refuses any method but squash and any base
+but main; refuses (exit 1) when main is not at `--expect-base`; refuses (exit 1) the step 6a attestation
+pull request (one that changes `.aiqt/core/releases.toml`), which step 6a lands instead; runs
 `tools/ci-status.sh --main-health` and `tools/ci-status.sh <head> --require-base main` before the merge,
-reads the settings and the pull request again, sends one squash request pinned to the head SHA, requires
-a single-parent landing commit whose parent is the base commit its last compare read named and whose tree
-is the head's tree, and then runs `tools/ci-status.sh --main-health --merge-commit <landing
-SHA>`. The request pins only the head: a base that moves between that read and the merge is caught after
-the landing, not prevented, unless branch protection requires an up-to-date branch. Exit 1 is a refusal
-(or, after a merge, a landing commit that is not single-parent, sits on another base commit, carries
-another tree, or a red main; its RESULT line says which); exit 2 is cannot-evaluate (settings or state
-unreadable: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME or a main push run
-that cannot be evaluated: read the pull request to reconcile and never resend.
+reads the settings, the pull request, the compare and the head commit again, sends one squash request
+pinned to the head SHA whose commit title is the pull request title and number and whose message is its
+body (an empty body is refused), requires a single-parent landing commit whose parent is `--expect-base`,
+whose tree is the head's tree and whose message is that title and body, and then runs
+`tools/ci-status.sh --main-health --merge-commit <landing SHA>`. The request pins only the head: a base
+that moves between the last read and the merge is caught after the landing, not prevented, unless branch
+protection requires an up-to-date branch. Exit 1 is a refusal (or, after a merge, a landing property that
+does not hold, or a red main; one RESULT line per property says which); exit 2 is cannot-evaluate
+(settings or state unreadable: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME or a
+main push run that cannot be evaluated: read the pull request to reconcile and never resend.
 A WARNING means the hosting settings are wider than squash: the landing went ahead, and the maintainer
 disables the extra methods in the repository settings. The tool cannot stop a merge made outside it
 (the web interface or the API) while those settings allow another method; its BOUNDARY line says so.
@@ -279,17 +283,10 @@ disables the extra methods in the repository settings. The tool cannot stop a me
      `commondir`, `gitdir`), or an entry it cannot read; the message names the directory and the
      entry it found, or the entry it could not read; it also refuses (exit 2) when the gate module is
      imported and `main()` is called directly, with no arguments and no stage-1 hand-off recorded (the
-     single-stage checkout gate never falls back to the current directory). Land it through
-     `tools/merge_pr.py` by squash, like every pull request. The squash writes a new commit, so the
-     commit post-tag certified does not itself reach main; the landing is bound to it instead. Main is
-     still frozen at the tagged commit, so the landing commit's one parent must be the tagged commit
-     (`git rev-list --parents -n 1 <landing SHA>` names exactly it) and its tree must equal the certified
-     commit's tree (`git rev-parse <landing SHA>^{tree}` equals `git rev-parse <attestation commit>^{tree}`).
-     Then run `python3 tools/check_release_build.py --post-tag --attestation-commit <full landing SHA>
-     --qa-path <QA object>` again, on the landing commit, and require exit 0 before step 6b. The release
-     row keeps the tagged commit's ids (`commit_sha`, `tag_object_sha`), never the landing SHA. A
-     mismatch, or a check whose result cannot be read, stops the release here: report the discrepancy
-     and take no later step. These checks detect a discrepancy after the landing; they do not undo it.
+     single-stage checkout gate never falls back to the current directory). Merge without rewriting the
+     gated commit (no
+     squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
+     commit.
    - 6b. Tag key. Only after 6a has merged, record `tag = "vX.Y.Z"` in that release's `changelog.toml`
      entry: place the line inside that release's `[[release]]` table, immediately after its `version`
      line and before any sub-table header such as `[release.artifacts]` (a line appended at the end of
