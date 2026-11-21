@@ -654,8 +654,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "valgat"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["gate:merge-markers"]
 
 [[rule]]
 corpus-id = "valinf"
