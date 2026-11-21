@@ -850,10 +850,20 @@ words (`eval`, `exec`, `perl`, `ruby`, `node`, `nodejs`, `php`, `lua`, `tclsh`, 
 `pixi run`, `pipx run`, `uvx`, `nix-shell`, and any other program that runs the next word). A shell
 whose name is none of the launch shells under any version suffix (`toybox sh`, `elvish`, `nu`,
 `xonsh`) and an interpreter or command runner outside the program-text words (`m4`, `gnuplot`,
-`psql`, `mysql`, `at`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip
+`psql`, `mysql`, `at`, `batch`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip
 -TT`, `man -P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`) is not read either, nor
 is a listed name under a suffix outside the version grammar (`bash-static`, `python3-dbg`,
-`perl5.36-thread`) or a renamed copy. A program
+`perl5.36-thread`) or a renamed copy. A shell or python program bound to another name earlier in
+the same call is not read either: `hash -p /bin/bash ls` (or `printf -v 'BASH_CMDS[ls]' /bin/bash`)
+and then `... | ls`, or `alias zz=bash` (or `printf -v 'BASH_ALIASES[zz]' bash`) after `shopt -s
+expand_aliases` on an earlier line and then `... | zz`; the guard reads only the name the segment
+spells. A privilege word that starts a shell itself, with no shell word in the segment (`sudo -s`,
+`sudo -i`, `sudo --login`, `doas -s`, a bare `pkexec`), is not a stdin program to this test: it is
+refused only in tripwire mode, and inside an `env -S` or `--split-string` text (`env -S'sudo -s'`)
+it is not refused in any mode. A `coproc` reads its own pipe, not the segment's input, so
+`... | coproc bash` runs nothing it is fed; `coproc` is not peeled as a reserved word, so `coproc
+bash < /tmp/f.sh` is not read as a stdin program, which matters only for a file outside the
+declared directories (the copy-out-and-run residual below). A program
 decoded and written to a file outside the declared directories and run by a later segment of the
 same call (`echo ... | base64 -d > /tmp/f.sh && bash /tmp/f.sh`, or through a FIFO) is the
 copy-out-and-run residual: the run names only that file. A descriptor reached through an alias the lexical test does not read (a symlink to
@@ -946,13 +956,15 @@ segment that reads the helper's output through a pipe (directly or through read 
 `diff` or a hash tool). So `... cat x.py | python3`, `... | bash`, `... | sh -s`, `... | python3 -I
 reader.py`, `source <(...)` and `echo "$(...)"` are refused, as fbdff942 refused them; the helper alone,
 redirected to a file outside the declared directories, or piped into `git apply` or a read form, is
-allowed. A call that names `sudo` for anything else is refused in tripwire mode too. The deny reason
+allowed. A call that names `sudo` for anything else as a word is refused in tripwire mode too; a
+privilege word inside an `env -S` or `--split-string` text is not read as one (`env -S'sudo -s'`
+and `env -S'sudo -n true'` are allowed in every mode, see "Residuals" above). The deny reason
 names the store as the registry's `deliverable_dirs` declares it and this route in tripwire mode; in the
 other two modes it adds one sentence saying containment was not observed, naming the directory and the
 property that failed, so the strict guard applies.
 
-`tools/nrd_differential.py --base <file>` judges a generated corpus (855 forms, 13 of them spellings
-that hide the helper route, 5 runners whose own program text joins it, and 47 tightened rows that
+`tools/nrd_differential.py --base <file>` judges a generated corpus (873 forms, 13 of them spellings
+that hide the helper route, 5 runners whose own program text joins it, and 60 tightened rows that
 fbdff942 allows and that must be refused in every mode) with the fbdff942
 module (the file `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py`
 prints, checked by sha256) and with this hook forced to each mode, running none of them. It fails when a
@@ -999,8 +1011,10 @@ Residuals the tripwire states (in addition to "Residuals" above):
    declared directories that builds the call (`python3 r.py`, written by an earlier call, another
    tool, or an earlier segment of the same call that decodes text into the file) is not seen, as at
    fbdff942, and neither is such text decoded into a shell or python word that reads stdin behind a
-   wrapper outside the stdin wrappers listed under "Residuals" above (`setarch x86_64 bash`), or into
-   a shell or interpreter none of the listed names covers under any version suffix (`elvish`, `m4`).
+   wrapper outside the stdin wrappers listed under "Residuals" above (`setarch x86_64 bash`), into
+   a shell or interpreter none of the listed names covers under any version suffix (`elvish`, `m4`),
+   into a shell or python program bound to another name earlier in the same call (`hash -p /bin/bash
+   ls`, an alias), or into a privilege word's own shell inside an `env -S` text (`env -S'sudo -s'`).
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.

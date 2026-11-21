@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.0.5"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "4ce8de818acb1c098252de4e62b7b6140c71f4f1f891f9b0d940ebab5404ee96"
+tree-sha256 = "4b49bb582444dce4742c102b32a734aeca13c6cf0edac554ec6087bc86f6b85f"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -87,13 +87,13 @@ sha256 = "e596c1d3af706c871fb963d23176a1eb9e360366cee59c11b0963522e30d1bcd"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
-bytes = 209004
-sha256 = "8996ca4b220f2a706a555c8a51825e34ef735fb90ba0d7a810cde3ea3c8f634c"
+bytes = 210390
+sha256 = "cce3b3f45f26bdc9d15319192bb282fd26364116502c678e55bd0cb827253543"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 564726
-sha256 = "e82dba4d3905e6db35043e135e812f3eb46999b207065615d792f49a74ee40ff"
+bytes = 565215
+sha256 = "45eb3e90678580df030ae1bf5526ff8168f67b8efc787fd94244233a510acdde"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -837,8 +837,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1228802
-sha256 = "800b6235ff9155dea8865497e256aba25194db1f184e477c1d43dc7f9b34f52f"
+bytes = 1229291
+sha256 = "6261662e695619b28c88e1de25444f2eae22c7a1e29bfd6dd28ed7a5149a2f18"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2457,8 +2457,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 735144
-sha256 = "ace808cbc97afaafd75ef2e5753e91fd5a918ec27c5dd3465ad3e7a9ac8d09ca"
+bytes = 735633
+sha256 = "fe46359cd03a269e558935874b099239dc3778edb21ec6ae39ad1cb44685e805"
 
 [[sources]]
 path = "GEMINI.md"
@@ -4062,8 +4062,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 799902
-sha256 = "7d61fa871c01fc4ba2e9072ebcb8c6f3541e699afbd5be26e7dda001e9fef32b"
+bytes = 800391
+sha256 = "b27beff6b49157936cbc1449aa3e5397758cac7c0f883990892506a03a46ba5a"
 
 [[sources]]
 path = "site/evidence.html"
