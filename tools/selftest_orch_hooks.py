@@ -18490,6 +18490,46 @@ def _main_isolated(report_path=None):
             "echo 'exec(open(\"{}/x.py\").read())' | poetry run /usr/bin/python-3.12".format(_nrd_sp))
         check("nrd/version-suffix-verdict-denies",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_ver_verdict], ["deny"] * 9)
+        # a package tool's operands are package names: a version suffix there names no program, so
+        # these three are allowed (verdict only); the exact names, a wrapper or a path command word
+        # before the tool, and the suffixed name as a command word still deny
+        _nrd_pkg_allow = ("dpkg -L lua5.4", "apt-get download php8.2", "pip download node18")
+        check("nrd/package-name-suffix-allows",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_pkg_allow], ["allow"] * 3)
+        _nrd_pkg_deny = ("dpkg -L lua", "apt-get download php", "./dpkg -L lua5.4",
+                         "sudo apt-get download php8.2", "PATH=/tmp:/usr/bin dpkg -L lua5.4",
+                         "dpkg -L lua5.4 | lua5.4", "pip download node18 && node18 -e 1")
+        check("nrd/package-name-suffix-bounds-deny",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_pkg_deny], ["deny"] * 7)
+        # an interpreter launched under another name (verdict only; nothing here is run): the running
+        # interpreter through /proc (F2), a privilege word's own shell (F3), and a shell or python bound
+        # to another name earlier in the same call (F1)
+        _nrd_other_name = (
+            "echo 'bash {}/x.sh' | /proc/self/exe".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | /proc/thread-self/exe".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | exec /proc/self/exe".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | nice /proc/self/exe".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | sudo /proc/1/exe".format(_nrd_sp),
+            "/proc/self/exe -c 'echo hi'", "/proc/self/task/1/exe /dev/stdin",
+            "echo hi | /proc/self/root/proc/self/exe", "echo hi | /dev/fd/3 3</bin/bash",
+            "echo hi | /proc/self/map_files/1000-2000", "env -S'/proc/self/exe -s'",
+            "echo hi | sudo -s", "echo hi | sudo -i", "echo hi | sudo --login", "echo hi | sudo -Es",
+            "echo hi | sudo -u orch-deliv -s", "echo hi | doas -s", "echo hi | pkexec",
+            "echo hi | newgrp", "echo hi | setsid sudo -s", "env -S'sudo -s'",
+            "env --split-string='sudo -s'", "env -S'doas -s'", "env -S'pkexec'", "env -S'sudo -n true'",
+            "hash -p /bin/bash ls; echo hi | ls", "hash -p /usr/bin/python3 zz; echo 'print(1)' | zz -",
+            "printf -v 'BASH_CMDS[ls]' /bin/bash; echo hi | ls",
+            "shopt -s expand_aliases\nalias zz=bash\necho hi | zz",
+            "shopt -s expand_aliases\nprintf -v 'BASH_ALIASES[zz]' bash\necho hi | zz",
+            "declare 'BASH_CMDS[ls]=/bin/bash'", "printf -v \"$N\" /bin/bash")
+        check("nrd/other-name-launch-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_name],
+              ["deny"] * len(_nrd_other_name))
+        _nrd_other_allow = ("readlink /proc/self/exe", "ls -l /proc/self/exe", "hash -r", "alias",
+                            "printf '%s\\n' x", "echo hi")
+        check("nrd/other-name-reads-allow",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_allow],
+              ["allow"] * len(_nrd_other_allow))
         # a listed name's lone --version or --help, for the words fbdff942 did not refuse in that form
         # (_NRD_INFO_WORDS), prints and exits: allowed, in any listed spelling. Anything more after it,
         # a wrapper before it, and the program-text words fbdff942 refused in every form still deny

@@ -31300,7 +31300,8 @@ def _nrd_stdin_program(seg):
         eff = []
         for k, tok in enumerate(seg.argv):
             name = _nrd_prog_name(tok)
-            if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name):
+            if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name) \
+                    or (not seg.argv_opaque[k] and (_nrd_proc_launch(tok) or name in _NRD_SHELL_START_WORDS)):
                 eff = seg.argv[k:]
                 break
     for _round in range(8):
@@ -31315,6 +31316,14 @@ def _nrd_stdin_program(seg):
         eff = nxt
     if not eff:
         return False
+    if _nrd_proc_launch(eff[0]):
+        # /proc/self/exe, /dev/fd/3 and the rest: an interpreter whose name and grammar are not read
+        return True
+    eff_oq = seg.argv_opaque[len(seg.argv) - len(eff):] if len(eff) <= len(seg.argv) else []
+    if _nrd_starts_shell(_nrd_prog_name(eff[0]), eff[1:],
+                         eff_oq[1:] if len(eff_oq) == len(eff) else [True] * (len(eff) - 1)):
+        # sudo -s, doas -s, a bare pkexec, newgrp: the privilege word starts a shell reading stdin
+        return True
     return _nrd_launch_reads_stdin(_nrd_prog_name(eff[0]), eff[1:])
 
 
@@ -31638,10 +31647,11 @@ def _nrd_launch_unproven(seg, cwd, dirs, ctx, contained=False):
         k += 1
     if k < len(argv) and (oq[k] or "/" in argv[k]):
         launch = True
+    names = _nrd_word_names(argv, oq)
     for j, tok in enumerate(argv):
         if oq[j]:
             continue
-        word = _nrd_prog_name(tok)
+        word = names[j]
         if _NRD_PY_WORD_RE.match(word):
             launch = True
             if _nrd_py_launch_unproven(argv[j + 1:], cwd, dirs, ctx, **ckw):
@@ -31936,6 +31946,18 @@ _NRD_INFO_WORDS = frozenset(("ed", "dc", "sqlite3", "ipython", "ipython3", "jupy
                              "jupyter-qtconsole"))
 
 
+def _nrd_exact_prog_name(tok):
+    """_nrd_prog_name without the version-suffix reading, for a package tool's operands
+    (_nrd_pkg_operand_start): the last path component, a python-family variant read as python3; lua5.4
+    there is the word lua5.4, while lua stays lua."""
+    name = tok.rsplit("/", 1)[-1]
+    if name in _NRD_SUFFIX_NAMES or _NRD_PY_WORD_RE.match(name):
+        return name
+    if _NRD_PY_VARIANT_RE.match(name):
+        return "python3"
+    return name
+
+
 def _nrd_prog_name(tok):
     """The listed program name a command word runs as, for the deny-side tests: its last path
     component, and, when that is not itself a listed name, the listed name it is with a version suffix
@@ -31952,6 +31974,156 @@ def _nrd_prog_name(tok):
                 and (name[i] != "." or name[i - 1].isdigit()):
             return name[:i]
     return name
+
+
+# The package tools whose operands name packages, not programs (dpkg -L lua5.4, apt-get download
+# php8.2, pip download node18): after one of them as a segment's command word, an operand word is read
+# by its exact name only (_nrd_exact_prog_name), so a package name with a version suffix is
+# not read as the program it resembles. The exact listed names still deny there as before (dpkg -L lua).
+# The command word must be spelled bare or under a system binary directory, with no PATH assignment
+# before it, so a renamed copy elsewhere is not exempted.
+_NRD_PKG_NAME_HEADS = frozenset(("dpkg", "dpkg-query", "apt", "apt-get", "apt-cache", "pip", "pip3"))
+_NRD_PKG_HEAD_DIRS = frozenset(("/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"))
+
+
+def _nrd_pkg_operand_start(argv, oq):
+    """The index of a segment's command word when it is one of the package tools (_NRD_PKG_NAME_HEADS)
+    after NAME=value prefixes, none of them a PATH assignment, spelled bare or under a system binary
+    directory and read as literal; None otherwise. The words after that index are package operands."""
+    k = 0
+    while k < len(argv) and not oq[k] and _ENV_ASSIGN_RE.match(argv[k]):
+        if argv[k].split("=", 1)[0].rstrip("+") == "PATH":
+            return None
+        k += 1
+    if k >= len(argv) or oq[k]:
+        return None
+    head, slash, base = argv[k].rpartition("/")
+    if base not in _NRD_PKG_NAME_HEADS or (slash and head not in _NRD_PKG_HEAD_DIRS):
+        return None
+    return k
+
+
+def _nrd_word_names(argv, oq):
+    """Each word's listed program name for the every-word tests (_nrd_prog_name), with a package tool's
+    operands read by exact name (_nrd_pkg_operand_start, _nrd_exact_prog_name)."""
+    pkg = _nrd_pkg_operand_start(argv, oq)
+    return [_nrd_prog_name(tok) if pkg is None or j <= pkg else _nrd_exact_prog_name(tok)
+            for j, tok in enumerate(argv)]
+
+
+# A command word that runs an interpreter its name does not show (F2): /proc/<pid, self or
+# thread-self>/exe (also below task/<tid>) is the running program itself (the shell reading the call, or
+# python), /proc/<...>/fd/N, /dev/fd/N and /dev/stdin run whatever file that descriptor holds open
+# (/dev/fd/3 3</bin/bash), and /proc/<...>/map_files/<range> runs a mapped file (the interpreter binary
+# among them). A /proc/<...>/root prefix is removed first (/proc/self/root/proc/self/exe). A relative
+# word with a slash is read without its working directory, since a cd can move it into /proc/self or
+# /dev/fd: it counts when its last component is exe, its last-but-one is map_files, or it names a
+# descriptor (_nrd_stdin_device with bare digits: ./0 after cd /dev/fd). Such a word is read as an
+# interpreter whose program and arguments the guard does not read: as a segment's command word, or after
+# a stdin wrapper, it puts the call in scope whenever a directory is declared.
+_NRD_PROC_LAUNCH_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?(?:exe|fd/[^/]+|map_files/[^/]+)\Z")
+_NRD_PROC_ROOT_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?root(?=/|\Z)")
+_NRD_PROC_CWD_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?cwd/")
+
+
+def _nrd_proc_launch(tok):
+    """True when a command word runs the program a /proc entry or a descriptor holds
+    (_NRD_PROC_LAUNCH_RE and the descriptor paths of _nrd_stdin_device), read as described above."""
+    if not isinstance(tok, str) or "/" not in tok:
+        return False
+    if tok.startswith("/"):
+        path = "/" + os.path.normpath(tok).lstrip("/")
+        for _round in range(16):
+            m = _NRD_PROC_ROOT_RE.match(path)
+            if m is None:
+                break
+            path = "/" + path[m.end():].lstrip("/")
+        m = _NRD_PROC_CWD_RE.match(path)
+        if m is not None:
+            # below the process's working directory: read as a relative word (fail closed)
+            return _nrd_proc_launch("./" + path[m.end():])
+        return _NRD_PROC_LAUNCH_RE.match(path) is not None or _nrd_stdin_device(path)
+    parts = [p for p in tok.split("/") if p not in ("", ".")]
+    if not parts:
+        return False
+    return parts[-1] == "exe" or (len(parts) >= 2 and parts[-2] == "map_files") \
+        or _nrd_stdin_device(tok, bare_digits=True)
+
+
+def _nrd_proc_exe(tok):
+    """_nrd_proc_launch without the descriptor paths: the /proc/<...>/exe and map_files forms (and a
+    relative word ending in exe or below map_files), the reading behind a stdin wrapper, where a
+    descriptor path is an operand far more often than a command word (make -f /dev/stdin)."""
+    if not _nrd_proc_launch(tok):
+        return False
+    if tok.startswith("/"):
+        path = "/" + os.path.normpath(tok).lstrip("/")
+        return not _nrd_stdin_device(path) or "/map_files/" in path or path.endswith("/exe")
+    return not _nrd_stdin_device(tok, bare_digits=True)
+
+
+# The privilege and session words that start a shell themselves, with no shell word in the segment
+# (F3): sudo with -s, -i, --shell or --login (a short option cluster holding s or i before a letter that
+# takes a value, or a long option prefix of those two names), doas -s, pkexec with no command, and
+# newgrp, sg, run0 and machinectl shell in any form (each starts the account's shell, or for sg a sh -c
+# body, from words this guard does not read). Such a word reads its program from stdin like a shell.
+_NRD_SUDO_VALUE_LETTERS = frozenset("CDgpRrTtUu")
+_NRD_SUDO_VALUE_LONG = ("--user", "--group", "--close-from", "--chdir", "--host", "--prompt", "--chroot",
+                        "--role", "--type", "--command-timeout", "--other-user")
+_NRD_DOAS_VALUE_LETTERS = frozenset("aCu")
+_NRD_SHELL_START_WORDS = frozenset(("sudo", "doas", "pkexec", "newgrp", "sg", "run0", "machinectl"))
+
+
+def _nrd_starts_shell(word, args, oq=None):
+    """True when the privilege or session word (_NRD_SHELL_START_WORDS, under _nrd_prog_name) given
+    these following words starts a shell itself (the forms above). An opaque word among sudo's, doas's
+    or pkexec's option words counts (fail closed: it can hold -s)."""
+    if word not in _NRD_SHELL_START_WORDS:
+        return False
+    if word in ("newgrp", "sg", "run0"):
+        return True
+    if word == "machinectl":
+        return "shell" in args
+    oq = oq if oq is not None else [False] * len(args)
+    i = 0
+    n = len(args)
+    while i < n:
+        tok = args[i]
+        if oq[i]:
+            return True
+        if tok == "--":
+            return word == "pkexec" and i + 1 >= n
+        if word == "pkexec":
+            if tok in ("--version", "--help"):
+                return False
+            if tok in ("--user", "-u"):
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            return False
+        if tok.startswith("--") and word == "sudo":
+            name = tok.partition("=")[0]
+            if len(name) >= 4 and ("--shell".startswith(name) or "--login".startswith(name)):
+                return True
+            takes = "=" not in tok and len(name) >= 3 and any(o.startswith(name) for o in _NRD_SUDO_VALUE_LONG)
+            i += 2 if takes else 1
+            continue
+        if len(tok) > 1 and tok[0] == "-":
+            shell_letters = "si" if word == "sudo" else "s"
+            value_letters = _NRD_SUDO_VALUE_LETTERS if word == "sudo" else _NRD_DOAS_VALUE_LETTERS
+            skip = 0
+            for j, ch in enumerate(tok[1:], 1):
+                if ch in shell_letters:
+                    return True
+                if ch in value_letters:
+                    skip = 1 if j + 1 == len(tok) else 0
+                    break
+            i += 1 + skip
+            continue
+        return False
+    return word == "pkexec"
 
 
 def _nrd_info_only(argv, oq):
@@ -32198,9 +32370,35 @@ def _nrd_env_split_launch(args, oq):
             for w in text.split():
                 name = _nrd_prog_name(w.strip("'\""))
                 if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name) \
-                        or name in _NRD_RUNNER_WORDS or name in _NRD_PROGRAM_TEXT_WORDS:
+                        or name in _NRD_RUNNER_WORDS or name in _NRD_PROGRAM_TEXT_WORDS \
+                        or name in _NRD_PRIV_WORDS or name in _NRD_SHELL_START_WORDS \
+                        or _nrd_proc_launch(w) or "BASH_CMDS" in w or "BASH_ALIASES" in w:
+                    # also a privilege word (env -S'sudo -s', env -S'sudo -n true': F3) and an
+                    # interpreter named by a /proc entry or descriptor (env -S'/proc/self/exe': F2)
                     return True
         i += 1
+    return False
+
+
+def _nrd_binds_name(word, rest, rest_oq):
+    """True when a hash, alias or printf word binds a program to another name in this call (F1): hash
+    with any option cluster holding p, or an opaque word, after it (hash -p /bin/bash ls); alias with
+    any NAME=value operand, or an opaque one (alias zz=bash, read once expand_aliases is set); printf
+    -v with an opaque target (a literal BASH_CMDS or BASH_ALIASES target is refused by name). A later
+    word of the call can then run that program under a name the stdin-program test does not read."""
+    if word == "hash":
+        return any(rest_oq[k] or (len(t) > 1 and t[0] == "-" and t[1] != "-" and "p" in t[1:])
+                   for k, t in enumerate(rest))
+    if word == "alias":
+        return any(rest_oq[k] or "=" in t for k, t in enumerate(rest))
+    if word == "printf":
+        for k, t in enumerate(rest):
+            if t == "-v":
+                return k + 1 < len(rest) and rest_oq[k + 1]
+            if t.startswith("-v"):
+                return rest_oq[k]
+            if t == "--" or not t.startswith("-"):
+                return False
     return False
 
 
@@ -32229,17 +32427,32 @@ def _nrd_wide_unproven(seg, cwd, dirs):
     oq = seg.argv_opaque
     run_cwd = _nrd_wrapper_cwd(argv, oq, cwd) if argv else cwd
     info_only = _nrd_info_only(argv, oq)
+    names = _nrd_word_names(argv, oq)
     for j, tok in enumerate(argv):
         if _NRD_PROGRAM_ENV_RE.match(tok):
             return True
         value = tok.partition("=")[2]
         if _nrd_exec_config_target(tok, cwd) or (value and _nrd_exec_config_target(value, cwd)):
             return True
+        if "BASH_CMDS" in tok or "BASH_ALIASES" in tok:
+            # the shell's command hash or alias table bound by name in this call (printf -v
+            # 'BASH_CMDS[ls]' /bin/bash, declare, read or an assignment): a later word then runs a
+            # program its name does not show (F1)
+            return True
         if oq[j]:
             continue
-        word = _nrd_prog_name(tok)
+        word = names[j]
         rest = argv[j + 1:]
         rest_oq = oq[j + 1:]
+        if _nrd_binds_name(word, rest, rest_oq):
+            return True
+        if ((tok.startswith(("/", "./", "../")) and _nrd_proc_exe(tok))
+                or _nrd_starts_shell(word, rest, rest_oq)) and any(
+                not oq[k] and names[k] in _NRD_STDIN_WRAPPERS for k in range(j)):
+            # /proc/self/exe (or a map_files path) or a privilege word's own shell behind a launch,
+            # runner, privilege or sandbox wrapper (sudo /proc/self/exe, setsid sudo -s); a
+            # descriptor path there is read as an operand (make -f /dev/stdin), a listed residual
+            return True
         if word in _NRD_PROGRAM_TEXT_WORDS and not info_only:
             return True
         if word in _NRD_SED_WORDS:
@@ -32300,7 +32513,7 @@ def _nrd_wide_unproven(seg, cwd, dirs):
             if _nrd_env_split_launch(rest, rest_oq):
                 return True
     if any(not oq[k] and (_NRD_PY_WORD_RE.match(w) or w in _NRD_LAUNCH_SHELLS or w in (".", "source"))
-           for k, w in enumerate(_nrd_prog_name(t) for t in argv)):
+           for k, w in enumerate(names)):
         # a startup file read from a descriptor (BASH_ENV=/dev/stdin bash -c true, ENV=/dev/fd/0 sh -i,
         # bash --rcfile /dev/stdin -i): the startup program is read from stdin like a script
         for k, tok in enumerate(argv):

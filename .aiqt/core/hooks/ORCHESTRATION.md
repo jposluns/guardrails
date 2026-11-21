@@ -750,7 +750,13 @@ runner program-text option that runs nothing (`pytest -o addopts=-q`, `make -E '
 --version`, `env --version`, `rsync --version`) still denies: fbdff942 refused each, and the guard
 allows nothing it refused. A word that is a listed name plus a version suffix denies wherever it
 stands, even as an argument that names no program (`openssl genpkey -algorithm ed448` reads `ed448`
-as `ed`). An unquoted
+as `ed`, and `mkdir -p build/node18` reads `node18` as `node`), with one exception: an operand of a
+package tool (`dpkg`, `dpkg-query`, `apt`, `apt-get`, `apt-cache`, `pip` or `pip3`) that is the
+segment's command word, spelled bare or under `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` or
+`/usr/local/bin`, with no `PATH` assignment before it, is read by its exact name, so `dpkg -L lua5.4`,
+`apt-get download php8.2` and `pip download node18` are allowed, while the exact listed names there
+still deny as at fbdff942 (`dpkg -L lua`), and so does the same operand behind a wrapper (`sudo
+apt-get download php8.2`) or after a path command word (`./dpkg -L lua5.4`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
 even where it only prints and names no declared directory from a working directory outside them all
 (`cat <<EOF > out.txt`, `grep -c x <<< 'xyz'`, a here-document with a trailing space after its
@@ -845,7 +851,7 @@ words (`eval`, `exec`, `perl`, `ruby`, `node`, `nodejs`, `php`, `lua`, `tclsh`, 
 `unshare`, `nsenter`, `firejail`, `bwrap`, `systemd-run`, `unbuffer`, `chronic`, `valgrind`,
 `fakeroot`, `faketime` and `proot`, each with a version suffix and in a path form too; and inside an
 `env -S` or `--split-string` line. Behind any OTHER word it is not refused
-(`setarch x86_64 bash` and `linux32 bash`, `capsh --`, `newgrp`, `sg`, `prlimit`, `numactl`,
+(`setarch x86_64 bash` and `linux32 bash`, `capsh --`, `prlimit`, `numactl`,
 `rlwrap`, `dbus-run-session`, `cgexec`, `torsocks`, the dynamic loader `ld.so bash`, `conda run`,
 `pixi run`, `pipx run`, `uvx`, `nix-shell`, and any other program that runs the next word). A shell
 whose name is none of the launch shells under any version suffix (`toybox sh`, `elvish`, `nu`,
@@ -853,14 +859,57 @@ whose name is none of the launch shells under any version suffix (`toybox sh`, `
 `psql`, `mysql`, `at`, `batch`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip
 -TT`, `man -P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`) is not read either, nor
 is a listed name under a suffix outside the version grammar (`bash-static`, `python3-dbg`,
-`perl5.36-thread`) or a renamed copy. A shell or python program bound to another name earlier in
-the same call is not read either: `hash -p /bin/bash ls` (or `printf -v 'BASH_CMDS[ls]' /bin/bash`)
-and then `... | ls`, or `alias zz=bash` (or `printf -v 'BASH_ALIASES[zz]' bash`) after `shopt -s
-expand_aliases` on an earlier line and then `... | zz`; the guard reads only the name the segment
-spells. A privilege word that starts a shell itself, with no shell word in the segment (`sudo -s`,
-`sudo -i`, `sudo --login`, `doas -s`, a bare `pkexec`), is not a stdin program to this test: it is
-refused only in tripwire mode, and inside an `env -S` or `--split-string` text (`env -S'sudo -s'`)
-it is not refused in any mode. A `coproc` reads its own pipe, not the segment's input, so
+`perl5.36-thread`) or a renamed copy (the launch-under-another-name list below).
+
+Launch under another name. Each way of running a shell or interpreter under a name other than a
+listed one that this guard reads (R1 to R4) is refused in every mode wherever a directory is
+declared, whatever the call names:
+
+- R1, the running interpreter through `/proc` or a descriptor: a command word (after the
+  stdin-program peel, or as the first such word behind a wrapper option outside its grammar) that is
+  `/proc/<pid, self or thread-self>/exe` (also below `task/<tid>`, and behind any number of
+  `/proc/<...>/root` prefixes), `/proc/<...>/fd/N`, `/proc/<...>/map_files/<range>`, `/dev/fd/N` or
+  `/dev/stdin`, or a relative word with a slash whose last component is `exe`, whose last-but-one is
+  `map_files`, or that names a descriptor (`./0` after `cd /dev/fd`), with any arguments
+  (`... | /proc/self/exe`, `exec /proc/self/exe`, `nice /proc/self/exe`, `/proc/self/exe -c '...'`,
+  `/dev/fd/3 3</bin/bash`); an `exe` or `map_files` word of those (absolute, or led by `./` or
+  `../`) anywhere after a stdin wrapper (`sudo /proc/self/exe`); and any R1 word inside an `env -S`
+  or `--split-string` text.
+- R2, a privilege or session word that starts a shell itself: `sudo` with `-s`, `-i`, `--shell` or
+  `--login` (a short cluster holding `s` or `i` before a letter that takes a value, such as `-Es`; a
+  long prefix of at least four characters, such as `--sh`; an opaque option word), `doas -s`,
+  `pkexec` with no command, and `newgrp`, `sg`, `run0` and `machinectl shell` in any form, as the
+  command word or after a stdin wrapper (`setsid sudo -s`).
+- R3, an `env -S` or `--split-string` text holding a privilege word (`sudo`, `sudoedit`, `su`,
+  `doas`, `pkexec`, `runuser`, `setpriv`) or an R2 word, whatever follows it (`env -S'sudo -s'`,
+  `env -S'sudo -n true'`).
+- R4, a program bound to another name in the same call: `hash` with an option cluster holding `p`
+  or an opaque word after it (`hash -p /bin/bash ls`), `alias` with a `NAME=value` or opaque
+  operand (`alias zz=bash`), any word holding `BASH_CMDS` or `BASH_ALIASES` (`printf -v
+  'BASH_CMDS[ls]' /bin/bash`, `printf -v 'BASH_ALIASES[zz]' bash`, `declare`, `read`, a direct
+  assignment), and `printf -v` with an opaque target (`printf -v "$N" /bin/bash`). Each refuses
+  the whole call, so `... | ls` after such a binding never runs past this guard. A word that only
+  looks like one counts too (`echo hash -p`, `grep BASH_CMDS notes.txt`).
+
+Not read (residuals, counted: 6). U1, a copy, hard link or symbolic link of a shell or python, or
+of `/proc/self/exe`, made in this call or an earlier one and run under its own name (`cp /bin/bash
+/tmp/x`, `ln -s /proc/self/exe /tmp/x`, `install`, `cat /bin/bash > /tmp/x`, then `... | /tmp/x`),
+also placed in a `PATH` directory and run by a bare name. U2, a binding made in an EARLIER call (a
+`hash -p` entry, an alias, a `BASH_CMDS` or `BASH_ALIASES` entry, a function) or in this call
+through a name built at run time (`v=BASH_; v+=CMDS; declare "${v}[ls]=/bin/bash"`), the existing
+earlier-call-variable and concatenation residuals. U3, a wrapper that starts the account's shell
+when it is given no command, with no shell word in the segment (`unshare`, `nsenter`, `chroot <dir>`,
+`fakeroot`, `firejail`, `proot`, `systemd-run --shell`, `tmux`, `screen`), since the guard does
+not hold each one's option grammar to tell a command from an option value; `script`, `su` and
+`runuser` are program-text words and refused. U4, a `/proc` or descriptor path reached by a relative
+word other than the R1 spellings after a `cd` into `/proc/<...>` or `/dev/fd` (`cd /proc/self/fd &&
+sudo 3`), a relative word without a leading `./` or `../` behind a stdin wrapper (`sudo
+fd/3`), and a descriptor path as the command word behind a stdin wrapper (`sudo /dev/fd/3
+3</bin/bash`, `nohup /proc/self/fd/3`), where the guard reads such a path as an operand. U5, a
+shell or python reached through the dynamic loader or another program that runs the next word (`/lib64/ld-linux-x86-64.so.2 /bin/bash`, `setarch x86_64 bash` and the other words
+listed above) and a shell whose name is no listed launch shell (`toybox sh`, `elvish`, above). U6,
+`sudo -e` or `sudoedit`, which run an editor named by `SUDO_EDITOR`, `VISUAL` or `EDITOR` set in an
+earlier call. A `coproc` reads its own pipe, not the segment's input, so
 `... | coproc bash` runs nothing it is fed; `coproc` is not peeled as a reserved word, so `coproc
 bash < /tmp/f.sh` is not read as a stdin program, which matters only for a file outside the
 declared directories (the copy-out-and-run residual below). A program
@@ -956,9 +1005,9 @@ segment that reads the helper's output through a pipe (directly or through read 
 `diff` or a hash tool). So `... cat x.py | python3`, `... | bash`, `... | sh -s`, `... | python3 -I
 reader.py`, `source <(...)` and `echo "$(...)"` are refused, as fbdff942 refused them; the helper alone,
 redirected to a file outside the declared directories, or piped into `git apply` or a read form, is
-allowed. A call that names `sudo` for anything else as a word is refused in tripwire mode too; a
-privilege word inside an `env -S` or `--split-string` text is not read as one (`env -S'sudo -s'`
-and `env -S'sudo -n true'` are allowed in every mode, see "Residuals" above). The deny reason
+allowed. A call that names `sudo` for anything else as a word is refused in tripwire mode too, and
+a privilege word inside an `env -S` or `--split-string` text is refused in every mode (`env -S'sudo
+-s'` and `env -S'sudo -n true'`, R3 under "Launch under another name" above). The deny reason
 names the store as the registry's `deliverable_dirs` declares it and this route in tripwire mode; in the
 other two modes it adds one sentence saying containment was not observed, naming the directory and the
 property that failed, so the strict guard applies.
@@ -1013,8 +1062,9 @@ Residuals the tripwire states (in addition to "Residuals" above):
    fbdff942, and neither is such text decoded into a shell or python word that reads stdin behind a
    wrapper outside the stdin wrappers listed under "Residuals" above (`setarch x86_64 bash`), into
    a shell or interpreter none of the listed names covers under any version suffix (`elvish`, `m4`),
-   into a shell or python program bound to another name earlier in the same call (`hash -p /bin/bash
-   ls`, an alias), or into a privilege word's own shell inside an `env -S` text (`env -S'sudo -s'`).
+   or into a shell launched under another name in a way this guard does not read (U1 to U6 under
+   "Launch under another name" above: a copy or link run under its own name, a binding made in an
+   earlier call or through a name built at run time, `unshare` or `chroot <dir>` with no command).
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.
