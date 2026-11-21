@@ -1363,6 +1363,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 
+      - name: Gate-record self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite gate-record-selftest
+
       - name: Instruction-budget self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest

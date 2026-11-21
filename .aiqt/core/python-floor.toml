@@ -209,6 +209,7 @@ guarded-surfaces = [
     "tools/selftest_aiqt_corpus.py",
     "tools/selftest_aiqt_hooks.py",
     "tools/selftest_ci_status.py",
+    "tools/selftest_gate_record.py",
     "tools/selftest_git_fixture_env.py",
     "tools/selftest_git_fixture_env_config_combined.py",
     "tools/selftest_git_fixture_env_config_malformed.py",

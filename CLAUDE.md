@@ -249,6 +249,18 @@ on any patch release other than the one the file names. When the host interprete
 `python-host-patch` in `.aiqt/python-host.toml` and the `python-version` pin of every host job in
 `quality.yml` together, in one change.
 
+The git-side gate record (rule gatdis) binds a passing check run to the tree being committed. Install it once
+per clone with `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install` (it writes
+pre-commit, pre-merge-commit and pre-push stubs into the common git directory's hooks directory, never sets
+`core.hooksPath`, and refuses next to the OPF pre-commit stub, printing the manual chaining step). Then: stage
+everything the commit holds, run `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record run`
+(it runs the set `.aiqt/gate-record.toml` names, `bash tools/run_all_checks.sh`, on a working tree that
+matches the index and appends a record bound to the index tree), and commit. The hooks refuse a tree whose
+last record is missing, failed, for another tree or for another set, or that has an earlier failed run, and
+read the set from the commit the change is built on. `tools/doctor.py --require-gate-record` reports a missing
+or disabled stub. Until a clone has the stubs, the gate-weakening hook denies a check and git in one Bash
+command outside a short list of exact shapes; run them as two calls.
+
 ## Git and writing conventions
 
 - Commits are authored `Jeff Posluns <jeff@posluns.ca>`, with NO AI author, committer, or co-author

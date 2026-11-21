@@ -2572,6 +2572,95 @@ expected-check-ids = [
 ]
 
 [[suite]]
+# The git-side gate record (rule gatdis): recorder rows W1-W8, verifier rows V1-V16, pinned residual rows
+# X1-X3 and installer rows I1-I6, each refusal with its flip, over real git commits in throwaway repositories.
+id = "gate-record-selftest"
+runner = "tools/selftest_gate_record.py"
+expected-check-ids = [
+  # ---------- the recorder ----------
+  "W1/exit",
+  "W1/record",
+  "W1/keys",
+  "W2/exit",
+  "W2/record",
+  "W3/exit-nonzero",
+  "W3/record",
+  "W4/exit-nonzero",
+  "W4/record",
+  "W5/exit",
+  "W5/record",
+  "W5/not-run",
+  "W6/exit",
+  "W6/not-run",
+  "W5-W6/flip-clean-runs",
+  "W7/exit",
+  "W7/own-log",
+  "W7/other-untouched",
+  "W8/both-exit-0",
+  "W8/two-whole-lines",
+  # ---------- the verifiers ----------
+  "V1/refused-missing",
+  "V1/stub-exit",
+  "V1/flip-no-stub-commits",
+  "V2/stub-exit",
+  "V2/commit",
+  "V3/refused-failed",
+  "V3/stub-exit",
+  "V3/flip-no-stub-commits",
+  "V4/refused-other-tree",
+  "V4/flip-no-stub-commits",
+  "V5/refused-other-tree",
+  "V5/flip-no-stub-commits",
+  "V6/refused-commit-a",
+  "V6/flip-no-stub-commits",
+  "V7/refused-other-set",
+  "V7/flip-no-stub-commits",
+  "V8/recorded-lowered-set",
+  "V8/refused-config-from-head",
+  "V8/flip-no-stub-commits",
+  "V9/unborn-refused-without-record",
+  "V9/unborn-commit",
+  "V10/refused-earlier-failure",
+  "V10/flip-no-stub-commits",
+  "V11-V13/baseline-pass",
+  "V11/symlink-log-exit",
+  "V11/symlink-log-refused",
+  "V12/writable-log-exit",
+  "V13/duplicate-key-exit",
+  "V13/extra-key-exit",
+  "V13/nan-exit",
+  "V13/no-final-lf-exit",
+  "V11-V13/flip-restored-log-commits",
+  "V14/forged-env-ignored",
+  "V14/flip-no-stub-commits",
+  "V15/push-refused",
+  "V15/remote-unchanged",
+  "V15/pass-and-deletion-pushed",
+  "V15/flip-no-stub-pushes",
+  "V16/merge-refused",
+  "V16/flip-no-stub-merges",
+  # ---------- the pinned residuals ----------
+  "X1/no-verify-commits",
+  "X2/hookspath-commits",
+  "X3/forged-pass-line-commits",
+  # ---------- the installer ----------
+  "I1/install-exit",
+  "I1/stubs",
+  "I1/rerun-no-op",
+  "I2/hookspath-refused",
+  "I2/flip-unset-installs",
+  "I3/symlink-hooks-refused",
+  "I3/flip-real-dir-installs",
+  "I4/foreign-refused",
+  "I4/flip-removed-installs",
+  "I5/opf-stub-refused",
+  "I5/chaining-step-printed",
+  "I5/flip-removed-installs",
+  "I6/no-config-refused",
+  "I6/flip-config-installs",
+]
+
+[[suite]]
 id = "instruction-budget-selftest"
 runner = "tools/check_instruction_budget.py"
 expected-check-ids = [

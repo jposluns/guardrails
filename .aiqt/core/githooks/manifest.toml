@@ -1,0 +1,14 @@
+# Git-side hooks (rule-linked controls that git runs, installed per clone; not Claude Code hooks and not in
+# the plugin's hooks.json). Each [[githook]] names the git hook events it is installed on, its entry point
+# and its install command. Read by tools/gen_enforceability.py into .aiqt/enforceability.json.
+version = 1
+
+[[githook]]
+id = "gate-record"
+rules = ["gatdis"]
+events = ["pre-commit", "pre-merge-commit", "pre-push"]
+entry = "python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record verify-commit (pre-commit, pre-merge-commit) or verify-push (pre-push), run from HEAD's committed copy"
+install = "python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install"
+default = "block"
+class = "c"
+residue = "Installed per clone (gate-record install writes stubs into the common git directory's hooks directory and never sets core.hooksPath); a clone that never ran it runs no hook. git commit or push --no-verify, a client that runs no hooks, a core.hooksPath set later or on the command line, and a removed stub skip it. A same-user process can append a forged record line or edit a stub. cherry-pick, revert, rebase and am commit without a pre-commit hook (pre-push still checks the pushed tip); pre-push checks tips only. The record binds the tree, not the environment or ignored files. An earlier failure older than the 64 KiB log tail the verifier reads is not seen. The closure for all of these is the required Quality gates check, which re-runs every gate on the merged tree."

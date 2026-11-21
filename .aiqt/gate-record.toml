@@ -1,0 +1,15 @@
+# The required check sets of the git-side gate record (rule gatdis). The hooks installed by
+#   python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install
+# read this file from the commit a change is built on (HEAD for pre-commit, the pushed tip's first
+# parent for pre-push), never from the working tree, so a change cannot lower its own bar.
+# Workflow: stage everything, run
+#   python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record run
+# and commit once it passes; the pre-commit hook refuses a tree with no passing record of the
+# pre-commit set, and the pre-push hook a pushed tip with no passing record of the pre-push set.
+format-version = 1
+pre-commit = "full"
+pre-push = "full"
+
+[[set]]
+name = "full"
+argv = ["bash", "tools/run_all_checks.sh"]
