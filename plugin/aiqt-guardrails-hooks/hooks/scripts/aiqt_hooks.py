@@ -32810,6 +32810,23 @@ _RWH_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")  # a full sha1 
 # t, so they do not match. Matching data that merely names git (a message, a path operand)
 # over-holds while a hold is live, a disclosed safe over-deny, never an under-block.
 _RWH_RAW_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+
+
+def _rwh_static_git_word(command):
+    """Whether command carries a git word bash assembles from its own text: the plain word
+    (_RWH_RAW_GIT_WORD_RE) or the letters g, i, t split only by quote characters, backslashes, '$'
+    or newlines (_GIT_WORD_RE: g''it, g""it, g\\it, gi$'t', gi$"t", a line continuation) in the
+    raw text, or the word git in one of its de-quoted readings (_decoded_readings: an ANSI-C quote's
+    escapes decoded, gi$'\\x74', gi$'\\164', gi$'\\u0074'). Each reading can only add a match to the
+    raw-text test, never clear one, so a command it matches is judged against the hold set as the
+    plain word is. A git word built at RUN TIME (a parameter expansion, $@ or $*, a command
+    substitution, brace expansion) is not read: the disclosed run-time-word residual, tied to the
+    open design question on a git-side control (PD-SHELL-GUARD-STALL). Linear, never raises."""
+    if _RWH_RAW_GIT_WORD_RE.search(command) is not None or _GIT_WORD_RE.search(command) is not None:
+        return True
+    return any(_RWH_RAW_GIT_WORD_RE.search(text) is not None for text in _decoded_readings(command))
+
+
 # The substitution spellings whose presence anywhere in the raw text (even quoted as data) keeps a
 # command out of the one plain-git form a live hold still allows: a command or process
 # substitution opener, a backquote, and the heredoc/here-string operator.
@@ -34704,7 +34721,10 @@ def _rwh_decide(data):
     be resolved at all and withholds the command outright. The rule is
     ONE-PLAIN-GIT-or-fail-closed, judged from the RAW text, so shell grammar is never modelled case
     by case. A command whose raw text carries no git word (git as a word, the git of a git-<name>
-    executable, the git ending an interpreter path) consults nothing beyond the session repository.
+    executable, the git ending an interpreter path, each also with its letters split by quotes,
+    backslashes, '$' or newlines, or spelled by an ANSI-C quote's escapes: _rwh_static_git_word)
+    consults nothing beyond the session repository; a git word built at run time is the disclosed
+    run-time-word residual.
     A command that carries one is judged against its HOLD SET: the repositories of the session cwd,
     of every literal path the raw text names after -C, --git-dir, --work-tree (= and separated
     forms), cd, pushd or a GIT_ assignment (quotes stripped; quoted bodies, heredocs and option
@@ -34825,10 +34845,11 @@ def _rwh_decide(data):
             # an absent command fails closed exactly as it does for an unreadable cwd
             return ("unverifiable", _rwh_probe_text(cwd))
         return ("allow", None)
-    if _RWH_RAW_GIT_WORD_RE.search(command) is None:
-        # no git word anywhere in the raw text: nothing here runs git by a spelling this rule
-        # models (a git reached through an opaque program name is the disclosed indirect-git
-        # residual), so only the session notes (drift, expiry) travel
+    if not _rwh_static_git_word(command):
+        # no git word anywhere in the raw text or its de-quoted readings: nothing here runs git
+        # by a spelling this rule models (a git reached through an opaque program name is the
+        # disclosed indirect-git residual, and a git word built at run time the disclosed
+        # run-time-word residual), so only the session notes (drift, expiry) travel
         return ("note", " ".join(notes)) if notes else ("allow", None)
     try:
         segments = _segments(command, skip_empty=True)
