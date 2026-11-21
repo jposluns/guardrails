@@ -18531,7 +18531,13 @@ def _main_isolated(report_path=None):
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_allow],
               ["allow"] * len(_nrd_other_allow))
         # a '..' after a /proc or /dev link, and a bare name a PATH search lands on /proc or a
-        # descriptor, run the same interpreter (verdict only; nothing here is run)
+        # descriptor, run the same interpreter (verdict only; nothing here is run). Every earlier form
+        # stays a row; the rows after them are read by THE /PROC RULE as one class: a launched path
+        # through /proc or a descriptor at any component after the guard's walk (a link made in an
+        # earlier call into /proc included), a PATH this call sets through one, and an input the scan
+        # cannot evaluate (refused as cannot-evaluate, never a crash)
+        _nrd_plink = tmp / "nrd-plink"
+        _nrd_plink.symlink_to("/proc/self/exe")
         _nrd_other_more = (
             "echo hi | /dev/fd/../exe", "echo hi | /proc/self/root/../proc/self/exe",
             "echo hi | /proc/net/../exe", "echo hi | /proc/thread-self/../../exe",
@@ -18541,7 +18547,13 @@ def _main_isolated(report_path=None):
             "echo hi | env PATH=/proc/self exe", "echo hi | PATH=/proc/self command exe",
             "echo hi | /dev/fd/3/exe 3</proc/self", "echo hi | /dev/fd/3/self/exe 3</proc",
             "echo hi | /proc/self/fd/3/exe 3</proc/self", "echo hi | sudo /dev/fd/3/exe 3</proc/self",
-            "env -S'/dev/fd/3/exe -s' 3</proc/self", "echo hi | /dev/stdin/exe 0</proc/self")
+            "env -S'/dev/fd/3/exe -s' 3</proc/self", "echo hi | /dev/stdin/exe 0</proc/self",
+            "echo hi | /proc/self/cwd/run.sh", "/proc/self/root/bin/sh -c id",
+            "echo hi | /usr/../proc/self/exe", "echo hi | {}".format(_nrd_plink),
+            "echo hi | nice {}".format(_nrd_plink), "echo hi | PATH=/usr/bin:/proc/self ls",
+            "export PATH=/usr/../proc/self; echo hi | ls", "echo hi | PATH=/dev/fd/../ ls",
+            "cd /proc/self && echo hi | PATH=:/usr/bin ls", "echo hi | PATH=/dev ls",
+            "cat <<$'\\c\u00df'\ntext\nEOF\n", "doas --version")
         check("nrd/other-name-dotdot-path-denies",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more],
               ["deny"] * len(_nrd_other_more))
@@ -18556,9 +18568,12 @@ def _main_isolated(report_path=None):
         check("nrd/package-name-option-value-denies",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_pkg_hook],
               ["deny"] * len(_nrd_pkg_hook))
-        _nrd_other_more_allow = ("doas --version", "timeout 3 ls", "ls /usr/lib/../bin",
+        _nrd_other_more_allow = ("timeout 3 ls", "ls /usr/lib/../bin",
                                  "ls -l /dev/fd/3/ 3</proc/self", "cat /proc/self/fd/3/status 3</proc/self",
-                                 "dpkg -L lua5.4", "dpkg --pre-invoke true -L lua5.4")
+                                 "dpkg -L lua5.4", "dpkg --pre-invoke true -L lua5.4",
+                                 "ls > /dev/null", "cat a.txt 2>/dev/null", "/usr/bin/../bin/ls -l",
+                                 "PATH=/usr/local/bin:/usr/bin:/bin ls", "export PATH=/opt/tool/bin:$PATH",
+                                 "readlink {}".format(_nrd_plink))
         check("nrd/other-name-more-reads-allow",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more_allow],
               ["allow"] * len(_nrd_other_more_allow))

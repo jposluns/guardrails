@@ -872,25 +872,37 @@ Launch under another name. Each way of running a shell or interpreter under a na
 listed one that this guard reads (R1 to R4) is refused in every mode wherever a directory is
 declared, whatever the call names:
 
-- R1, the running interpreter through `/proc` or a descriptor: a command word (after the
-  stdin-program peel, or as the first such word behind a wrapper option outside its grammar) that is
-  `/proc/<pid, self or thread-self>/exe` (also below `task/<tid>`, and behind any number of
-  `/proc/<...>/root` prefixes), `/proc/<...>/fd/N`, `/proc/<...>/map_files/<range>`, `/dev/fd/N` or
-  `/dev/stdin`, or a relative word with a slash whose last component is `exe`, whose last-but-one is
-  `map_files`, or that names a descriptor (`./0` after `cd /dev/fd`), with any arguments
-  (`... | /proc/self/exe`, `exec /proc/self/exe`, `nice /proc/self/exe`, `/proc/self/exe -c '...'`,
-  `/dev/fd/3 3</bin/bash`); an `exe` or `map_files` word of those (absolute, or led by `./` or
-  `../`) anywhere after a stdin wrapper (`sudo /proc/self/exe`); and any R1 word inside an `env -S`
-  or `--split-string` text. An absolute word holding a `..` component is also read like a relative
-  one, since the kernel resolves a `..` after a link such as `/dev/fd`, `/proc/self/root`,
-  `/proc/net` or `/proc/thread-self` from the link's target (`/dev/fd/../exe`,
-  `/proc/self/root/../proc/self/exe` and `/proc/net/../exe` are `/proc/self/exe`); an absolute word
-  below a descriptor (`/dev/fd/N/...`, `/dev/stdin/...`, `/proc/<...>/fd/N/...`) counts too, since a
-  descriptor held open on a directory makes the rest a lookup from it (`/dev/fd/3/exe 3</proc/self`
-  and `/dev/fd/3/self/exe 3</proc` are the running shell); and a bare command
-  word (after the same peel) that is `exe`, all digits, `stdin`, `stdout` or `stderr` counts, since a
-  `PATH` search can land it on such an entry (`PATH=/proc/self exe`, `PATH=/dev/fd 3 3</bin/bash`,
-  `cd /proc/self && PATH=. exe`, or a `PATH` set in an earlier call).
+- R1, the /proc rule (one class, not a list of forms): a command word or launched path that passes
+  through `/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr` or a descriptor path at ANY
+  component, after any resolution the guard performs, or that the guard cannot resolve. `/proc` holds
+  the running program itself (`/proc/<pid>/exe`), every file a descriptor holds open (`fd/N`,
+  `map_files/<range>`, a directory: `3</proc/self` makes `/dev/fd/3/exe` the shell) and links back
+  into the whole tree (`root`, `cwd`), so no list of its spellings closes. The guard reads the word as
+  written and lexically normalised, then walks it component by component as the kernel does: each
+  symbolic link the filesystem shows at judgement time is replaced by its target and a `..` applies
+  to the resolved prefix (so `/dev/fd/../exe`, `/proc/self/root/../proc/self/exe`, `/proc/net/../exe`,
+  `/usr/../proc/self/exe` and a link made in an earlier call that points into `/proc` all count), and
+  the walk never reads inside `/proc` or a descriptor: the first such component decides. A walk that
+  cannot finish (a link loop, more than 40 links, a component it cannot stat) counts, and so does a
+  relative command word with no known working directory (after `cd -` or another lost-cwd word, or a
+  payload with no working directory); a relative command word with a known working directory (the
+  payload's, followed through literal `cd`) is walked from it (`cd /proc/self && ./exe`). It applies
+  to a command word after the stdin-program peel (or the first such word behind a wrapper option
+  outside its grammar), with any arguments (`... | /proc/self/exe`, `exec /proc/self/exe`, `nice
+  /proc/self/exe`, `/proc/self/exe -c '...'`, `/dev/fd/3 3</bin/bash`, `/dev/fd/3/exe 3</proc/self`);
+  to every word with a slash after a stdin wrapper except a plain descriptor (`sudo /proc/self/exe`,
+  `sudo /dev/fd/3/exe`; `make -f /dev/stdin` is read as an operand, U4); and to every word inside an
+  `env -S` or `--split-string` text. For a bare command word the launched path is found by a `PATH`
+  search, so a `PATH` this call sets (a `PATH=` or `PATH+=` word anywhere: a prefix, `export`,
+  `declare`, `env`) counts when any entry passes through `/proc` or a descriptor after the same walk,
+  is `/dev` itself, is relative or empty with no known working directory (and is walked from the
+  known one otherwise: `cd /proc/self && PATH=. exe`), or holds an expansion other than `$PATH` or
+  `${PATH}`, a glob, a brace, a tilde or a quote (`PATH=/proc/self exe`, `PATH=/dev stdin`,
+  `PATH=/usr/bin:/proc/self ls`, `export PATH=$HOME/bin:$PATH`); and a bare command word that is
+  `exe`, all digits, `stdin`, `stdout` or `stderr` counts whatever `PATH` is (a `PATH` set in an
+  earlier call). The readings of the earlier releases stay as fail-closed readings of a word the walk
+  places outside `/proc`: a relative word whose last component is `exe`, whose last-but-one is
+  `map_files`, or that names a descriptor (`./0`), and an absolute word with a `..` read that way too.
 - R2, a privilege or session word that starts a shell itself: `sudo` with `-s`, `-i`, `--shell` or
   `--login` (a short cluster holding `s` or `i` before a letter that takes a value, such as `-Es`; a
   long prefix of at least four characters, such as `--sh`; an opaque option word), `doas -s`,
@@ -907,10 +919,25 @@ declared, whatever the call names:
   the whole call, so `... | ls` after such a binding never runs past this guard. A word that only
   looks like one counts too (`echo hash -p`, `grep BASH_CMDS notes.txt`).
 
-Not read (residuals, counted: 6). U1, a copy, hard link or symbolic link of a shell or python, or
-of `/proc/self/exe`, made in this call or an earlier one and run under its own name (`cp /bin/bash
-/tmp/x`, `ln -s /proc/self/exe /tmp/x`, `install`, `cat /bin/bash > /tmp/x`, then `... | /tmp/x`),
-also placed in a `PATH` directory and run by a bare name. U2, a binding made in an EARLIER call (a
+The scan never crashes the hook: an input it cannot evaluate (any exception while reading or
+judging it, such as the `TypeError` an ANSI-C here-document delimiter like `<<$'\cß'` raised) is
+refused as cannot-evaluate in every mode, and in tripwire mode the deny text names that reason.
+Accepted over-denies of R1, wherever a directory is declared: a `PATH` this call sets with an
+expansion other than `$PATH` (`export PATH=$HOME/.local/bin:$PATH`), a relative command word with no
+known working directory (`./run.sh` after `cd -`), a command word through `/proc` or a
+descriptor that cannot run (`/proc/self`, `/dev/fd`), and a word with a slash through `/proc` behind
+a stdin wrapper even where it is only an operand (`find /proc -name x`, `xargs cat /proc/meminfo`,
+`sudo cat /proc/x`). `doas` with an option word holding an `s` (`doas --version`) is refused in every
+mode, as 74fe3128 refused it (doas has no long options, so it starts no shell; the no-reduction rule
+keeps the refusal).
+
+Not read (residuals, counted: 6). U1, a copy or hard link of a shell or python made in this call or
+an earlier one and run under its own name (`cp /bin/bash /tmp/x`, `install`, `cat /bin/bash >
+/tmp/x`, then `... | /tmp/x`), a symbolic link made in THIS call (`ln -s /proc/self/exe /tmp/x &&
+... | /tmp/x`: the R1 walk reads the filesystem at judgement time, so a link made in an earlier call
+that points into `/proc` or a descriptor counts), and any of these placed in a `PATH` directory and
+run by a bare name, or reached by a bare name through a `PATH` set in an earlier call (R1 reads only a
+`PATH` this call sets). U2, a binding made in an EARLIER call (a
 `hash -p` entry, an alias, a `BASH_CMDS` or `BASH_ALIASES` entry, a function) or in this call
 through a name built at run time (`v=BASH_; v+=CMDS; declare "${v}[ls]=/bin/bash"`), the existing
 earlier-call-variable and concatenation residuals. U3, a wrapper that starts the account's shell
@@ -918,13 +945,12 @@ when it is given no command, with no shell word in the segment (`unshare`, `nsen
 `fakeroot`, `firejail`, `proot`, `systemd-run --shell` or `-S`, `setarch x86_64` or `linux32` with no
 command, `capsh --`, `tmux`, `screen`), since the guard does
 not hold each one's option grammar to tell a command from an option value; `script`, `su` and
-`runuser` are program-text words and refused. U4, a `/proc` or descriptor path reached by a relative
-word other than the R1 spellings after a `cd` into `/proc/<...>` or `/dev/fd` (`cd /proc/self/fd &&
-sudo 3`), a relative word without a leading `./` or `../` behind a stdin wrapper (`sudo
-fd/3`), and a descriptor path as the command word behind a stdin wrapper (`sudo /dev/fd/3
-3</bin/bash`, `nohup /proc/self/fd/3`), where the guard reads such a path as an operand, and a bare
-`exe` behind a stdin wrapper or inside an `env -S` text (`setsid exe`, `env -S'PATH=/proc/self exe'`),
-where `exe` is read as an operand too. U5, a
+`runuser` are program-text words and refused. U4, a word behind a stdin wrapper that the guard reads as an operand,
+not as the launched path: a bare or relative word other than the R1 spellings (`cd /proc/self/fd &&
+sudo 3`, `sudo fd/3`, `setsid exe`), a plain descriptor path (`sudo /dev/fd/3 3</bin/bash`, `nohup
+/proc/self/fd/3`), and a bare `exe` or a `PATH=` word inside an `env -S` text (`env -S'PATH=/proc/self
+exe'`); and a path component replaced between judgement and run (the R1 walk reads the filesystem
+once, at judgement time, so a link changed by another process before the call runs is not seen). U5, a
 shell or python reached through the dynamic loader or another program that runs the next word (`/lib64/ld-linux-x86-64.so.2 /bin/bash`, `setarch x86_64 bash` and the other words
 listed above) and a shell whose name is no listed launch shell (`toybox sh`, `elvish`, above). U6,
 `sudo -e` or `sudoedit`, which run an editor named by `SUDO_EDITOR`, `VISUAL` or `EDITOR` set in an

@@ -31240,6 +31240,9 @@ def _nrd_python_reads_stdin(args):
 # a pipe, a here-document or an N<&0 duplication feeds, so the program is never among the lexed words.
 _NRD_STDIN_DEV_RE = re.compile(r"/(?:dev/(?:stdin|stdout|stderr|fd/[^/]+)|proc/[^/]+/(?:task/[^/]+/)?fd/[^/]+)\Z")
 _NRD_STDIN_DEV_NAMES = frozenset(("stdin", "stdout", "stderr"))
+# The caller does not know a command word's working directory (_nrd_proc_launch): a relative word gets
+# the relative readings only.
+_NRD_CWD_UNREAD = object()
 
 
 def _nrd_stdin_device(path, bare_digits=False):
@@ -31280,18 +31283,18 @@ def _nrd_launch_reads_stdin(word, args):
     return False
 
 
-def _nrd_stdin_program(seg):
-    """True when a segment runs a shell, source or python-family word that reads its program from
-    standard input or a descriptor (a pipe into bash, sh, mksh, fish, csh or python3, bash -s, python3
-    -, bash /dev/stdin, source /dev/stdin, . /dev/fd/0, python3 /dev/fd/0, a quoted here-document or
-    here-string fed to one: _nrd_launch_reads_stdin): its body is never in the call's lexed words, so
-    the caller puts the call in scope whenever any directory is declared. The shells are the launch
-    shells (_NRD_LAUNCH_SHELLS), not only the guard's own shell words. The command word is found after
-    NAME=value prefixes, the env, nice, timeout and time wrappers (_gate_peel), and exec, command or
-    builtin with their options, and after any reserved word or grouping token that leads the segment
-    (if true; then bash; fi, while true; do bash; done, ! bash: _NRD_RESERVED_LEAD); behind a wrapper
-    carrying an option outside that grammar, the first shell, source or python-family word of the
-    segment is taken as the command word (fail closed: its own arguments decide)."""
+def _nrd_command_word_unresolved(seg, cwd):
+    """THE /PROC RULE (_nrd_proc_launch) for the command word _nrd_stdin_program finds (_nrd_stdin_command),
+    read with the working directory the scope walk knows: a relative command word is walked from cwd,
+    and with no known working directory (cwd None) it cannot be resolved and counts (cd /proc/self &&
+    ./exe, cd - && ./x). A segment whose peel cannot be read is _nrd_stdin_program's (it counts there)."""
+    eff = _nrd_stdin_command(seg)
+    return bool(eff) and _nrd_proc_launch(eff[0], cwd)
+
+
+def _nrd_stdin_command(seg):
+    """The words from a segment's command word on, as _nrd_stdin_program peels them (below); None when
+    an exec, command or builtin is followed by words the peel cannot read (fail closed)."""
     lead = 0
     while lead < len(seg.argv) and not seg.argv_opaque[lead] and seg.argv[lead] in _NRD_RESERVED_LEAD:
         lead += 1
@@ -31312,12 +31315,32 @@ def _nrd_stdin_program(seg):
             k += 2 if eff[0].rsplit("/", 1)[-1] == "exec" and eff[k] == "-a" else 1
         nxt = _gate_peel(eff[k:])
         if nxt is None:
-            return True
+            return None
         eff = nxt
+    return eff
+
+
+def _nrd_stdin_program(seg):
+    """True when a segment runs a shell, source or python-family word that reads its program from
+    standard input or a descriptor (a pipe into bash, sh, mksh, fish, csh or python3, bash -s, python3
+    -, bash /dev/stdin, source /dev/stdin, . /dev/fd/0, python3 /dev/fd/0, a quoted here-document or
+    here-string fed to one: _nrd_launch_reads_stdin): its body is never in the call's lexed words, so
+    the caller puts the call in scope whenever any directory is declared. The shells are the launch
+    shells (_NRD_LAUNCH_SHELLS), not only the guard's own shell words. The command word is found after
+    NAME=value prefixes, the env, nice, timeout and time wrappers (_gate_peel), and exec, command or
+    builtin with their options, and after any reserved word or grouping token that leads the segment
+    (if true; then bash; fi, while true; do bash; done, ! bash: _NRD_RESERVED_LEAD); behind a wrapper
+    carrying an option outside that grammar, the first shell, source or python-family word of the
+    segment is taken as the command word (fail closed: its own arguments decide)."""
+    eff = _nrd_stdin_command(seg)
+    if eff is None:
+        return True
     if not eff:
         return False
     if _nrd_proc_launch(eff[0]) or _nrd_proc_bare(eff[0]):
-        # /proc/self/exe, /dev/fd/3 and the rest: an interpreter whose name and grammar are not read
+        # THE /PROC RULE: a command word through /proc or a descriptor (/proc/self/exe, /dev/fd/3,
+        # /dev/fd/../exe, /dev/fd/3/exe 3</proc/self and the rest), or one this guard cannot resolve:
+        # an interpreter whose name and grammar are not read
         return True
     eff_oq = seg.argv_opaque[len(seg.argv) - len(eff):] if len(eff) <= len(seg.argv) else []
     if _nrd_starts_shell(_nrd_prog_name(eff[0]), eff[1:],
@@ -32026,60 +32049,153 @@ def _nrd_pkg_name_word(tok):
     return isinstance(tok, str) and "/" not in tok and "=" not in tok and not tok.startswith("-")
 
 
-# A command word that runs an interpreter its name does not show (F2): /proc/<pid, self or
-# thread-self>/exe (also below task/<tid>) is the running program itself (the shell reading the call, or
-# python), /proc/<...>/fd/N, /dev/fd/N and /dev/stdin run whatever file that descriptor holds open
-# (/dev/fd/3 3</bin/bash), and /proc/<...>/map_files/<range> runs a mapped file (the interpreter binary
-# among them). A /proc/<...>/root prefix is removed first (/proc/self/root/proc/self/exe). A relative
-# word with a slash is read without its working directory, since a cd can move it into /proc/self or
-# /dev/fd: it counts when its last component is exe, its last-but-one is map_files, or it names a
-# descriptor (_nrd_stdin_device with bare digits: ./0 after cd /dev/fd). Such a word is read as an
-# interpreter whose program and arguments the guard does not read: as a segment's command word, or after
-# a stdin wrapper, it puts the call in scope whenever a directory is declared.
-_NRD_PROC_LAUNCH_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?(?:exe|fd/[^/]+|map_files/[^/]+)\Z")
-_NRD_PROC_ROOT_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?root(?=/|\Z)")
-_NRD_PROC_CWD_RE = re.compile(r"/proc/[^/]+/(?:task/[^/]+/)?cwd/")
-# A path below a descriptor (/dev/fd/N/..., /dev/stdin/..., /proc/<...>/fd/N/...): the descriptor can
-# name a directory, such as one opened with 3</proc/self.
-_NRD_PROC_BELOW_FD_RE = re.compile(
-    r"(?:/proc/[^/]+/(?:task/[^/]+/)?fd/[^/]+|/dev/fd/[^/]+|/dev/std(?:in|out|err))/[^/]")
+# THE /PROC RULE (one class; it replaces the per-form readings of /proc/self/exe, '..' after a /proc or
+# /dev link, a path below a descriptor and the rest). /proc holds the running program itself
+# (/proc/<pid, self or thread-self>/exe, also below task/<tid>), every file a descriptor holds open
+# (fd/N, map_files/<range>, and a directory one: 3</proc/self makes /dev/fd/3/exe the shell), and
+# links back into the whole tree (root, cwd); /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr are
+# descriptors. None of them names the program it runs, and a descriptor can name any file or directory,
+# so no form-by-form list of them closes. The rule: a command word or launched path that passes through
+# /proc, /dev/fd, /dev/stdin, /dev/stdout or /dev/stderr at ANY component, in its text, after lexical
+# normalisation, or at any step of the resolution this guard performs (_nrd_proc_walk: each symbolic
+# link the filesystem shows is followed and a '..' applies to the resolved prefix, as the kernel does),
+# or whose resolution this guard cannot finish (a link loop, a component it cannot stat, a relative
+# word with no known working directory where the caller knows its position), is read as an interpreter
+# whose program and arguments the guard does not read: as a segment's command word, or after a stdin
+# wrapper, it puts the call in scope whenever a directory is declared. The walk never stats inside
+# /proc or a descriptor: it stops at the first such component. The relative readings of the earlier
+# releases stay as fail-closed readings for a word the walk cannot place (a relative word read without
+# its working directory counts when its last component is exe, its last-but-one is map_files, or it
+# names a descriptor: _nrd_stdin_device with bare digits, ./0 after cd /dev/fd), and so does reading an
+# absolute word with a '..' the relative way.
+_NRD_DESC_DEV_NAMES = frozenset(("fd", "stdin", "stdout", "stderr"))
+_NRD_WALK_LINKS = 40
+_NRD_WALK_STEPS = 512
 
 
-def _nrd_proc_launch(tok):
-    """True when a command word runs the program a /proc entry or a descriptor holds
-    (_NRD_PROC_LAUNCH_RE and the descriptor paths of _nrd_stdin_device), read as described above."""
+def _nrd_proc_text(path):
+    """True when an absolute path's components, read as written (empty and '.' components dropped),
+    start with proc, or with dev then fd, stdin, stdout or stderr."""
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    return bool(parts) and (parts[0] == "proc" or (parts[0] == "dev" and len(parts) > 1
+                                                   and parts[1] in _NRD_DESC_DEV_NAMES))
+
+
+def _nrd_proc_walk(path):
+    """(through, resolved) for an absolute path, resolved component by component the way the kernel
+    does: a symbolic link (os.lstat, os.readlink) is replaced by its target (an absolute target restarts
+    at /), a '..' removes the last component of the resolved prefix (and resumes the filesystem reads),
+    and a missing component pauses them (what follows is applied lexically). through is True when the path as written or any
+    prefix the walk reaches lies in /proc or a descriptor (_nrd_proc_text), or when the walk cannot
+    finish (more than _NRD_WALK_LINKS links or _NRD_WALK_STEPS components, or a stat or readlink error
+    other than a missing or non-directory component: cannot resolve, fail closed); resolved is the
+    resolved path (None when through)."""
+    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+        return True, None
+    if _nrd_proc_text(path) or _nrd_proc_text(os.path.normpath(path)):
+        return True, None
+    pending = [p for p in path.split("/") if p not in ("", ".")]
+    cur = "/"
+    links = 0
+    steps = 0
+    missing = False
+    while pending:
+        steps += 1
+        if steps > _NRD_WALK_STEPS:
+            return True, None
+        comp = pending.pop(0)
+        if comp == "..":
+            # back to the parent of the resolved prefix; the filesystem reads resume there (a component
+            # missing now, made later in the same call, can lead back to a real link: d/new/../x)
+            cur = os.path.dirname(cur)
+            missing = False
+            continue
+        nxt = os.path.join(cur, comp)
+        if _nrd_proc_text(nxt):
+            return True, None
+        if missing:
+            cur = nxt
+            continue
+        try:
+            st = os.lstat(nxt)
+        except (FileNotFoundError, NotADirectoryError):
+            missing = True
+            cur = nxt
+            continue
+        except (OSError, ValueError):
+            return True, None
+        if stat.S_ISLNK(st.st_mode):
+            links += 1
+            if links > _NRD_WALK_LINKS:
+                return True, None
+            try:
+                target = os.readlink(nxt)
+            except (OSError, ValueError):
+                return True, None
+            if target.startswith("/"):
+                cur = "/"
+                if _nrd_proc_text(target):
+                    return True, None
+            pending = [p for p in target.split("/") if p not in ("", ".")] + pending
+            continue
+        cur = nxt
+    return False, cur
+
+
+def _nrd_proc_launch(tok, cwd=_NRD_CWD_UNREAD):
+    """True when a command word or launched path is read under THE /PROC RULE above. cwd is the word's
+    working directory when the caller knows the word's position (an absolute path, or None when it is
+    unknown: a relative word then cannot be resolved and counts); left out, a relative word gets the
+    relative readings only."""
     if not isinstance(tok, str) or "/" not in tok:
         return False
     if tok.startswith("/"):
-        path = "/" + os.path.normpath(tok).lstrip("/")
-        for _round in range(16):
-            m = _NRD_PROC_ROOT_RE.match(path)
-            if m is None:
-                break
-            path = "/" + path[m.end():].lstrip("/")
-        m = _NRD_PROC_CWD_RE.match(path)
-        if m is not None:
-            # below the process's working directory: read as a relative word (fail closed)
-            return _nrd_proc_launch("./" + path[m.end():])
-        if _NRD_PROC_LAUNCH_RE.match(path) is not None or _nrd_stdin_device(path):
-            return True
-        if _NRD_PROC_BELOW_FD_RE.match(path) is not None:
-            # below a descriptor: a descriptor held open on a directory makes the rest of the path a
-            # lookup from that directory (/dev/fd/3/exe 3</proc/self is the running shell, and so is
-            # /dev/fd/3/self/exe 3</proc), so no such path is read as an ordinary program (fail closed)
+        if _nrd_proc_walk(tok)[0]:
             return True
         if ".." in tok.split("/"):
-            # the kernel resolves a '..' after a symbolic link from the link's target, not lexically:
-            # /dev/fd/../exe is /proc/self/exe (/dev/fd links to /proc/self/fd), and so are
-            # /proc/self/root/../proc/self/exe, /proc/net/../exe and /proc/thread-self/../../exe, which
-            # normpath reads as /dev/exe and the like. Such a word is read as a relative one (fail closed)
+            # kept reading (fail closed): an absolute word with a '..' also gets the relative readings
             return _nrd_proc_launch("./" + tok.lstrip("/"))
         return False
     parts = [p for p in tok.split("/") if p not in ("", ".")]
     if not parts:
         return False
-    return parts[-1] == "exe" or (len(parts) >= 2 and parts[-2] == "map_files") \
-        or _nrd_stdin_device(tok, bare_digits=True)
+    if parts[-1] == "exe" or (len(parts) >= 2 and parts[-2] == "map_files") \
+            or _nrd_stdin_device(tok, bare_digits=True):
+        return True
+    if cwd is _NRD_CWD_UNREAD:
+        return False
+    if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+        return True                         # no known working directory: cannot resolve (fail closed)
+    return _nrd_proc_walk(os.path.join(cwd, tok))[0]
+
+
+def _nrd_path_unresolved(seg, cwd):
+    """True when a segment sets PATH (a PATH= or PATH+= word anywhere in it: a prefix assignment, export,
+    declare, env and the rest) to a value with an entry a bare command word's search could land in /proc
+    or on a descriptor through, or one this guard cannot resolve: an entry whose resolution passes
+    through /proc or a descriptor (_nrd_proc_walk), the /dev directory itself (PATH=/dev stdin), a
+    relative or empty entry with no known working directory (cwd None), or an entry holding an expansion,
+    a glob, a brace or a tilde (only $PATH and ${PATH} are read, as the inherited search). An opaque
+    PATH word counts. The inherited PATH of an earlier call is not read (a listed residual)."""
+    for k, tok in enumerate(seg.argv):
+        name, sep, value = tok.partition("=")
+        if not sep or (name[:-1] if name.endswith("+") else name) != "PATH":
+            continue
+        if seg.argv_opaque[k] and "$" not in value:
+            return True
+        for entry in value.split(":"):
+            if entry in ("$PATH", "${PATH}"):
+                continue
+            if any(ch in entry for ch in "$`~*?[{\\\"'"):
+                return True
+            if not entry.startswith("/"):
+                if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+                    return True
+                entry = os.path.join(cwd, entry)
+            through, resolved = _nrd_proc_walk(entry)
+            if through or resolved == "/dev":
+                return True
+    return False
 
 
 def _nrd_proc_bare(tok):
@@ -32093,14 +32209,16 @@ def _nrd_proc_bare(tok):
 
 
 def _nrd_proc_exe(tok):
-    """_nrd_proc_launch without the descriptor paths: the /proc/<...>/exe and map_files forms (and a
-    relative word ending in exe or below map_files), the reading behind a stdin wrapper, where a
-    descriptor path is an operand far more often than a command word (make -f /dev/stdin)."""
+    """_nrd_proc_launch without the plain descriptor paths: every word THE /PROC RULE reads apart from a
+    descriptor itself (/dev/stdin, /dev/fd/N, /proc/<...>/fd/N; an exe or map_files path still counts,
+    and so does a path below a descriptor), the reading behind a stdin wrapper, where a descriptor path
+    is an operand far more often than a command word (make -f /dev/stdin)."""
     if not _nrd_proc_launch(tok):
         return False
     if tok.startswith("/"):
         path = "/" + os.path.normpath(tok).lstrip("/")
-        return not _nrd_stdin_device(path) or "/map_files/" in path or path.endswith("/exe")
+        # a plain descriptor by its pattern (_NRD_STDIN_DEV_RE), as _nrd_stdin_device reads one
+        return _NRD_STDIN_DEV_RE.match(path) is None or "/map_files/" in path or path.endswith("/exe")
     return not _nrd_stdin_device(tok, bare_digits=True)
 
 
@@ -32152,11 +32270,10 @@ def _nrd_starts_shell(word, args, oq=None):
             takes = "=" not in tok and len(name) >= 3 and any(o.startswith(name) for o in _NRD_SUDO_VALUE_LONG)
             i += 2 if takes else 1
             continue
-        if tok.startswith("--") and len(tok) > 2:
-            # doas has no long options: getopt rejects --version and the shell never starts, so its
-            # letters are not read as a cluster (doas --version holds an s)
-            i += 1
-            continue
+        # doas has no long options (getopt rejects --version before any shell starts), but a doas word
+        # whose letters hold an s is still read as a cluster, as 74fe3128 read it: the no-reduction rule
+        # keeps every decision 74fe3128 denies denied, so doas --version stays refused (an accepted
+        # over-deny, in every mode)
         if len(tok) > 1 and tok[0] == "-":
             shell_letters = "si" if word == "sudo" else "s"
             value_letters = _NRD_SUDO_VALUE_LETTERS if word == "sudo" else _NRD_DOAS_VALUE_LETTERS
@@ -32578,6 +32695,20 @@ def _nrd_wide_unproven(seg, cwd, dirs):
 
 
 def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
+    """_nrd_scope_scan_body, which never raises: an input the scan cannot evaluate (any exception while
+    reading or judging it, such as the TypeError one ANSI-C here-document delimiter raised) is refused as
+    cannot-evaluate, in every mode (check-fails-closed-on-unreadable; in tripwire mode the deny text
+    names this reason like any other)."""
+    try:
+        return _nrd_scope_scan_body(command, cwd, dirs, _depth, mode=mode)
+    except Exception as exc:            # noqa: BLE001 - every scan failure is a cannot-evaluate deny
+        return ("this command", "cannot be evaluated by this guard's scan (the scan raised {}), so whether "
+                                "it reaches a declared directory or runs a program this guard does not "
+                                "read cannot be ruled out; restate it in a simpler form, or write file "
+                                "content with the Write tool".format(exc.__class__.__name__))
+
+
+def _nrd_scope_scan_body(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
     """The allowlist-by-construction judgement of one Bash command against the declared directories:
     (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text (or
     a copy with each $'...' ANSI-C span decoded to bash's spelling) names a declared directory
@@ -32695,6 +32826,15 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
                               or any(_nrd_match(r.target, walk_cwd, dirs) is True
                                      for r in seg.redirects)):
                 scope = True
+            if not scope and dirs and _nrd_command_word_unresolved(seg, None if cwd_lost else walk_cwd):
+                # THE /PROC RULE for a relative command word: walked from the working directory the walk
+                # knows (cd /proc/self && ./exe), and unresolvable with none (fail closed, in every mode)
+                scope = True
+            if not scope and dirs and _nrd_path_unresolved(seg, None if cwd_lost else walk_cwd):
+                # THE /PROC RULE for a bare command word: a PATH this call sets with an entry through
+                # /proc or a descriptor, /dev itself, or one this guard cannot resolve (PATH=/proc/self
+                # exe, PATH=/dev stdin, cd /proc/self && PATH=. exe; fail closed, in every mode)
+                scope = True
             if not scope and _nrd_assigned_value_in(seg, walk_cwd, dirs):
                 # the value of an assignment or --option= word resolves into a declared directory
                 # (PYTHONPATH=drafts, BASH_ENV=drafts/x.sh, PATH=drafts:/usr/bin)
@@ -32754,6 +32894,15 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
 
 
 def _nrd_candidate(command):
+    """_nrd_candidate_body, which never raises: a command it cannot evaluate counts as a candidate (the
+    malformed-configuration posture denies it, fail closed)."""
+    try:
+        return _nrd_candidate_body(command)
+    except Exception:                   # noqa: BLE001 - a cannot-evaluate input is a candidate
+        return True
+
+
+def _nrd_candidate_body(command):
     """True when a command holds a segment the malformed-configuration posture refuses: an interpreter
     word, source or the dot builtin, exec, direct execution of a path, an opaque indirection word, or a
     loader-environment assignment; an unlexable command counts when its raw text holds an
