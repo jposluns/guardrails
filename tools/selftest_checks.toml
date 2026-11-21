@@ -2622,6 +2622,8 @@ expected-check-ids = [
   "V9/unborn-commit",
   "V10/refused-earlier-failure",
   "V10/flip-no-stub-commits",
+  "V17/tree-moved-exit-0-commits",
+  "V17/flip-tree-moved-exit-1-refused",
   "V11-V13/baseline-pass",
   "V11/symlink-log-exit",
   "V11/symlink-log-refused",

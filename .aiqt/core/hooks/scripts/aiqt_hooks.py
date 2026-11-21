@@ -44645,14 +44645,22 @@ class _DeadlineWindow:
 #
 # The stubs run the verifier from HEAD's committed aiqt_hooks.py (the index's on an unborn branch), copied to a
 # temporary file, never from the working tree or stdin, and read the configuration from the commit the change is
-# built on, so a commit cannot lower its own bar or change the verifier that judges it. No path, tree or set is
-# read from the environment. A record line is a JSON object with exactly _GR_KEYS, in that order.
+# built on, so a commit on an existing branch cannot change the configured check set or the verifier that
+# judges it (an unborn, orphan, branch reads both from its own index, and pre-push reads a root commit's own
+# configuration, so an orphan branch sets its own check set: a disclosed residual). The check set's
+# argv still runs the code of the tree under test, so a commit that changes the check's own code (for example
+# tools/run_all_checks.sh) is judged by that changed code. No path, tree or set is read from the environment. A
+# record line is a JSON object with exactly _GR_KEYS, in that order.
 # Disclosed residuals (each closed by the required Quality gates re-run on the merged tree, or disclosed): R1 git
 # commit or push --no-verify skips the hooks (the text guard denies the spellings it reads); R2 a client that runs
-# no hooks, a core.hooksPath set later or on the command line, or a removed stub; R3 a same-user process that
-# appends a forged record or edits a stub (the Write/Edit path deny of gate_record_path_guard narrows the tool
-# route only); R4 cherry-pick, revert, rebase and am commit without a pre-commit hook (pre-push still checks the
-# pushed tip); R5 the record binds the tree, not the environment or ignored files; R6 a stub reads the verifier
+# no hooks, a core.hooksPath set later or on the command line, a removed stub, and git plumbing that runs no
+# hook (git commit-tree with git update-ref makes a commit, git send-pack pushes one); R3 a same-user process,
+# the checked command itself included, that appends or rewrites a record or edits a stub (the Write/Edit path
+# deny in write_scope_guard, _wrtscp_gate_record_hit, narrows the tool route only); R4 cherry-pick, revert,
+# rebase and am commit without a pre-commit hook (pre-push still checks the pushed tip); R5 the record binds the
+# tree, not the environment, the parent commit or ignored files, and the check runs the tree's own code; the log
+# is per worktree, so a push from another worktree finds no record and refuses, and removing a linked worktree
+# drops its records; the stubs write their temporary verifier copy under TMPDIR (or /tmp); R6 a stub reads the verifier
 # from HEAD, so a commit that changes it is judged by the old one, but the commit after it runs the new one;
 # R7 pre-push checks tips only; R8 same-user races on the index or the log; and an earlier failure older than
 # the 64 KiB tail the verifier reads is not seen.
@@ -44976,8 +44984,11 @@ def _gr_judge(records, tree, set_name, argv, newest_overall):
     if last["set"] != set_name or tuple(last["argv"]) != tuple(argv):
         return ("a different check set: the record for tree {} is for set {!r} {}, the configuration requires {!r} "
                 "{}; {}".format(tree, last["set"], last["argv"], set_name, list(argv), fix))
+    # A tree-moved record whose check exited 0 is no failure of the check (the tree changed under it, so its
+    # result binds no tree); only a fail, or a tree-moved run whose check also exited nonzero, stays an earlier
+    # failure of this tree.
     earlier = [record for record in known if record is not last and record["tree"] == tree
-               and record["result"] in ("fail", "tree-moved")]
+               and (record["result"] == "fail" or (record["result"] == "tree-moved" and record["exit"] != 0))]
     if earlier:
         return ("an earlier run on this tree failed: tree {} has a {} record (exit {}) before the pass, and a later "
                 "pass does not erase it (rule integ-rerun-pass-is-still-failure); change the tree to fix the "

@@ -21,6 +21,8 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          the same tree (refuses: orchestrator answer O6), a symbolic-link log, a group- or world-writable log,
          four malformed last lines, a forged log named in the environment (ignored), pre-push over several
          tips and a deletion, and pre-merge-commit on a clean merge.
+  V17    a tree-moved record whose check exited 0 is no earlier failure (the restored tree's pass commits);
+         its flip, a tree-moved record whose check also exited 1, still refuses.
   X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
@@ -362,6 +364,23 @@ def rows_verify(base):
                   (True, True))
         else:
             check("V10/flip-no-stub-commits", done.returncode, 0)
+    # V17: a tree-moved record whose check exited 0 (the tree changed under the run; the check did not fail) is no
+    # earlier failure, so once the tree is restored a pass on it commits. Its flip: the same run with the check
+    # also exiting 1 (tree-moved, exit 1) still refuses as an earlier failure.
+    for failed in (False, True):
+        repo = fixture(base)
+        stage(repo, "b.txt", "b\n")
+        extra = {"FIXTURE_EDIT": "1", "FIXTURE_EXIT": "1"} if failed else {"FIXTURE_EDIT": "1"}
+        gate(repo, "run", extra=extra)
+        git_out(repo, "checkout", "--", "a.txt")
+        gate(repo, "run")
+        before = head(repo)
+        done = commit(repo, "v17")
+        if failed:
+            check("V17/flip-tree-moved-exit-1-refused",
+                  refused_commit(repo, before, done, "an earlier run on this tree failed"), (True, True))
+        else:
+            check("V17/tree-moved-exit-0-commits", done.returncode, 0)
     rows_log_tamper(base)
     for installed in (True, False):
         repo = fixture(base, installed)
