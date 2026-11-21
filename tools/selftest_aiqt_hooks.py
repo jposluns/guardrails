@@ -6228,6 +6228,76 @@ def _test_fallback_views(failures):
         aiqt_hooks._decoded_readings = readings
 
 
+# (sdr-*) commit_msg_subst, commit_identity, git_explicit_binding and diff_source_pretool read the static decoded
+# reading (_ansi_c_static_reading) beside the command: a git word, subcommand or option spelled with an ANSI-C escape
+# or a locale quote, which bash assembles from the command text alone, is judged as its plain spelling is. Each row
+# is (label, handler name, command, want, decision under the flip or None when not pinned): the -git, -sub, -opt and
+# -locale rows were allowed (or only noted) before and now take the plain spelling's decision (the -plain rows);
+# the -none rows hold the allow of a command whose decoded reading spells no hazard (an ANSI-C message, and an
+# ANSI-C escape inside double quotes, which bash keeps literal, so no backquote substitution is read there).
+_STATIC_DECODED_ROWS = (
+    ("sdr-sectvl-git", "commit_msg_subst", "$'\\x67'it commit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-sectvl-sub", "commit_msg_subst", "true && git c$'\\157'mmit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-sectvl-locale", "commit_msg_subst", "gi$\"t\" commit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-sectvl-plain", "commit_msg_subst", "git commit -m \"`hostname`\"", "deny", None),
+    ("sdr-sectvl-none", "commit_msg_subst", "git commit -m \"note: $'\\x60'id$'\\x60' stays literal\"", "allow",
+     None),
+    ("sdr-cmtidn-sub", "commit_identity", "git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny",
+     "allow"),
+    ("sdr-cmtidn-opt", "commit_identity", "git commit -$'\\055'author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny",
+     "allow"),
+    ("sdr-cmtidn-trailer", "commit_identity",
+     "git commit -m $'x\\n\\nCo-Authored-\\x42y: " + _AI_TRAILER_VALUE + "'", "deny", "allow"),
+    ("sdr-cmtidn-plain", "commit_identity", "git commit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny", None),
+    ("sdr-cmtidn-none", "commit_identity", "git commit -m $'feat: x\\n\\nbody line'", "allow", None),
+    ("sdr-expbnd-sub", "git_explicit_binding", "git add --all && git $'\\x70'ush", "deny", "allow"),
+    ("sdr-expbnd-opt", "git_explicit_binding", "git add -''-$'\\x61'll && git push", "deny", "allow"),
+    ("sdr-expbnd-locale", "git_explicit_binding", "git add --all && gi$\"t\" push", "deny", "allow"),
+    ("sdr-expbnd-plain", "git_explicit_binding", "git add --all && git push", "deny", None),
+    ("sdr-expbnd-none", "git_explicit_binding", "git add src/a.py && git commit -m $'a\\nb'", "allow", None),
+    ("sdr-cnsdif-git", "diff_source_pretool", "$'\\x67'it log -p", "deny", "allow"),
+    ("sdr-cnsdif-sub", "diff_source_pretool", "git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-cnsdif-opt", "diff_source_pretool", "git log $'\\x2d'p", "deny", "allow-note"),
+    ("sdr-cnsdif-plain", "diff_source_pretool", "git log -p", "deny", None),
+    ("sdr-cnsdif-none", "diff_source_pretool", "git commit -m $'a\\tb'", "allow", None),
+)
+
+
+def _test_static_decoded_reading(failures):
+    """(sdr-*) The static decoded reading (_ansi_c_static_reading) is read beside the command by four guards:
+    _STATIC_DECODED_ROWS. Each row runs as given, then each pinned row runs again under a flip that reads no static
+    decoded reading (the command itself returned), where it must take its old decision, so the row is red on the
+    old reading. A direct check holds the reading itself: an escape decoded unquoted where its text is plain, a
+    single-quoted body otherwise, and an ANSI-C quote inside double quotes left as written."""
+    for label, name, command, want, _old in _STATIC_DECODED_ROWS:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+    for label, command, want in (
+            ("sdr-reading-plain", "git $'\\x6c'og -p", "git log -p"),
+            ("sdr-reading-quoted", "printf $'a\\tb'", "printf 'a\tb'"),
+            ("sdr-reading-dq-literal", "echo \"$'\\x60'\"", "echo \"$'\\x60'\""),
+            ("sdr-reading-dq-subst", "echo \"$(git $'\\x6c'og)\"", "echo \"$(git log)\""),
+            ("sdr-reading-locale", "gi$\"t\" log", "gi\"t\" log"),
+            ("sdr-reading-sq-literal", "echo '$\\x67'", "echo '$\\x67'")):
+        got = aiqt_hooks._ansi_c_static_reading(command)
+        if got != want:
+            failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
+                label, command, want, got))
+    reading = aiqt_hooks._ansi_c_static_reading
+    aiqt_hooks._ansi_c_static_reading = lambda command: command
+    try:
+        for label, name, command, _want, old in _STATIC_DECODED_ROWS:
+            if old is None:
+                continue
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != old:
+                failures.append("({}-flip) with no static decoded reading the row must take its old decision {}, "
+                                "so it pins the reading; got {}".format(label, old, got))
+    finally:
+        aiqt_hooks._ansi_c_static_reading = reading
+
+
 def _test_heredoc_terminator(failures):
     """(hd-*) heredoc_terminator (sectvl): every heredoc opener bash acts on needs a later line exactly equal to
     its delimiter (after the line's leading tabs for <<-) before the end of the command, or the command is
@@ -38473,6 +38543,7 @@ def _main_isolated(monitor):
         _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_fallback_views(failures)
+        _test_static_decoded_reading(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
