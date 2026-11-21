@@ -228,7 +228,8 @@ import statement in the same scope included, can then load from the mutated path
 by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
 lambda or comprehension shares the name of the function, class or module around it, and two
 scopes with one dotted name, such as a function defined twice, one name in both branches of an
-if, or a class and a function of one name, are paired, which errs toward reporting; a mutation
+if, a class and a function of one name, an async def and a def of one name, or methods of one
+name in two classes of one name, are paired, which errs toward reporting; a mutation
 and an importer whose enclosing dotted names differ are not paired: an insert in one function
 and the importer in a function of another name, a mutation whose importer is in a nested
 function, a mutation in a nested function whose importer is in the function around it, a
@@ -3728,7 +3729,8 @@ def self_test():
     enter, finish = _Scanner._enter, scanner_methods["finish"]
 
     def own_name(self, node):
-        self.qual.append("<" + type(node).__name__ + ">")
+        # Line and column too, so two lambdas or comprehensions in one scope never share a name.
+        self.qual.append("<{}@{}:{}>".format(type(node).__name__, node.lineno, node.col_offset))
         try:
             enter(self, node)
         finally:
