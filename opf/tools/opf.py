@@ -1727,14 +1727,17 @@ _REAPER_COMPETE_BOUND = 80
 
 class _WatchdogBoundReached(BaseException):
     """A watchdog leg reached a bound that the behaviour under test does not
-    decide: a _watchdog_completion_case launch() that reached its own
-    process bound, or a setup wait (a fixture event the exercise needs
-    before it can judge anything) that reached its own. That run said
-    nothing about the behaviour its leg tests, so _watchdog_leg_entry
-    reports the leg as the distinct CANNOT-EVALUATE (the marker on a clean
-    exit), never a pass and never a finding. A BaseException, so no
-    assertion helper's `except` (refuses() included) can read it as the
-    refusal it expects. A guarded assertion never raises it."""
+    decide: a _watchdog_completion_case launch_or_no_verdict() (only the
+    call sites converted to it; every other launch() that reaches its bound
+    propagates TimeoutExpired, as before) that reached its own process
+    bound, or a setup wait (a fixture event the exercise needs before it
+    can judge anything) that reached its own. That run said nothing about
+    the behaviour its leg tests, so _watchdog_leg_entry reports the leg as
+    the distinct CANNOT-EVALUATE (the marker on a clean exit), never a pass
+    and never a finding. A BaseException, so no assertion helper's `except`
+    (refuses() included) can read it as the refusal it expects. A guarded
+    assertion never raises it, and every outcome a leg has already captured
+    is judged before any wait or launch that may raise it."""
 
 
 def _watchdog_bounded_await(reached, bound, note, setup, pending=None, clock=None):
@@ -1754,6 +1757,25 @@ def _watchdog_bounded_await(reached, bound, note, setup, pending=None, clock=Non
             raise _WatchdogBoundReached(note + ": its kill is observed pending; only its exit "
                                                "was unscheduled at the bound")
         time.sleep(0.005)
+
+
+def _watchdog_degraded_judge(message, flip, subject_exit):
+    """Judge one escalate-degraded exercise: its captured refusal message FIRST, then
+    subject_exit(), the guarded wait for the unacknowledged subject's death. The message is
+    decided before that wait begins, so a wrong one is a definite failure even when the wait
+    then reaches its bound with the subject's SIGKILL observed pending (no verdict,
+    _WatchdogBoundReached): the wait can only add a failure or a no verdict to a message
+    that held. flip is the by-pid suffix mutant, which must reproduce the false
+    frozen-guardian, killed-tree claim. Returns the message."""
+    if flip:
+        assert "subject tree killed" in message, \
+            ("the flip did not reproduce the false claim", message)
+    else:
+        assert "subject cleanup unverified" in message, message
+        assert "guardian not frozen" in message, message
+        assert "subject tree killed" not in message, message
+    subject_exit()
+    return message
 
 
 # The tree legs' startup liveness backstop (nested-timeout/nested-cancel).
@@ -5654,13 +5676,22 @@ def _watchdog_completion_case(mode, tree=None):
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
     def launch(code="return 0", bound=_COMPLETION_LAUNCH_TIMEOUT, **kwargs):
+        # A launch that reaches its bound propagates TimeoutExpired: every row
+        # whose body was not converted (audit-ignore, nonce, fixture-id,
+        # status, early-exit, guardian-error, cleanup-budget, empty-children)
+        # keeps exactly that outcome.
+        return emit.run_status_owned([*command[:4], code],
+                                     fixture_id="completion/" + mode,
+                                     timeout=bound, **kwargs)
+
+    def launch_or_no_verdict(code="return 0", bound=_COMPLETION_LAUNCH_TIMEOUT, **kwargs):
+        # ONLY the converted call sites (premature-exit, reaper, cleanup-cancel),
+        # each of which judges what reaching the bound means at that point:
+        # the launch finished nothing the leg judges, so no verdict (see
+        # _WatchdogBoundReached), never a failure.
         try:
-            return emit.run_status_owned([*command[:4], code],
-                                         fixture_id="completion/" + mode,
-                                         timeout=bound, **kwargs)
+            return launch(code, bound, **kwargs)
         except subprocess.TimeoutExpired as exc:
-            # The launch reached its own bound, so it finished nothing the leg
-            # judges: no verdict (see _WatchdogBoundReached), never a failure.
             raise _WatchdogBoundReached("completion/%s: a launch reached its %s s bound (%r)"
                                          % (mode, bound, code)) from exc
 
@@ -5917,6 +5948,15 @@ def _watchdog_completion_case(mode, tree=None):
         assert events and signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN
     elif mode == "reaper":
         real_wait = emit._fixture_wait
+
+        def disposition_kept():
+            # The owner never changes SIGCHLD (it refuses a launch whose
+            # disposition is not SIG_DFL), so a changed one is a definite
+            # failure whatever the competing reap did: checked before any
+            # no verdict below can end the leg.
+            assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL, \
+                "completion/reaper: the launch left SIGCHLD changed"
+
         for code in ("return 0", "import os; os._exit(37)"):
             stolen, competed, expired = [], [], []
 
@@ -5946,7 +5986,7 @@ def _watchdog_completion_case(mode, tree=None):
 
             with patch.object(emit, "_fixture_wait", compete):
                 try:
-                    refuses(emit.ChildStatusUnavailable, lambda: launch(code))
+                    refuses(emit.ChildStatusUnavailable, lambda: launch_or_no_verdict(code))
                 except _WatchdogBoundReached:
                     # Once the competing reap landed, the owner's own wait was
                     # handed ECHILD in that same poll, which refuses at once
@@ -5955,10 +5995,12 @@ def _watchdog_completion_case(mode, tree=None):
                     # reap landed the bound is a setup bound (no verdict).
                     assert not stolen, "completion/reaper: the owner was handed ECHILD " \
                         "and ran to its launch bound instead of refusing"
+                    disposition_kept()
                     raise
             if expired:
                 # The owner's cleanup may have replaced the no-verdict on its
                 # way out; the reap never landed, so nothing was judged.
+                disposition_kept()
                 raise _WatchdogBoundReached(expired[0])
             assert len(stolen) == 1 and os.waitstatus_to_exitcode(stolen[0][1]) == 0
             assert signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
@@ -6002,12 +6044,13 @@ def _watchdog_completion_case(mode, tree=None):
         refuses(emit.FixtureIncomplete, lambda: launch("import os; os._exit(0)"))
     elif mode == "premature-exit":
         bound = _PREMATURE_EXIT_LAUNCH_TIMEOUT
-        launch("return 0", bound)  # normal-return control
+        launch_or_no_verdict("return 0", bound)  # normal-return control
         for code in ("raise SystemExit()", "raise SystemExit(0)",
                      "raise RuntimeError('before postconditions')"):
-            refuses(emit.FixtureIncomplete, lambda: launch(code, bound))
+            refuses(emit.FixtureIncomplete, lambda: launch_or_no_verdict(code, bound))
         # CLI exit-status subjects have an explicit, separately supervised path.
-        launch("raise SystemExit(2)", bound, process_fixture=True, expected_returncode=2)
+        launch_or_no_verdict("raise SystemExit(2)", bound, process_fixture=True,
+                             expected_returncode=2)
     elif mode in ("nested-timeout", "nested-cancel"):
         verdict, cause = _watchdog_tree_case(mode, **(tree or {}))
         if verdict != "pass":
@@ -6053,7 +6096,7 @@ def _watchdog_completion_case(mode, tree=None):
 
         with patch.object(emit, "_fixture_wait", cancel):
             try:
-                refuses(RuntimeError, lambda: launch("import time; time.sleep(60)"))
+                refuses(RuntimeError, lambda: launch_or_no_verdict("import time; time.sleep(60)"))
             except _WatchdogBoundReached:
                 # The subject outlives the launch bound by design, so only the
                 # cancellation can end this launch early. Before the cancel was
@@ -8577,20 +8620,18 @@ def _watchdog_completion_case(mode, tree=None):
                         failures.append(str(exc))
                 assert failures and "escalat" in failures[0], failures
                 assert child.subject_pid == subject, (child.subject_pid, subject)
-                await_state(subject, (None, "Z"),
-                            "the unacknowledged subject outlived the degraded escalation",
-                            setup=False)
-                return failures[0]
+                # The captured diagnostic is judged BEFORE the subject-exit
+                # wait: that wait reaching its bound on a pending SIGKILL is
+                # no verdict, which must never hide a wrong message.
+                return _watchdog_degraded_judge(
+                    failures[0], flip,
+                    lambda: await_state(subject, (None, "Z"), "the unacknowledged subject "
+                                        "outlived the degraded escalation", setup=False))
 
-            message = exercise(flip=False)
-            assert "subject cleanup unverified" in message, message
-            assert "guardian not frozen" in message, message
-            assert "subject tree killed" not in message, message
+            exercise(flip=False)
             # Flip: the by-pid suffix claims the frozen guardian and killed tree
             # this degraded escalation never performed.
-            flipped = exercise(flip=True)
-            assert "subject tree killed" in flipped, \
-                ("the flip did not reproduce the false claim", flipped)
+            exercise(flip=True)
     elif mode == "poll-masked":
         import time
         # Masked design: poll()'s whole
@@ -16095,7 +16136,14 @@ def _watchdog_load_route_vectors():
     launch bound reached before the cancel is raised is no verdict, one reached after it
     (the cancellation did not end the launch) fails the leg. deadline-flips: a mutant run
     that was never established is never read as detected: no verdict on a flip whose check
-    needs the subject to run, a failure of the late-deadline flip, whose check does not."""
+    needs the subject to run, a failure of the late-deadline flip, whose check does not.
+    unconverted launch rows (audit-ignore, nonce, fixture-id, status, early-exit,
+    guardian-error, cleanup-budget, empty-children): a launch that reached its bound still
+    propagates TimeoutExpired out of the leg (pre-fix: the shared launch() made it no
+    verdict in every row). escalate-degraded's diagnostic: judged before the guarded
+    subject-exit wait, so a wrong one fails also when that wait ends on a pending kill
+    (pre-fix: no verdict). reaper: a SIGCHLD the launch changed fails the leg also when
+    the competing reap never landed (pre-fix: no verdict)."""
     import contextlib
     import io
     import subprocess
@@ -16187,7 +16235,7 @@ def _watchdog_load_route_vectors():
                 return real_waitpid(pid, flags)
             if pid in collected:
                 raise ChildProcessError(10, "No child processes")
-            if script == "late":
+            if script in ("late", "late-disposition", "replaced", "replaced-disposition"):
                 if not flags & os.WNOHANG:
                     release.wait(30)  # only a blocking reaper waits here; released below
                 return 0, 0
@@ -16195,8 +16243,16 @@ def _watchdog_load_route_vectors():
             return pid, (125 << 8 if script == "guardian-failed" else 0)
 
         def owned(argv, *, fixture_id, timeout, **kwargs):
+            if script.endswith("-disposition"):
+                # A broken owner that changes SIGCHLD (restored below).
+                signal.signal(signal.SIGCHLD, lambda *args: None)
             try:
                 emit._fixture_wait(next(guardians), os.WNOHANG)
+            except _WatchdogBoundReached:
+                if script.startswith("replaced"):
+                    # The owner's cleanup replaces the no-verdict on its way out.
+                    raise emit.ChildStatusUnavailable("cleanup replaced the backstop")
+                raise
             except emit.ChildStatusUnavailable:
                 if script == "waits-out":
                     # A broken owner that keeps waiting after ECHILD until
@@ -16218,12 +16274,18 @@ def _watchdog_load_route_vectors():
                     return "fail"
         finally:
             release.set()
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)  # run only at SIG_DFL (below)
         return _watchdog_completion_verdict(rc, out.getvalue())
 
+    # A SIGCHLD changed by the launch fails the leg also when the competing
+    # reap never landed, whichever way the no verdict leaves the launch
+    # (pre-fix: the no verdict skipped the disposition check).
     if signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL:
         for script, want in (("late", "cannot-evaluate"), ("reaped", "pass"),
                              ("accepted", "fail"), ("guardian-failed", "fail"),
-                             ("waits-out", "fail")):
+                             ("waits-out", "fail"), ("late-disposition", "fail"),
+                             ("replaced", "cannot-evaluate"),
+                             ("replaced-disposition", "fail")):
             got = reaper(script)
             if got != want:
                 misses.append("reaper with a %s competing reap -> %r, want %r" % (script, got, want))
@@ -16338,6 +16400,95 @@ def _watchdog_load_route_vectors():
         got = flips(outcomes)
         if got != want:
             misses.append("deadline-flips over %r mutant runs -> %r, want %r" % (outcomes, got, want))
+
+    # The unconverted launch rows: the real leg, run in process over a scripted
+    # run_status_owned whose launch reaches its bound, propagates TimeoutExpired
+    # exactly as before this change; only the converted call sites
+    # (premature-exit, reaper, cleanup-cancel, above) read it as no verdict
+    # (pre-fix: the shared launch() made it no verdict in every row).
+    # audit-ignore's irreversible audit hook is stubbed out; no launch here
+    # reaches a process.
+    def unconverted(mode):
+        def owned(argv, *, fixture_id, timeout, **kwargs):
+            raise subprocess.TimeoutExpired(argv, timeout)
+
+        out = io.StringIO()
+        with patch.object(emit, "run_status_owned", owned), \
+                patch.object(sys, "addaudithook", lambda hook: None), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                rc = _watchdog_leg_entry(1, _watchdog_completion_case, mode)
+            except subprocess.TimeoutExpired:
+                return "raised-timeout"
+            except AssertionError:
+                return "fail"
+        return _watchdog_completion_verdict(rc, out.getvalue())
+
+    for mode in ("audit-ignore", "nonce", "fixture-id", "status", "early-exit",
+                 "guardian-error", "cleanup-budget", "empty-children"):
+        got = unconverted(mode)
+        if got != "raised-timeout":
+            misses.append("%s over a launch that reached its bound -> %r, want its "
+                          "TimeoutExpired propagated" % (mode, got))
+
+    # escalate-degraded: the captured diagnostic is judged before the guarded
+    # subject-exit wait, so a wrong diagnostic stays a failure when that wait
+    # reaches its bound with the subject's kill observed pending (pre-fix: the
+    # wait ran first and its no verdict hid the wrong message). The real leg's
+    # exercise must route its guarded wait through the judge.
+    held = ("fixture guardian failed; after degraded escalation (guardian not frozen, "
+            "subject cleanup unverified)")
+    claimed = ("fixture guardian failed; after bounded-close escalation (guardian frozen, "
+               "subject tree killed, guardian SIGKILL)")
+
+    def degraded(judge, message, flip, wait):
+        ticks = iter((0.0, 100.0, 100.0))
+
+        def subject_exit():
+            _watchdog_bounded_await(lambda: wait == "exited", 10.0, "vector", False,
+                                    lambda: wait == "pending", clock=lambda: next(ticks))
+
+        try:
+            judge(message, flip, subject_exit)
+        except _WatchdogBoundReached:
+            return "no-verdict"
+        except AssertionError:
+            return "fail"
+        return "pass"
+
+    def pre_fix_degraded(message, flip, subject_exit):
+        subject_exit()
+        return _watchdog_degraded_judge(message, flip, lambda: None)
+
+    for args, want in (((held, False, "exited"), "pass"), ((held, False, "pending"), "no-verdict"),
+                       ((held, False, "outlived"), "fail"), ((claimed, False, "pending"), "fail"),
+                       ((claimed, False, "exited"), "fail"), ((claimed, True, "pending"), "no-verdict"),
+                       ((claimed, True, "exited"), "pass"), ((held, True, "pending"), "fail")):
+        got = degraded(_watchdog_degraded_judge, *args)
+        if got != want:
+            misses.append("escalate-degraded judge %r -> %r, want %r"
+                          % (("held" if args[0] is held else "claimed",) + args[1:], got, want))
+    if degraded(pre_fix_degraded, claimed, False, "pending") != "no-verdict":
+        misses.append("the escalate-degraded judge vector does not discriminate the pre-fix order")
+    import ast
+    import inspect
+    routed = []
+    for node in ast.walk(ast.parse(inspect.getsource(_watchdog_completion_case))):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "exercise"):
+            continue
+        calls = [call for call in ast.walk(node) if isinstance(call, ast.Call)
+                 and isinstance(call.func, ast.Name)]
+        judges = [call for call in calls if call.func.id == "_watchdog_degraded_judge"]
+        if not judges:
+            continue
+        inside = set(id(sub) for judge in judges for sub in ast.walk(judge))
+        guarded = [call for call in calls if call.func.id == "await_state"
+                   and any(keyword.arg == "setup" and isinstance(keyword.value, ast.Constant)
+                           and keyword.value.value is False for keyword in call.keywords)]
+        routed.append(bool(guarded) and all(id(call) in inside for call in guarded))
+    if routed != [True]:
+        misses.append("escalate-degraded's guarded subject-exit wait is not judged after its "
+                      "diagnostic (exercises routed through the judge: %r)" % (routed,))
     return misses
 
 
