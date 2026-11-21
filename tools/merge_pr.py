@@ -85,8 +85,11 @@ allow_rebase_merge, each a JSON boolean (a missing field, null, a string, a numb
 response is cannot-evaluate, never a default). Squash disabled: refused (exit 1). Squash enabled and
 merge commits or rebase merges enabled too: a WARNING names the repository and each extra method,
 states that those methods stay available outside this tool and recommends disabling them in the
-repository settings; the settings then let the run go on to its remaining checks, and it lands by squash
-only if every one of them passes (a WARNING is not a landing). Nothing here changes a hosting setting.
+repository settings; the settings then let the run go on to its remaining checks, and it sends the squash
+request only if every check before the request passes (a WARNING is not a landing). The post-merge checks
+run after the landing: their failure is exit 1 or 2 after a merge (see Exit above), so only exit 0
+confirms a landing that satisfies them all, and a nonzero exit does not show that nothing landed.
+Nothing here changes a hosting setting.
 
 THE SEQUENCE. (1) Bind the target and read the settings; (2) read the pull request and require it open,
 not a draft, not merged, at the named head and base, its head branch in this repository (with --train,

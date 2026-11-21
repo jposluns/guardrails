@@ -45,9 +45,15 @@ property says which); exit 2 is cannot-evaluate (settings or state unreadable, o
 the request: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME (an interruption
 included), or a main push run or main tip that cannot be evaluated: read the pull request to reconcile and
 never resend.
+Exit 0, with its `RESULT: LANDED:` line, confirms a landing that satisfies every post-merge check; it is
+not the only exit that can follow a merge. Once the request was sent, a merge can also have happened on
+exit 1 (a `MERGED:` line followed by `RESULT: LANDED, MAIN IS RED` or `RESULT: LANDED, NOT ON MAIN`, or a
+`RESULT: MERGED ...` line naming a landing property that does not hold) and on exit 2 (an UNKNOWN OUTCOME,
+or a `MERGED:` line followed by a post-merge read that cannot be evaluated); after any of them, read the
+pull request to reconcile and never resend.
 A WARNING means the hosting settings are wider than squash. It does not mean anything landed: the settings
-let the run go on to its remaining checks, and only exit 0 with a `RESULT: LANDED:` line reports a
-landing. The maintainer disables the extra methods in the repository settings. The tool cannot stop a
+let the run go on to its remaining checks, and the squash request is sent only when every check before it
+passes. The maintainer disables the extra methods in the repository settings. The tool cannot stop a
 merge made outside it (the web interface or the API) while those settings allow another method; its
 BOUNDARY line says so.
 

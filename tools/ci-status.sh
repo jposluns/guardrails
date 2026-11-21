@@ -27,12 +27,16 @@
 # permission (not verified live); a private repository's token also needs Pull requests: Read, or
 # every --wait exits 2.
 #
-# Every invocation requires a completed successful run of the workflow file
-# .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below), except --match-tree,
-# which requires one on a commit with the same TREE and refuses that tree when any completed run of
-# that file on it, within the window THE TREE MATCH below states, concluded otherwise. In every mode a
-# run whose event is schedule or workflow_dispatch is advisory (THE ADVISORY RUNS below): it never
-# satisfies that requirement and never refuses the commit or the tree.
+# Every read of a commit's own runs (a rev or HEAD, report-once or --wait, with or without --require-base
+# or --pr and --require-status) requires a completed successful run of the workflow file
+# .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below). Two modes are separate
+# reads with their own rules instead: --match-tree requires one on a commit with the same TREE and refuses
+# that tree when any completed run of that file on it, within the window THE TREE MATCH below states,
+# concluded otherwise; --main-health reads no commit of this checkout and counts only main push runs of
+# that file (THE MAIN HEALTH below): one-shot, the newest completed one decides, so an older run that did
+# not succeed, on the same commit or another, refuses nothing; with --merge-commit SHA, the main push runs
+# on SHA decide. In every mode a run whose event is schedule or workflow_dispatch is advisory (THE
+# ADVISORY RUNS below): it never satisfies that requirement and never refuses the commit or the tree.
 #
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
@@ -159,11 +163,16 @@ MERGE_COMMIT=""
 # accepted origin forms name) and refused when repeated or given any other value (exit 2, before any read),
 # makes every gh api call below carry --hostname HOST, so GH_HOST and gh's configured default host select
 # nothing. GH_API_HOST_ARGS is expanded with the ${a[@]+"${a[@]}"} form, so an empty array expands to no
-# word at all under set -u on every bash.
+# word at all under set -u on every bash. COMPATIBILITY EXCEPTION (disclosed): the unknown-option
+# diagnostic (exit 2, before any read) lists --api-host github.com among the supported options whether
+# or not --api-host was given, so its text differs from the text before --api-host existed; its exit
+# code and the absence of any read are unchanged. It is the one printed message whose text changed for a
+# call that does not give --api-host.
 API_HOST=""
 GH_API_HOST_ARGS=()
-# The workflow FILE whose completed successful run every invocation demands (a conforming one
-# under --require-base), matched against each run's recorded workflow path (the runs API's .path),
+# The workflow FILE whose completed successful run every read of a commit's own runs demands (a
+# conforming one under --require-base; THE TREE MATCH and THE MAIN HEALTH read the same file under their
+# own rules), matched against each run's recorded workflow path (the runs API's .path),
 # never its display name: any workflow can carry name: Quality, so a name match would let a
 # same-named run from another file stand in. quality.yml is this repository's aggregated workflow,
 # the one required status the merge lane reads.
@@ -314,7 +323,8 @@ if [ -n "$EXPECT_VALUE" ]; then
   exit 2
 fi
 # THE MAIN HEALTH (see below) is a separate read of main: it takes no rev and no other option but
-# --merge-commit, which it alone accepts. Both refusals come before any git or API read.
+# --merge-commit, which it alone accepts, and --api-host, which every mode accepts. Both refusals come
+# before any git or API read.
 if [ -n "$MERGE_COMMIT" ] && [ "$MAIN_HEALTH" -ne 1 ]; then
   printf 'ERROR: --merge-commit is accepted only with --main-health.\n' >&2
   exit 2
@@ -975,10 +985,11 @@ SETTLE_OBSERVATIONS=5
 # payload plus a complete GitHub workflow YAML, event-filter, and glob implementation; the SHA and
 # repository files alone cannot answer that question for pull_request base branches or paths.
 
-# THE REQUIRED WORKFLOW (every invocation). quality.yml runs on a pull request only when the pull
+# THE REQUIRED WORKFLOW (every read of a commit's own runs; THE TREE MATCH and THE MAIN HEALTH have
+# their own rules). quality.yml runs on a pull request only when the pull
 # request is labelled, so a head can carry nothing but its msg-leaks.yml run, which would otherwise
-# read green with no Quality evidence at all. Every invocation, with or without --require-base and
-# --wait, therefore requires at least one completed successful run whose workflow FILE is
+# read green with no Quality evidence at all. Every read of a commit's own runs, with or without
+# --require-base and --wait, therefore requires at least one completed successful run whose workflow FILE is
 # REQUIRE_WORKFLOW (quality.yml unless --require-base names another with --require-workflow), matched
 # inside jq on the run's raw recorded .path, never its display name; under --require-base that run
 # must also conform (see below). Absent one the head reads as missing, never as passing (exit 1,

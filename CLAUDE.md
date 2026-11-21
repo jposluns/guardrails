@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.27** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.28** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -186,14 +186,17 @@ stays out of the checkout's git config (no job pushes or fetches after its check
 `tools/check_ci_parity.py` reads each workflow file there as parsed YAML and refuses a checkout step
 without it; a workflow outside that reader's conservative YAML subset is cannot-evaluate (exit 2),
 never skipped.
-`tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on every
-read, with or without `--require-base` and `--wait`, other than an advisory run (a run of any workflow
+On every read of a commit's own runs (a rev or HEAD, with or without `--require-base` and `--wait`),
+`tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on that
+commit, other than an advisory run (a run of any workflow
 whose event is `schedule` or `workflow_dispatch`: it is listed and named on a NOTE line, never counts as
 that run, never refuses the commit and keeps no `--wait` polling), so a head with none (a member head)
-reads as missing (exit 1), never as passing. It also refuses a commit with any non-success run other
+reads as missing (exit 1), never as passing. Such a read also refuses a commit with any non-success run other
 than an advisory one, a cancelled one included, so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
 re-applied included, or a push back to an earlier head) needs a new head commit, labelled again.
-Before a merge, `tools/ci-status.sh --main-health` reads main's own health from the newest completed push run of `.github/workflows/quality.yml` on `main` (exit 0 success, 1 red, 2 cannot evaluate, advisory runs only named), and after it `--main-health --merge-commit <full sha>` waits, bounded by `CI_STATUS_TIMEOUT`, for main's push run on that merge commit and exits 1 loudly when it is red (see the script's THE MAIN HEALTH).
+`--match-tree` (matched by tree; see the script's THE TREE MATCH) and `--main-health` are separate reads
+with their own rules, not these.
+Before a merge, `tools/ci-status.sh --main-health` reads main's own health from the newest completed push run of `.github/workflows/quality.yml` on `main` (exit 0 success, 1 red, 2 cannot evaluate, advisory runs only named); it reads no commit of the checkout, that newest run alone decides (an older run that did not succeed, on the same commit included, refuses nothing) and runs of other workflow files are passed over. After a merge `--main-health --merge-commit <full sha>` waits, bounded by `CI_STATUS_TIMEOUT`, for main's push run on that merge commit and exits 1 loudly when it is red (see the script's THE MAIN HEALTH).
 
 The maintainer authorized on 2026-10-25 what member heads no longer get from CI; each still runs once, on
 the train head: every Quality job. Since the maintainer's decision of 2026-10-27, the train pull
