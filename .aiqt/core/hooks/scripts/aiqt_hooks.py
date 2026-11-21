@@ -29728,9 +29728,12 @@ _NRD_ENV_NAMES = frozenset(("PATH", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
 # scope the allowlist already denies them as unlisted words).
 _NRD_OPAQUE_WORDS = frozenset(("eval", "xargs", "nohup", "sudo", "su", "watch", "parallel"))
 # An interpreter-ish word anywhere in raw text, quotes and heredoc bodies included, for the
-# malformed-key scope: a python/pypy/shell word, source, eval, exec, or the dot builtin.
+# malformed-key scope: a python/pypy/shell word (also after a path and with a version suffix:
+# /usr/bin/bash5.2, python3.14t, zsh-5.9), source, eval, exec, or the dot builtin.
 _NRD_RAW_INTERP_RE = re.compile(
-    r"(?:^|[\s;|&(){}`<>'\"=])(?:python[0-9.]*|pypy[0-9.]*|sh|bash|dash|zsh|ksh|source|eval|exec|\.)"
+    r"(?:(?:^|[\s;|&(){}`<>'\"=/])(?:(?:python|pypy)-?[0-9.]*t?"
+    r"|(?:sh|bash|dash|zsh|ksh)(?:-?[0-9][0-9.]*)?)"
+    r"|(?:^|[\s;|&(){}`<>'\"=])(?:source|eval|exec|\.))"
     r"(?=$|[\s;|&(){}`<>'\"])")
 # The coreutils hash tools, one allowlist row shared below.
 _NRD_HASH_WORDS = frozenset(("sha256sum", "sha1sum", "sha224sum", "sha384sum", "sha512sum", "md5sum",
@@ -29926,7 +29929,7 @@ _NRD_HELPER_NAME_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\Z")
 _NRD_CUSTODIAN_MARK = "orch-deliv"
 _NRD_PRIV_WORDS = frozenset(("sudo", "sudoedit", "su", "doas", "pkexec", "runuser", "setpriv"))
 _NRD_PRIV_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:sudo|sudoedit|su|doas|pkexec|runuser|setpriv)"
-                          r"(?![A-Za-z0-9_.-])")
+                          r"(?:-?[0-9][0-9.]*)?(?![A-Za-z0-9_.-])")
 
 
 def _nrd_probe_dir(d, flag, euid):
@@ -30034,7 +30037,7 @@ def _nrd_custodian_reach(command, segments):
         return any(_NRD_PRIV_RE.search(t) for t in texts)
     for seg in segments:
         for tok in seg.argv:
-            if _NRD_CUSTODIAN_MARK in tok or tok.rsplit("/", 1)[-1] in _NRD_PRIV_WORDS:
+            if _NRD_CUSTODIAN_MARK in tok or _nrd_prog_name(tok) in _NRD_PRIV_WORDS:
                 return True
         for r in seg.redirects:
             if isinstance(r.target, str) and _NRD_CUSTODIAN_MARK in r.target:
@@ -31296,7 +31299,7 @@ def _nrd_stdin_program(seg):
     if eff is None:
         eff = []
         for k, tok in enumerate(seg.argv):
-            name = tok.rsplit("/", 1)[-1]
+            name = _nrd_prog_name(tok)
             if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name):
                 eff = seg.argv[k:]
                 break
@@ -31312,7 +31315,7 @@ def _nrd_stdin_program(seg):
         eff = nxt
     if not eff:
         return False
-    return _nrd_launch_reads_stdin(eff[0].rsplit("/", 1)[-1], eff[1:])
+    return _nrd_launch_reads_stdin(_nrd_prog_name(eff[0]), eff[1:])
 
 
 # --- the unread-launch-target class ---------------------------------------------------------------------
@@ -31638,7 +31641,7 @@ def _nrd_launch_unproven(seg, cwd, dirs, ctx, contained=False):
     for j, tok in enumerate(argv):
         if oq[j]:
             continue
-        word = tok.rsplit("/", 1)[-1]
+        word = _nrd_prog_name(tok)
         if _NRD_PY_WORD_RE.match(word):
             launch = True
             if _nrd_py_launch_unproven(argv[j + 1:], cwd, dirs, ctx, **ckw):
@@ -31908,6 +31911,54 @@ _NRD_PY_TEXT_MODULES = frozenset(("timeit", "code", "pdb", "asyncio", "IPython",
 _NRD_STDIN_WRAPPERS = frozenset(_NRD_LAUNCH_WORDS | _NRD_RUNNER_WORDS | {
     "doas", "pkexec", "runuser", "setpriv", "sudoedit", "chroot", "unshare", "nsenter", "firejail",
     "bwrap", "systemd-run", "unbuffer", "chronic", "valgrind", "fakeroot", "faketime", "proot"})
+# Every program name a deny-side test matches is matched by its last path component with an optional
+# version suffix (_nrd_prog_name): bash5.2, zsh-5.9, ksh2020, perl5.36.0, php8.2, lua5.4, tclsh8.6,
+# gawk-5.1.0, pytest-3.11, ipython3.12, python3.14t and python-3.12, each also as /usr/bin/bash5.2 or
+# ./zsh5. The suffix is an optional '-' then dot-separated numeric components of at most four digits;
+# after a listed name that itself ends in a digit, a '.' may open it too (sqlite3.40, ksh93.1, so
+# make.1 or bash.1 is not a suffixed name). Shell builtins and keywords (eval, exec, command, builtin,
+# trap, time) take no suffix. The closed allowlist's own names (the readers, cp, git apply, bash -n,
+# the python3 -I reader form) stay exact: a suffixed name there is another program, so it is refused
+# in scope as before. Only prefixes no longer than the longest listed name are tried, so the cost per
+# word stays linear in its length.
+_NRD_VERSION_SUFFIX_RE = re.compile(r"[-.]?[0-9]{1,4}(?:\.[0-9]{1,4})*\Z")
+_NRD_PY_VARIANT_RE = re.compile(r"(?:python|pypy)-?[0-9]{1,4}(?:\.[0-9]{1,4})*t?\Z")
+_NRD_SUFFIX_NAMES = frozenset(
+    (_NRD_LAUNCH_SHELLS | _NRD_LAUNCH_WORDS | _NRD_PROGRAM_TEXT_WORDS | _NRD_RUNNER_WORDS | _NRD_SED_WORDS
+     | _NRD_STDIN_WRAPPERS | _NRD_OPAQUE_WORDS | _NRD_PRIV_WORDS | {"git", "env"})
+    - {"eval", "exec", "command", "builtin", "trap", "time"})
+_NRD_SUFFIX_NAME_MAX = max(len(n) for n in _NRD_SUFFIX_NAMES)
+# The words whose lone --version or --help is not read as program text or a runner's own program
+# (sqlite3 --version, ipython --help): the ones fbdff942 did not refuse in that form. perl, node, ruby,
+# awk, sed, vim, ssh, rsync, env and the rest of the program-text words were refused there in every
+# form, so they stay refused (no reduction).
+_NRD_INFO_WORDS = frozenset(("ed", "dc", "sqlite3", "ipython", "ipython3", "jupyter-console",
+                             "jupyter-qtconsole"))
+
+
+def _nrd_prog_name(tok):
+    """The listed program name a command word runs as, for the deny-side tests: its last path
+    component, and, when that is not itself a listed name, the listed name it is with a version suffix
+    removed (_NRD_VERSION_SUFFIX_RE: bash5.2 is bash, /usr/bin/perl5.36.0 is perl, pytest-3.11 is
+    pytest); a python-family variant the family pattern misses (python3.14t, python-3.12) is python3.
+    Any other word is returned as its last path component."""
+    name = tok.rsplit("/", 1)[-1]
+    if name in _NRD_SUFFIX_NAMES or _NRD_PY_WORD_RE.match(name):
+        return name
+    if _NRD_PY_VARIANT_RE.match(name):
+        return "python3"
+    for i in range(min(len(name) - 1, _NRD_SUFFIX_NAME_MAX), 0, -1):
+        if name[:i] in _NRD_SUFFIX_NAMES and _NRD_VERSION_SUFFIX_RE.match(name, i) \
+                and (name[i] != "." or name[i - 1].isdigit()):
+            return name[:i]
+    return name
+
+
+def _nrd_info_only(argv, oq):
+    """True when a segment's words are exactly an _NRD_INFO_WORDS program (any listed spelling) and one
+    lone --version or --help: it prints and exits, reading no program text (sqlite3 --version)."""
+    return (len(argv) == 2 and not any(oq) and argv[1] in ("--version", "--help")
+            and _nrd_prog_name(argv[0]) in _NRD_INFO_WORDS)
 
 
 def _nrd_py_module_end(args):
@@ -32105,10 +32156,11 @@ def _nrd_git_runs_config(args, oq):
 def _nrd_env_split_launch(args, oq):
     """True when the words after an env word carry a -S or --split-string command line (separate,
     attached, = or cluster spelling) that holds a launch shell, source or the dot builtin, a
-    python-family word, a runner or a program-text word, or an opaque value: env re-splits that text
-    into the command it runs (env -S 'bash -s' reads its program from stdin, env -S 'bash -c ...' runs
-    a body the -c recursion never sees), and neither the stdin-program test nor the words above read
-    inside it. The option words end at the first word that is neither an option nor an assignment."""
+    python-family word, a runner or a program-text word (each under _nrd_prog_name), a quote, a
+    backslash or a $ (env reads those itself), or an opaque value: env re-splits that text into the
+    command it runs (env -S 'bash -s' reads its program from stdin, env -S 'bash -c ...' runs a body
+    the -c recursion never sees), and neither the stdin-program test nor the words above read inside
+    it. The option words end at the first word that is neither an option nor an assignment."""
     i = 0
     n = len(args)
     while i < n:
@@ -32138,8 +32190,13 @@ def _nrd_env_split_launch(args, oq):
         if text is not None:
             if oq[i]:
                 return True
+            if any(ch in text for ch in "\\'\"$"):
+                # env re-reads quotes, backslash escapes and ${NAME} inside the -S text itself
+                # (env -S'bash\_-s', -S"'b''ash' -s", -S'"ba"sh -s' and -S'${SHELL} -s' each run a
+                # shell reading stdin), so its words are not what a whitespace split shows
+                return True
             for w in text.split():
-                name = w.strip("'\"").rsplit("/", 1)[-1]
+                name = _nrd_prog_name(w.strip("'\""))
                 if name in _NRD_LAUNCH_SHELLS or name in (".", "source") or _NRD_PY_WORD_RE.match(name) \
                         or name in _NRD_RUNNER_WORDS or name in _NRD_PROGRAM_TEXT_WORDS:
                     return True
@@ -32171,6 +32228,7 @@ def _nrd_wide_unproven(seg, cwd, dirs):
     argv = seg.argv
     oq = seg.argv_opaque
     run_cwd = _nrd_wrapper_cwd(argv, oq, cwd) if argv else cwd
+    info_only = _nrd_info_only(argv, oq)
     for j, tok in enumerate(argv):
         if _NRD_PROGRAM_ENV_RE.match(tok):
             return True
@@ -32179,10 +32237,10 @@ def _nrd_wide_unproven(seg, cwd, dirs):
             return True
         if oq[j]:
             continue
-        word = tok.rsplit("/", 1)[-1]
+        word = _nrd_prog_name(tok)
         rest = argv[j + 1:]
         rest_oq = oq[j + 1:]
-        if word in _NRD_PROGRAM_TEXT_WORDS:
+        if word in _NRD_PROGRAM_TEXT_WORDS and not info_only:
             return True
         if word in _NRD_SED_WORDS:
             if not _nrd_sed_inert(rest, rest_oq):
@@ -32191,7 +32249,7 @@ def _nrd_wide_unproven(seg, cwd, dirs):
             _isolated, mode, target = _nrd_py_mode(rest)
             if mode == "c":
                 return True
-            if mode == "stdin" and any(not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_STDIN_WRAPPERS
+            if mode == "stdin" and any(not oq[k] and _nrd_prog_name(argv[k]) in _NRD_STDIN_WRAPPERS
                                        for k in range(j)):
                 return True
             if mode == "script" and _nrd_stdin_device(target, bare_digits=True):
@@ -32207,16 +32265,19 @@ def _nrd_wide_unproven(seg, cwd, dirs):
                     # -m doctest, -m pydoc run the program they are handed), as for a runner
                     return True
             if mode == "script" and isinstance(target, str) \
-                    and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS and target in rest:
+                    and _nrd_prog_name(target) in _NRD_RUNNER_WORDS and target in rest:
                 at = rest.index(target) + 1
-                if _nrd_runner_text(target.rsplit("/", 1)[-1], rest[at:], rest_oq[at:]):
+                if _nrd_runner_text(_nrd_prog_name(target), rest[at:], rest_oq[at:]):
                     return True
             if mode == "m" or (mode == "script" and isinstance(target, str)
-                               and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS):
+                               and _nrd_prog_name(target) in _NRD_RUNNER_WORDS):
                 if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                     return True
         elif word in _NRD_RUNNER_WORDS:
-            if _nrd_runner_text(word, rest, rest_oq) or _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+            # a lone --version or --help of an _NRD_INFO_WORDS runner (ipython --version) carries no
+            # program text; the path test still applies, as at fbdff942
+            if (not info_only and _nrd_runner_text(word, rest, rest_oq)) \
+                    or _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                 return True
         elif word in _NRD_LAUNCH_SHELLS:
             if _nrd_shell_has_c(rest) and _nrd_shell_c_body(seg) is None:
@@ -32227,7 +32288,7 @@ def _nrd_wide_unproven(seg, cwd, dirs):
                 # a program read from a descriptor (bash /dev/stdin), wherever the word stands
                 return True
             if _nrd_shell_reads_stdin(rest) and any(
-                    not oq[k] and argv[k].rsplit("/", 1)[-1] in _NRD_STDIN_WRAPPERS for k in range(j)):
+                    not oq[k] and _nrd_prog_name(argv[k]) in _NRD_STDIN_WRAPPERS for k in range(j)):
                 return True
         elif word in (".", "source"):
             if _nrd_stdin_device(_nrd_shell_operand(rest, word), bare_digits=True):
@@ -32239,7 +32300,7 @@ def _nrd_wide_unproven(seg, cwd, dirs):
             if _nrd_env_split_launch(rest, rest_oq):
                 return True
     if any(not oq[k] and (_NRD_PY_WORD_RE.match(w) or w in _NRD_LAUNCH_SHELLS or w in (".", "source"))
-           for k, w in enumerate(t.rsplit("/", 1)[-1] for t in argv)):
+           for k, w in enumerate(_nrd_prog_name(t) for t in argv)):
         # a startup file read from a descriptor (BASH_ENV=/dev/stdin bash -c true, ENV=/dev/fd/0 sh -i,
         # bash --rcfile /dev/stdin -i): the startup program is read from stdin like a script
         for k, tok in enumerate(argv):
@@ -32461,10 +32522,10 @@ def _nrd_candidate(command):
         if not eff:
             continue
         head = eff[0]
-        word = head.rsplit("/", 1)[-1]
+        word = _nrd_prog_name(head)
         if word == "exec" and len(eff) > 1:
             head = eff[1]
-            word = head.rsplit("/", 1)[-1]
+            word = _nrd_prog_name(head)
         if (_NRD_PY_WORD_RE.match(word) or word in _NRD_SHELL_WORDS or head == "."
                 or word == "source" or "/" in head or word in _NRD_OPAQUE_WORDS):
             return True

@@ -34,8 +34,14 @@ ash, posh, rbash, fish, csh, tcsh, ksh93), or to a shell or python word inside a
 or doctest /dev/stdin), and a runner's own program text from a working directory that is not an
 ancestor of a declared directory (make --eval, -E or -f - and their abbreviated long spellings, npx
 -c, npm exec -c, ipython or ipython3 -c, jupyter-console, python3 -m timeit or code, coverage run -m
-timeit, tox --override or -x in a cluster, cargo --config, pytest or pytest-3 -o), and ed, dc or
-sqlite3 running it as a shell command line (their ! command or a .shell dot-command).
+timeit, tox --override or -x in a cluster, cargo --config, pytest or pytest-3 -o), ed, dc or
+sqlite3 running it as a shell command line (their ! command or a .shell dot-command), and any of
+those names with a version suffix, bare or in a path form (bash5.2, zsh-5.9 -s, /usr/bin/bash5.2
+/dev/stdin, python3.14t -, env -S 'bash5.2 -s', perl5.36.0 -e, php8.2 -r, sqlite3.40, pytest-3.11
+-o), an env -S text spelling a shell through env's own escapes, quotes or ${NAME} (env
+-S'bash\\_-s', -S"'b''ash' -s", -S'${SHELL} -s'), and sqlite3 --version with a .shell script after
+it. The info/ rows (a lone --version or
+--help) are ordinary rows: each keeps its fbdff942 verdict.
 
 The fbdff942 module is not read from git history (no git process is launched): pass the file that
 `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py` prints, and
@@ -265,6 +271,33 @@ EXTRA = (
     ("program-text/ed", "out", "echo '!echo " + _B64 + " | base64 -d | bash' | ed -s"),
     ("program-text/dc", "out", "dc -e '!echo " + _B64 + " | base64 -d | bash'"),
     ("program-text/sqlite3", "out", "sqlite3 :memory: '.shell echo " + _B64 + " | base64 -d | bash'"),
+    # tightened past fbdff942: a listed shell, python, interpreter, program-text or runner name with a
+    # version suffix, bare or in a path form (the guard matches every listed name that way)
+    ("stdin/bash5.2", "out", "echo " + _B64 + " | base64 -d | bash5.2"),
+    ("stdin/zsh-5.9-s", "out", "echo " + _B64 + " | base64 -d | zsh-5.9 -s"),
+    ("stdin/usr-bin-bash5.2-dev-stdin", "out", "echo " + _B64 + " | base64 -d | /usr/bin/bash5.2 /dev/stdin"),
+    ("stdin/python3.14t-dash", "out", "echo aW1wb3J0IG9z | base64 -d | python3.14t -"),
+    ("stdin/env-split-string-bash5.2", "out", "echo " + _B64 + " | base64 -d | env -S 'bash5.2 -s'"),
+    # tightened past fbdff942: an env -S text env itself re-reads (its \_ separator, a quote splice,
+    # ${NAME}), so a shell name spelled through it still runs a shell reading stdin
+    ("stdin/env-split-escape-separator", "out", "echo " + _B64 + " | base64 -d | env -S'bash\\_-s'"),
+    ("stdin/env-split-quote-splice", "out", "echo " + _B64 + " | base64 -d | env -S\"'b''ash' -s\""),
+    ("stdin/env-split-variable", "out", "echo " + _B64 + " | base64 -d | env -S'${SHELL} -s'"),
+    ("program-text/perl5.36.0", "out",
+     "perl5.36.0 -e 'system(\"echo " + _B64 + " | base64 -d | bash\")'"),
+    ("program-text/php8.2", "out", "php8.2 -r 'system(\"echo " + _B64 + " | base64 -d | bash\");'"),
+    ("program-text/sqlite3.40", "out", "sqlite3.40 :memory: '.shell echo " + _B64 + " | base64 -d | bash'"),
+    ("runner-text/pytest-3.11-o", "out", "pytest-3.11 -o addopts=-q"),
+    # tightened past fbdff942: a --version with more words after it is not information-only
+    ("program-text/sqlite3-version-extra", "out", "sqlite3 --version :memory: '.shell echo " + _B64
+     + " | base64 -d | bash'"),
+    # a lone --version or --help keeps its fbdff942 verdict: allowed for ed, dc, sqlite3 and the
+    # IPython and Jupyter console words, refused for the program-text words fbdff942 refused
+    ("info/sqlite3-version", "out", "sqlite3 --version"),
+    ("info/ed-help", "out", "ed --help"),
+    ("info/ipython-version", "out", "ipython --version"),
+    ("info/jupyter-console-version", "out", "jupyter-console --version"),
+    ("info/perl-version", "out", "perl --version"),
 )
 CWDS = ("tmp", "out", "st")
 # Rows the guard refuses although fbdff942 allows them: each must be refused in every mode, and no

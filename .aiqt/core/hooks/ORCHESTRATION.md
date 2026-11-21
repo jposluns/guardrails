@@ -505,7 +505,15 @@ or a program operand naming a descriptor: `/dev/stdin`, `/dev/stdout`, `/dev/std
 leading reserved word or grouping token, `NAME=value` prefixes, the `env`, `nice`, `timeout` and
 `time` wrappers, and `exec`, `command` or `builtin`) is in scope whenever any directory is declared, so
 a pipe into one, `bash -s`, `python3 -`, `bash /dev/stdin`, `source /dev/stdin`, `. /dev/fd/0`,
-`python3 /dev/stdin`, `if true; then bash; fi` and a quoted here-document fed to one deny. Out of scope the call passes untouched. IN SCOPE the call is
+`python3 /dev/stdin`, `if true; then bash; fi` and a quoted here-document fed to one deny. Every
+program name this guard matches on the deny side (the shells, the python family, the launch,
+program-text, runner, sed, privilege and stdin-wrapper words) is matched by its last path component
+with an optional version suffix (an optional `-`, or a `.` after a name that ends in a digit, then
+dot-separated numeric components of at most four digits): `bash5.2`, `zsh-5.9`, `ksh2020`,
+`python3.14t`, `python-3.12`, `perl5.36.0`, `php8.2`, `lua5.4`, `tclsh8.6`, `gawk-5.1.0`,
+`sqlite3.40`, `pytest-3.11`, each also as `/usr/bin/bash5.2` or `./zsh5`. Shell builtins and keywords
+take no suffix, and the allowlist's own names below stay exact (a suffixed name there is another
+program, so it is refused in scope). Out of scope the call passes untouched. IN SCOPE the call is
 DENIED unless EVERY lexed segment is a closed-allowlist read-only form with its registered options:
 `cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`, `diff`, and the coreutils hash tools (`sha256sum`,
 `sha1sum`, `sha224sum`, `sha384sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `sum`); `cp` with the
@@ -639,7 +647,9 @@ segment wherever it stands for the rest. The constructs:
 - program text: `eval`, `trap`, `perl`, `ruby`, `node`, `php`, `lua`, `tclsh`, `Rscript`, `awk` (and
   `gawk`, `mawk`, `nawk`), `busybox`, `watch`, `su`, `script`, `flock`, `ssh`, `rsync`, `parallel`,
   `gdb`, the vi and emacs editors, `ed`, `dc` and `sqlite3` (a `!` command or a `.shell` or `.system`
-  dot-command runs a shell command line) and the other words `_NRD_PROGRAM_TEXT_WORDS` lists; a
+  dot-command runs a shell command line) and the other words `_NRD_PROGRAM_TEXT_WORDS` lists (a lone
+  `--version` or `--help` after `ed`, `dc` or `sqlite3`, the whole segment being those two words,
+  prints and exits and is not program text: `sqlite3 --version`); a
   python-family `-c`; a shell `-c` body the wrapper peel does not read (behind `xargs`, `find -exec`,
   `sudo`); a shell's `--command` or `--init-command` option and fish's `-C`; a python or shell word
   reading its program from stdin behind a launch wrapper, a runner or a privilege or sandbox wrapper
@@ -649,7 +659,9 @@ segment wherever it stands for the rest. The constructs:
   `python3 -m` module (`cProfile`, `profile`, `trace`, `doctest` and `pydoc` run the file they are
   handed); an `env -S` or `--split-string` command line that holds a shell, `source`, python-family,
   runner or program-text word (`env -S 'bash -s'`, `env -S 'bash -c ...'`: env re-splits it into the
-  command it runs, which no other test reads); and `sed` with any script other
+  command it runs, which no other test reads), or any quote, backslash or `$`, since env reads those
+  itself (`env -S'bash\_-s'`, `env -S"'b''ash' -s"` and `env -S'${SHELL} -s'` each run a shell
+  reading stdin); and `sed` with any script other
   than line addresses with `p`, `d`, `n` and `q` (sed's `e` command runs a shell command).
 - a test collector or runner started from an ancestor of a declared directory: a `python3 -m` run (with
   `-I` too: `unittest discover` and pytest put their start directory on `sys.path` themselves), a
@@ -662,7 +674,9 @@ segment wherever it stands for the rest. The constructs:
   `npm`, `npx`, `pnpm` or `yarn` `-c`, `--call`, `--shell-mode`,
   a `--shell` or `--script-shell` setting, `npm explore` or `yarn exec`; `ipython` or `ipython3` `-c`,
   `--c=`, a `--Class.trait=` word or no script operand; `jupyter console`, `qtconsole` or a
-  `--Class.trait=` word, and `jupyter-console` or `jupyter-qtconsole`; `tox -x` (also inside a short
+  `--Class.trait=` word, and `jupyter-console` or `jupyter-qtconsole` (a segment of only one of these
+  IPython or Jupyter console words and a lone `--version` or `--help` is not program text:
+  `ipython --version`); `tox -x` (also inside a short
   cluster such as `-qx`) or `--override`; `cargo --config`; `pytest`, `py.test`, `pytest-3`,
   `py.test-3` or `pytest3` `-o` or `--override-ini`;
   `coverage run -m` and a `python3 -m` run of `timeit`, `code`, `pdb`, `asyncio`, `IPython`, `idlelib`,
@@ -728,10 +742,15 @@ operand or runner word that only looks like a descriptor denies too (a script na
 as `python3 tools/fd/run.py`, `bash scripts/fd/build.sh` or `pytest tests/fd/test_io.py`, since the
 relative test does not resolve it against the working directory), a descriptor handed to a `python3
 -m` module that only reads it (`python3 -m json.tool /dev/stdin`; with no operand it reads stdin and
-passes), an `env -S` line holding a launch word even where what it runs is inert (`env -S'bash -c'
-'echo hi'`), as do `ed`, `dc` and `sqlite3` with any script (`sqlite3 x.db 'select 1'`), `ipython`
-with no script operand (`ipython --version`), and a runner program-text option that runs nothing
-(`pytest -o addopts=-q`, `make -E ''`). An unquoted
+passes), an `env -S` line holding a launch word, a quote, a backslash or a `$` even where what it
+runs is inert (`env -S'bash -c' 'echo hi'`, `env -S'echo "hi"'`), as do `ed`, `dc` and `sqlite3` with any script (`sqlite3 x.db 'select 1'`), `ipython`
+with no script operand other than a lone `--version` or `--help` (`ipython --colors=NoColor`), and a
+runner program-text option that runs nothing (`pytest -o addopts=-q`, `make -E ''`). A lone
+`--version` or `--help` of the other program-text words (`perl --version`, `sed --version`, `vim
+--version`, `env --version`, `rsync --version`) still denies: fbdff942 refused each, and the guard
+allows nothing it refused. A word that is a listed name plus a version suffix denies wherever it
+stands, even as an argument that names no program (`openssl genpkey -algorithm ed448` reads `ed448`
+as `ed`). An unquoted
 heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
 even where it only prints and names no declared directory from a working directory outside them all
 (`cat <<EOF > out.txt`, `grep -c x <<< 'xyz'`, a here-document with a trailing space after its
@@ -813,14 +832,28 @@ handed as data; the guard does not read it. A program fed on stdin to an interpr
 `source` or python-family word (`perl`, `ruby`, `node`, `awk -f -`), or to a shell behind a wrapper the
 peel does not read (`xargs`, `sudo`, `stdbuf`), is not put in scope by the stdin rule (the program-text
 and wrapper parts of the refuse-wide test refuse those listed here). A shell or python word reading
-stdin behind a wrapper word outside the launch, runner, privilege and sandbox wrappers listed above is
-not refused (`setarch x86_64 bash`, `capsh --`, `newgrp`, `prlimit`, `numactl`, `rlwrap`,
-`dbus-run-session`, `conda run`, `pixi run`, `uvx`, and the like). A shell whose command word is not
-one of the launch shells listed above (a version-suffixed name such as `bash5.2` or `zsh5`, `toybox
-sh`, `elvish`, `nu`, `xonsh`) and an interpreter or command runner outside the program-text words (a
-version-suffixed `perl5.36.0`, `php8.2`, `lua5.4`, `tclsh8.6` or `ruby3.1`, `m4`, `gnuplot`, `psql`,
-`mysql`, `at`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip -TT`, `man
--P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`) is not read either. A program
+its program from stdin is refused in exactly four positions: as the segment's command word after
+the stdin-program peel (a leading reserved word or grouping token, `NAME=value` prefixes, `env`,
+`nice`, `timeout` and `time` within their option grammar, then `exec`, `command` or `builtin`); as
+the first shell, `source` or python word of a segment whose wrapper carries an option outside that
+grammar; and anywhere in a segment after one of the stdin wrappers (`_NRD_STDIN_WRAPPERS`): the launch
+words (`eval`, `exec`, `perl`, `ruby`, `node`, `nodejs`, `php`, `lua`, `tclsh`, `Rscript`, `awk`,
+`gawk`, `mawk`, `nawk`, `make`, `gmake`, `xargs`, `find`, `parallel`, `nohup`, `setsid`, `stdbuf`,
+`sudo`, `su`, `watch`, `flock`, `ionice`, `taskset`, `chrt`, `strace`, `ltrace`, `nice`, `time`,
+`timeout`, `env`, `command`, `builtin`, `trap`), the runner words (`_NRD_RUNNER_WORDS`: `poetry run`,
+`uv run`, `npm exec` and the rest), and `doas`, `pkexec`, `runuser`, `setpriv`, `sudoedit`, `chroot`,
+`unshare`, `nsenter`, `firejail`, `bwrap`, `systemd-run`, `unbuffer`, `chronic`, `valgrind`,
+`fakeroot`, `faketime` and `proot`, each with a version suffix and in a path form too; and inside an
+`env -S` or `--split-string` line. Behind any OTHER word it is not refused
+(`setarch x86_64 bash` and `linux32 bash`, `capsh --`, `newgrp`, `sg`, `prlimit`, `numactl`,
+`rlwrap`, `dbus-run-session`, `cgexec`, `torsocks`, the dynamic loader `ld.so bash`, `conda run`,
+`pixi run`, `pipx run`, `uvx`, `nix-shell`, and any other program that runs the next word). A shell
+whose name is none of the launch shells under any version suffix (`toybox sh`, `elvish`, `nu`,
+`xonsh`) and an interpreter or command runner outside the program-text words (`m4`, `gnuplot`,
+`psql`, `mysql`, `at`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip
+-TT`, `man -P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`) is not read either, nor
+is a listed name under a suffix outside the version grammar (`bash-static`, `python3-dbg`,
+`perl5.36-thread`) or a renamed copy. A program
 decoded and written to a file outside the declared directories and run by a later segment of the
 same call (`echo ... | base64 -d > /tmp/f.sh && bash /tmp/f.sh`, or through a FIFO) is the
 copy-out-and-run residual: the run names only that file. A descriptor reached through an alias the lexical test does not read (a symlink to
@@ -965,7 +998,9 @@ Residuals the tripwire states (in addition to "Residuals" above):
    stdin-program and program-text tests, which tripwire mode keeps. A program in a file outside the
    declared directories that builds the call (`python3 r.py`, written by an earlier call, another
    tool, or an earlier segment of the same call that decodes text into the file) is not seen, as at
-   fbdff942.
+   fbdff942, and neither is such text decoded into a shell or python word that reads stdin behind a
+   wrapper outside the stdin wrappers listed under "Residuals" above (`setarch x86_64 bash`), or into
+   a shell or interpreter none of the listed names covers under any version suffix (`elvish`, `m4`).
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.

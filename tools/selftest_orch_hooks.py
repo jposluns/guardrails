@@ -18434,11 +18434,75 @@ def _main_isolated(report_path=None):
                          "echo 'exec(open(\"{}/x.py\").read())' | env --split-string='python3 -'".format(_nrd_sp))
         check("nrd/env-split-launch-denies",
               [nrd_got(c, cwd=outd, project=_nrd_proj) for c in _nrd_env_rows], [DENY_RAN] * 3)
+        # env reads quotes, backslash escapes and ${NAME} inside the -S text itself, so a shell name
+        # spelled through them is still a shell: real bash runs the declared file through each of the
+        # first three (env's \_ separator, a quote splice, a quoted name); ${SHELL} depends on the
+        # environment, so its row asserts the verdict. Each was allowed in every mode before
+        _nrd_env_esc_rows = ("echo 'bash {}/x.sh' | env -S'bash\\_-s'".format(_nrd_sp),
+                             "echo 'bash {}/x.sh' | env -S\"'b''ash' -s\"".format(_nrd_sp),
+                             "echo 'bash {}/x.sh' | env -S'\"ba\"sh -s'".format(_nrd_sp))
+        _nrd_env_var_row = "echo 'bash {}/x.sh' | env -S'${{SHELL}} -s'".format(_nrd_sp)
+        check("nrd/env-split-escape-denies",
+              [nrd_got(c, cwd=outd, project=_nrd_proj) for c in _nrd_env_esc_rows]
+              + [_verdict(nrd(_nrd_env_var_row, cwd=outd, project=_nrd_proj))],
+              [DENY_RAN] * 3 + ["deny"])
         _nrd_m_dev_rows = (
             "echo 'exec(open(\"{}/x.py\").read())' | python3 -I -m cProfile /dev/stdin".format(_nrd_sp),
             "echo 'exec(open(\"{}/x.py\").read())' | python3 -I -m trace --trace /dev/fd/0".format(_nrd_sp))
         check("nrd/python-m-descriptor-denies",
               [nrd_got(c, cwd=outd, project=_nrd_proj) for c in _nrd_m_dev_rows], [DENY_RAN] * 2)
+        # --- every program name the guard matches is matched with a version suffix and in a path
+        # form (_nrd_prog_name): bash5.2, zsh-5.9 and python3.14t here are symlinks in an undeclared
+        # directory to this host's bash and python, so real bash runs the declared file through each
+        # (absolute and ./ path forms); perl5.36.0 is one to perl where perl is installed. Each was
+        # allowed in every mode before
+        _nrd_vbin = tmp / "nrd-vbin"
+        _nrd_vbin.mkdir()
+        (_nrd_vbin / "bash5.2").symlink_to(shutil.which("bash"))
+        (_nrd_vbin / "zsh-5.9").symlink_to(shutil.which("bash"))
+        (_nrd_vbin / "python3.14t").symlink_to(sys.executable)
+        _nrd_perl = shutil.which("perl")
+        if _nrd_perl:
+            (_nrd_vbin / "perl5.36.0").symlink_to(_nrd_perl)
+        _nrd_ver_ran = (
+            ("echo 'bash {}/x.sh' | {}/bash5.2".format(_nrd_sp, _nrd_vbin), outd),
+            ("echo 'bash {}/x.sh' | {}/zsh-5.9 -s".format(_nrd_sp, _nrd_vbin), outd),
+            ("echo 'exec(open(\"{}/x.py\").read())' | {}/python3.14t -".format(_nrd_sp, _nrd_vbin), outd),
+            ("echo 'bash {}/x.sh' | ./bash5.2 /dev/stdin".format(_nrd_sp), str(_nrd_vbin)))
+        check("nrd/version-suffix-names-deny",
+              [nrd_got(c, run_cwd=cw, cwd=cw, project=_nrd_proj) for c, cw in _nrd_ver_ran], [DENY_RAN] * 4)
+        _nrd_ver_perl = "{}/perl5.36.0 -e 'system(\"bash \" . \"{}/nrd-sta\" . \"ge/x.sh\")'".format(_nrd_vbin, tmp)
+        check("nrd/version-suffix-perl-denies",
+              nrd_got(_nrd_ver_perl, cwd=outd, project=_nrd_proj) if _nrd_perl
+              else (_verdict(nrd(_nrd_ver_perl, cwd=outd, project=_nrd_proj)), "absent"),
+              DENY_RAN if _nrd_perl else ("deny", "absent"))
+        # names this host does not install, verdict only: interpreters, a program-text word, a runner,
+        # an env -S line, a wrapped descriptor read and a stdin wrapper, each with a version suffix
+        _nrd_ver_verdict = (
+            "php8.2 -r 'system(\"bash {}/x.sh\");'".format(_nrd_sp),
+            "ruby3.2 -e 'system(\"bash {}/x.sh\")'".format(_nrd_sp),
+            "gawk-5.1.0 'BEGIN {{ system(\"bash {}/x.sh\") }}'".format(_nrd_sp),
+            "sqlite3.40 :memory: '.shell bash {}/x.sh'".format(_nrd_sp),
+            "pytest-3.11 -o addopts=-q",
+            "echo 'bash {}/x.sh' | env -S'bash5.2 -s'".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | nohup ksh2020 /dev/stdin".format(_nrd_sp),
+            "echo 'bash {}/x.sh' | doas bash5".format(_nrd_sp),
+            "echo 'exec(open(\"{}/x.py\").read())' | poetry run /usr/bin/python-3.12".format(_nrd_sp))
+        check("nrd/version-suffix-verdict-denies",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_ver_verdict], ["deny"] * 9)
+        # a listed name's lone --version or --help, for the words fbdff942 did not refuse in that form
+        # (_NRD_INFO_WORDS), prints and exits: allowed, in any listed spelling. Anything more after it,
+        # a wrapper before it, and the program-text words fbdff942 refused in every form still deny
+        _nrd_info_allow = ("sqlite3 --version", "sqlite3 --help", "ed --version", "dc --help",
+                           "ipython --version", "ipython3 --help", "jupyter-console --version",
+                           "/usr/bin/sqlite3 --version")
+        check("nrd/info-only-version-allows",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_info_allow], ["allow"] * 8)
+        _nrd_info_deny = ("sqlite3 --version :memory: '.shell bash {}/x.sh'".format(_nrd_sp),
+                          "echo '.shell bash {}/x.sh' | xargs sqlite3 --version".format(_nrd_sp),
+                          "env sqlite3 --version", "perl --version", "sed --version")
+        check("nrd/info-only-bounds-deny",
+              [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_info_deny], ["deny"] * 5)
         # --- a runner's own program text, from a working directory that is NOT an ancestor of a
         # declared directory (the path test does not reach it): make --eval, -E and -f -, python -m
         # timeit and code run the declared file under real bash; the rest assert the verdict only
@@ -19376,6 +19440,26 @@ def _main_isolated(report_path=None):
               _flip_verdict_pair((("_nrd_env_opaque", lambda seg, *a: False),
                                   ("_nrd_env_split_launch", lambda args, oq: False)),
                                  "env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp)), "allow")
+        # matching each listed name by its last path component only (the reading before the
+        # version-suffix class) reopens every version-suffixed row above, and treating no lone
+        # --version or --help as information-only refuses every info-only row again
+        _nrd_no_suffix = (("_nrd_prog_name", lambda tok: tok.rsplit("/", 1)[-1]),)
+        check("nrd/flip-version-suffix-names-allow",
+              _nrd_with(_nrd_no_suffix, lambda: (
+                  [_verdict(nrd(c, cwd=cw, project=_nrd_proj)) for c, cw in _nrd_ver_ran]
+                  + [_verdict(nrd(_nrd_ver_perl, cwd=outd, project=_nrd_proj))]
+                  + [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_ver_verdict])),
+              ["allow"] * 14)
+        # without the env -S reading every escaped spelling of a shell name is allowed again
+        check("nrd/flip-env-split-escape-allows",
+              _nrd_with((("_nrd_env_split_launch", lambda args, oq: False),), lambda: [
+                  _verdict(nrd(c, cwd=outd, project=_nrd_proj))
+                  for c in _nrd_env_esc_rows + (_nrd_env_var_row,)]),
+              ["allow"] * 4)
+        check("nrd/flip-info-only-denies",
+              _nrd_with((("_nrd_info_only", lambda argv, oq: False),), lambda: [
+                  _verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_info_allow]),
+              ["deny"] * 8)
 
         def _nrd_prev_c_peel(argv, oq):
             # the earlier enumerated peel: env options it does not know are skipped one token at a
@@ -20097,7 +20181,7 @@ def _main_isolated(report_path=None):
         check("nrd-contain/tightened-rows-deny-every-mode",
               [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
                 _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_tight],
-              [("deny", "deny", "deny")] * 47)
+              [("deny", "deny", "deny")] * 60)
         # the hidden-spelling class: each builds `<helper> cat 994/x.py | python3` at run time, so neither
         # the custodian mark nor a privilege word is in the text (the forms of tools/nrd_differential.py
         # hidden/, refused at fbdff942). Tripwire mode keeps the substitution, stdin-program,
@@ -20280,9 +20364,10 @@ def _main_isolated(report_path=None):
         check("nrd-contain/flip-differential-refuse-wide-skipped-red",
               any(f.startswith("hidden/") and "allowed in 'contained'" in f for f in _nrdc_diff_skip), True)
         # the comparator holds the tightened rows: with the descriptor, launch-shell, program-text word,
-        # wrapper, env -S and runner-text readings back to their pre-fix behaviour, every tightened row
-        # is a finding
+        # wrapper, env -S, runner-text and version-suffixed name readings back to their pre-fix
+        # behaviour, every tightened row is a finding
         _nrdc_pre_fix = (("_nrd_stdin_device", lambda path, bare_digits=False: False),
+                         ("_nrd_prog_name", lambda tok: tok.rsplit("/", 1)[-1]),
                          ("_nrd_env_split_launch", lambda args, oq: False),
                          ("_NRD_LAUNCH_SHELLS", aiqt_hooks._NRD_SHELL_WORDS),
                          ("_NRD_PROGRAM_TEXT_WORDS", aiqt_hooks._NRD_PROGRAM_TEXT_WORDS - {"ed", "dc", "sqlite3"}),
