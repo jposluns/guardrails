@@ -121,7 +121,8 @@ FIXTURE_REPO = "fixture/repository"
 FIXTURE_ORIGIN = "https://github.com/fixture/repository.git"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
-# The workflow file every read of ci-status.sh requires a completed successful run of.
+# The workflow file every read of ci-status.sh requires a completed successful run of by default
+# (--require-base BRANCH --require-workflow PATH requires PATH instead).
 QUALITY_PATH = ".github/workflows/quality.yml"
 # The fixture commit's committer date and the fixture clock. The script scans the unfiltered listing
 # back to min(committer date, now) minus its 24-hour margin; these mirror that arithmetic.

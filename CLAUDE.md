@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.28** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.29** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -187,8 +187,10 @@ stays out of the checkout's git config (no job pushes or fetches after its check
 without it; a workflow outside that reader's conservative YAML subset is cannot-evaluate (exit 2),
 never skipped.
 On every read of a commit's own runs (a rev or HEAD, with or without `--require-base` and `--wait`),
-`tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on that
-commit, other than an advisory run (a run of any workflow
+`tools/ci-status.sh` requires a completed successful run of the required workflow file on that commit
+(`.github/workflows/quality.yml` by default; `--require-base <branch> --require-workflow <path>` requires
+the file at that path instead, and `--require-workflow` is refused without `--require-base`), other than
+an advisory run (a run of any workflow
 whose event is `schedule` or `workflow_dispatch`: it is listed and named on a NOTE line, never counts as
 that run, never refuses the commit and keeps no `--wait` polling), so a head with none (a member head)
 reads as missing (exit 1), never as passing. Such a read also refuses a commit with any non-success run other

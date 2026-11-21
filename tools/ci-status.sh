@@ -28,9 +28,11 @@
 # every --wait exits 2.
 #
 # Every read of a commit's own runs (a rev or HEAD, report-once or --wait, with or without --require-base
-# or --pr and --require-status) requires a completed successful run of the workflow file
-# .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below). Two modes are separate
-# reads with their own rules instead: --match-tree requires one on a commit with the same TREE and refuses
+# or --pr and --require-status) requires a completed successful run of the required workflow file on the
+# commit: .github/workflows/quality.yml by default, or the file --require-workflow PATH names, which is
+# accepted only with --require-base (see THE REQUIRED WORKFLOW below). Two modes are separate
+# reads with their own rules instead, each always reading quality.yml (both refuse --require-workflow):
+# --match-tree requires one on a commit with the same TREE and refuses
 # that tree when any completed run of that file on it, within the window THE TREE MATCH below states,
 # concluded otherwise; --main-health reads no commit of this checkout and counts only main push runs of
 # that file (THE MAIN HEALTH below): one-shot, the newest completed one decides, so an older run that did
@@ -174,8 +176,9 @@ GH_API_HOST_ARGS=()
 # conforming one under --require-base; THE TREE MATCH and THE MAIN HEALTH read the same file under their
 # own rules), matched against each run's recorded workflow path (the runs API's .path),
 # never its display name: any workflow can carry name: Quality, so a name match would let a
-# same-named run from another file stand in. quality.yml is this repository's aggregated workflow,
-# the one required status the merge lane reads.
+# same-named run from another file stand in. quality.yml, the default, is this repository's aggregated
+# workflow, the one required status the merge lane reads; --require-base BRANCH --require-workflow PATH
+# replaces it with PATH for that read (--match-tree and --main-health refuse --require-workflow).
 REQUIRE_WORKFLOW=".github/workflows/quality.yml"
 REQUIRE_WORKFLOW_SET=0
 EXPECT_VALUE=""

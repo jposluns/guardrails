@@ -353,8 +353,9 @@ def evaluate_policy(method, settings, repo):
         return "warn", extras, (
             "WARNING: {} also allows {}. Those methods stay available to anyone merging outside this tool; "
             "disable them in the repository settings so squash is the only allowed method. These settings "
-            "let this run go on to its remaining checks; it lands by squash only, and only if every one of "
-            "them passes.".format(repo, " and ".join(extras)))
+            "let this run go on to its remaining checks; it sends a squash request only, and only if every "
+            "check before the request passes; a check after the merge can still fail (exit 1 or 2 after a "
+            "merge), so only exit 0 confirms the landing.".format(repo, " and ".join(extras)))
     return "permit", (), "squash is the only merge method {} allows".format(repo)
 
 
@@ -1552,7 +1553,9 @@ def _self_test_exit_paths():
     # The settings warning states what the settings permit, not that a landing happened.
     warning = evaluate_policy("squash", _settings(merge=True), FX_REPO)[2]
     check("policy/warning-claims-no-landing",
-          "proceeds" not in warning and "only if every one of them passes" in warning, warning)
+          "proceeds" not in warning and "lands" not in warning
+          and "only if every check before the request passes" in warning
+          and "only exit 0 confirms the landing" in warning, warning)
 
 
 def _self_test_live_argv():
@@ -1629,7 +1632,8 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: merge_pr {} checks on recorded API responses with no network (the policy table "
-          "with its flips: squash-only permits, each wider setting warns and lands by squash, squash disabled "
+          "with its flips: squash-only permits, each wider setting warns and, every other check green, lands "
+          "by squash, squash disabled "
           "and merge or rebase are refused under narrow and broad settings, missing, null, wrong-type and "
           "other-repository settings cannot evaluate; the origin binding; every argument refusal before any "
           "read; the landing's request order and exact pinned squash payload; every pre-request refusal "
