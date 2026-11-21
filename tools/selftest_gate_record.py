@@ -23,6 +23,14 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          tips and a deletion, and pre-merge-commit on a clean merge.
   V17    a tree-moved record whose check exited 0 is no earlier failure (the restored tree's pass commits);
          its flip, a tree-moved record whose check also exited 1, still refuses.
+  V18    a commit that changes the required set's argv commits, because the recorder runs HEAD's set; its
+         flip, the same commit with the check failing, refuses.
+  V19-V25 the binding class (QA findings 1, 3, 7, 8, 9, 10, 11): an orphan branch that lowers the bar is
+         refused at commit and at push; the check's process group is killed before the record is written
+         (the flip pins residual R3, a writer that leaves the group); pre-push reads every worktree's log;
+         the stub's verifier copy lives in the git directory; the lock wait and the check run are bounded;
+         a symbolic-link aiqt directory is not followed; and the record binds the parent commit (another
+         parent refuses, a check that moves HEAD records tree-moved). Each has its flip.
   X1-X3  the pinned residuals: --no-verify, core.hooksPath on the command line, a forged pass line.
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
@@ -52,6 +60,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -87,6 +96,15 @@ if [ -n "${FIXTURE_MARK:-}" ]; then : >"$FIXTURE_MARK"; fi
 if [ -n "${FIXTURE_SLEEP:-}" ]; then sleep "$FIXTURE_SLEEP"; fi
 if [ -n "${FIXTURE_EDIT:-}" ]; then printf 'edit\\n' >>a.txt; fi
 if [ -n "${FIXTURE_SIGNAL:-}" ]; then kill -TERM $$; fi
+if [ "${FIXTURE_WRITER:-}" = group ]; then ( sleep 2; cat "$FIXTURE_SAVED" >"$FIXTURE_LOG" ) & fi
+if [ "${FIXTURE_WRITER:-}" = escape ]; then
+    python3 -I -c 'import os, shutil, sys, time
+if os.fork():
+    os._exit(0)
+os.setsid()
+time.sleep(2)
+shutil.copyfile(sys.argv[1], sys.argv[2])' "$FIXTURE_SAVED" "$FIXTURE_LOG"
+fi
 exit "${FIXTURE_EXIT:-0}"
 """
 OPF_STUB = "#!/bin/sh\n# OPF pre-commit stub, written by opf/enforcement/precommit/install.sh (fixture copy).\nexit 0\n"
@@ -203,8 +221,9 @@ def rows_recorder(base):
     check("W1/exit", done.returncode, 0)
     check("W1/record", (last["result"], last["exit"], last["tree"], last["tree_after"], last["set"]),
           ("pass", 0, tree, tree, "full"))
-    check("W1/keys", list(last), ["format", "tree", "object_format", "tree_after", "set", "argv", "exit", "result",
-                                  "started", "finished", "recorder"])
+    check("W1/keys", list(last), ["format", "tree", "head", "object_format", "tree_after", "set", "argv", "exit",
+                                  "result", "started", "finished", "recorder"])
+    check("W1/head-is-parent", last.get("head"), head(repo))
     done = gate(repo, "run", extra={"FIXTURE_EXIT": "3"})
     last = records(repo)[-1]
     check("W2/exit", done.returncode, 3)
@@ -328,18 +347,35 @@ def rows_verify(base):
             check("V7/refused-other-set", refused_commit(repo, before, done, "a different check set"), (True, True))
         else:
             check("V7/flip-no-stub-commits", done.returncode, 0)
+    # V8: a commit that lowers the configuration is judged by HEAD's set. The recorder runs HEAD's set by default
+    # (QA finding 5), so its record is for "full"; a record of the lowered set (run --set suite-x) is refused.
+    repo = fixture(base)
+    stage(repo, ".aiqt/gate-record.toml", LOWERED)
+    gate(repo, "run")
+    check("V8/recorder-runs-head-set", records(repo)[-1]["set"], "full")
     for installed in (True, False):
         repo = fixture(base, installed)
         stage(repo, ".aiqt/gate-record.toml", LOWERED)
-        gate(repo, "run")
+        gate(repo, "run", "--set", "suite-x")
         before = head(repo)
         done = commit(repo, "v8")
         if installed:
-            check("V8/recorded-lowered-set", records(repo)[-1]["set"], "suite-x")
             check("V8/refused-config-from-head", refused_commit(repo, before, done, "a different check set"),
                   (True, True))
         else:
             check("V8/flip-no-stub-commits", done.returncode, 0)
+    # V18 (QA finding 5): a commit that changes the required set's argv records and commits by the documented
+    # workflow, because the recorder runs HEAD's argv; its flip, the same commit with the check failing, refuses.
+    for failed in (False, True):
+        repo = fixture(base)
+        stage(repo, ".aiqt/gate-record.toml", CONFIG.replace('argv = ["sh", "check.sh"]', 'argv = ["sh", "check.sh", "v2"]'))
+        gate(repo, "run", extra={"FIXTURE_EXIT": "1"} if failed else None)
+        before = head(repo)
+        done = commit(repo, "v18")
+        if failed:
+            check("V18/flip-failing-head-set-refused", refused_commit(repo, before, done, "failed"), (True, True))
+        else:
+            check("V18/argv-change-commits", (records(repo)[-1]["argv"], done.returncode), (["sh", "check.sh"], 0))
     unborn = TMP / "unborn"
     git_out(TMP, "init", "-q", "-b", "main", str(unborn))
     (unborn / HOOKS_REL).parent.mkdir(parents=True)
@@ -387,7 +423,7 @@ def rows_verify(base):
         forged = TMP / "forged-{}.jsonl".format(installed)
         stage(repo, "b.txt", "b\n")
         tree = git_out(repo, "write-tree")
-        forged.write_text(forged_line(tree), encoding="ascii")
+        forged.write_text(forged_line(tree, head(repo)), encoding="ascii")
         extra = {"AIQT_GATE_RECORD": str(forged), "AIQT_GATE_RECORD_LOG": str(forged), "AIQT_GATE_TREE": tree}
         before = head(repo)
         done = git(repo, "commit", "-q", "-m", "v14", extra=extra)
@@ -399,8 +435,9 @@ def rows_verify(base):
     rows_merge(base)
 
 
-def forged_line(tree):
-    record = {"format": "aiqt-gate-record/1", "tree": tree, "object_format": "sha1", "tree_after": tree, "set": "full",
+def forged_line(tree, parent):
+    record = {"format": "aiqt-gate-record/2", "tree": tree, "head": parent, "object_format": "sha1",
+              "tree_after": tree, "set": "full",
               "argv": ["sh", "check.sh"], "exit": 0, "result": "pass", "started": "2026-11-21T00:00:00Z",
               "finished": "2026-11-21T00:00:01Z", "recorder": "forged"}
     return json.dumps(record, separators=(",", ":")) + "\n"
@@ -440,7 +477,7 @@ def rows_log_tamper(base):
     tree = git_out(repo, "write-tree")
     log = log_path(repo)
     log.parent.mkdir(mode=0o700)
-    log.write_text(forged_line(tree), encoding="ascii")
+    log.write_text(forged_line(tree, head(repo)), encoding="ascii")
     os.chmod(log, 0o600)
     check("X3/forged-pass-line-commits", commit(repo, "x3").returncode, 0)
     stage(repo, "c.txt", "c\n")
@@ -493,6 +530,147 @@ def rows_merge(base):
                   (True, True, True))
         else:
             check("V16/flip-no-stub-merges", (done.returncode, head(repo) != before), (0, True))
+
+
+# --- the binding class: check, tree, parent and log location as the hook judges them ---------------------------
+def bare_remote(repo, name):
+    remote = TMP / "{}.git".format(name)
+    git_out(TMP, "init", "-q", "--bare", "-b", "main", str(remote))
+    git_out(repo, "remote", "set-url", "origin", str(remote))
+    git_out(repo, "push", "-q", "--no-verify", "origin", "main")
+    return remote
+
+
+def rows_class(base):
+    # V19 (QA finding 1): an orphan branch keeps the default branch's bar. Lowering the configuration in its index
+    # refuses the commit, and a root commit made past the hook with it refuses the push; the flip, an orphan
+    # branch that keeps the bar, commits and pushes.
+    for lowered in (True, False):
+        repo = fixture(base)
+        remote = bare_remote(repo, "v19-{}".format(lowered))
+        git_out(repo, "checkout", "-q", "--orphan", "v19")
+        if lowered:
+            stage(repo, ".aiqt/gate-record.toml", LOWERED)
+        gate(repo, "run")
+        done = commit(repo, "v19")
+        if lowered:
+            check("V19/orphan-lowered-commit-refused", (done.returncode != 0, head(repo), "own bar" in done.stderr),
+                  (True, "", True))
+            commit(repo, "v19", "--no-verify")
+            done = git(repo, "push", "-q", "origin", "v19")
+            check("V19/orphan-lowered-push-refused", (done.returncode != 0, "own bar" in done.stderr,
+                                                       git(remote, "rev-parse", "-q", "--verify", "v19").stdout),
+                  (True, True, ""))
+        else:
+            check("V19/flip-same-bar-orphan-commits", done.returncode, 0)
+            check("V19/flip-same-bar-orphan-pushes", git(repo, "push", "-q", "origin", "v19").returncode, 0)
+    # V20 (QA finding 3): the check runs in its own session and its process group is killed before the record is
+    # written, so a writer it leaves behind in its group cannot rewrite the log; the flip pins residual R3, a writer
+    # that leaves the group (setsid) and rewrites the log after the recorder's line.
+    for escape in (False, True):
+        repo = fixture(base)
+        stage(repo, "b.txt", "b\n")
+        gate(repo, "run")
+        saved = TMP / "v20-saved-{}.jsonl".format(escape)
+        shutil.copyfile(log_path(repo), saved)
+        done = gate(repo, "run", extra={"FIXTURE_EXIT": "1", "FIXTURE_WRITER": "escape" if escape else "group",
+                                        "FIXTURE_SAVED": str(saved), "FIXTURE_LOG": str(log_path(repo))})
+        time.sleep(3)
+        before = head(repo)
+        result = commit(repo, "v20")
+        if escape:
+            check("V20/flip-escaped-writer-forges-residual", (done.returncode, result.returncode), (1, 0))
+        else:
+            check("V20/group-writer-killed", (done.returncode, records(repo)[-1]["result"],
+                                              refused_commit(repo, before, result, "failed")), (1, "fail", (True, True)))
+    # V21 (QA finding 7): pre-push reads every worktree's log, so a branch recorded and committed in a linked
+    # worktree pushes from the main worktree; the flip, a branch committed there with no record, refuses.
+    repo = fixture(base)
+    bare_remote(repo, "v21")
+    linked = TMP / "v21-linked"
+    git_out(repo, "worktree", "add", "-q", "-b", "v21", str(linked))
+    stage(linked, "b.txt", "b\n")
+    gate(linked, "run")
+    commit(linked, "v21")
+    check("V21/linked-record-pushes-from-main", git(repo, "push", "-q", "origin", "v21").returncode, 0)
+    git_out(linked, "checkout", "-q", "-b", "v21-none")
+    stage(linked, "c.txt", "c\n")
+    commit(linked, "v21 none", "--no-verify")
+    done = git(repo, "push", "-q", "origin", "v21-none")
+    check("V21/flip-unrecorded-refused", (done.returncode != 0, "missing" in done.stderr), (True, True))
+    # V22 (QA finding 8): the stub's verifier copy lives in the git directory, so an unusable TMPDIR does not
+    # refuse and no copy is left behind; the flip, a symbolic-link aiqt directory, cannot evaluate.
+    repo = fixture(base)
+    stage(repo, "b.txt", "b\n")
+    gate(repo, "run")
+    done = git(repo, "commit", "-q", "-m", "v22", extra={"TMPDIR": str(TMP / "no-such-dir")})
+    left = sorted(path.name for path in (repo / ".git" / "aiqt").iterdir() if path.name.startswith("verifier."))
+    check("V22/no-tmpdir-commits", (done.returncode, left), (0, []))
+    repo = fixture(base)
+    stage(repo, "b.txt", "b\n")
+    gate(repo, "run")
+    real = repo / ".git" / "aiqt-real"
+    (repo / ".git" / "aiqt").rename(real)
+    os.symlink(real, repo / ".git" / "aiqt")
+    check("V22/flip-symlink-dir-stub-exit", stub_rc(repo), 2)
+    # V23 (QA finding 9): the recorder's lock wait and the check's run are bounded and cannot evaluate past the
+    # bound; the flips, the same runs inside the bound, pass.
+    import fcntl
+    repo = fixture(base)
+    stage(repo, "b.txt", "b\n")
+    gate(repo, "run")
+    fd = os.open(str(log_path(repo).parent / "recorder.lock"), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        done = run([sys.executable, "-I", "-B", str(HOOKS_SRC), "gate-record", "run"], repo,
+                   {"AIQT_GATE_RECORD_LOCK_TIMEOUT": "1"}, timeout=60)
+    finally:
+        os.close(fd)
+    check("V23/held-lock-cannot-evaluate", (done.returncode, "stayed locked" in done.stderr), (2, True))
+    check("V23/flip-free-lock-runs", gate(repo, "run", extra={"AIQT_GATE_RECORD_LOCK_TIMEOUT": "1"}).returncode, 0)
+    done = gate(repo, "run", extra={"FIXTURE_SLEEP": "5", "AIQT_GATE_RECORD_CHECK_TIMEOUT": "1"})
+    check("V23/slow-check-cannot-evaluate", (done.returncode, records(repo)[-1]["result"]), (2, "cannot-evaluate"))
+    done = gate(repo, "run", extra={"FIXTURE_SLEEP": "1", "AIQT_GATE_RECORD_CHECK_TIMEOUT": "30"})
+    check("V23/flip-check-inside-bound-passes", (done.returncode, records(repo)[-1]["result"]), (0, "pass"))
+    # V24 (QA finding 10): the recorder opens the aiqt directory with O_NOFOLLOW and creates its files relative to
+    # it, so a symbolic-link aiqt directory cannot evaluate and nothing is written through it; the flip, a real
+    # directory, records.
+    repo = fixture(base)
+    stage(repo, "b.txt", "b\n")
+    outside = TMP / "v24-outside"
+    outside.mkdir(mode=0o700)
+    os.symlink(outside, repo / ".git" / "aiqt")
+    done = gate(repo, "run")
+    check("V24/symlink-dir-not-followed", (done.returncode, sorted(path.name for path in outside.iterdir())), (2, []))
+    os.unlink(repo / ".git" / "aiqt")
+    check("V24/flip-real-dir-records", gate(repo, "run").returncode, 0)
+    # V25 (QA finding 11, the class): the record binds the parent commit it ran on. The same tree committed on
+    # another parent refuses; a check that moves HEAD records tree-moved; the flip, the recorded parent, commits.
+    for moved in (False, True):
+        repo = fixture(base)
+        first = head(repo)
+        stage(repo, "c.txt", "c\n")
+        commit(repo, "other parent", "--no-verify")
+        stage(repo, "b.txt", "b\n")
+        gate(repo, "run")
+        if moved:
+            git_out(repo, "reset", "-q", "--soft", first)
+            before = head(repo)
+            done = commit(repo, "v25")
+            check("V25/other-parent-refused", refused_commit(repo, before, done, "for another parent"), (True, True))
+        else:
+            check("V25/flip-recorded-parent-commits", commit(repo, "v25").returncode, 0)
+    repo = fixture(base)
+    moving = "git -c user.name=f -c user.email=f@example.invalid commit-tree -m moved HEAD^{tree}"
+    write(repo, "check.sh", CHECK_SH.replace('exit "${FIXTURE_EXIT:-0}"',
+                                             'if [ -n "${FIXTURE_MOVE:-}" ]; then git reset -q --soft "$(' + moving
+                                             + ')"; fi\nexit "${FIXTURE_EXIT:-0}"'))
+    git_out(repo, "add", "check.sh")
+    git_out(repo, "commit", "-q", "--no-verify", "-m", "a check that can move HEAD")
+    stage(repo, "d.txt", "d\n")
+    check("V25/flip-check-not-moving-passes", gate(repo, "run").returncode, 0)
+    done = gate(repo, "run", extra={"FIXTURE_MOVE": "1"})
+    check("V25/check-moving-head-tree-moved", (done.returncode, records(repo)[-1]["result"]), (1, "tree-moved"))
 
 
 # --- the installer -----------------------------------------------------------------------------------------
@@ -576,6 +754,7 @@ def run_checks():
         base = make_base()
         rows_recorder(base)
         rows_verify(base)
+        rows_class(base)
         rows_install(base)
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

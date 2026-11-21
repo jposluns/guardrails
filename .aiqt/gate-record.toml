@@ -2,12 +2,15 @@
 #   python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install
 # read this file from the commit a change is built on (HEAD for pre-commit, the pushed tip's first
 # parent for pre-push), never from the working tree, so a change cannot alter the set it is
-# judged by. The set's argv still runs the code of the tree under test, so a change to the check's
-# own code (for example tools/run_all_checks.sh) is judged by that changed code.
+# judged by; a change with no parent (an orphan branch) must keep the default branch's copy. The
+# recorder reads it from the same commit, so a change to this file is recorded against the set it
+# is judged by. The set's argv still runs the code of the tree under test, so a change to the
+# check's own code (for example tools/run_all_checks.sh) is judged by that changed code.
 # Workflow: stage everything, run
 #   python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record run
-# and commit once it passes; the pre-commit hook refuses a tree with no passing record of the
-# pre-commit set, and the pre-push hook a pushed tip with no passing record of the pre-push set.
+# and commit once it passes; the record binds the tree and the HEAD commit it ran on. The
+# pre-commit hook refuses a tree with no passing record of the pre-commit set on HEAD, and the
+# pre-push hook a pushed tip with no passing record of the pre-push set on the tip's first parent.
 format-version = 1
 pre-commit = "full"
 pre-push = "full"

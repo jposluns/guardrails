@@ -91,8 +91,9 @@ one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-valu
 push/merge -n edges stay allowed; and the parse-error fallback fails safe. The interim narrowing (gcg-* rows): a
 command that runs a check and names git (or holds a $ or backquote after the check) denies unless it is exactly one
 shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which keeps its message; each flip row is
-red with the narrowing reverted and each shape row red with the shape list emptied; and the write-scope guard
-denies a Write into the git-side gate record's directory (gcg-wr-* rows).
+red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
+(gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
+reverted; and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -5000,6 +5001,26 @@ _GCG_ROWS = (
 )
 
 
+# The gatdis interim plumbing deny (gpl-*, QA finding 2): git commit-tree, send-pack and http-push run no hook.
+# With the deny reverted (_gate_plumbing_git returning False) every flip row goes back to main's decision.
+_GPL_ROWS = (
+    ("gpl-01", "git commit-tree -p HEAD -m x 4b825dc642cb6eb9a060e54bf8d69288fbee4904", "allow", "deny", "flip"),
+    ("gpl-02", "c=$(git commit-tree -p HEAD -m x HEAD^{tree}) && git update-ref refs/heads/p $c", "allow", "deny",
+     "flip"),
+    ("gpl-03", "git send-pack /srv/r.git refs/heads/plumb", "allow", "deny", "flip"),
+    ("gpl-04", "git -C /r send-pack origin plumb", "allow", "deny", "flip"),
+    ("gpl-05", "git http-push https://example.invalid/r.git plumb", "allow", "deny", "flip"),
+    ("gpl-06", "git commit-'tree' -m x T", "deny", "deny", "keep"),  # main's closed grammar denies it first
+    ("gpl-07", "git-send-pack /srv/r.git main", "allow", "deny", "flip"),
+    ("gpl-08", "$G send-pack /srv/r.git main", "allow", "deny", "flip"),
+    ("gpl-09", "git send-pack 'unbalanced", "allow", "deny", "flip"),
+    ("gpl-10", "git log --oneline", "allow", "allow", "keep"),
+    ("gpl-11", "git push origin feat", "allow", "allow", "keep"),
+    ("gpl-12", "grep -n send-pack notes.txt", "allow", "allow", "keep"),
+    ("gpl-13", "git commit-tree -p HEAD -m x T && git commit --no-verify -m y", "deny", "deny", "keep"),
+)
+
+
 def _gcg_reason(command):
     _code, obj, _err = aiqt_hooks.gate_weakening({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                                   "tool_input": {"command": command}})
@@ -5039,6 +5060,26 @@ def _test_gate_check_git(failures, tmp):
                 failures.append("({}-empty) shape row is not red with the shape list emptied".format(label))
     finally:
         aiqt_hooks._gate_check_then_git, aiqt_hooks._gate_check_git_shape = saved_rule, saved_shape
+    for label, command, main, now, kind in _GPL_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    if "commit-tree" not in _gcg_reason("git send-pack /r.git refs/heads/x"):
+        failures.append("(gpl-msg) the plumbing deny does not name the routes it refuses")
+    if "--no-verify" not in _gcg_reason("git commit-tree -p HEAD -m x T && git commit --no-verify -m y"):
+        failures.append("(gpl-msg-bypass) the hook-bypass deny no longer keeps its own message before the plumbing deny")
+    saved_plumb = aiqt_hooks._gate_plumbing_git
+    try:
+        aiqt_hooks._gate_plumbing_git = lambda command: False
+        for label, command, main, now, kind in _GPL_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the plumbing deny reverted, gate_weakening({!r}) should give "
+                                "main's {}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the plumbing deny reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_git = saved_plumb
     repo = _init_repo(Path(tmp) / "gcg-write-scope")
 
     def write(path):

@@ -254,12 +254,15 @@ per clone with `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record
 pre-commit, pre-merge-commit and pre-push stubs into the common git directory's hooks directory, never sets
 `core.hooksPath`, and refuses next to the OPF pre-commit stub, printing the manual chaining step). Then: stage
 everything the commit holds, run `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record run`
-(it runs the set `.aiqt/gate-record.toml` names, `bash tools/run_all_checks.sh`, on a working tree that
-matches the index and appends a record bound to the index tree), and commit. The hooks refuse a tree whose
-last record is missing, failed, for another tree or for another set, or that has an earlier failed run, and
-read the set from the commit the change is built on. `tools/doctor.py --require-gate-record` reports a missing
-or disabled stub. Until a clone has the stubs, the gate-weakening hook denies a check and git in one Bash
-command outside a short list of exact shapes; run them as two calls.
+(it runs the set HEAD's committed `.aiqt/gate-record.toml` names, `bash tools/run_all_checks.sh`, on a
+working tree that matches the index, and appends a record bound to the index tree and the HEAD commit), and
+commit. The hooks refuse a tree whose last record is missing, failed, for another tree, for another parent
+commit or for another set, or that has an earlier failed run, and read the set from the commit the change is
+built on; an orphan branch must keep the default branch's set and verifier. After `git commit --amend`, record
+the tree on its real parent (`git reset --soft HEAD^`, run the recorder, commit) before pushing.
+`tools/doctor.py --require-gate-record` reports a missing or disabled stub. Until a clone has the stubs, the
+gate-weakening hook denies a check and git in one Bash command outside a short list of exact shapes, and git
+commit-tree, send-pack and http-push in any command; run a check and git as two calls.
 
 ## Git and writing conventions
 

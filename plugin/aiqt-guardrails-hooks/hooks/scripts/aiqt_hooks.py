@@ -410,7 +410,7 @@ DENY_CONSTRUCTORS = (
     "_deny", "_abspth_check_required", "_abspth_check_search_root", "_clean_ignored_deny", "_commit_denial",
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
-    "_gate_check_then_git_deny", "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
+    "_gate_check_then_git_deny", "_gate_plumbing_deny", "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
     "_reset_ancestry_deny", "_wrtscp_deny")
 
@@ -19058,6 +19058,8 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind
             return _gate_runtime_deny(runtime_hit)
     if check_git and _gate_check_then_git(command):
         return _gate_check_then_git_deny()
+    if check_git and _gate_plumbing_git(command):
+        return _gate_plumbing_deny()
     if kind == "swallow":
         # the swallow/truncate checker-shape heuristic is too broad (a benign optional
         # probe is common), so on the unparseable fallback it ALLOWS-WITH-NOTE rather than denying; the
@@ -20234,6 +20236,38 @@ def _gate_check_then_git_deny():
         "AIQT guardrail: denied a check followed by git outside the exact accepted shapes (rule gatdis).")
 
 
+# The interim plumbing deny (gatdis, QA finding 2): git commit-tree makes a commit that git update-ref then puts
+# on a branch, and git send-pack and git http-push push one, and none of them runs the pre-commit or pre-push hook
+# the git-side gate record installs. A command whose text, with every quote character and backslash removed and
+# lowercased, holds one of these verbs as a word (git-send-pack, the exec-path spelling, included) and names git
+# (_gate_names_git over the whole text: a word-bounded 'git', or a '$' or backquote that may build it) denies,
+# after every other deny of this guard, on the parsed path, the ordinary parse-failure fallback and the
+# uncertain-'#' doubt path alike. Other spellings of the same routes (git hash-object -t commit -w or git
+# fast-import with git update-ref, git receive-pack, a transport helper, a client that runs no hook) stay a
+# disclosed residual of the gate record (its R2), closed for main by the required Quality gates.
+_GATE_PLUMB_VERB_RE = re.compile(r"(?<![a-z0-9_])(?:commit-tree|send-pack|http-push)(?![a-z0-9_-])", re.ASCII)
+
+
+def _gate_plumbing_git(command):
+    """True when command may run git plumbing that commits or pushes with no hook (commit-tree, send-pack,
+    http-push): its de-quoted lowercased text holds such a verb as a word, and it names git (_gate_names_git)."""
+    plain = command.replace("'", "").replace('"', "").replace("\\", "").lower()
+    if _GATE_PLUMB_VERB_RE.search(plain) is None:
+        return False
+    return _gate_names_git(command, command)
+
+
+def _gate_plumbing_deny():
+    """The interim plumbing deny: git plumbing that makes or pushes a commit with no hook."""
+    return _deny(
+        "AIQT rule gatdis (gate-discipline): this command names git plumbing that makes or pushes a commit "
+        "with no git hook (git commit-tree, whose commit git update-ref then puts on a branch, git send-pack or "
+        "git http-push), so the git-side gate record's pre-commit and pre-push hooks would never judge it. "
+        "Commit with git commit and push with git push so the hooks run. Other spellings of these routes are a "
+        "disclosed residual, not an allowed route. " + _GATE_ALTS,
+        "AIQT guardrail: denied git plumbing that commits or pushes with no hook (rule gatdis).")
+
+
 def gate_weakening(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
@@ -20499,6 +20533,10 @@ def gate_weakening(data):
     analysis, so every correct form outside the shapes denies (pytest && git commit -m x, make test && git push
     origin x, pytest && git status, pytest && echo git, pytest && echo $HOME): the deliberate over-denial, whose fix
     is two Bash calls. It holds until the git-side gate record (gate_record_main) is installed in the clone.
+    INTERIM PLUMBING DENY (_gate_plumbing_git), right after it on the same three paths: a command whose de-quoted
+    lowercased text holds git commit-tree, send-pack or http-push as a word and names git (or holds a '$' or
+    backquote) DENIES, since none of them runs the gate record's hooks; other spellings of those routes stay the
+    gate record's disclosed residual R2.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -20679,6 +20717,8 @@ def gate_weakening(data):
         # The interim narrowing on the raw text (the raw checker probe), after every deny above.
         if _gate_check_then_git(command):
             return _gate_check_then_git_deny()
+        if _gate_plumbing_git(command):
+            return _gate_plumbing_deny()
         # What remains is still text this guard cannot evaluate: where it holds a checker-shaped word
         # (_gate_doubt_checker, the parsed recognizer's own name splitter and lexicon, so a swallow or
         # truncating spelling behind the '#' pairs through its own '|', '<<<' or substitution marker) and
@@ -20806,6 +20846,9 @@ def gate_weakening(data):
     # deny above (each keeps its message) and before any note or allow (_gate_check_then_git).
     if _gate_check_then_git(command, records):
         return _gate_check_then_git_deny()
+    # The interim plumbing deny (_gate_plumbing_git): git commit-tree, send-pack and http-push run no hook.
+    if _gate_plumbing_git(command):
+        return _gate_plumbing_deny()
     if pending_note is not None:
         return _allow_note(pending_note)
     flow_note = _gate_flow_note(records, command)
@@ -44629,13 +44672,16 @@ class _DeadlineWindow:
 # --- gatdis git side: the gate record (aiqt_hooks.py gate-record run|verify-commit|verify-push|install) ---------
 # The text guard above reads shell text, so each new spelling of "git after a masked check" was a new miss. This
 # control moves the decision to git: a recorder runs the required check set on a clean index and appends one
-# record bound to the index tree, and git's pre-commit, pre-merge-commit and pre-push hooks refuse a tree whose
-# record is missing, failed, for another tree or for another check set, whatever spelled the git command.
+# record bound to the index tree and to the commit the change builds on, and git's pre-commit, pre-merge-commit
+# and pre-push hooks refuse a tree whose record is missing, failed, for another tree, for another parent commit
+# or for another check set, whatever spelled the git command.
 #
 #   python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record run [--set NAME]
 #       stage first: the working tree must match the index (no unstaged change, no untracked non-ignored file);
-#       runs the set's argv (no shell, every GIT_ variable dropped) and appends one record to
-#       <git-path>/aiqt/gate-records.jsonl; exits with the check's own status (2: cannot evaluate).
+#       runs the set (by default the pre-commit set) of the configuration the pre-commit hook will read
+#       (_gr_commit_base: HEAD's committed one), in its own session with every GIT_ variable dropped and no
+#       shell, kills what is left of the check's process group when it exits, and appends one record to
+#       <git dir>/aiqt/gate-records.jsonl; exits with the check's own status (2: cannot evaluate).
 #   python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install
 #       writes the pre-commit, pre-merge-commit and pre-push stubs into the common git directory's hooks
 #       directory (never core.hooksPath); refuses a core.hooksPath in any scope, a symbolic-link hooks
@@ -44643,30 +44689,41 @@ class _DeadlineWindow:
 #       step) and a clone with no .aiqt/gate-record.toml.
 #   gate-record verify-commit | verify-push   what the stubs run; exit 0 pass, 1 refused, 2 cannot evaluate.
 #
-# The stubs run the verifier from HEAD's committed aiqt_hooks.py (the index's on an unborn branch), copied to a
-# temporary file, never from the working tree or stdin, and read the configuration from the commit the change is
-# built on, so a commit on an existing branch cannot change the configured check set or the verifier that
-# judges it (an unborn, orphan, branch reads both from its own index, and pre-push reads a root commit's own
-# configuration, so an orphan branch sets its own check set: a disclosed residual). The check set's
-# argv still runs the code of the tree under test, so a commit that changes the check's own code (for example
-# tools/run_all_checks.sh) is judged by that changed code. No path, tree or set is read from the environment. A
-# record line is a JSON object with exactly _GR_KEYS, in that order.
+# The bar a change is judged by (the configuration and the verifier) is read from the commit it builds on, never
+# from the working tree or stdin: HEAD for pre-commit and pre-merge-commit, the pushed tip's first parent for
+# pre-push. Only a repository with no commit at all reads it from the index. A change with no parent in a
+# repository that has commits (an orphan branch's first commit, a pushed root commit off the default branch) is
+# judged by the default branch's bar (the first of _GR_DEFAULT_REFS that names a commit), and is refused when its
+# own configuration or verifier differs from it (_gr_same_bar); a pushed root commit the default branch contains
+# is the repository's first commit and keeps its own. So a commit on a branch cannot change the configured check
+# set or the verifier that judges it. The check set's argv still runs the code of the tree under test, so a
+# commit that changes the check's own code (for example tools/run_all_checks.sh) is judged by that changed code.
+# No path, tree, parent or set is read from the environment (two bounds can only be lowered there, which can only
+# make the recorder cannot evaluate). A record line is a JSON object with exactly _GR_KEYS, in that order: head
+# is the HEAD commit when the check ran ("" on an unborn branch), and the recorder writes a tree-moved record when
+# the check moved the tree, the index or HEAD, and a cannot-evaluate one when the check ran past its bound, a
+# process of its group outlived it, or the log was replaced or rewritten while it ran.
 # Disclosed residuals (each closed by the required Quality gates re-run on the merged tree, or disclosed): R1 git
 # commit or push --no-verify skips the hooks (the text guard denies the spellings it reads); R2 a client that runs
 # no hooks, a core.hooksPath set later or on the command line, a removed stub, and git plumbing that runs no
-# hook (git commit-tree with git update-ref makes a commit, git send-pack pushes one); R3 a same-user process,
-# the checked command itself included, that appends or rewrites a record or edits a stub (the Write/Edit path
-# deny in write_scope_guard, _wrtscp_gate_record_hit, narrows the tool route only); R4 cherry-pick, revert,
-# rebase and am commit without a pre-commit hook (pre-push still checks the pushed tip); R5 the record binds the
-# tree, not the environment, the parent commit or ignored files, and the check runs the tree's own code; the log
-# is per worktree, so a push from another worktree finds no record and refuses, and removing a linked worktree
-# drops its records; the stubs write their temporary verifier copy under TMPDIR (or /tmp); R6 a stub reads the verifier
-# from HEAD, so a commit that changes it is judged by the old one, but the commit after it runs the new one;
-# R7 pre-push checks tips only; R8 same-user races on the index or the log; and an earlier failure older than
+# hook (the text guard denies git commit-tree, send-pack and http-push, _gate_plumbing_git; other spellings such
+# as git hash-object -t commit or git fast-import with git update-ref stay open); R3 a same-user process that
+# appends or rewrites a record or edits a stub, the checked command included when it leaves its own session and
+# process group and writes after the recorder's line (the Write/Edit path deny in write_scope_guard,
+# _wrtscp_gate_record_hit, narrows the tool route only); R4 cherry-pick, revert, rebase and am commit without a
+# pre-commit hook (pre-push still checks the pushed tip and its parent); R5 the record binds the tree and the
+# first parent, not the environment, a merge's other parents or ignored files, and the check runs the tree's own
+# code; git commit --amend runs pre-commit with HEAD still the replaced commit, so its pre-commit judges the
+# replaced commit's bar and parent, and its pre-push refuses until the tree is recorded on the real parent;
+# removing a linked worktree drops its records; R6 a stub reads the verifier from HEAD, so a commit that changes
+# it is judged by the old one, but the commit after it runs the new one; R7 pre-push checks tips only; R8
+# same-user races on the index, HEAD, the default branch or the log; the stubs bound their git and python3 calls
+# only where a timeout command exists (the verifier bounds its own git calls); and an earlier failure older than
 # the 64 KiB tail the verifier reads is not seen.
-_GR_FORMAT = "aiqt-gate-record/1"
-_GR_RECORDER = "aiqt_hooks gate-record 1"
-_GR_KEYS = ("format", "tree", "object_format", "tree_after", "set", "argv", "exit", "result", "started",
+_GR_FORMAT = "aiqt-gate-record/2"
+_GR_OLD_FORMATS = ("aiqt-gate-record/1",)
+_GR_RECORDER = "aiqt_hooks gate-record 2"
+_GR_KEYS = ("format", "tree", "head", "object_format", "tree_after", "set", "argv", "exit", "result", "started",
             "finished", "recorder")
 _GR_RESULTS = ("pass", "fail", "tree-moved", "cannot-evaluate")
 _GR_CONFIG = ".aiqt/gate-record.toml"
@@ -44674,6 +44731,21 @@ _GR_LOG = "aiqt/gate-records.jsonl"
 _GR_TAIL = 65536
 _GR_HOOKS = ("pre-commit", "pre-merge-commit", "pre-push")
 _GR_VERIFIER = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+# The refs naming the default branch, whose bar a change with no parent keeps (first match wins).
+_GR_DEFAULT_REFS = ("refs/remotes/origin/HEAD", "refs/heads/main", "refs/heads/master")
+# Bounds, in seconds: one git call of the recorder or a verifier; a wait for the recorder or log lock; one run of
+# the check set; the wait for the check's process group to be gone after its kill; and, in the stubs (where a
+# timeout command exists), one git call and the verifier's whole run. A bound that runs out cannot evaluate.
+_GR_GIT_SECONDS = 120
+_GR_LOCK_SECONDS = 60
+_GR_CHECK_SECONDS = 6 * 3600
+_GR_REAP_SECONDS = 10
+_GR_STUB_GIT_SECONDS = 120
+_GR_STUB_VERIFY_SECONDS = 900
+# The recorder's lock and check bounds can be lowered (never raised) through these variables, which can only
+# make the recorder cannot evaluate sooner; the self-test uses them.
+_GR_LOCK_ENV = "AIQT_GATE_RECORD_LOCK_TIMEOUT"
+_GR_CHECK_ENV = "AIQT_GATE_RECORD_CHECK_TIMEOUT"
 _GR_TREE_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", re.ASCII)
 _GR_STAMP_RE = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", re.ASCII)
 _GR_SET_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}", re.ASCII)
@@ -44695,6 +44767,10 @@ class _GateRecordError(Exception):
     """A gate-record step that cannot evaluate (exit 2), with the reason."""
 
 
+class _GateRecordRefusal(Exception):
+    """A change the verifier refuses before it reads a record (exit 1), with the reason."""
+
+
 def _gr_env(keep):
     """os.environ with every GIT_ variable dropped except those in keep (and GIT_CONFIG_KEY_n/VALUE_n where keep
     holds GIT_CONFIG_COUNT)."""
@@ -44707,12 +44783,31 @@ def _gr_env(keep):
     return env
 
 
-def _gr_git(env, *args, cwd=None, check=True, data=None):
-    """Run git with env; the stripped stdout text, or None when check is False and git failed."""
+def _gr_bound(variable, default):
+    """default, or the positive number of seconds in the environment variable when it is lower (never higher)."""
+    text = os.environ.get(variable, "")
     try:
-        done = subprocess.run(("git",) + args, env=env, cwd=cwd, input=data, capture_output=True, check=False)
+        value = float(text)
+    except ValueError:
+        return default
+    return value if 0 < value < default else default
+
+
+def _gr_git_done(env, args, cwd=None, data=None):
+    """The finished git run; a launch failure or a run past _GR_GIT_SECONDS cannot evaluate."""
+    try:
+        return subprocess.run(("git",) + args, env=env, cwd=cwd, input=data, capture_output=True, check=False,
+                              timeout=_GR_GIT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise _GateRecordError("git {} did not finish within {} seconds".format(args[0], _GR_GIT_SECONDS)) from exc
     except OSError as exc:
         raise _GateRecordError("could not run git {} ({})".format(args[0], exc)) from exc
+
+
+def _gr_git(env, *args, cwd=None, check=True, data=None):
+    """Run git with env; the stripped stdout text, or None when check is False and git failed (a timeout always
+    cannot evaluate, so it is never read as git's answer)."""
+    done = _gr_git_done(env, args, cwd=cwd, data=data)
     if done.returncode != 0:
         if check:
             raise _GateRecordError("git {} failed (exit {}): {}".format(
@@ -44758,12 +44853,106 @@ def _gr_now():
 def _gr_log_path(env, cwd=None):
     """The log path, joined textually onto this worktree's git directory: git's own --git-path with
     --path-format=absolute resolves symbolic links, which would hide a log or aiqt directory replaced by one
-    from the lstat checks in _gr_read_log. The aiqt directory is not one git shares across linked worktrees,
-    so each worktree keeps its own log."""
+    from the O_NOFOLLOW opens in _gr_open_dir and _gr_read_log_file. Each worktree keeps its own log; the
+    pre-push verifier reads them all (_gr_log_paths)."""
     gitdir = _gr_git(env, "rev-parse", "--absolute-git-dir", cwd=cwd)
     if not gitdir or not os.path.isabs(gitdir):
         raise _GateRecordError("git named no absolute git directory for the gate-record log")
     return os.path.join(gitdir, _GR_LOG)
+
+
+def _gr_log_paths(env, cwd=None):
+    """Every gate-record log of the repository, for pre-push: this worktree's, the common git directory's and
+    each linked worktree's (<common>/worktrees/NAME, a real directory), once each, this worktree's first."""
+    own = _gr_log_path(env, cwd=cwd)
+    common = _gr_git(env, "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=cwd)
+    if not common or not os.path.isabs(common):
+        raise _GateRecordError("git named no absolute common git directory for the gate-record logs")
+    gitdirs = [common]
+    linked = os.path.join(common, "worktrees")
+    try:
+        names = sorted(os.listdir(linked))
+    except FileNotFoundError:
+        names = []
+    except OSError as exc:
+        raise _GateRecordError("could not list {} ({})".format(linked, exc.strerror)) from exc
+    for name in names:
+        path = os.path.join(linked, name)
+        try:
+            if stat.S_ISDIR(os.lstat(path).st_mode):
+                gitdirs.append(path)
+        except FileNotFoundError:
+            continue
+    paths, seen = [own], {os.path.realpath(os.path.dirname(os.path.dirname(own)))}
+    for gitdir in gitdirs:
+        key = os.path.realpath(gitdir)
+        if key not in seen:
+            seen.add(key)
+            paths.append(os.path.join(gitdir, _GR_LOG))
+    return paths
+
+
+def _gr_open_dir(log, create):
+    """A descriptor on the log's aiqt directory, opened with O_DIRECTORY and O_NOFOLLOW, so the lock and the log
+    are created and opened relative to it and a symbolic link there is never followed; it must be owned by this
+    user and closed to group and other writes, else cannot evaluate. None when it is absent and create is False."""
+    parent = os.path.dirname(log)
+    if create:
+        try:
+            os.mkdir(parent, 0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise _GateRecordError("could not create {} ({})".format(parent, exc.strerror)) from exc
+    try:
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        if create:
+            raise _GateRecordError("{} vanished while the recorder opened it".format(parent))
+        return None
+    except OSError as exc:  # ELOOP for a symbolic link, ENOTDIR for another kind of file
+        raise _GateRecordError("{} is not a real directory owned by this user and closed to group and other "
+                               "writes ({})".format(parent, exc.strerror)) from exc
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise _GateRecordError("{} is not a real directory owned by this user and closed to group and other "
+                               "writes".format(parent))
+    return fd
+
+
+def _gr_open_in(dirfd, name, flags, where):
+    """A descriptor on name inside dirfd, opened with O_NOFOLLOW and O_NONBLOCK (a FIFO there cannot stall it);
+    it must be a regular file owned by this user and closed to group and other writes, else cannot evaluate.
+    FileNotFoundError passes through."""
+    try:
+        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise _GateRecordError("{} is not a real file owned by this user and closed to group and other writes "
+                               "({})".format(where, exc.strerror)) from exc
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise _GateRecordError("{} is not a real file owned by this user and closed to group and other "
+                               "writes".format(where))
+    return fd
+
+
+def _gr_lock(fd, what):
+    """An exclusive flock on fd, waiting at most the lock bound (_GR_LOCK_SECONDS, or lower from _GR_LOCK_ENV)."""
+    import fcntl
+    seconds = _gr_bound(_GR_LOCK_ENV, _GR_LOCK_SECONDS)
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise _GateRecordError("{} stayed locked by another process for {:g} seconds".format(what, seconds))
+        time.sleep(0.05)
 
 
 def _gr_clean_tree(env, cwd):
@@ -44778,45 +44967,234 @@ def _gr_clean_tree(env, cwd):
     return tree
 
 
-def _gr_read_trees(env, top, log):
-    """(tree, index_tree): the clean tree (_gr_clean_tree, None when the working tree does not match the index)
-    and the index tree, read under an exclusive lock on <aiqt dir>/recorder.lock, so two recorders in one worktree
-    do not race each other on git's own index lock (git write-tree takes it). Another git process holding the
-    index lock still makes the read fail, which cannot evaluate (exit 2)."""
-    import fcntl
-    parent = os.path.dirname(log)
+def _gr_head(env, cwd=None):
+    """The HEAD commit id, or "" on an unborn branch."""
+    head = _gr_git(env, "rev-parse", "-q", "--verify", "HEAD^{commit}", cwd=cwd, check=False) or ""
+    if head and not _GR_TREE_RE.fullmatch(head):
+        raise _GateRecordError("git named no commit id for HEAD")
+    return head
+
+
+def _gr_read_state(env, top, log):
+    """(tree, index_tree, head): the clean tree (_gr_clean_tree, None when the working tree does not match the
+    index), the index tree and the HEAD commit, read under an exclusive lock on <aiqt dir>/recorder.lock (created
+    relative to the aiqt directory's descriptor), so two recorders in one worktree do not race each other on git's
+    own index lock (git write-tree takes it). Another git process holding the index lock still makes the read
+    fail, which cannot evaluate (exit 2)."""
+    dirfd = _gr_open_dir(log, create=True)
     try:
-        os.mkdir(parent, 0o700)
-    except FileExistsError:
-        pass
-    fd = os.open(os.path.join(parent, "recorder.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        fd = _gr_open_in(dirfd, "recorder.lock", os.O_RDWR | os.O_CREAT, os.path.join(os.path.dirname(log),
+                                                                                     "recorder.lock"))
+    finally:
+        os.close(dirfd)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        _gr_lock(fd, "the recorder lock")
+        head = _gr_head(env, cwd=top)
         tree = _gr_clean_tree(env, top)
         index_tree = tree if tree is not None else _gr_git(env, "write-tree", cwd=top)
     finally:
         os.close(fd)
-    return tree, index_tree
+    return tree, index_tree, head
 
 
-def _gr_append(log, record):
-    """Append one record line under an exclusive lock, in one write on an O_APPEND descriptor, then fsync."""
-    import fcntl
-    parent = os.path.dirname(log)
+def _gr_log_snapshot(log):
+    """(device, inode, size, sha256 of its bytes) of the log before the check runs, or None when there is none."""
+    import hashlib
+    dirfd = _gr_open_dir(log, create=True)
     try:
-        os.mkdir(parent, 0o700)
-    except FileExistsError:
-        pass
-    line = (json.dumps(record, ensure_ascii=True, separators=(",", ":"), allow_nan=False) + "\n").encode("ascii")
-    fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        fd = _gr_open_in(dirfd, os.path.basename(log), os.O_RDONLY, log)
+    except FileNotFoundError:
+        return None
+    finally:
+        os.close(dirfd)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        info = os.fstat(fd)
+        digest = hashlib.sha256()
+        left = info.st_size
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            digest.update(chunk)
+            left -= len(chunk)
+        return info.st_dev, info.st_ino, info.st_size, digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _gr_log_kept(fd, snapshot):
+    """True when the open log still is the snapshot's file with its bytes up to the snapshot's size unchanged
+    (records appended since, by another recorder, are allowed)."""
+    import hashlib
+    if snapshot is None:
+        return True
+    device, inode, size, want = snapshot
+    info = os.fstat(fd)
+    if (info.st_dev, info.st_ino) != (device, inode) or info.st_size < size:
+        return False
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, min(size - offset, 1 << 20), offset)
+        if not chunk:
+            return False
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest() == want
+
+
+def _gr_append(log, record, snapshot=None):
+    """Append one record line under an exclusive lock, in one write on an O_APPEND descriptor opened relative to
+    the aiqt directory's descriptor, then fsync. When the log is not the snapshot's file with its earlier bytes
+    unchanged (_gr_log_kept), the record is written as cannot-evaluate and the reason returned; else None."""
+    dirfd = _gr_open_dir(log, create=True)
+    try:
+        fd = _gr_open_in(dirfd, os.path.basename(log), os.O_RDWR | os.O_APPEND | os.O_CREAT, log)
+    finally:
+        os.close(dirfd)
+    problem = None
+    try:
+        _gr_lock(fd, "the gate-record log")
+        if not _gr_log_kept(fd, snapshot):
+            problem = "the log was replaced or rewritten while the check ran"
+            record["result"] = "cannot-evaluate"
+        line = (json.dumps(record, ensure_ascii=True, separators=(",", ":"), allow_nan=False) + "\n").encode("ascii")
         written = os.write(fd, line)
         if written != len(line):
             raise _GateRecordError("a short write to {} ({} of {} bytes)".format(log, written, len(line)))
         os.fsync(fd)
     finally:
         os.close(fd)
+    return problem
+
+
+def _gr_kill_group(pgid):
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _gr_group_gone(pgid, seconds):
+    """True once no process is left in the process group pgid, waiting at most seconds."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _gr_run_check(argv, top, env):
+    """(status, problem): run argv in its own session (so its own process group, whose id is its pid), wait for
+    it within the check bound (_GR_CHECK_SECONDS, or lower from _GR_CHECK_ENV) without reaping it, then, while
+    the exited leader still holds the group id, SIGKILL every process left in the group, reap the leader, and wait
+    for the group to be gone, so no process it left behind in its group writes after the recorder's line.
+    problem is None, or why the run cannot evaluate: it ran past the bound, or a process outlived the kill."""
+    seconds = _gr_bound(_GR_CHECK_ENV, _GR_CHECK_SECONDS)
+    try:
+        proc = subprocess.Popen(argv, cwd=top, env=env, start_new_session=True)
+    except OSError as exc:
+        _stderr_note("aiqt gate-record: could not launch {} ({})".format(argv[0], exc))
+        return 127, None
+    problem = None
+    deadline = time.monotonic() + seconds
+    try:
+        while os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+            if time.monotonic() >= deadline:
+                problem = "the check ran past its {:g}-second bound and was killed".format(seconds)
+                _gr_kill_group(proc.pid)
+                os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+                break
+            time.sleep(0.05)
+    finally:
+        _gr_kill_group(proc.pid)  # the unreaped leader keeps the group id from being reused
+        proc.wait()
+    if not _gr_group_gone(proc.pid, _GR_REAP_SECONDS) and problem is None:
+        problem = "a process of the check's process group was still present {} seconds after the kill".format(
+            _GR_REAP_SECONDS)
+    status = proc.returncode if proc.returncode >= 0 else 128 - proc.returncode
+    return status, problem
+
+
+def _gr_config_at(env, rev_path, where, cwd=None):
+    text = _gr_git(env, "show", rev_path, cwd=cwd, check=False)
+    if text is None:
+        raise _GateRecordError("{} is missing at {}".format(_GR_CONFIG, where))
+    return _gr_parse_config(text + "\n", "{} at {}".format(_GR_CONFIG, where))
+
+
+def _gr_default_base(env, cwd=None):
+    """The commit whose bar a change with no parent keeps: the first of _GR_DEFAULT_REFS naming a commit, or None."""
+    for ref in _GR_DEFAULT_REFS:
+        sha = _gr_git(env, "rev-parse", "-q", "--verify", ref + "^{commit}", cwd=cwd, check=False)
+        if sha:
+            return sha
+    return None
+
+
+def _gr_same_bar(env, mine, where, base, cwd=None):
+    """Refuse (_GateRecordRefusal) unless the configuration and the verifier at mine (a revision, or "" for the
+    index) are the default branch commit base's: a change with no parent must keep the repository's bar."""
+    own = _gr_config_at(env, mine + ":" + _GR_CONFIG, where, cwd=cwd)
+    theirs = _gr_config_at(env, base + ":" + _GR_CONFIG, "the default branch " + base, cwd=cwd)
+    own_verifier = _gr_git(env, "rev-parse", "-q", "--verify", mine + ":" + _GR_VERIFIER, cwd=cwd, check=False)
+    their_verifier = _gr_git(env, "rev-parse", "-q", "--verify", base + ":" + _GR_VERIFIER, cwd=cwd, check=False)
+    if own != theirs or own_verifier != their_verifier:
+        raise _GateRecordRefusal(
+            "a change with no parent sets its own bar: {} holds a different {} than the default branch {} "
+            "(the first of {} that names a commit); an orphan branch or a new root commit must keep the "
+            "repository's configuration and verifier, so restore both from the default branch, record again and "
+            "retry".format(where, "configuration" if own != theirs else "verifier", base, ", ".join(_GR_DEFAULT_REFS)))
+    return theirs
+
+
+def _gr_commit_base(env, head, index, judge, cwd=None):
+    """(sets, pre_commit, pre_push, where): the configuration a commit on top of head (the HEAD commit, or "" on
+    an unborn branch) is judged by, the one place the pre-commit verifier and the recorder both read it from.
+    HEAD's committed configuration; on an unborn branch, the index's (index: "" for the index, or the recorded
+    tree) only when the repository has no commit at all; otherwise (an orphan branch) the default branch's, and
+    with judge the orphan's own configuration and verifier must equal it (_gr_same_bar)."""
+    if head:
+        return _gr_config_at(env, head + ":" + _GR_CONFIG, "HEAD", cwd=cwd) + ("HEAD",)
+    if not _gr_git(env, "rev-list", "-n", "1", "--all", cwd=cwd):
+        where = "the index (a repository with no commit)"
+        return _gr_config_at(env, index + ":" + _GR_CONFIG, where, cwd=cwd) + (where,)
+    base = _gr_default_base(env, cwd=cwd)
+    if base is None:
+        raise _GateRecordError("this is an unborn (orphan) branch in a repository that has commits, and none of {} "
+                               "names a commit whose bar it must keep".format(", ".join(_GR_DEFAULT_REFS)))
+    where = "the default branch {} (an orphan branch)".format(base)
+    if judge:
+        return _gr_same_bar(env, index, "the index of this orphan branch", base, cwd=cwd) + (where,)
+    return _gr_config_at(env, base + ":" + _GR_CONFIG, where, cwd=cwd) + (where,)
+
+
+def _gr_push_base(env, sha):
+    """(sets, pre_push, head): the configuration a pushed commit sha is judged by and the parent its record must
+    name. The first parent's; for a root commit the default branch contains, its own (the repository's first
+    commit), with head ""; for any other root commit, the default branch's, refused unless the root keeps it."""
+    parent = _gr_git(env, "rev-parse", "-q", "--verify", sha + "^1", check=False)
+    if parent:
+        sets, _, pre_push = _gr_config_at(env, parent + ":" + _GR_CONFIG, sha + "^1")
+        return sets, pre_push, parent
+    base = _gr_default_base(env)
+    if base is None:
+        raise _GateRecordError("{} is a root commit and none of {} names a commit whose bar it must keep".format(
+            sha, ", ".join(_GR_DEFAULT_REFS)))
+    contained = _gr_git_done(env, ("merge-base", "--is-ancestor", sha, base)).returncode
+    if contained not in (0, 1):
+        raise _GateRecordError("git merge-base --is-ancestor {} {} failed (exit {})".format(sha, base, contained))
+    if contained == 0:
+        sets, _, pre_push = _gr_config_at(env, sha + ":" + _GR_CONFIG, sha + " (the default branch's root commit)")
+    else:
+        sets, _, pre_push = _gr_same_bar(env, sha, sha + " (a root commit off the default branch)", base)
+    return sets, pre_push, ""
 
 
 def _gr_run(args):
@@ -44828,22 +45206,20 @@ def _gr_run(args):
         raise _GateRecordError("usage: gate-record run [--set NAME]")
     env = _gr_env(_GR_CONFIG_KEEP)
     top = _gr_git(env, "rev-parse", "--show-toplevel", cwd=os.getcwd())
-    try:
-        with open(os.path.join(top, _GR_CONFIG), encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError as exc:
-        raise _GateRecordError("could not read {} ({})".format(_GR_CONFIG, exc)) from exc
-    sets, pre_commit, _pre_push = _gr_parse_config(text, _GR_CONFIG)
-    name = name or pre_commit
-    if name not in sets:
-        raise _GateRecordError("{} names no set {!r}".format(_GR_CONFIG, name))
-    argv = sets[name]
     object_format = _gr_git(env, "rev-parse", "--show-object-format", cwd=top)
     log = _gr_log_path(env, cwd=top)
     record = dict.fromkeys(_GR_KEYS)
-    record.update(format=_GR_FORMAT, object_format=object_format, set=name, argv=list(argv), recorder=_GR_RECORDER)
+    record.update(format=_GR_FORMAT, object_format=object_format, recorder=_GR_RECORDER)
     record["started"] = _gr_now()
-    tree, index_tree = _gr_read_trees(env, top, log)
+    tree, index_tree, head = _gr_read_state(env, top, log)
+    # The set and its argv come from the configuration the pre-commit hook reads for a commit on this HEAD
+    # (_gr_commit_base), never from the working tree, so the record names the check the hook will judge.
+    sets, pre_commit, _pre_push, where = _gr_commit_base(env, head, index_tree, False, cwd=top)
+    name = name or pre_commit
+    if name not in sets:
+        raise _GateRecordError("{} at {} names no set {!r}".format(_GR_CONFIG, where, name))
+    argv = sets[name]
+    record.update(head=head, set=name, argv=list(argv))
     if tree is None:
         record.update(tree=index_tree, tree_after=index_tree, exit=-1, result="cannot-evaluate", finished=_gr_now())
         _gr_append(log, record)
@@ -44853,26 +45229,28 @@ def _gr_run(args):
         return 2
     record["tree"] = tree
     child_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    try:
-        done = subprocess.run(argv, cwd=top, env=child_env, check=False)
-        status = done.returncode if done.returncode >= 0 else 128 - done.returncode
-    except OSError as exc:
-        _stderr_note("aiqt gate-record: could not launch {} ({})".format(argv[0], exc))
-        status = 127
+    snapshot = _gr_log_snapshot(log)
+    status, problem = _gr_run_check(argv, top, child_env)
     record["finished"] = _gr_now()
-    after, after_index = _gr_read_trees(env, top, log)
+    after, after_index, after_head = _gr_read_state(env, top, log)
     record["exit"] = status
     record["tree_after"] = after_index
-    if after != tree:
+    if problem is not None:
+        record["result"] = "cannot-evaluate"
+    elif after != tree or after_head != head:
         record["result"] = "tree-moved"
     else:
         record["result"] = "pass" if status == 0 else "fail"
-    _gr_append(log, record)
-    _stderr_note("aiqt gate-record: set {} on tree {}: {} (exit {}); record appended to {}".format(
-        name, tree, record["result"], status, log))
+    problem = _gr_append(log, record, snapshot) or problem
+    _stderr_note("aiqt gate-record: set {} ({}) on tree {}, parent {}: {} (exit {}); record appended to {}".format(
+        name, where, tree, head or "none (unborn branch)", record["result"], status, log))
+    if problem is not None:
+        _stderr_note("aiqt gate-record: cannot evaluate: {}; the record binds no result. Run the recorder "
+                     "again.".format(problem))
+        return 2
     if record["result"] == "tree-moved":
-        _stderr_note("aiqt gate-record: the check changed the working tree or the index, so its result binds no "
-                     "tree; stage the change and run the recorder again.")
+        _stderr_note("aiqt gate-record: the check changed the working tree, the index or HEAD, so its result binds "
+                     "no tree; stage the change and run the recorder again.")
         return status if status != 0 else 1
     return status if 0 <= status <= 255 else 1
 
@@ -44896,10 +45274,14 @@ def _gr_parse_line(line):
         record = json.loads(line, object_pairs_hook=_gr_no_dupes, parse_constant=_gr_bad_constant)
     except ValueError as exc:
         raise _GateRecordError("a gate record is not strict JSON ({})".format(exc)) from exc
+    if isinstance(record, dict) and record.get("format") in _GR_OLD_FORMATS:
+        raise _GateRecordError("a gate record in the format {} of an earlier recorder, which binds no parent "
+                               "commit; run the recorder again".format(record.get("format")))
     if not isinstance(record, dict) or tuple(record) != _GR_KEYS:
         raise _GateRecordError("a gate record does not hold exactly the keys {} in that order".format(
             ", ".join(_GR_KEYS)))
     if (record["format"] != _GR_FORMAT or not isinstance(record["tree"], str) or not _GR_TREE_RE.fullmatch(record["tree"])
+            or not isinstance(record["head"], str) or not (record["head"] == "" or _GR_TREE_RE.fullmatch(record["head"]))
             or record["object_format"] not in ("sha1", "sha256")
             or not isinstance(record["tree_after"], str) or not _GR_TREE_RE.fullmatch(record["tree_after"])
             or not isinstance(record["set"], str) or not isinstance(record["argv"], list)
@@ -44912,20 +45294,21 @@ def _gr_parse_line(line):
     return record
 
 
-def _gr_read_log(env):
+def _gr_read_log_file(log):
     """The records of the log's last _GR_TAIL bytes (the first, possibly partial, line of a cut tail dropped),
-    oldest first; an empty list when there is no log. A log or aiqt directory that is a symbolic link, not
-    owned by this user or writable by group or others, and a last line with no final LF, cannot evaluate."""
-    log = _gr_log_path(env)
-    for path, kind in ((os.path.dirname(log), stat.S_ISDIR), (log, stat.S_ISREG)):
-        try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            return []
-        if not kind(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-            raise _GateRecordError("{} is not a real {} owned by this user and closed to group and other writes"
-                                   .format(path, "directory" if kind is stat.S_ISDIR else "file"))
-    fd = os.open(log, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    oldest first; an empty list when there is no log. The aiqt directory and the log are opened with O_NOFOLLOW
+    (the log relative to the directory's descriptor) and checked on the open descriptors: a symbolic link, a file
+    of another kind, one not owned by this user or writable by group or others, and a last line with no final LF,
+    cannot evaluate."""
+    dirfd = _gr_open_dir(log, create=False)
+    if dirfd is None:
+        return []
+    try:
+        fd = _gr_open_in(dirfd, os.path.basename(log), os.O_RDONLY, log)
+    except FileNotFoundError:
+        return []
+    finally:
+        os.close(dirfd)
     try:
         size = os.fstat(fd).st_size
         start = max(0, size - _GR_TAIL)
@@ -44963,10 +45346,12 @@ def _gr_read_log(env):
     return records
 
 
-def _gr_judge(records, tree, set_name, argv, newest_overall):
-    """None when the records admit tree under the set, else the refusal text. newest_overall: the newest record
-    of all must be for tree (pre-commit); otherwise the newest record for tree decides (pre-push)."""
-    fix = ("stage the change, run python3 -I -B {} gate-record run, and retry once it passes".format(_GR_VERIFIER))
+def _gr_judge(records, tree, head, set_name, argv, newest_overall):
+    """None when the records admit tree on parent head under the set, else the refusal text. newest_overall: the
+    newest record of all must be for tree (pre-commit); otherwise the newest record for tree decides (pre-push).
+    The deciding record must also name head as the parent it ran on."""
+    fix = ("stage the change, run python3 -I -B {} gate-record run (it runs the set the hook reads from the "
+           "commit the change builds on), and retry once it passes".format(_GR_VERIFIER))
     known = [record for record in records if record is not None]
     if newest_overall:
         if not records:
@@ -44981,12 +45366,17 @@ def _gr_judge(records, tree, set_name, argv, newest_overall):
     if last["result"] != "pass" or last["exit"] != 0 or last["tree_after"] != tree:
         return "failed: the record for tree {} is {} (exit {}); fix the failure, then {}".format(
             tree, last["result"], last["exit"], fix)
+    if last["head"] != head:
+        return ("for another parent: the record for tree {} ran on parent {}, the commit builds on {} (after git "
+                "commit --amend, a rebase or a reset, record the tree on its real parent: for an amend, git reset "
+                "--soft HEAD^, run the recorder, then git commit); {}".format(
+                    tree, last["head"] or "none (an unborn branch)", head or "none (a root commit)", fix))
     if last["set"] != set_name or tuple(last["argv"]) != tuple(argv):
         return ("a different check set: the record for tree {} is for set {!r} {}, the configuration requires {!r} "
                 "{}; {}".format(tree, last["set"], last["argv"], set_name, list(argv), fix))
     # A tree-moved record whose check exited 0 is no failure of the check (the tree changed under it, so its
     # result binds no tree); only a fail, or a tree-moved run whose check also exited nonzero, stays an earlier
-    # failure of this tree.
+    # failure of this tree, whatever parent it ran on.
     earlier = [record for record in known if record is not last and record["tree"] == tree
                and (record["result"] == "fail" or (record["result"] == "tree-moved" and record["exit"] != 0))]
     if earlier:
@@ -44996,11 +45386,19 @@ def _gr_judge(records, tree, set_name, argv, newest_overall):
     return None
 
 
-def _gr_config_at(env, rev_path, where):
-    text = _gr_git(env, "show", rev_path, check=False)
-    if text is None:
-        raise _GateRecordError("{} is missing at {}".format(_GR_CONFIG, where))
-    return _gr_parse_config(text + "\n", "{} at {}".format(_GR_CONFIG, where))
+def _gr_judge_logs(logs, tree, head, set_name, argv):
+    """The pre-push judgement over every log (_gr_log_paths): each log is judged on its own (_gr_judge, the newest
+    record for tree in that log), any refusal other than missing refuses, and otherwise one log that admits the
+    tree admits it; with none, missing."""
+    verdicts = [_gr_judge(records, tree, head, set_name, argv, False) for records in logs]
+    hard = [verdict for verdict in verdicts if verdict is not None and not verdict.startswith("missing:")]
+    if hard:
+        return hard[0]
+    if any(verdict is None for verdict in verdicts):
+        return None
+    return ("missing: no gate record exists for tree {} in any gate-record log of this clone (the common git "
+            "directory's and each linked worktree's); stage the change, run python3 -I -B {} gate-record run, "
+            "and retry once it passes".format(tree, _GR_VERIFIER))
 
 
 def _gr_verify_commit():
@@ -45008,11 +45406,13 @@ def _gr_verify_commit():
     tree = _gr_git(env, "write-tree")
     if not _GR_TREE_RE.fullmatch(tree or ""):
         raise _GateRecordError("git write-tree returned no tree id")
-    if _gr_git(env, "rev-parse", "-q", "--verify", "HEAD^{commit}", check=False):
-        sets, pre_commit, _ = _gr_config_at(env, "HEAD:" + _GR_CONFIG, "HEAD")
-    else:
-        sets, pre_commit, _ = _gr_config_at(env, ":" + _GR_CONFIG, "the index (unborn branch)")
-    refusal = _gr_judge(_gr_read_log(env), tree, pre_commit, sets[pre_commit], True)
+    head = _gr_head(env)
+    try:
+        sets, pre_commit, _, _where = _gr_commit_base(env, head, "", True)
+    except _GateRecordRefusal as exc:
+        _stderr_note("aiqt gate-record: commit refused: {}".format(exc))
+        return 1
+    refusal = _gr_judge(_gr_read_log_file(_gr_log_path(env)), tree, head, pre_commit, sets[pre_commit], True)
     if refusal is not None:
         _stderr_note("aiqt gate-record: commit refused: " + refusal)
         return 1
@@ -45025,7 +45425,7 @@ def _gr_verify_push(stdin_text):
     lines = stdin_text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    records = None
+    logs = None
     refused = False
     for line in lines:
         parts = line.split(" ")
@@ -45035,13 +45435,15 @@ def _gr_verify_push(stdin_text):
         if zero.fullmatch(sha):
             continue  # a deletion pushes no tree
         tree = _gr_git(env, "rev-parse", "--verify", sha + "^{tree}")
-        if _gr_git(env, "rev-parse", "-q", "--verify", sha + "^1", check=False):
-            sets, _, pre_push = _gr_config_at(env, sha + "^1:" + _GR_CONFIG, sha + "^1")
-        else:
-            sets, _, pre_push = _gr_config_at(env, sha + ":" + _GR_CONFIG, sha + " (a root commit)")
-        if records is None:
-            records = _gr_read_log(env)
-        refusal = _gr_judge(records, tree, pre_push, sets[pre_push], False)
+        try:
+            sets, pre_push, head = _gr_push_base(env, sha)
+        except _GateRecordRefusal as exc:
+            _stderr_note("aiqt gate-record: push of {} refused: {}".format(parts[0], exc))
+            refused = True
+            continue
+        if logs is None:
+            logs = [_gr_read_log_file(path) for path in _gr_log_paths(env)]
+        refusal = _gr_judge_logs(logs, tree, head, pre_push, sets[pre_push])
         if refusal is not None:
             _stderr_note("aiqt gate-record: push of {} refused: {}".format(parts[0], refusal))
             refused = True
@@ -45050,23 +45452,50 @@ def _gr_verify_push(stdin_text):
 
 _GR_STUB = """#!/bin/sh
 # AIQT gate-record stub ({hook}), written by aiqt_hooks.py gate-record install (rule gatdis). It runs the
-# verifier from HEAD's committed {verifier} (the index's on an unborn branch), copied to a temporary
-# file, and exits 0 (pass), 1 (refused) or 2 (cannot evaluate). Remove this file to uninstall.
-tmp=$(mktemp "${{TMPDIR:-/tmp}}/aiqt-gate-record.XXXXXXXXXX") || {{
-    printf '%s\\n' "aiqt gate-record: cannot evaluate: mktemp failed" >&2
+# verifier from HEAD's committed {verifier} (on an unborn branch: the index's when the repository has
+# no commit at all, else the default branch's), copied to a temporary file in the git directory's aiqt
+# directory, and exits 0 (pass), 1 (refused) or 2 (cannot evaluate). Remove this file to uninstall.
+fail() {{
+    printf '%s\\n' "aiqt gate-record: cannot evaluate: $1" >&2
     exit 2
 }}
-trap 'rm -f "$tmp"' EXIT
-if git rev-parse -q --verify 'HEAD^{{commit}}' >/dev/null; then
+if command -v timeout >/dev/null 2>&1; then
+    git_bound='timeout {git_seconds}'
+    verify_bound='timeout {verify_seconds}'
+else
+    git_bound=''
+    verify_bound=''
+fi
+gitdir=$($git_bound git rev-parse --absolute-git-dir) || fail "git named no git directory"
+if $git_bound git rev-parse -q --verify 'HEAD^{{commit}}' >/dev/null; then
     src='HEAD:{verifier}'
 else
-    src=':{verifier}'
+    any=$($git_bound git rev-list -n 1 --all) || fail "git rev-list failed"
+    if [ -z "$any" ]; then
+        src=':{verifier}'
+    else
+        src=''
+        for ref in {refs}; do
+            if $git_bound git rev-parse -q --verify "$ref^{{commit}}" >/dev/null; then
+                src="$ref:{verifier}"
+                break
+            fi
+        done
+        [ -n "$src" ] || fail "an orphan branch, and none of {refs} names a commit to read the verifier from"
+    fi
 fi
-git show "$src" >"$tmp" || {{
-    printf '%s\\n' "aiqt gate-record: cannot evaluate: $src is not readable" >&2
-    exit 2
-}}
-python3 -I -B "$tmp" gate-record {mode}
+dir="$gitdir/aiqt"
+if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir -m 700 "$dir" 2>/dev/null
+fi
+if [ -L "$dir" ] || [ ! -d "$dir" ]; then
+    fail "$dir is not a real directory"
+fi
+tmp=$(mktemp "$dir/verifier.XXXXXXXXXX") || fail "mktemp failed in $dir"
+trap 'rm -f "$tmp"' EXIT
+trap 'exit 2' HUP INT TERM
+$git_bound git show "$src" >"$tmp" || fail "$src is not readable"
+$verify_bound python3 -I -B "$tmp" gate-record {mode}
 rc=$?
 case "$rc" in
     0|1|2) exit "$rc" ;;
@@ -45077,7 +45506,8 @@ exit 2
 
 def _gr_stub(hook):
     mode = "verify-push" if hook == "pre-push" else "verify-commit"
-    return _GR_STUB.format(hook=hook, verifier=_GR_VERIFIER, mode=mode)
+    return _GR_STUB.format(hook=hook, verifier=_GR_VERIFIER, mode=mode, refs=" ".join(_GR_DEFAULT_REFS),
+                           git_seconds=_GR_STUB_GIT_SECONDS, verify_seconds=_GR_STUB_VERIFY_SECONDS)
 
 
 def _gr_install():
@@ -45171,6 +45601,9 @@ def gate_record_main(args):
         _stderr_note("aiqt gate-record: usage: aiqt_hooks.py gate-record run [--set NAME] | verify-commit | "
                      "verify-push [REMOTE URL] | install | stub HOOK")
         return 2
+    except _GateRecordRefusal as exc:
+        _stderr_note("aiqt gate-record: refused: {}".format(exc))
+        return 1
     except _GateRecordError as exc:
         _stderr_note("aiqt gate-record: cannot evaluate: {}".format(exc))
         return 2

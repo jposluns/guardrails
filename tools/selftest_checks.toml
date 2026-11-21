@@ -2572,8 +2572,10 @@ expected-check-ids = [
 ]
 
 [[suite]]
-# The git-side gate record (rule gatdis): recorder rows W1-W8, verifier rows V1-V16, pinned residual rows
-# X1-X3 and installer rows I1-I6, each refusal with its flip, over real git commits in throwaway repositories.
+# The git-side gate record (rule gatdis): recorder rows W1-W8, verifier rows V1-V18, binding rows V19-V25
+# (orphan bar, the check's process group, every worktree's log, the stub's copy in the git directory, bounds,
+# the O_NOFOLLOW directory, the parent commit), pinned residual rows X1-X3 and installer rows I1-I6, each
+# refusal with its flip, over real git commits in throwaway repositories.
 id = "gate-record-selftest"
 runner = "tools/selftest_gate_record.py"
 expected-check-ids = [
@@ -2581,6 +2583,7 @@ expected-check-ids = [
   "W1/exit",
   "W1/record",
   "W1/keys",
+  "W1/head-is-parent",
   "W2/exit",
   "W2/record",
   "W3/exit-nonzero",
@@ -2615,9 +2618,11 @@ expected-check-ids = [
   "V6/flip-no-stub-commits",
   "V7/refused-other-set",
   "V7/flip-no-stub-commits",
-  "V8/recorded-lowered-set",
+  "V8/recorder-runs-head-set",
   "V8/refused-config-from-head",
   "V8/flip-no-stub-commits",
+  "V18/argv-change-commits",
+  "V18/flip-failing-head-set-refused",
   "V9/unborn-refused-without-record",
   "V9/unborn-commit",
   "V10/refused-earlier-failure",
@@ -2641,6 +2646,27 @@ expected-check-ids = [
   "V15/flip-no-stub-pushes",
   "V16/merge-refused",
   "V16/flip-no-stub-merges",
+  # ---------- the binding class: check, tree, parent and log location ----------
+  "V19/orphan-lowered-commit-refused",
+  "V19/orphan-lowered-push-refused",
+  "V19/flip-same-bar-orphan-commits",
+  "V19/flip-same-bar-orphan-pushes",
+  "V20/group-writer-killed",
+  "V20/flip-escaped-writer-forges-residual",
+  "V21/linked-record-pushes-from-main",
+  "V21/flip-unrecorded-refused",
+  "V22/no-tmpdir-commits",
+  "V22/flip-symlink-dir-stub-exit",
+  "V23/held-lock-cannot-evaluate",
+  "V23/flip-free-lock-runs",
+  "V23/slow-check-cannot-evaluate",
+  "V23/flip-check-inside-bound-passes",
+  "V24/symlink-dir-not-followed",
+  "V24/flip-real-dir-records",
+  "V25/other-parent-refused",
+  "V25/flip-recorded-parent-commits",
+  "V25/flip-check-not-moving-passes",
+  "V25/check-moving-head-tree-moved",
   # ---------- the pinned residuals ----------
   "X1/no-verify-commits",
   "X2/hookspath-commits",
