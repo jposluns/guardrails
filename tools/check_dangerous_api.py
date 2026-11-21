@@ -232,9 +232,11 @@ if, or a class and a function of one name, are paired, which errs toward reporti
 and an importer whose enclosing dotted names differ are not paired: an insert in one function
 and the importer in a function of another name, a mutation whose importer is in a nested
 function, a mutation in a nested function whose importer is in the function around it, a
-module-level mutation whose importer is inside a top-level def, a class-body mutation whose
-importer is in a method of that class, and a mutation inside a def whose importer is at module
-level); a plain
+module-level mutation whose importer is inside a top-level def, a class body or a method, a
+class-body mutation whose importer is in a method of that class or at module level, a method
+mutation whose importer is in the body of its class, a mutation inside a def whose importer is
+at module level or in a class body, and a mutation and an importer in methods of one name in
+two classes of different names); a plain
 import statement after a sys.path insert or append in the same scope (not counted because it
 matches about 160 live scopes, most of them a tool importing its own directory, so counting
 it would over-fire); a literal module name for a file the code itself writes under a name the
@@ -2545,6 +2547,92 @@ _BUILTINS_BOUND = (
     "    __builtins__.exec(text)\n",
 )
 
+# sys.path pairing is by the dotted name of the enclosing def, async def or class (the import
+# itself in each vector below is a literal standard-library module, so only the mutation can be a
+# site). A lambda or comprehension shares the name of the function, class body or module around
+# it, whether it holds the importer (a lambda in a function or at module level, a list, dict or
+# generator comprehension in a function, a list comprehension in a class body) or the mutation (a
+# lambda, a set comprehension). Each is a positive code-syspath vector; the self-test also reads
+# them with each lambda and comprehension given a name of its own, where none may report it.
+_SYSPATH_SHARED = (
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return lambda: importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "load = lambda: importlib.import_module('json')\n",
+    "import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+    "    return [importlib.import_module('json') for n in names]\n",
+    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+    "    mods = [importlib.import_module('json') for n in names]\n",
+    "import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+    "    return {n: importlib.import_module('json') for n in names}\n",
+    "import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
+    "    return list(importlib.import_module('json') for n in names)\n",
+    "import importlib, sys\ndef load(td):\n    add = lambda: sys.path.append(str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\ndef load(tds):\n    {sys.path.append(str(td)) for td in tds}\n"
+    "    return importlib.import_module('json')\n",
+)
+# Two scopes with one dotted name pair, which errs toward reporting: a function defined twice
+# (once with the importer in the first), one name in both branches of an if, a class and a
+# function of one name, an async def and a def of one name, and methods of one name in two
+# classes of one name. Each is a positive code-syspath vector; the self-test also reads them with
+# each def, async def or class told apart by its line, where none may report it.
+_SYSPATH_SAME_NAME = (
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\ndef load():\n    return importlib.import_module('json')\n"
+    "def load(td):\n    sys.path.insert(0, str(td))\n",
+    "import importlib, sys\nif fast:\n    def load(td):\n        sys.path.insert(0, str(td))\n"
+    "else:\n    def load():\n        return importlib.import_module('json')\n",
+    "import importlib, sys\nclass load:\n    sys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nasync def load(td):\n    sys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    def load(self, td):\n        sys.path.append(str(td))\n"
+    "class C:\n    def load(self):\n        return importlib.import_module('json')\n",
+)
+# A mutation pairs only with an importer whose enclosing dotted name is identical, so one whose
+# importer is in a scope that encloses it or that it encloses is not paired: the importer in a
+# nested function, the mutation in a nested function, a module-level mutation with the importer
+# in a top-level def, a class body or a method, a class-body mutation with the importer in a
+# method of that class or at module level, a method mutation with the importer in its class
+# body, and a mutation in a def with the importer at module level (once with the importer
+# first). Each is a negative vector; the self-test also reads them with a mutation also paired
+# with an importer in an enclosing or enclosed scope, where each must report code-syspath.
+_SYSPATH_UNPAIRED = (
+    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    def inner():\n        return importlib.import_module('json')\n    return inner\n",
+    "import importlib, sys\ndef load(td):\n    def add():\n        sys.path.insert(0, str(td))\n"
+    "    add()\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "def load():\n    return importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.append(str(td))\n"
+    "class C:\n    mod = importlib.import_module('json')\n",
+    "import importlib, sys\nsys.path.insert(0, str(td))\n"
+    "class C:\n    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
+    "    def load(self):\n        return importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    sys.path.append(str(td))\n"
+    "mod = importlib.import_module('json')\n",
+    "import importlib, sys\nclass C:\n    def add(self, td):\n        sys.path.append(str(td))\n"
+    "    mod = importlib.import_module('json')\n",
+    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
+    "importlib.import_module('json')\n",
+    "import importlib, sys\nmod = importlib.import_module('json')\n"
+    "def add(td):\n    sys.path.append(str(td))\n",
+)
+# Nor is a mutation paired with an importer in a scope of another dotted name where neither
+# encloses the other: a mutation in a def with the importer in a class body, and a mutation and an
+# importer in methods of one name in two classes of different names. Each is a negative vector;
+# the self-test also reads them with a mutation paired with an importer anywhere in its file,
+# where each must report code-syspath.
+_SYSPATH_UNRELATED = (
+    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
+    "class C:\n    mod = importlib.import_module('json')\n",
+    "import importlib, sys\nclass A:\n    def load(self, td):\n        sys.path.append(str(td))\n"
+    "class B:\n    def load(self):\n        return importlib.import_module('json')\n",
+)
+
 # Positive vectors: (source, checks). Each must yield a finding with all checks on, and NO
 # finding with any one of its checks disabled, so every vector fails without its check. That
 # pins each check, not every branch inside one: a branch is pinned only where a vector needs it
@@ -2853,24 +2941,9 @@ POSITIVE_VECTORS = (
     ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
      "    return getattr(importlib, 'import_module')('json')\n", ("code-syspath",)),
     # Pairing is by the dotted name of the enclosing def, async def or class, so a lambda or
-    # comprehension shares the name around it (a function, a class body or the module)...
-    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
-     "    return lambda: importlib.import_module('json')\n", ("code-syspath",)),
-    ("import importlib, sys\nsys.path.insert(0, str(td))\n"
-     "load = lambda: importlib.import_module('json')\n", ("code-syspath",)),
-    ("import importlib, sys\ndef load(td, names):\n    sys.path.insert(0, str(td))\n"
-     "    return [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
-    ("import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
-     "    mods = [importlib.import_module('json') for n in names]\n", ("code-syspath",)),
-    # ...and two scopes with one dotted name pair: a function defined twice, one name in both
-    # branches of an if, and a class and a function of one name.
-    ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
-     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
-    ("import importlib, sys\nif fast:\n    def load(td):\n        sys.path.insert(0, str(td))\n"
-     "else:\n    def load():\n        return importlib.import_module('json')\n",
-     ("code-syspath",)),
-    ("import importlib, sys\nclass load:\n    sys.path.insert(0, str(td))\n"
-     "def load():\n    return importlib.import_module('json')\n", ("code-syspath",)),
+    # comprehension shares the name around it (a function, a class body or the module), and two
+    # scopes with one dotted name pair (the tables above name each placement).
+    *((source, ("code-syspath",)) for source in _SYSPATH_SHARED + _SYSPATH_SAME_NAME),
     ("from logging.handlers import pickle\npickle.loads(data)\n", ("chain", "dsz-ref")),
     ("from pickle import *\nloads(b'')\n", ("star-import",)),
     ("import subprocess\nm = subprocess\nm.run(cmd, shell=True)\n", ("module-escape",)),
@@ -3242,20 +3315,9 @@ NEGATIVE_VECTORS = (
     "import importlib, sys\ndef f():\n    sys.path.insert(0, '/usr/share/stubs')\n"
     "    return importlib.import_module('json')\n",
     # A mutation and an importer whose enclosing dotted names differ are not paired (the
-    # residuals name each): the importer in a nested function, the mutation in a nested
-    # function, a module-level mutation with the importer in a top-level def, a class-body
-    # mutation with the importer in a method, and a mutation in a def with the importer at
-    # module level.
-    "import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
-    "    def inner():\n        return importlib.import_module('json')\n    return inner\n",
-    "import importlib, sys\ndef load(td):\n    def add():\n        sys.path.insert(0, str(td))\n"
-    "    add()\n    return importlib.import_module('json')\n",
-    "import importlib, sys\nsys.path.insert(0, str(td))\n"
-    "def load():\n    return importlib.import_module('json')\n",
-    "import importlib, sys\nclass C:\n    sys.path.insert(0, str(td))\n"
-    "    def load(self):\n        return importlib.import_module('json')\n",
-    "import importlib, sys\ndef add(td):\n    sys.path.insert(0, str(td))\n"
-    "importlib.import_module('json')\n",
+    # residuals name each placement; the tables above hold them).
+    *_SYSPATH_UNPAIRED,
+    *_SYSPATH_UNRELATED,
 )
 
 
@@ -3652,6 +3714,68 @@ def self_test():
                                 + repr(source))
     finally:
         _SCOPE_IMPORTERS = scope_importers
+    # sys.path pairing is by the dotted name of the enclosing def, async def or class. With each
+    # lambda and comprehension given a name of its own, no scope-sharing vector reports
+    # code-syspath; with each def, async def or class told apart by its line, no same-name vector
+    # does; with a mutation also paired with an importer in an enclosing or enclosed scope, every
+    # unpaired vector does; and with a mutation paired with an importer anywhere in its file,
+    # every unrelated-scope vector does. Each patched scanner method is restored afterwards.
+    shared_visits = ("visit_Lambda", "visit_ListComp", "visit_SetComp", "visit_GeneratorExp",
+                     "visit_DictComp")
+    defined_visits = ("visit_FunctionDef", "visit_AsyncFunctionDef", "visit_ClassDef")
+    scanner_methods = {name: _Scanner.__dict__[name]
+                       for name in shared_visits + defined_visits + ("finish",)}
+    enter, finish = _Scanner._enter, scanner_methods["finish"]
+
+    def own_name(self, node):
+        self.qual.append("<" + type(node).__name__ + ">")
+        try:
+            enter(self, node)
+        finally:
+            self.qual.pop()
+
+    def by_definition(self, node):
+        self.qual.append(str(node.lineno))
+        try:
+            enter(self, node)
+        finally:
+            self.qual.pop()
+
+    def related(qual, scope):
+        return qual == scope or "<module>" in (qual, scope) or qual.startswith(scope + ".") \
+            or scope.startswith(qual + ".")
+
+    def by_enclosing_scope(self):
+        scopes = set(self.importer_scopes)
+        for _node, qual, _name in self.syspath_pending:
+            if any(related(qual, scope) for scope in scopes):
+                self.importer_scopes.add(qual)
+        finish(self)
+
+    def by_file(self):
+        if self.importer_scopes:
+            self.importer_scopes.update(qual for _node, qual, _name in self.syspath_pending)
+        finish(self)
+
+    for label, patch, table, reported in (
+            ("each lambda and comprehension given a name of its own",
+             dict.fromkeys(shared_visits, own_name), _SYSPATH_SHARED, False),
+            ("each def, async def or class told apart by its line",
+             dict.fromkeys(defined_visits, by_definition), _SYSPATH_SAME_NAME, False),
+            ("a mutation also paired with an importer in an enclosing or enclosed scope",
+             {"finish": by_enclosing_scope}, _SYSPATH_UNPAIRED, True),
+            ("a mutation paired with an importer anywhere in its file",
+             {"finish": by_file}, _SYSPATH_UNRELATED, True)):
+        try:
+            for name, method in patch.items():
+                setattr(_Scanner, name, method)
+            for source in table:
+                if any(item[4] == "code-syspath" for item in scan_source(source)) != reported:
+                    failures.append(("no code-syspath with " if reported else "code-syspath with ")
+                                    + label + ": " + repr(source))
+        finally:
+            for name, method in scanner_methods.items():
+                setattr(_Scanner, name, method)
     # \z is read as an end anchor: with it dropped from the end anchors, its vectors pass.
     global _REGEX_ENDS
     ends, _REGEX_ENDS = _REGEX_ENDS, tuple(end for end in _REGEX_ENDS if end != "\\z")
@@ -3723,13 +3847,18 @@ def self_test():
           " vectors (each changes outcome without its check), 4 admission vectors, {} literal-"
           "import vectors (the repository module file and the emptied stdlib roster flip"
           " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
-          " reimporters dropped from the scope registration), {} \\z vectors"
+          " reimporters dropped from the scope registration), {} scope-sharing and {} same-name"
+          " sys.path vectors that lose code-syspath with each lambda and comprehension given a"
+          " name of its own and with each definition told apart by its line, {} unpaired and {}"
+          " unrelated-scope sys.path vectors that gain it with pairing by enclosing scope and"
+          " across the file, {} \\z vectors"
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
-              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
+              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS), len(_SYSPATH_SHARED),
+              len(_SYSPATH_SAME_NAME), len(_SYSPATH_UNPAIRED), len(_SYSPATH_UNRELATED),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
