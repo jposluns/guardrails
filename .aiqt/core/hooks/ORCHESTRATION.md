@@ -655,13 +655,14 @@ segment wherever it stands for the rest. The constructs:
   or write-redirect destination in scope. An allowlisted reader still passes (`cat ~/.bashrc`,
   `ls .git/hooks`).
 
-Operator note: while containment is NOT observed (the `none` and `noexec-only` modes of "Containment
-and tripwire mode" below), setting `deliverable_dirs` changes how the WHOLE session's Bash calls are
-judged, not only calls that name a declared directory: every construct above, a program on stdin
-(`python3 -` with a quoted here-document, a pipe into `bash`), an unquoted here-document or here-string,
-and a launch carrying any expansion deny wherever a directory is declared. When containment is
-observed (the `contained` mode), only calls that name, reach or run inside a declared directory are
-judged.
+Operator note: setting `deliverable_dirs` changes how the WHOLE session's Bash calls are judged, not
+only calls that name a declared directory: every construct above, a program on stdin (`python3 -` with
+a quoted here-document, a pipe into `bash`), an unquoted here-document or here-string, and a launch
+carrying any expansion deny wherever a directory is declared. When containment is observed (the
+`contained` mode of "Containment and tripwire mode" below) these constructs still deny, since such a
+program can build the custodian route at run time; only the lost-working-directory and
+unknown-working-directory rules and the collector and runner path test are dropped, and calls that
+show the custodian route are judged against its form.
 
 The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
 it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
@@ -827,14 +828,20 @@ working directory inside one, the raw text (and its ANSI-C-decoded copy) naming 
 redirect target resolving into one, an assignment or `--option=` value resolving into one, the nested
 `-c` recursion, the CDPATH widening, and the unread-launch-target test apart from its
 unknown-working-directory part (so a python module search reaching a declared directory, a `PATH` entry
-inside one, and a launch carrying an expansion, glob, brace, tilde or ANSI-C quote still deny). It skips
-only the session-wide refuse-wide tests, which exist because the guard
-could not otherwise rule out reaching an openable file: the unreadable-command rule, the
-command-substitution rule, the stdin-program rule, the opaque-`env` rule, the refuse-wide segment test
-(program text, collectors, git configuration, configuration that executes), the lost-working-directory
-relative-operand rule, and the part of the launch test that counts an unknown working directory as
-reaching a declared one. In tripwire mode, and only there, the closed allowlist also lists the custodian
-reader form, exactly:
+inside one, and a launch carrying an expansion, glob, brace, tilde or ANSI-C quote still deny). It also
+keeps every test of a construct whose program the guard does not read: the unreadable-command rule, the
+command-substitution rule, the stdin-program rule, the opaque-`env` rule, and the program-text part of
+the refuse-wide segment test (program text, a python `-c`, an unread shell `-c` body, a sed script, git
+configuration that runs program text, a program-running environment assignment, configuration that
+executes). Such a program can build the custodian route at run time where no text test sees it
+(base64 text decoded into `bash`, `python3 -c` or `perl -e` joining the call, a git alias), so these
+constructs are refused in every mode, as fbdff942 refused them. It skips only the session-wide tests
+that exist solely because a declared file could be opened: the lost-working-directory relative-operand
+rule, the part of the launch test that counts an unknown working directory as reaching a declared one,
+and the collector and runner path test (a test collector, build runner or `python -m` run that may
+start at or above a declared directory; a `python -m` module search that reaches a declared directory
+still denies through the launch test). In tripwire mode, and only there, the closed allowlist also
+lists the custodian reader form, exactly:
 
     sudo -u orch-deliv /usr/local/bin/orch-deliverable cat <relative name>
     sudo -u orch-deliv /usr/local/bin/orch-deliverable ls <relative name>
@@ -857,14 +864,16 @@ names the store as the registry's `deliverable_dirs` declares it and this route 
 other two modes it adds one sentence saying containment was not observed, naming the directory and the
 property that failed, so the strict guard applies.
 
-`tools/nrd_differential.py --base <file>` judges a generated corpus (790 forms) with the fbdff942
+`tools/nrd_differential.py --base <file>` judges a generated corpus (803 forms, 13 of them spellings
+that hide the helper route) with the fbdff942
 module (the file `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py`
 prints, checked by sha256) and with this hook forced to each mode, running none of them. It fails when a
 form changes verdict in `none` or `noexec-only`, or when `contained` allows a form fbdff942 refused that
-is neither the tripwire relaxation (no declared directory, custodian mark or privilege word in its text,
-and a working directory outside them) nor a helper data read (with each helper form replaced by `cat` of
-a file outside the declared directories, fbdff942 allows it). The self-test runs the same comparator
-with a stand-in base (`nrd-contain/differential-*`).
+is not a helper data read: every exact helper form in its text starts a command and the pipeline it
+opens feeds only `git apply` or a read form, and with each helper form replaced by `cat` of a file
+outside the declared directories, fbdff942 allows it. The three relaxations above have no form in that
+corpus; the self-test pins them (`nrd-contain/tripwire-relaxations-allow-contained`) and runs the same
+comparator with a stand-in base (`nrd-contain/differential-*`).
 
 Operator steps (host work, outside this repository; each is its own request to the host owner):
 
@@ -894,10 +903,12 @@ Residuals the tripwire states (in addition to "Residuals" above):
    one). The helper gives the bytes, and running them is the rule's judgement-level step; the copy
    names no declared directory, so its run is not refused. Piping the helper's output straight into an
    interpreter, a shell or a reader script is refused (above) wherever the call's text shows the
-   custodian route; a spelling that hides both `orch-deliv` and the privilege word from the text (a
-   variable or an encoding built in the call, such as base64 text decoded into a shell) is not seen,
-   and in tripwire mode the stdin-program and substitution rules that refused such forms at fbdff942
-   are skipped.
+   custodian route. A spelling that hides both `orch-deliv` and the privilege word from the text and
+   builds the call in a construct the guard does not read (base64 text decoded into a shell, program
+   text joining the call, a command substitution) is refused by the unreadable-command, substitution,
+   stdin-program and program-text tests, which tripwire mode keeps. A program in a file outside the
+   declared directories that builds the call (`python3 r.py`, written by an earlier call or another
+   tool) is not seen, as at fbdff942.
 2. The run scratch during a run: the orchestrator owns it and it is not contained.
 3. The stage window between the broker's staging and publication.
 4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.
@@ -909,10 +920,12 @@ Residuals the tripwire states (in addition to "Residuals" above):
    assumed to be the account the Bash tool runs as.
 6. The existing residuals: same-UID registry edits and non-Bash tools (the write-scope guard covers the
    structured write tools).
-7. In tripwire mode the constructs the skipped tests refused (a command substitution, program text, a
-   here-string, a stdin program, git configuration that runs program text) are allowed wherever they
-   name no declared directory; under containment a file there cannot be opened, so they no longer reach
-   one, but a host that only LOOKS contained to the probe (item 5) loses them.
+7. In tripwire mode the forms the three skipped tests refused (a relative operand or an interpreter
+   launch after the walk loses the working directory, such as `cd - && python3 x.py`, and a test
+   collector or build runner started at or above a declared directory, such as `pytest` or `make` there)
+   are allowed wherever they name no declared directory; under containment a file there cannot be
+   opened, so they no longer reach one, but a host that only LOOKS contained to the probe (item 5)
+   loses them.
 8. In the `noexec-only` and `none` modes every residual listed above still applies, unchanged.
 
 ## The lease heartbeat

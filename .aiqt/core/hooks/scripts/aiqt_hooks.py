@@ -29900,8 +29900,11 @@ def _nrd_dirs(value, root):
 # them (a custodian account owns them; a root-owned helper run through sudo is the only reader). Under
 # containment an in-place `python3 x.py` or `bash x.sh` fails at open() whatever its shell spelling, so
 # the guard runs as a TRIPWIRE: it keeps every test that relates a command to a declared directory and
-# drops only the session-wide refuse-wide tests that exist because an openable file could otherwise be
-# reached unseen. The three modes, probed once per hook call by _nrd_containment.
+# every test of a construct whose program it does not read (a command the lexer cannot read, a command
+# substitution, a program read from stdin, program text, an opaque env call), since such a construct can
+# build the custodian route at run time, and drops only the session-wide tests that exist solely because
+# a declared file could be opened (the lost-cwd and unknown-cwd rules and the collector/runner path
+# test). The three modes, probed once per hook call by _nrd_containment.
 _NRD_MODE_NONE = "none"
 _NRD_MODE_NOEXEC = "noexec-only"
 _NRD_MODE_CONTAINED = "contained"
@@ -30018,8 +30021,10 @@ def _nrd_custodian_reach(command, segments):
     read, a privilege word stands as a whole word in the raw or decoded text. In tripwire mode such a call
     is in scope, so every segment must pass the closed allowlist (where the helper reader form is
     listed) and the helper's output may feed only git apply or a read form. A spelling that hides both
-    the mark and the privilege word from the text (a variable, an encoding) is not seen (a disclosed
-    residual)."""
+    the mark and the privilege word from the text is not seen here: an encoding decoded into a shell or
+    program text building the call at run time is put in scope by the refuse-wide tests, which tripwire
+    mode keeps (_nrd_subst_unproven, _nrd_stdin_program, _nrd_wide_unproven); a variable assigned in an
+    earlier call is the general disclosed residual."""
     texts = (command, _nrd_ansi_c_spelling(command))
     if any(_NRD_CUSTODIAN_MARK in t for t in texts):
         return True
@@ -31120,7 +31125,9 @@ def _nrd_unread_in_scope(dirs):
     move anywhere, and a quote splice, an expansion or a decoded string can spell an absolute path the
     raw text never holds. No test short of lexing separates a plainly unrelated unreadable command
     from one of those, so every one is in scope (check-fails-closed-on-unreadable); the over-deny is
-    accepted and its deny reason names the cause and the exit."""
+    accepted and its deny reason names the cause and the exit. Tripwire mode keeps this test: an
+    unreadable command can also build the custodian route where no lexed word shows it (encoded text in
+    a here-string decoded into a shell)."""
     return bool(dirs)
 
 
@@ -31905,14 +31912,18 @@ def _nrd_shell_has_c(args):
     return any(len(tok) > 1 and tok[0] == "-" and tok[1] != "-" and "c" in tok[1:] for tok in args)
 
 
-def _nrd_wide_unproven(seg, cwd, dirs):
+def _nrd_wide_unproven(seg, cwd, dirs, contained=False):
     """True when one lexed segment holds a construct this guard does not fully read (the block comment
     above): a program-text word, a python -c, a shell -c body the peel does not reach, a python or
     shell word reading its program from stdin behind a launch wrapper, a sed script outside line-number
     printing, a python -m run, collector or runner that may start at or above a declared directory, git
     configuration that can run program text, a program-running environment assignment, or a word or
     redirect target naming configuration that executes. cwd is the effective working directory the
-    scope walk knows, or None."""
+    scope walk knows, or None. In contained mode (contained=True) only the path test of a python -m
+    run, collector or runner (_nrd_runner_reaches) is skipped: it exists solely because such a run
+    could open a file in a declared directory, which containment rules out. Every program-text,
+    stdin, git configuration, environment and executing-configuration test stays, since that program
+    can build the custodian route at run time."""
     argv = seg.argv
     oq = seg.argv_opaque
     run_cwd = _nrd_wrapper_cwd(argv, oq, cwd) if argv else cwd
@@ -31941,10 +31952,10 @@ def _nrd_wide_unproven(seg, cwd, dirs):
                 return True
             if mode == "m" or (mode == "script" and isinstance(target, str)
                                and target.rsplit("/", 1)[-1] in _NRD_RUNNER_WORDS):
-                if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+                if not contained and _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                     return True
         elif word in _NRD_RUNNER_WORDS:
-            if _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
+            if not contained and _nrd_runner_reaches(rest, rest_oq, run_cwd, dirs):
                 return True
         elif word in _NRD_LAUNCH_SHELLS:
             if _nrd_shell_has_c(rest) and _nrd_shell_c_body(seg) is None:
@@ -32006,11 +32017,15 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
     (tripwire mode) the tests that relate the command to a declared directory all stay (the payload
     working directory, _nrd_raw_names on the raw and ANSI-C-decoded text, argv and redirect targets,
     _nrd_assigned_value_in, the nested -c recursion, the CDPATH widening, and _nrd_launch_unproven
-    apart from its unknown-working-directory part), and only the session-wide refuse-wide tests are
-    skipped:
-    _nrd_unread_in_scope, _nrd_subst_unproven, _nrd_stdin_program, _nrd_env_opaque, _nrd_wide_unproven,
-    the lost-cwd relative-operand rule and the unknown-cwd-counts-as-reaching part of
-    _nrd_launch_unproven. Under containment the file cannot be opened, so those tests no longer guard
+    apart from its unknown-working-directory part), and so do the tests of a construct whose program
+    this guard does not read (_nrd_unread_in_scope, _nrd_subst_unproven, _nrd_stdin_program,
+    _nrd_env_opaque, and every program-text, stdin, git configuration, environment and
+    executing-configuration test of _nrd_wide_unproven): such a program can build the custodian route
+    at run time (encoded text decoded into a shell, program text joining the call), where no text test
+    sees it. Only the session-wide tests that exist solely because a declared file could be opened are
+    skipped: the lost-cwd relative-operand rule, the unknown-cwd-counts-as-reaching part of
+    _nrd_launch_unproven, and the collector/runner path test of _nrd_wide_unproven
+    (_nrd_runner_reaches). Under containment the file cannot be opened, so those tests no longer guard
     anything the host does not; the allowlist then also lists the custodian reader form. The custodian
     route is the one way this account reads a deliverable, so tripwire mode puts in scope every call
     that shows it (_nrd_custodian_reach: the custodian mark in the text or a word, or a privilege word),
@@ -32027,18 +32042,20 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
         segments = _lex_command(command)
     except ValueError:
         segments = None
-        if not contained and _nrd_unread_in_scope(dirs):
+        if _nrd_unread_in_scope(dirs):
             # A command the lexer cannot read (an unquoted here-document, a here-string and the rest) is
-            # in scope and refuses whole; no re-reading of it can allow it.
+            # in scope and refuses whole; no re-reading of it can allow it (in every mode: such a
+            # command can also build the custodian route unseen)
             scope = True
     if not scope and contained and _nrd_custodian_reach(command, segments):
         # tripwire mode: a call that names the custodian route or a privilege word is in scope, so every
         # segment must pass the closed allowlist and the helper's output may feed only git apply or a
         # read form (an unreadable such call refuses whole)
         scope = True
-    if not scope and dirs and not contained and _nrd_subst_unproven(command):
+    if not scope and dirs and _nrd_subst_unproven(command):
         # a command substitution anywhere in the raw text, other than the quoted cat here-document
-        # shape: its body is not in the lexed words, so nothing shows what it runs (refuse wide)
+        # shape: its body is not in the lexed words, so nothing shows what it runs (refuse wide, in
+        # every mode: the body can build the custodian route at run time)
         scope = True
     walk = segments
     if walk is not None:
@@ -32047,9 +32064,10 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
         walk_cwd = eff_cwd
         cwd_lost = False
         for seg in walk:
-            if not scope and dirs and not contained and _nrd_stdin_program(seg):
+            if not scope and dirs and _nrd_stdin_program(seg):
                 # a shell or interpreter reading its program from stdin: the program is not in the
-                # lexed words, so nothing shows it names no declared directory (fail closed)
+                # lexed words, so nothing shows it names no declared directory or builds no custodian
+                # call, such as decoded base64 piped into bash (fail closed, in every mode)
                 scope = True
             if not scope and not contained and cwd_lost and _nrd_relative_operand(seg):
                 # the working directory is unknown after cd -, a bare cd, an unreadable cd operand or
@@ -32065,11 +32083,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
                 sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1, mode=mode)
                 if sub is not None:
                     return sub
-            if not scope and not contained and _nrd_env_opaque(seg, walk_cwd, dirs):
+            if not scope and _nrd_env_opaque(seg, walk_cwd, dirs):
                 # an env call whose words the closed set does not parse, an assignment-shaped word its
                 # grammar rejects, or a value-bearing -S call whose words are not plainly outside the
                 # declared directories can run a command this guard cannot read: in scope, so only the
-                # read-only allowlist passes it (fail closed)
+                # read-only allowlist passes it (fail closed, in every mode)
                 scope = True
             if not scope and (any(_nrd_match(tok, walk_cwd, dirs) is True for tok in seg.argv)
                               or any(_nrd_match(r.target, walk_cwd, dirs) is True
@@ -32084,11 +32102,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0, mode=_NRD_MODE_NONE):
                 # an interpreter, source or command-running launch whose executed or imported files this
                 # guard cannot place outside the declared directories (the unread-launch-target class)
                 scope = True
-            if not scope and dirs and not contained \
-                    and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs):
+            if not scope and dirs and _nrd_wide_unproven(seg, None if cwd_lost else walk_cwd, dirs, **ckw):
                 # a construct this guard does not fully read: program text, a collector or runner from an
                 # ancestor of a declared directory, git configuration that runs program text, or a word
-                # naming configuration that executes (refuse wide, allow narrow)
+                # naming configuration that executes (refuse wide, allow narrow; tripwire mode skips only
+                # the collector/runner path test)
                 scope = True
             if cdpath and seg.argv:
                 w = 0

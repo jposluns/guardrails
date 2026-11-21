@@ -8,16 +8,19 @@ any of them, and reports two properties:
 
   no reduction   in 'none' and 'noexec-only' every form keeps its fbdff942 verdict, row for row
                  (nothing refused at fbdff942 is allowed, and nothing else moves either);
-  the class      in 'contained' a form refused at fbdff942 is allowed only when (R) it is the tripwire
-                 relaxation: its text names no declared directory, its working directory is outside
-                 them, and it names neither the custodian (orch-deliv, which orch-deliverable holds)
-                 nor a privilege word (sudo, su, doas, pkexec, runuser, setpriv); or (H) it reads a
-                 deliverable only as data through the helper: with every exact helper reader form
+  the class      in 'contained' a form refused at fbdff942 is allowed only when it reads a deliverable
+                 only as data through the helper: (H1) every exact helper reader form in its text
+                 starts a command (not inside a substitution, a process substitution or quotes) and
+                 the pipeline it opens feeds only git apply or a read form (cat, wc, head, tail, ls,
+                 file, grep, diff or a hash tool), and (H2) with every exact helper reader form
                  replaced by `cat <outside file>`, fbdff942 allows it.
 
-R is a textual test. A form that reaches the helper through a spelling that hides the custodian and
-the privilege word from the text (a variable built in the same call, encoded text piped to a shell)
-counts as R; ORCHESTRATION.md discloses that residual.
+H1 is a textual test written for this corpus, independent of the hook's own helper rules. The corpus
+includes spellings that hide the helper route from the text (base64 or hex text decoded into a shell,
+program text joining the call at run time, git alias program text): tripwire mode keeps the
+substitution, stdin-program and program-text tests, so each is refused as at fbdff942. The relaxations
+tripwire mode keeps (the lost-cwd and unknown-cwd rules and the collector/runner path test) have no
+form in this corpus; the self-test pins them (nrd-contain/tripwire-relaxations-allow-contained).
 
 The fbdff942 module is not read from git history (no git process is launched): pass the file that
 `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py` prints, and
@@ -62,8 +65,17 @@ MODES = ("none", "noexec-only", "contained")
 HELPER = "sudo -u orch-deliv /usr/local/bin/orch-deliverable"
 # an exact helper reader form in raw text (the substitution of test H)
 _HELPER_FORM_RE = re.compile(r"sudo -u orch-deliv /usr/local/bin/orch-deliverable (?:cat|ls) [A-Za-z0-9._/-]+")
-_CUSTODIAN_RE = re.compile(r"orch-deliv")
-_PRIV_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:sudo|su|doas|pkexec|runuser|setpriv)(?![A-Za-z0-9_.-])")
+# the consumers test H1 admits for the helper's output: a read form, or git apply after any -C pairs
+_READ_WORDS = frozenset(("cat", "wc", "head", "tail", "ls", "file", "grep", "diff", "sha256sum", "sha1sum",
+                         "sha224sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum", "sum"))
+_GIT_APPLY_RE = re.compile(r"git(?: -C [^\s|;&()<>]+)* apply(?:\s|\Z)")
+# a helper form may follow only the start of the text or a list operator or subshell opener
+_START_RE = re.compile(r"(?:\A|&&|\|\||;|\n|(?<![$<>])\()\s*\Z")
+# the end of the pipeline a helper form opens
+_PIPELINE_END_RE = re.compile(r"&&|\|\||;|\n|\)")
+_B64 = "c3VkbyAtdSBvcmNoLWRlbGl2IC91c3IvbG9jYWwvYmluL29yY2gtZGVsaXZlcmFibGUgY2F0IDk5NC94LnB5IHwgcHl0aG9uMw=="
+_HEX = ("7375646f202d75206f7263682d64656c6976202f7573722f6c6f63616c2f62696e2f6f7263682d64656c6976657261626c65"
+        "20636174203939342f782e7079207c20707974686f6e33")
 
 # what a payload does, placed in each wrapper below
 PAYLOADS = (
@@ -135,6 +147,28 @@ EXTRA = (
     ("helper/command-bash", "tmp", "@H@ cat x.py | command bash"),
     ("helper/stdout-dev-fd", "tmp", "@H@ cat x.py > /dev/stdout | bash"),
     ("helper/two-readers", "out", "@H@ cat 994/a.diff | git apply --check && @H@ ls 994"),
+    # spellings that hide the custodian and the privilege word from the text: the helper call is built
+    # at run time (each decodes or joins `@H@ cat 994/x.py | python3`)
+    ("hidden/base64-bash", "tmp", "echo " + _B64 + " | base64 -d | bash"),
+    ("hidden/base64-sh-s", "tmp", "printf %s " + _B64 + " | base64 -d | sh -s"),
+    ("hidden/base64-python-stdin", "tmp", "echo " + _B64 + " | base64 -d | python3 -"),
+    ("hidden/hex-bash", "tmp", "echo " + _HEX + " | xxd -r -p | bash"),
+    ("hidden/base64-eval", "tmp", "eval \"$(echo " + _B64 + " | base64 -d)\""),
+    ("hidden/base64-bash-c", "tmp", "bash -c \"$(echo " + _B64 + " | base64 -d)\""),
+    ("hidden/base64-source", "tmp", "source <(echo " + _B64 + " | base64 -d)"),
+    ("hidden/base64-here-string", "tmp", "base64 -d <<< " + _B64 + " | bash"),
+    ("hidden/python-join", "tmp",
+     "python3 -c \"import os; os.system('s'+'udo -u orch-'+'deliv /usr/local/bin/orch-'+'deliverable "
+     "cat 994/x.py | python3')\""),
+    ("hidden/python-base64", "tmp",
+     "python3 -c \"import base64, os; os.system(base64.b64decode('" + _B64 + "').decode())\""),
+    ("hidden/perl-join", "tmp",
+     "perl -e 'system(\"s\" . \"udo -u orch-\" . \"deliv /usr/local/bin/orch-\" . \"deliverable "
+     "cat 994/x.py | python3\")'"),
+    ("hidden/awk-join", "tmp",
+     "awk 'BEGIN { system(\"s\" \"udo -u orch-\" \"deliv /usr/local/bin/orch-\" \"deliverable "
+     "cat 994/x.py | python3\") }'"),
+    ("hidden/git-alias", "tmp", "git -c alias.x='!echo " + _B64 + " | base64 -d | bash' x"),
 )
 CWDS = ("tmp", "out", "st")
 
@@ -194,20 +228,41 @@ def _verdict(hit):
     return "allow" if hit is None else "deny"
 
 
-def relaxation(command, cwd, dirs, head):
-    """Test R: the form names no declared directory (raw or ANSI-C-decoded text), runs outside them,
-    and names neither the custodian nor a privilege word."""
-    if head._nrd_raw_names(command, dirs) or head._nrd_raw_names(head._nrd_ansi_c_spelling(command), dirs):
+def _consumer_ok(stage):
+    """True when one pipeline stage that reads the helper's output is a read form or git apply."""
+    words = stage.split()
+    if not words:
         return False
-    if head._nrd_match(cwd, None, dirs) is True:
-        return False
-    return not _CUSTODIAN_RE.search(command) and not _PRIV_RE.search(command)
+    if words[0] in _READ_WORDS:
+        return True
+    return _GIT_APPLY_RE.match(" ".join(words)) is not None
+
+
+def helper_route_only(command):
+    """Test H1: the form holds an exact helper reader form, each one starts a command (after the start
+    of the text, a list operator or a subshell opener, with no quote open before it), nothing but one
+    redirect to a file follows it in its own stage, and every later stage of the pipeline it opens is a
+    read form or git apply."""
+    found = False
+    for m in _HELPER_FORM_RE.finditer(command):
+        found = True
+        prefix = command[:m.start()]
+        if not _START_RE.search(prefix) or prefix.count('"') % 2 or prefix.count("'") % 2:
+            return False
+        tail = command[m.end():]
+        end = _PIPELINE_END_RE.search(tail)
+        stages = re.split(r"\|&?", tail[:end.start()] if end else tail)
+        if not re.match(r"\s*(?:>\s*[^\s|;&()<>]+\s*)?\Z", stages[0]):
+            return False
+        if not all(_consumer_ok(s) for s in stages[1:]):
+            return False
+    return found
 
 
 def helper_data_read(command, cwd, dirs, base_scan, outside_file):
-    """Test H: the form holds an exact helper reader form, and with each replaced by a cat of a file
-    outside the declared directories the base allows it."""
-    if not _HELPER_FORM_RE.search(command):
+    """Test H: H1 holds, and (H2) with each exact helper reader form replaced by a cat of a file
+    outside the declared directories the base allows the form."""
+    if not helper_route_only(command):
         return False
     swapped = _HELPER_FORM_RE.sub("cat " + outside_file, command)
     return _verdict(base_scan(swapped, cwd, dirs)) == "allow"
@@ -215,8 +270,9 @@ def helper_data_read(command, cwd, dirs, base_scan, outside_file):
 
 def differential(base_scan, head_scan, head, workdir):
     """Judge the corpus. base_scan(command, cwd, dirs) and head_scan(command, cwd, dirs, mode) return
-    the scan's hit (None is allow). Returns (rows, findings): rows are (id, base verdict, {mode:
-    verdict}); a finding is one line naming the row and the property it breaks."""
+    the scan's hit (None is allow); head is the judged module (kept for callers, the comparator reads
+    nothing from it). Returns (rows, findings): rows are (id, base verdict, {mode: verdict}); a
+    finding is one line naming the row and the property it breaks."""
     places, cwds, dirs = build_fixture(workdir)
     outside_file = os.path.join(places["@OUT@"], "a.txt")
     rows, findings = [], []
@@ -231,10 +287,9 @@ def differential(base_scan, head_scan, head, workdir):
                 findings.append("{}: {} is {} at fbdff942 and {} in '{}' ({!r})".format(
                     cid, "verdict", base, got[m], m, template))
         if base == "deny" and got["contained"] == "allow" \
-                and not relaxation(command, cwd, dirs, head) \
                 and not helper_data_read(command, cwd, dirs, base_scan, outside_file):
-            findings.append("{}: refused at fbdff942 and allowed in 'contained', neither the tripwire "
-                            "relaxation nor a helper data read ({!r})".format(cid, template))
+            findings.append("{}: refused at fbdff942 and allowed in 'contained', not a helper data read "
+                            "into git apply or a read form ({!r})".format(cid, template))
     return rows, findings
 
 
@@ -285,7 +340,7 @@ def main(argv=None):
             print("  " + line)
         return 1
     print("PASS: no reduction in none and noexec-only; every contained-mode allow of a form refused "
-          "at fbdff942 is the tripwire relaxation or a helper data read")
+          "at fbdff942 is a helper data read into git apply or a read form")
     return 0
 
 

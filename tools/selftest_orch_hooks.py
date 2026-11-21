@@ -19890,21 +19890,79 @@ def _main_isolated(report_path=None):
         check("nrd-contain/cp-source-form-same-every-mode",
               [_nrdc_mode_verdict(m, "cp {}/x.py {}/cpc.py".format(st, outd), outd)
                for m in ("none", "noexec-only", "contained")], ["allow"] * 3)
-        # these name no declared directory: refused in 'none' and 'noexec-only', allowed when contained
+        # these name no declared directory and run a program this guard does not read (a here-document,
+        # a here-string, program text, a command substitution, git configuration): refused in every
+        # mode, since such a program can build the custodian route at run time
         _nrdc_wide = ("cat <<EOF > out.txt\nhi\nEOF\n", "grep -c x <<< 'xyz'", "python3 -c 'print(1)'",
                       "echo \"$(date)\"", "git -c core.pager=less log")
-        check("nrd-contain/tripwire-unnamed-allows-contained",
+        check("nrd-contain/refuse-wide-same-every-mode",
               [(_nrdc_mode_verdict("none", c, outd), _nrdc_mode_verdict("noexec-only", c, outd),
                 _nrdc_mode_verdict("contained", c, outd)) for c in _nrdc_wide],
-              [("deny", "deny", "allow")] * 5)
+              [("deny", "deny", "deny")] * 5)
+        # the relaxations tripwire mode keeps, each existing only because a declared file could be
+        # opened: a lost working directory (cd -) with a relative operand or an interpreter launch, and a
+        # collector or runner started at an ancestor of a declared directory. Refused in 'none' and
+        # 'noexec-only', allowed when contained
+        _nrdc_relaxed = (("cd - && cat notes.txt", outd), ("cd - && python3 x.py", outd),
+                         ("pytest -q", str(tmp)), ("make test", str(tmp)))
+        check("nrd-contain/tripwire-relaxations-allow-contained",
+              [(_nrdc_mode_verdict("none", c, cw), _nrdc_mode_verdict("noexec-only", c, cw),
+                _nrdc_mode_verdict("contained", c, cw)) for c, cw in _nrdc_relaxed],
+              [("deny", "deny", "allow")] * 4)
         # T4: removing the mode gate (the scan ignores the mode) turns the allow rows red
         setattr(aiqt_hooks, "_nrd_scope_scan",
                 lambda command, cwd, dirs, _depth=0, mode="none": _nrdc_real_scan(command, cwd, dirs, _depth))
         try:
             check("nrd-contain/flip-no-mode-gate-red",
-                  [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_wide], ["deny"] * 5)
+                  [_nrdc_mode_verdict("contained", c, cw) for c, cw in _nrdc_relaxed], ["deny"] * 4)
         finally:
             setattr(aiqt_hooks, "_nrd_scope_scan", _nrdc_real_scan)
+        import nrd_differential as _nrdc_diff
+        _nrdc_diff_extra = _nrdc_diff.EXTRA
+        # the hidden-spelling class: each builds `<helper> cat 994/x.py | python3` at run time, so neither
+        # the custodian mark nor a privilege word is in the text (the forms of tools/nrd_differential.py
+        # hidden/, refused at fbdff942). Tripwire mode keeps the substitution, stdin-program,
+        # unreadable-command and program-text tests, so each is refused in every mode
+        _nrdc_hidden = [t for cid, _k, t in _nrdc_diff_extra if cid.startswith("hidden/")]
+        check("nrd-contain/hidden-helper-spellings-deny-every-mode",
+              [(_nrdc_mode_verdict("none", c, str(tmp)), _nrdc_mode_verdict("noexec-only", c, str(tmp)),
+                _nrdc_mode_verdict("contained", c, str(tmp))) for c in _nrdc_hidden],
+              [("deny", "deny", "deny")] * 13)
+        # flip: the tripwire as it was at bd6e74ea (the substitution, stdin-program, unreadable-command,
+        # env-opaque and wide tests skipped) allows the spellings those tests alone refuse
+        _nrdc_wide_tests = ("_nrd_subst_unproven", "_nrd_stdin_program", "_nrd_unread_in_scope",
+                            "_nrd_env_opaque", "_nrd_wide_unproven")
+        _nrdc_wide_real = {k: getattr(aiqt_hooks, k) for k in _nrdc_wide_tests}
+        _nrdc_wide_off = [False]
+
+        def _nrdc_skip_wide_in_contained():
+            # each refuse-wide test answers False while _nrdc_wide_off[0] is set (set only around a
+            # 'contained' judgement, so a stand-in base judged beside it keeps every test)
+            for k, real in _nrdc_wide_real.items():
+                setattr(aiqt_hooks, k, lambda *a, _real=real, **kw: False if _nrdc_wide_off[0]
+                        else _real(*a, **kw))
+
+        def _nrdc_restore_wide():
+            _nrdc_wide_off[0] = False
+            for k, f in _nrdc_wide_real.items():
+                setattr(aiqt_hooks, k, f)
+
+        def _nrdc_contained_wide_off(fn):
+            _nrdc_wide_off[0] = True
+            try:
+                return fn()
+            finally:
+                _nrdc_wide_off[0] = False
+
+        _nrdc_skip_wide_in_contained()
+        try:
+            _nrdc_hidden_mut = [_nrdc_contained_wide_off(lambda: _nrdc_mode_verdict("contained", c, str(tmp)))
+                                for c in _nrdc_hidden]
+        finally:
+            _nrdc_restore_wide()
+        check("nrd-contain/flip-tripwire-skips-refuse-wide-red",
+              _nrdc_hidden_mut, ["allow", "allow", "deny", "allow", "deny", "deny", "allow", "allow", "deny",
+                                 "deny", "allow", "allow", "allow"])
         # the custodian reader form, judged in scope (from a working directory inside a declared
         # directory): allowed only when contained, alone or feeding git apply from outside them
         _nrdc_helper = "sudo -u orch-deliv /usr/local/bin/orch-deliverable"
@@ -19966,7 +20024,9 @@ def _main_isolated(report_path=None):
 
         # F2: in tripwire mode a call that shows the custodian route is in scope, and the helper's output
         # may feed only git apply or a read form. Each of these was refused at fbdff942 and allowed by
-        # the tripwire before this rule (working directory outside every declared directory).
+        # the tripwire before this rule (working directory outside every declared directory); the
+        # stdin-program and substitution tests, which tripwire mode now keeps, refuse the first eleven
+        # on their own as well.
         _nrdc_reader = Path(outd) / "nrdc-reader.py"
         _nrdc_reader.write_text("import sys\nsys.stdout.write(sys.stdin.read())\n", encoding="utf-8")
         _nrdc_h = "{} cat 994/x.py".format(_nrdc_helper)
@@ -19985,8 +20045,9 @@ def _main_isolated(report_path=None):
                          _nrdc_h)
         check("nrd-contain/helper-output-sink-allows-contained",
               [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_ok], ["allow"] * 5)
-        # F2 flips: without the custodian scope rule every out-of-scope row is allowed again; without
-        # the sink rule the reader-script rows (which pass the allowlist on their own) are allowed
+        # F2 flips: without the custodian scope rule the reader-script rows (which no refuse-wide test
+        # reaches) are allowed again; without the sink rule those rows (which pass the allowlist on their
+        # own) are allowed
         _nrdc_real_reach = aiqt_hooks._nrd_custodian_reach
         _nrdc_real_sink = aiqt_hooks._nrd_helper_sink_ok
         setattr(aiqt_hooks, "_nrd_custodian_reach", lambda command, segments: False)
@@ -19994,7 +20055,7 @@ def _main_isolated(report_path=None):
             _nrdc_reach_mut = [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_bad]
         finally:
             setattr(aiqt_hooks, "_nrd_custodian_reach", _nrdc_real_reach)
-        check("nrd-contain/flip-custodian-scope-red", _nrdc_reach_mut, ["allow"] * 13)
+        check("nrd-contain/flip-custodian-scope-red", _nrdc_reach_mut, ["deny"] * 11 + ["allow"] * 2)
         setattr(aiqt_hooks, "_nrd_helper_sink_ok", lambda seg: True)
         try:
             _nrdc_sink_mut = [_nrdc_mode_verdict("contained", c, outd) for c in _nrdc_sink_bad[-2:]]
@@ -20004,9 +20065,12 @@ def _main_isolated(report_path=None):
 
         # F6: the fbdff942 differential's comparator (tools/nrd_differential.py), run here with a
         # stand-in base (this hook forced to 'none'), so it is pinned without git history: clean on the
-        # real hook, red when tripwire mode leaks into 'none', and red when the custodian route rules are
-        # removed (the tool itself judges against the fbdff942 module by sha256)
-        import nrd_differential as _nrdc_diff
+        # real hook, red when tripwire mode leaks into 'none', red when tripwire mode admits any call
+        # holding the helper (the helper piped into python3 is then allowed, and it is no data read), and
+        # red when tripwire mode skips the refuse-wide tests again (the hidden/ rows); the tool itself
+        # judges against the fbdff942 module by sha256. With the refuse-wide tests kept, removing the
+        # custodian scope and sink rules changes no verdict this comparator counts (each form they alone
+        # refuse is one fbdff942 allows); flip-custodian-scope-red and flip-helper-sink-red pin them
 
         def _nrdc_diff_run(head_scan, tag):
             work = tmp / ("nrdc-diff-" + tag)
@@ -20022,16 +20086,20 @@ def _main_isolated(report_path=None):
             lambda c, cw, d, m: aiqt_hooks._nrd_scope_scan(c, cw, d, mode="contained"), "leak")[1]
         check("nrd-contain/flip-differential-tripwire-in-none-red",
               any("in 'none'" in f for f in _nrdc_diff_leak), True)
-        setattr(aiqt_hooks, "_nrd_custodian_reach", lambda command, segments: False)
-        setattr(aiqt_hooks, "_nrd_helper_sink_ok", lambda seg: True)
-        try:
-            _nrdc_diff_route = _nrdc_diff_run(
-                lambda c, cw, d, m: aiqt_hooks._nrd_scope_scan(c, cw, d, mode=m), "route")[1]
-        finally:
-            setattr(aiqt_hooks, "_nrd_custodian_reach", _nrdc_real_reach)
-            setattr(aiqt_hooks, "_nrd_helper_sink_ok", _nrdc_real_sink)
+        _nrdc_diff_route = _nrdc_diff_run(
+            lambda c, cw, d, m: (None if m == "contained" and _nrdc_helper in c
+                                 else _nrdc_real_scan(c, cw, d, mode=m)), "route")[1]
         check("nrd-contain/flip-differential-helper-route-red",
-              any("allowed in 'contained'" in f for f in _nrdc_diff_route), True)
+              any(f.startswith("gen/p6/w3/") and "allowed in 'contained'" in f for f in _nrdc_diff_route), True)
+        _nrdc_skip_wide_in_contained()
+        try:
+            _nrdc_diff_skip = _nrdc_diff_run(
+                lambda c, cw, d, m: (_nrdc_contained_wide_off(lambda: _nrdc_real_scan(c, cw, d, mode=m))
+                                     if m == "contained" else _nrdc_real_scan(c, cw, d, mode=m)), "skip")[1]
+        finally:
+            _nrdc_restore_wide()
+        check("nrd-contain/flip-differential-refuse-wide-skipped-red",
+              any(f.startswith("hidden/") and "allowed in 'contained'" in f for f in _nrdc_diff_skip), True)
 
         def _nrdc_reason(mode, cmd, cwd):
             res = _nrdc_forced(mode, lambda: nrd(cmd, cwd=cwd, project=str(nd.root)))
