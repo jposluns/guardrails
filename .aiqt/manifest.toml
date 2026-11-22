@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "cf901b5fab793ff42e379b1b039f9e0d9b11f8d17ae2955cef859d10c84605a0"
+tree-sha256 = "2d6a0c5f2c69eda5596baffa4f1a18b1b07b99b3c0326ad304a991538a56c1aa"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -53,7 +53,7 @@ sha256 = "02c2e8187a94b20776de1c46e0ea24560e7d08d731a7ad758e804cd6001e4ca8"
 [[sources]]
 path = ".aiqt/core/clauses.toml"
 bytes = 332495
-sha256 = "33466d39192f4afcf90da08f0f9833fe7fa772973e6237fac95b621bb1c8fd78"
+sha256 = "946c6219238980e404257c7f0688be43b2c68adba2a9ac8d8dc3ffd9d57cd3c6"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -378,7 +378,7 @@ sha256 = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
 [[sources]]
 path = ".aiqt/core/rules/progr-decision.md"
 bytes = 847
-sha256 = "dca72839a7fe7b94f069da56b8609da3f30581c0a931ae1f4def3b0898d50673"
+sha256 = "81def217299b4473b2ddee4a04e7a0343e4d1cca7c5b6d2d2bea53bf1829db9a"
 
 [[sources]]
 path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.md"
@@ -858,7 +858,7 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
 bytes = 1104
-sha256 = "1c408bf3f77019123007c1b3e925ac7791ed7b74babc9147ceaac7e4e3661f9d"
+sha256 = "b7ea60a68c80e304fb7a3d0b50293be35096eec705b7bcb59b0847ebb708d496"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -1438,7 +1438,7 @@ sha256 = "9e5a1a67a3705baa9769b796280d811e9f1000fe7801f50e6a3fd163023e91aa"
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 bytes = 847
-sha256 = "dca72839a7fe7b94f069da56b8609da3f30581c0a931ae1f4def3b0898d50673"
+sha256 = "81def217299b4473b2ddee4a04e7a0343e4d1cca7c5b6d2d2bea53bf1829db9a"
 
 [[sources]]
 path = ".claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
@@ -2108,7 +2108,7 @@ sha256 = "8bee98cee9477ac40263ff07811fcd3278e1c4fa28eba1eed4c747ea89601a41"
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 bytes = 629
-sha256 = "ea1765720a8b6c9ca474caf56a56a75b37264b086bba05186e1df330c5028aa1"
+sha256 = "22ef350c862f1f744b4e1c02096f822808b3da1f00228d202cd99ecbb14e5434"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc"
@@ -2378,7 +2378,7 @@ sha256 = "e60b6218d3231e58fcef06d223dcc2c47d0a7a6fb4841e6b6ceab09f67cdb5ca"
 [[sources]]
 path = ".github/copilot-instructions.md"
 bytes = 122356
-sha256 = "a7dc93946081955d4b01dfaadbde8f287cb3d888bb9c576de3fea601b3066c9b"
+sha256 = "faeecfacedceea4244aeb3a9867d4a2fd5e9e646c48061573ecfd0075e4536bc"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2443,7 +2443,7 @@ sha256 = "5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0"
 [[sources]]
 path = "AGENTS.md"
 bytes = 122317
-sha256 = "e1af9f78f422fed1023bf184f5cc868858d36e5e560d237c902b02cc936f4568"
+sha256 = "38eb04980b403e69b4003daf22f56574e08ed3af05694650d3b73c5f742679d3"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2463,7 +2463,7 @@ sha256 = "29fb1354694749953de0dec691498e202d78cb255bba1979efdbdb1572402c00"
 [[sources]]
 path = "GEMINI.md"
 bytes = 122352
-sha256 = "5bbc7d836fbdbd0d2f90f38bde0a404ab1e280e0088d0a451a26c1da7666ebeb"
+sha256 = "5bfca1fa2f0767e461c9fbc5fe599ecdd375c614491b14e04ff83624a48736e1"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
@@ -5365,7 +5365,7 @@ sha256 = "9e5a1a67a3705baa9769b796280d811e9f1000fe7801f50e6a3fd163023e91aa"
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 path = ".claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
 kind = "file"
-sha256 = "dca72839a7fe7b94f069da56b8609da3f30581c0a931ae1f4def3b0898d50673"
+sha256 = "81def217299b4473b2ddee4a04e7a0343e4d1cca7c5b6d2d2bea53bf1829db9a"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
@@ -6169,7 +6169,7 @@ sha256 = "8bee98cee9477ac40263ff07811fcd3278e1c4fa28eba1eed4c747ea89601a41"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/20-PROGR-decision-classification-before-enacting.mdc"
 kind = "file"
-sha256 = "ea1765720a8b6c9ca474caf56a56a75b37264b086bba05186e1df330c5028aa1"
+sha256 = "22ef350c862f1f744b4e1c02096f822808b3da1f00228d202cd99ecbb14e5434"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/20-PROGR-repeated-failure-triggers-premise-review.mdc"
@@ -6487,13 +6487,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "a7dc93946081955d4b01dfaadbde8f287cb3d888bb9c576de3fea601b3066c9b"
+sha256 = "faeecfacedceea4244aeb3a9867d4a2fd5e9e646c48061573ecfd0075e4536bc"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "e1af9f78f422fed1023bf184f5cc868858d36e5e560d237c902b02cc936f4568"
+sha256 = "38eb04980b403e69b4003daf22f56574e08ed3af05694650d3b73c5f742679d3"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -6506,7 +6506,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "5bbc7d836fbdbd0d2f90f38bde0a404ab1e280e0088d0a451a26c1da7666ebeb"
+sha256 = "5bfca1fa2f0767e461c9fbc5fe599ecdd375c614491b14e04ff83624a48736e1"
 
 [[artifacts]]
 artifact-id = "skill:plugin/aiqt-guardrails-hooks/skills/aiqt/SKILL.md"
