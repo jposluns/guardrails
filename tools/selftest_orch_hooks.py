@@ -2916,13 +2916,45 @@ def _rwh_cases(tmp):
             return fn()
         finally:
             aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = saved
+    # gate G read two backquote forms as irrelevant, so the backquote refusal never ran on them, while bash builds
+    # git from each: $'\\c\\`zz' (bash un-escapes \\` first and reads \\c` as a NUL that drops the rest of the
+    # quote) and $\\\\<newline>' (bash un-escapes \\\\ first and joins $\\<newline>' into $'); gate G now reads a
+    # backslash after a backquote as relevant (_ansi_c_backquote_backslash) and the scan reads up to the quote the
+    # un-escaping can open (_ANSI_C_BACKQUOTE_BUILT_RE), so each is refused and read as a git word; with both
+    # dropped (the reading of e4f04ec4) each is allowed (red on revert)
+    gate_cmds = ["echo `g$'\\c\\`zz'it -C " + str(held) + " checkout " + seed + "`",
+                 "echo `$\\\\\n'\\x67'it -C " + str(held) + " checkout " + seed + "`"]
+    gate_inside = ["echo `g$'\\c\\`zz'it checkout " + seed + "`", "echo `$\\\\\n'\\x67'it checkout " + seed + "`"]
+
+    def gate_kinds():
+        return [kind(base, c) for c in gate_cmds] + [kind(held, c) for c in gate_inside]
+
+    # the flip reads its names with getattr, so against a tree without them (the revert) the row reports its
+    # failure instead of raising
+    def gate_unread(fn):
+        saved_gate = getattr(aiqt_hooks, "_ansi_c_backquote_backslash", None)
+        saved_built = getattr(aiqt_hooks, "_ANSI_C_BACKQUOTE_BUILT_RE", None)
+        if saved_gate is not None:
+            aiqt_hooks._ansi_c_backquote_backslash = lambda command: False
+        if saved_built is not None:
+            aiqt_hooks._ANSI_C_BACKQUOTE_BUILT_RE = re.compile(r"[^\s\S]")
+        try:
+            return fn()
+        finally:
+            if saved_gate is not None:
+                aiqt_hooks._ansi_c_backquote_backslash = saved_gate
+            if saved_built is not None:
+                aiqt_hooks._ANSI_C_BACKQUOTE_BUILT_RE = saved_built
     check("rwh/swallowed-quote-git-word-held-denies-red-on-revert",
           [[k != "allow" for k in swallowed_kinds()], static_reading_unread(swallowed_kinds),
-           [k != "allow" for k in backquote_kinds()], backquote_unrefused(backquote_kinds)],
+           [k != "allow" for k in backquote_kinds()], backquote_unrefused(backquote_kinds),
+           [k != "allow" for k in gate_kinds()], gate_unread(gate_kinds)],
           [[True] * (len(swallowed_cmds) + len(swallowed_inside)),
            ["allow"] * (len(swallowed_cmds) + len(swallowed_inside)),
            [True] * (len(backquote_cmds) + len(backquote_inside)),
-           ["allow"] * (len(backquote_cmds) + len(backquote_inside))])
+           ["allow"] * (len(backquote_cmds) + len(backquote_inside)),
+           [True] * (len(gate_cmds) + len(gate_inside)),
+           ["allow"] * (len(gate_cmds) + len(gate_inside))])
     # the static reading adds no match to text carrying no git word, so ordinary commands run inside the held
     # worktree stay allowed; with the gate reading every command as a git word each is withheld (the
     # over-broad gate this row catches)

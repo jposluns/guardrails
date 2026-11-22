@@ -2452,20 +2452,29 @@ def _ansi_c_static_reading(command):
     the body at its first unescaped backquote, which the scan does not model, so a backslash before a backslash,
     '$', backquote or quote there, and a backquote inside a quoted string, an ANSI-C quote, a here-document, a
     '$(...)' or a '${...}' there (_ANSI_C_BACKQUOTE_UNSURE_RE), is refused (`$'\\\\x67'it log -p` and
-    `\\$'\\x67'it log -p` both run git log -p).
+    `\\$'\\x67'it log -p` both run git log -p). That refusal applies ahead of the last ANSI-C or locale quote as
+    written and ahead of the last quote the un-escaping can open where none is written (_ANSI_C_BACKQUOTE_BUILT_RE:
+    `gi$\\\\<newline>'t' log -p` and "`gi$\\"t\\" log -p`" both run git log -p); a backslash in a backquote body
+    after both is past it, and a backslash there before any other character, which bash keeps, is read as
+    written.
     commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding read it BESIDE the command
     itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear one. A word bash builds at
     run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
     unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
     decoded: the disclosed run-time-word residual. GATE G comes first (_ansi_c_static_relevant): when the command
-    holds no locale quote, no '$' and line continuation before a quote, and no ANSI-C quote with an escape that can
-    change a value a guard tests, the reading is command itself, so there is no extra reading and no refusal and
+    holds no backslash after a backquote (_ansi_c_backquote_backslash; G reads text as written and does not model a
+    backquote body's un-escaping, so it never calls such a command irrelevant), no locale quote, no '$' and line
+    continuation before a quote, and no ANSI-C quote with an escape that can change a value a guard tests, the
+    reading is command itself, so there is no extra reading and no refusal and
     each guard takes the decision of its path without the static reading (an escape that decodes to one blank or
     control character, as in printf $'done\\n', in a command whose text names neither git nor an AI identity). A '$'
     followed by one or more line continuations before a quote (_ANSI_C_CONTINUED_QUOTE_RE, matched on the command as
     written), which bash joins into an ANSI-C or locale quote, makes the command relevant whatever the quote holds
     ($<backslash-newline>'\\x67'it, and gi$<backslash-newline>'t' with no escape) and is refused
-    (_StaticReadingUncertain), since the scan reads the quote after the continuation as a plain one. An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
+    (_StaticReadingUncertain), since the scan reads the quote after the continuation as a plain one. That match is
+    on the text as written: inside a backquote body bash also joins $\\\\<backslash-newline>' (the doubled backslash
+    un-escaped first), which it does not match; such a command holds a backslash after a backquote, so G reads it as
+    relevant and the scan refuses it (_ANSI_C_BACKQUOTE_BUILT_RE). An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
     escape, as this reading does, but the escape table before the one shared table read it as \\c\\ and an escape
     after it ($'\\c\\\\x20Claude' as a control character, a blank and Claude), so a command that reading denied is
     still denied (the no-reduction rule). An ANSI-C quote holding a \\U code past U+10FFFF (_ansi_c_beyond_index) is
@@ -2542,7 +2551,9 @@ _ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - 
 # internally to mark quoting), a NUL (bash ends the string there, so the letters after it in the quote drop out:
 # --author=$'Cl\0zz'aude is --author=Claude), non-ASCII text (a letter Python's case-insensitive match folds to an
 # ASCII one), nothing in _gate_bash_escape's decoding (a code point past U+10FFFF, which bash builds as bytes and
-# the static decoded reading refuses, _ansi_c_beyond_index) and any other text.
+# the static decoded reading refuses, _ansi_c_beyond_index) and any other text. These read an escape as written; in
+# a command with a backslash after a backquote, where bash may un-escape a backquote body first ($'\c\`zz' there is
+# \c` and a NUL, not \c\ and a backquote), gate G reads no escape as inert (_ansi_c_backquote_backslash).
 _ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
 # A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
 # the quote. Gate G reads a match as relevant whatever the quote holds (_ansi_c_static_relevant), and
@@ -2587,9 +2598,26 @@ def _ansi_c_static_subject(command):
     return any(_ANSI_C_SUBJECT_RE.search(_ANSI_C_SUBJECT_STRIP_RE.sub("", text)) for text in texts)
 
 
+def _ansi_c_backquote_backslash(command):
+    """True when command holds a backslash after its first backquote: every backslash that can stand in a
+    backquote substitution's body does (a body opens only at a backquote), so this finds every such body that
+    holds one, and more (a backquote inside single quotes, or one a backslash escapes, counts too). bash un-escapes
+    a backquote body before it parses it (\\\\ to \\, \\$ to $, \\` to `, and \\" to " in a backquote inside double
+    quotes; a backslash before any other character is kept), which gate G does not model: it reads the text as
+    written, so in such a body it could pair an escape bash never sees ($'\\c\\`zz' as \\c\\ and a plain backquote,
+    where bash reads \\c` as a NUL) or miss a quote bash joins ($\\\\<newline>'t' as no quote, where bash reads
+    $'t'). Gate G reads such a command as relevant to every guard (_ansi_c_static_relevant), so the scan, which
+    refuses what it cannot un-escape there (_ANSI_C_BACKQUOTE_UNSURE_RE, read up to each quote
+    _ANSI_C_BACKQUOTE_BUILT_RE finds), decides. Linear, never raises."""
+    tick = command.find("`")
+    return tick >= 0 and command.find("\\", tick + 1) >= 0
+
+
 def _ansi_c_static_relevant(command):
     """GATE G of the static decoded reading (_ansi_c_static_reading), which needs no grammar: True when command
-    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an escape (_GATE_BASH_ESCAPE_RE)
+    holds a backslash after a backquote (_ansi_c_backquote_backslash: a backquote body G does not decode as bash
+    does, whatever it holds), a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an
+    escape (_GATE_BASH_ESCAPE_RE)
     that can change a value one of the four guards that read the reading tests (words, identity values, trailers
     and paths), read as the guards' own lexer reads it (the escape's letter kept: $'\\x20' as x20) rather than as
     bash does: one whose decoding (_gate_bash_escape) holds a character in _ANSI_C_RELEVANT_CHARS (it spells part of a
@@ -2619,6 +2647,8 @@ def _ansi_c_static_relevant(command):
     raises."""
     if _ANSI_C_CONTINUED_QUOTE_RE.search(command) is not None:
         return True  # a '$' and a line continuation before a quote, refused whatever the quote holds
+    if _ansi_c_backquote_backslash(command):
+        return True  # a backslash a backquote body may un-escape, which G does not model
     joined = command.replace("\\\n", "")
     return _ansi_c_static_relevant_text(command, joined) or (
         joined != command and _ansi_c_static_relevant_text(joined, joined))
@@ -2789,6 +2819,15 @@ _ANSI_C_NEUTRAL_RE = re.compile(r"[^'\"`$\\(){}<>]*")
 # quoted string, an ANSI-C body, a here-document body, a '$(...)' or a '${...}' in the body is undefined in POSIX.
 # The scan reads the body as written and models none of that, so it refuses at each match.
 _ANSI_C_BACKQUOTE_UNSURE_RE = re.compile(r"\\[\\$`'\"]|`")
+# A '$', one or more backslashes or newlines, then a quote: no ANSI-C or locale quote in the text as written, but
+# one that a backquote body's un-escaping can open, since bash removes a backslash there before a backslash ($\\
+# and a newline become $ and a line continuation, joined into $'...') and, in a backquote inside double quotes,
+# before a double quote ($\" becomes $"...", a locale quote). A '$' or quote bash builds in such a body is a '$' or
+# quote of the text as written (the un-escaping only removes backslashes, and a line continuation removes a
+# backslash and a newline), so every quote it can open is either matched by $' or $" as written or by this. When
+# the command holds a backquote, _ansi_c_static_scan reads up to the quote of each match, so a backslash bash
+# removes there inside a backquote body is refused (_ANSI_C_BACKQUOTE_UNSURE_RE) rather than passed unread.
+_ANSI_C_BACKQUOTE_BUILT_RE = re.compile(r"\$[\\\n]+['\"]")
 
 
 def _ansi_c_static_scan(command):
@@ -2808,8 +2847,10 @@ def _ansi_c_static_scan(command):
     and this one disagree the text from the '#' to its line's end reads the same both ways when it holds none
     of _ANSI_C_NEUTRAL_RE's characters (it is kept as written), and otherwise the scan refuses.
 
-    It refuses (_StaticReadingUncertain) only at or ahead of the last ANSI-C or locale quote (past it nothing is
-    decoded, so the rest is kept as written): inside a backquote substitution's body (ticks, the count of '`'
+    It refuses (_StaticReadingUncertain) only at or ahead of the last ANSI-C or locale quote, or, when command holds
+    a backquote, the last quote a backquote body's un-escaping can open where none is written
+    (_ANSI_C_BACKQUOTE_BUILT_RE: a '$', backslashes or newlines, then a quote); past both nothing is decoded, so the
+    rest is kept as written: inside a backquote substitution's body (ticks, the count of '`'
     contexts open), at each match of _ANSI_C_BACKQUOTE_UNSURE_RE (a backslash before a backslash, '$', backquote
     or quote, which bash removes or may remove before it parses the body, read in the text the scan walks and in
     every single-quoted string, ANSI-C quote, here-document delimiter word and quoted here-document body it takes
@@ -2836,6 +2877,9 @@ def _ansi_c_static_scan(command):
     nl_at = -1  # the index of the first newline at or after i once looked up (len(command) when none)
     ticks = 0  # how many '`' contexts stack holds: inside a backquote body when nonzero
     last = max(command.rfind("$'"), command.rfind('$"'))
+    if "`" in command:
+        for built in _ANSI_C_BACKQUOTE_BUILT_RE.finditer(command):
+            last = max(last, built.end() - 1)  # a quote a backquote body's un-escaping can open
     i, n = 0, len(command)
     while True:
         if queue:
@@ -2863,7 +2907,7 @@ def _ansi_c_static_scan(command):
             word_at = i
             continue
         if i > last:
-            out.append(command[i:])  # no ANSI-C or locale quote from here on: nothing left to decode
+            out.append(command[i:])  # no ANSI-C or locale quote, written or built, from here on: nothing to decode
             break
         c = command[i]
         top = stack[-1] if stack else None
@@ -33609,8 +33653,9 @@ def _rwh_static_git_word(command):
     quotes or a comment cannot swallow a later quote's opening, as in echo '$'; gi$'\\x74' checkout x),
     with a refusal of that reading (_StaticReadingUncertain: a '$' and a line continuation before a
     quote, a \\c\\\\ pair, a \\U code past U+10FFFF, a backslash before a backslash, '$', backquote or
-    quote or a backquote it does not model inside a backquote substitution's body, a construct the scan
-    cannot read with certainty)
+    quote or a backquote it does not model inside a backquote substitution's body ahead of a quote that
+    is written or that the body's un-escaping can open, a construct the scan cannot read with certainty;
+    gate G admits every command with a backslash after a backquote)
     read as a git word, so such a command, even one that names no git, fails closed wherever a git-word
     command outside the read-only grammar does (a missing or relative cwd included, with no hold live):
     the disclosed over-refusal. Each reading can only add a match to the raw-text test, never clear one,

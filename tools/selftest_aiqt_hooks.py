@@ -6637,6 +6637,140 @@ def _test_static_decoded_backquote(failures):
             aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = unsure
 
 
+# (sdr-bqg-*) Gate G reads text as written and does not model a backquote body's un-escaping (F1 and F2 of the review
+# of e4f04ec4), so it read two backquote forms as irrelevant and the backquote refusal never ran on them, while bash
+# 5.3.9 builds git or Claude from each: $'\c\`zz' (bash un-escapes \` first and reads \c` as a NUL, which drops the
+# rest of the quote; G read \c\ and a plain backquote, an inert escape) and $\\<newline>' (bash un-escapes \\ first
+# and joins $\<newline>' into $'; neither G nor the scan saw a quote). A sibling is $\" in a backquote inside double
+# quotes (bash un-escapes \" there and reads $"...", a locale quote), and $\\<newline>' after \$. Gate G now reads
+# every command with a backslash after a backquote as relevant (_ansi_c_backquote_backslash), and the scan reads up
+# to each quote such a body's un-escaping can open where none is written (_ANSI_C_BACKQUOTE_BUILT_RE), so the
+# backquote refusal decides. Each row is (label, handler name, command, decision at e4f04ec4, flips): it denies, and
+# under each flip it names takes its decision at e4f04ec4, so each row is red on revert ("gate": G with no backquote
+# test; "built": the scan with no built quote). Their plain twins are the sdr-bq-*-plain rows, which deny.
+_STATIC_DECODED_BACKQUOTE_GATE = (
+    ("sdr-bqg-cnsdif-c-backquote", "diff_source_pretool", "echo `g$'\\c\\`zz'it log -p` >&2", "allow-note",
+     ("gate",)),
+    ("sdr-bqg-cnsdif-c-backquote-dq", "diff_source_pretool", "echo \"`g$'\\c\\`zz'it log -p`\" >&2", "allow",
+     ("gate",)),
+    ("sdr-bqg-sectvl-c-backquote", "commit_msg_subst", "echo `g$'\\c\\`zz'it commit -m \"$(id)\"`", "allow",
+     ("gate",)),
+    ("sdr-bqg-expbnd-c-backquote", "git_explicit_binding",
+     "echo `g$'\\c\\`zz'it add --all && g$'\\c\\`zz'it push`", "allow", ("gate",)),
+    ("sdr-bqg-cmtidn-c-backquote", "commit_identity",
+     "echo `g$'\\c\\`zz'it commit --author=C$'\\c\\`zz'laude -m x`", "allow", ("gate",)),
+    ("sdr-bqg-cnsdif-doubled-continued", "diff_source_pretool", "echo `gi$\\\\\n't' log -p` >&2", "allow-note",
+     ("gate", "built")),
+    ("sdr-bqg-cnsdif-doubled-continued-x67", "diff_source_pretool", "echo `$\\\\\n'\\x67'it log -p` >&2",
+     "allow-note", ("gate", "built")),
+    ("sdr-bqg-cnsdif-doubled-continued-locale", "diff_source_pretool", "echo `gi$\\\\\n\"t\" log -p` >&2",
+     "allow-note", ("gate", "built")),
+    ("sdr-bqg-cnsdif-doubled-continued-nested", "diff_source_pretool",
+     "echo `echo \\`gi$\\\\\\\\\n't' log -p\\`` >&2", "allow-note", ("gate", "built")),
+    ("sdr-bqg-sectvl-doubled-continued", "commit_msg_subst", "echo `gi$\\\\\n't' commit -m \"$(id)\"`", "allow",
+     ("gate", "built")),
+    ("sdr-bqg-expbnd-doubled-continued", "git_explicit_binding", "echo `git add --all && git $\\\\\n'push'`",
+     "allow", ("gate", "built")),
+    ("sdr-bqg-cmtidn-doubled-continued", "commit_identity", "echo `git commit --author=Cl$\\\\\n'aude' -m x`",
+     "allow", ("gate", "built")),
+    ("sdr-bqg-cnsdif-escaped-dollar-continued", "diff_source_pretool", "echo `gi\\$\\\\\n't' log -p` >&2",
+     "allow-note", ("gate", "built")),
+    ("sdr-bqg-cmtidn-escaped-dollar-continued", "commit_identity",
+     "echo `git commit --author=Cl\\$\\\\\n'aude' -m x`", "allow", ("gate", "built")),
+    ("sdr-bqg-cnsdif-dq-escaped-locale", "diff_source_pretool", "echo \"`gi$\\\"t\\\" log -p`\" >&2", "allow-note",
+     ("gate", "built")),
+    ("sdr-bqg-sectvl-dq-escaped-locale", "commit_msg_subst", "echo \"`gi$\\\"t\\\" commit -m \\\"$(id)\\\"`\"",
+     "allow", ("gate", "built")),
+    ("sdr-bqg-expbnd-dq-escaped-locale", "git_explicit_binding", "echo \"`git add --all && git $\\\"push\\\"`\"",
+     "allow", ("gate", "built")),
+)
+# The other backslash sequences of bash's backquote rules, where the outcome is preserved: a backslash before a
+# backslash, '$', backquote or double quote that opens no quote, a backslash before any other character (bash keeps
+# it, as the scan reads it) and an inert escape in a backquote body. Gate G reads each as relevant, the reading is
+# made with no refusal (label, command, expected reading), and diff_source_pretool allows each, as at e4f04ec4.
+_STATIC_DECODED_BACKQUOTE_GATE_KEPT = (
+    ("sdr-bqg-kept-doubled", "echo `echo \\\\`", "echo `echo \\\\`"),
+    ("sdr-bqg-kept-escaped-dollar", "echo `echo \\$HOME`", "echo `echo \\$HOME`"),
+    ("sdr-bqg-kept-escaped-backquote", "echo `echo \\`date\\``", "echo `echo \\`date\\``"),
+    ("sdr-bqg-kept-dq-escaped-quote", "echo \"`echo \\\"x\\\"`\"", "echo \"`echo \\\"x\\\"`\""),
+    ("sdr-bqg-kept-other-char", "echo `printf a\\ b`", "echo `printf a\\ b`"),
+    ("sdr-bqg-kept-other-char-quoted", "echo `printf '%s\\n' a b`; printf $'\\n'",
+     "echo `printf '%s\\n' a b`; printf '\n'"),
+    ("sdr-bqg-kept-inert-escape", "echo `printf %s $'\\t'`", "echo `printf %s '\t'`"),
+)
+# The new over-denial the residues list: a backslash bash removes in a backquote body ahead of an ANSI-C quote whose
+# escapes are all inert, or a '$', backslashes and a double quote in a backquote outside double quotes (bash builds
+# no quote there). diff_source_pretool allowed each at e4f04ec4 and denies each now.
+_STATIC_DECODED_BACKQUOTE_GATE_OVER = (
+    ("sdr-bqg-over-doubled-inert", "echo `printf 'a\\\\b'`; printf $'\\n'"),
+    ("sdr-bqg-over-escaped-dollar-inert", "x=`echo \\$HOME`; printf $'\\t%s\\n' \"$x\""),
+    ("sdr-bqg-over-escaped-locale-unquoted", "echo `printf %s $\\\"x\\\"`"),
+)
+
+
+def _test_static_decoded_backquote_gate(failures):
+    """(sdr-bqg-*) Gate G never reads a command with a backslash after a backquote as irrelevant, and the scan reads
+    up to each quote a backquote body's un-escaping can open: _STATIC_DECODED_BACKQUOTE_GATE rows deny, each reading
+    refuses and rwh-style git-word reading (_rwh_static_git_word) reads each as a git word; under each flip a row
+    names (the gate with no backquote test, the scan with no built quote) each row takes its decision at e4f04ec4,
+    so each row is red on revert. _STATIC_DECODED_BACKQUOTE_GATE_KEPT readings are made with no refusal and allow;
+    _STATIC_DECODED_BACKQUOTE_GATE_OVER rows deny (the listed over-denial)."""
+    for label, name, command, _old, _flips in _STATIC_DECODED_BACKQUOTE_GATE:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != "deny":
+            failures.append("({}) {} on {!r}: expected deny, got {}".format(label, name, command, got))
+        if not aiqt_hooks._ansi_c_static_relevant(command):
+            failures.append("({}) gate G must read {!r} as relevant".format(label, command))
+        try:
+            got = aiqt_hooks._ansi_c_static_reading(command)
+        except aiqt_hooks._StaticReadingUncertain:
+            got = None
+        if got is not None:
+            failures.append("({}) _ansi_c_static_reading({!r}) must refuse; it read {!r}".format(label, command, got))
+        if not aiqt_hooks._rwh_static_git_word(command):
+            failures.append("({}) _rwh_static_git_word({!r}) must read a git word".format(label, command))
+    for label, command, want in _STATIC_DECODED_BACKQUOTE_GATE_KEPT:
+        if not aiqt_hooks._ansi_c_static_relevant(command):
+            failures.append("({}) gate G must read {!r} as relevant".format(label, command))
+        try:
+            got = aiqt_hooks._ansi_c_static_reading(command)
+        except aiqt_hooks._StaticReadingUncertain as exc:
+            got = "refused: {}".format(exc)
+        if got != want:
+            failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
+                label, command, want, got))
+        got = _decision(aiqt_hooks.diff_source_pretool, command)
+        if got != "allow":
+            failures.append("({}) diff_source_pretool on {!r}: expected allow, got {}".format(label, command, got))
+    for label, command in _STATIC_DECODED_BACKQUOTE_GATE_OVER:
+        got = _decision(aiqt_hooks.diff_source_pretool, command)
+        if got != "deny":
+            failures.append("({}) diff_source_pretool on {!r}: expected deny (the listed over-denial), got {}"
+                            .format(label, command, got))
+    # Each flip reads its name with getattr, so against a tree without it (the revert) each row reports its failure
+    # above instead of raising.
+    gate = getattr(aiqt_hooks, "_ansi_c_backquote_backslash", None)
+    built = getattr(aiqt_hooks, "_ANSI_C_BACKQUOTE_BUILT_RE", None)
+    for flip in ("gate", "built"):
+        if flip == "gate" and gate is not None:
+            aiqt_hooks._ansi_c_backquote_backslash = lambda command: False
+        if flip == "built" and built is not None:
+            aiqt_hooks._ANSI_C_BACKQUOTE_BUILT_RE = re.compile(r"[^\s\S]")
+        try:
+            for label, name, command, old, flips in _STATIC_DECODED_BACKQUOTE_GATE:
+                if flip not in flips:
+                    continue
+                got = _decision(getattr(aiqt_hooks, name), command)
+                if got != old:
+                    failures.append("({}-flip-{}) under the {} flip the row must take its decision at e4f04ec4 {}, "
+                                    "so it pins the fix; got {}".format(label, flip, flip, old, got))
+        finally:
+            if gate is not None:
+                aiqt_hooks._ansi_c_backquote_backslash = gate
+            if built is not None:
+                aiqt_hooks._ANSI_C_BACKQUOTE_BUILT_RE = built
+
+
 # (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, a '$' and a line
 # continuation before a quote (_ANSI_C_CONTINUED_QUOTE_RE, whatever the quote holds), or an ANSI-C quote
 # with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, to anything but one inert
@@ -39165,6 +39299,7 @@ def _main_isolated(monitor):
         _test_static_decoded_reading(failures)
         _test_static_decoded_braced(failures)
         _test_static_decoded_backquote(failures)
+        _test_static_decoded_backquote_gate(failures)
         _test_static_decoded_gate(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
