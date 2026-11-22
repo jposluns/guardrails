@@ -8084,11 +8084,6 @@ expected-check-ids = [
   "flip/permit-not-record-prefix",
   "fc/retry-permit-changed",
   "flip/retry-permit-changed",
-  # a report digest belongs to one dispatch in the whole record
-  "fc/report-digest-shared-on-one-line",
-  "flip/report-digest-shared-on-one-line",
-  "fc/report-digest-replayed-across-rounds",
-  "flip/report-digest-replayed-across-rounds",
   # a withdrawn id is never the target of a replaces link, in either order
   "fc/replaces-withdrawn-id",
   "flip/replaces-withdrawn-id",
@@ -8099,4 +8094,49 @@ expected-check-ids = [
   "flip/imported-history-without-gate-values",
   "fc/imported-marker-is-unknown-field",
   "flip/imported-marker-is-unknown-field",
+  # a retry keeps its round's head: a new head is a new round
+  "fc/retry-moves-head",
+  "flip/retry-moves-head",
+  "fc/baseline-retry-moves-head",
+  "flip/baseline-retry-moves-head",
+  # a carried leg is only its family's latest dispatch in the round (a missing leg with no dispatch_id
+  # is no dispatch; one that names a dispatch is)
+  "fc/carried-leg-after-newer-dispatch",
+  "flip/carried-leg-after-newer-dispatch",
+  "fc/carried-leg-past-dispatch-not-missing",
+  "flip/carried-leg-past-dispatch-not-missing",
+  "fc/carried-leg-past-missing-leg-with-dispatch",
+  "flip/carried-leg-past-missing-leg-with-dispatch",
+  # one report digest may sit on two dispatches; a dispatch_id still names one leg
+  "fc/report-digest-repeat-with-shared-dispatch",
+  "flip/report-digest-repeats-on-one-line",
+  "fc/report-digest-repeat-with-other-family-dispatch",
+  "flip/report-digest-repeats-on-retry",
+  "fc/report-digest-repeat-with-replayed-dispatch",
+  "flip/report-digest-repeats-next-round",
+  # replaces is one id or a non-empty list of distinct ids, each checked as one id is
+  "fc/replaces-list-repeats-id",
+  "flip/replaces-list-repeats-id",
+  "fc/replaces-list-unknown-id",
+  "flip/replaces-list-unknown-id",
+  "fc/replaces-list-self",
+  "flip/replaces-list-self",
+  "fc/replaces-list-empty",
+  "flip/replaces-list-empty",
+  "fc/replaces-list-member-shape",
+  "flip/replaces-list-member-shape",
+  "fc/replaces-list-withdrawn-id",
+  "flip/replaces-list-withdrawn-id",
+  "fc/withdraw-id-replaced-in-list",
+  "flip/withdraw-id-replaced-in-list",
+  # source_dispatch, when present, names a leg on the grade's line that reports the id
+  "fc/source-dispatch-not-reporting",
+  "flip/source-dispatch-not-reporting",
+  "fc/source-dispatch-other-line",
+  "flip/source-dispatch-other-line",
+  "fc/source-dispatch-not-hex",
+  "flip/source-dispatch-not-hex",
+  # a followup never names the record's own item, in any letter case
+  "fc/followup-own-item-other-case",
+  "flip/followup-own-item-other-case",
 ]

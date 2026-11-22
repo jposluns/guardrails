@@ -980,18 +980,6 @@ def c_retry_permit_changed(d, bad):
     return _validate(_write(d, _lines(objs)))
 
 
-def c_report_shared(d, bad):
-    # fam-a's report digest on fam-b's leg of the same line.
-    shared = _golden()[2][org.F_LEGS][0][org.F_REPORT]
-    return _obj(d, bad, (2, org.F_LEGS, 1, org.F_REPORT), shared, "a1" * 32)
-
-
-def c_report_replayed(d, bad):
-    # The first fix round's fam-a report digest on the second fix round's fam-a leg (a new dispatch).
-    replay = _golden()[2][org.F_LEGS][0][org.F_REPORT]
-    return _obj(d, bad, (3, org.F_LEGS, 0, org.F_REPORT), replay, "a1" * 32)
-
-
 def c_replaces_withdrawn(d, bad):
     # F-20 is withdrawn on round three; round four grades F-40 replacing F-20 (bad) or F-15 (flip).
     objs = _golden()
@@ -1024,6 +1012,188 @@ def c_imported_history(d, bad):
 def c_imported_marker(d, bad):
     # The form has no import marker: one on an otherwise valid line is an unknown field.
     return _obj(d, bad, (2, "imported"), True, DELETE)
+
+
+# ---------- a retry keeps its head, a carried leg is its family's latest, id rules hold (round gate 12) ----
+
+NEW_HEAD = "5e" * 20
+
+
+def c_retry_moves_head(d, bad):
+    # Round three attempt two runs both legs again; on the bad side the line moves to a new head.
+    objs = _golden()
+    objs.append(_round_three([_leg(FAM_A, [("F-4", "open")], "a3"),
+                              _leg(FAM_B, [("F-4", "open")], "b3", state="degraded")]))
+    objs.append(_round(3, 2, NEW_HEAD if bad else HEADS[3], PERMITS[3],
+                       [_leg(FAM_A, [("F-4", "open")], "a4"), _leg(FAM_B, [("F-4", "open")], "b4")], []))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_baseline_retry_moves_head(d, bad):
+    # The baseline round retried; on the bad side the retry names the next head.
+    objs = _golden()[:2]
+    objs.append(_round(0, 2, HEADS[1] if bad else HEADS[0], None,
+                       [_leg(FAM_A, [("F-4", "open"), ("F-9", "open")], "a0r"),
+                        _leg(FAM_B, [("F-4", "open"), ("F-7", "open")], "b0r")], []))
+    return _validate(_write(d, _lines(objs)))
+
+
+def _missing(family):
+    return {org.F_FAMILY: family, org.F_STATE: "missing", org.F_DISPATCH: None, org.F_REPORT: None,
+            org.F_VERDICT: "none", org.F_FINDINGS: []}
+
+
+def c_carried_leg_after_newer_dispatch(d, bad):
+    # Round three: attempt one's fam-a leg closes F-4; attempt two dispatches fam-a again and gets
+    # blockers with F-4 open; attempt three carries attempt one's leg (bad) or attempt two's (flip).
+    objs = _golden()
+    old = _leg(FAM_A, [("F-4", "closed")], "a3")
+    newer = _leg(FAM_A, [("F-4", "open")], "a4")
+    objs.append(_round_three([old, _leg(FAM_B, [("F-4", "open")], "b3", state="degraded")]))
+    objs.append(_round(3, 2, HEADS[3], PERMITS[3],
+                       [newer, _leg(FAM_B, [("F-4", "open")], "b4", state="degraded")], []))
+    objs.append(_round(3, 3, HEADS[3], PERMITS[3],
+                       [copy.deepcopy(old if bad else newer), _leg(FAM_B, [("F-4", "open")], "b5")], []))
+    return _validate(_write(d, _lines(objs)))
+
+
+def _carry_past(middle):
+    """Round three's three attempts, attempt three carrying attempt one's fam-a leg past middle, fam-a's
+    attempt-two leg."""
+    objs = _golden()
+    old = _leg(FAM_A, [("F-4", "closed")], "a3")
+    objs.append(_round_three([old, _leg(FAM_B, [("F-4", "open")], "b3", state="degraded")]))
+    objs.append(_round(3, 2, HEADS[3], PERMITS[3],
+                       [middle, _leg(FAM_B, [("F-4", "open")], "b4", state="degraded")], []))
+    objs.append(_round(3, 3, HEADS[3], PERMITS[3],
+                       [copy.deepcopy(old), _leg(FAM_B, [("F-4", "open")], "b5")], []))
+    return objs
+
+
+def c_carried_leg_past_dispatch_not_missing(d, bad):
+    # fam-a's attempt-two leg is a new dispatch (bad) or missing with a null dispatch_id (flip; that is
+    # no dispatch, so the carry stands).
+    middle = _leg(FAM_A, [("F-4", "open")], "a4") if bad else _missing(FAM_A)
+    return _validate(_write(d, _lines(_carry_past(middle))))
+
+
+def c_carried_leg_past_missing_dispatch(d, bad):
+    # fam-a's attempt-two leg is missing but names a dispatch (bad: a dispatch that returned nothing is
+    # still a newer dispatch) or names none (flip).
+    middle = _missing(FAM_A)
+    if bad:
+        middle[org.F_DISPATCH] = _tag_hex("da4", 32)
+    return _validate(_write(d, _lines(_carry_past(middle))))
+
+
+EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
+
+
+def c_report_digest_repeats_on_one_line(d, bad):
+    # Both families return empty output on round three: one digest on two dispatches is valid (flip);
+    # the same digest is still refused when fam-b's leg also reuses fam-a's dispatch_id (bad).
+    objs = _golden()
+    a = _leg(FAM_A, [], "a3", state="empty")
+    b = _leg(FAM_B, [], "b3", state="empty")
+    a[org.F_REPORT] = b[org.F_REPORT] = EMPTY_DIGEST
+    if bad:
+        b[org.F_DISPATCH] = a[org.F_DISPATCH]
+    objs.append(_round_three([a, b]))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_report_digest_repeats_on_retry(d, bad):
+    # fam-b's degraded leg is dispatched again on the retry and returns the same bytes: a new dispatch
+    # with the same digest is valid (flip); naming fam-a's attempt-one dispatch instead (bad) is refused.
+    objs = _golden()
+    first_a = _leg(FAM_A, [("F-4", "open")], "a3")
+    first_b = _leg(FAM_B, [("F-4", "open")], "b3", state="degraded")
+    objs.append(_round_three([first_a, first_b]))
+    again = _leg(FAM_B, [("F-4", "open")], "b4", state="degraded")
+    again[org.F_REPORT] = first_b[org.F_REPORT]
+    if bad:
+        again[org.F_DISPATCH] = first_a[org.F_DISPATCH]
+    objs.append(_round(3, 2, HEADS[3], PERMITS[3], [_leg(FAM_A, [("F-4", "open")], "a4"), again], []))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_report_digest_repeats_next_round(d, bad):
+    # Round three's fam-a leg, a new complete dispatch, returns the bytes round two's fam-a leg returned:
+    # valid (flip); naming round two's fam-a dispatch_id as well (bad) is a replayed dispatch.
+    objs = _golden()
+    leg = _leg(FAM_A, [("F-4", "open")], "a3")
+    leg[org.F_REPORT] = objs[3][org.F_LEGS][0][org.F_REPORT]
+    if bad:
+        leg[org.F_DISPATCH] = objs[3][org.F_LEGS][0][org.F_DISPATCH]
+    objs.append(_round_three([leg, _leg(FAM_B, [("F-4", "open")], "b3")]))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_replaces_list_repeats(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_REPLACES), ["F-9", "F-9"], ["F-9", "F-7"])
+
+
+def c_replaces_list_unknown(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_REPLACES), ["F-9", "F-99"], ["F-9", "F-7"])
+
+
+def c_replaces_list_self(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_REPLACES), ["F-9", "F-15"], ["F-9", "F-7"])
+
+
+def c_replaces_list_empty(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_REPLACES), [], ["F-9"])
+
+
+def c_replaces_list_member_shape(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_REPLACES), ["F-9", 7], ["F-9", "F-7"])
+
+
+def c_replaces_list_withdrawn(d, bad):
+    # F-20 is withdrawn on round three; round four grades F-40 replacing a list holding F-20 (bad) or
+    # F-15 (flip).
+    objs = _golden()
+    objs.append(_round_three([_leg(FAM_A, [("F-4", "open")], "a3"), _leg(FAM_B, [("F-4", "open")], "b3")],
+                             [{org.F_ID: "F-20", org.F_BASIS: "out of scope"}]))
+    objs.append(_round(4, 1, HEADS[3], PERMITS[3],
+                       [_leg(FAM_A, [("F-4", "open"), ("F-40", "open")], "a4"),
+                        _leg(FAM_B, [("F-4", "open")], "b4")],
+                       [_grade("F-40", "MEDIUM", "fam-a report, entry two",
+                               replaces=["F-7", "F-20" if bad else "F-15"])]))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_withdraw_replaced_in_list(d, bad):
+    # F-15 replaces [F-9, F-7] on the second fix round; withdrawing F-7 afterwards (bad) is refused.
+    objs = _set(_golden(), (3, org.F_GRADES, 0, org.F_REPLACES), ["F-9", "F-7"])
+    objs.append(_r3([("F-4", "open")], [("F-4", "open")], [],
+                    [{org.F_ID: "F-7" if bad else "F-20", org.F_BASIS: "out of scope"}]))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_source_dispatch_not_reporting(d, bad):
+    # F-15 is reported by fam-a's leg of the second fix round, not by fam-b's.
+    objs = _golden()
+    legs = objs[3][org.F_LEGS]
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE_DISPATCH), legs[1][org.F_DISPATCH],
+                legs[0][org.F_DISPATCH])
+
+
+def c_source_dispatch_other_line(d, bad):
+    # F-4, graded on the baseline line, named with the first fix round's fam-a dispatch (another line).
+    objs = _golden()
+    return _obj(d, bad, (1, org.F_GRADES, 0, org.F_SOURCE_DISPATCH), objs[2][org.F_LEGS][0][org.F_DISPATCH],
+                objs[1][org.F_LEGS][0][org.F_DISPATCH])
+
+
+def c_source_dispatch_shape(d, bad):
+    objs = _golden()
+    good = objs[3][org.F_LEGS][0][org.F_DISPATCH]
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE_DISPATCH), good.upper(), good)
+
+
+def c_followup_own_item_other_case(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 1, org.F_FOLLOWUP), ITEM.lower(), "ITEM-0051")
 
 
 HANGUL_FILLER, COMBINING_ACUTE, BRAILLE_BLANK = chr(0x3164), chr(0x0301), chr(0x2800)
@@ -1412,10 +1582,6 @@ def _self_test():
                  "is not the sha256 of the record bytes before this line"),
                 ("fc/retry-permit-changed", "flip/retry-permit-changed", c_retry_permit_changed,
                  "is not the digest round 3 attempt 1 carries"),
-                ("fc/report-digest-shared-on-one-line", "flip/report-digest-shared-on-one-line",
-                 c_report_shared, "already carried by the leg of another dispatch"),
-                ("fc/report-digest-replayed-across-rounds", "flip/report-digest-replayed-across-rounds",
-                 c_report_replayed, "already carried by the leg of another dispatch"),
                 ("fc/replaces-withdrawn-id", "flip/replaces-withdrawn-id", c_replaces_withdrawn,
                  "a withdrawn id is never replaced"),
                 ("fc/withdraw-replaced-id", "flip/withdraw-replaced-id", c_withdraw_replaced,
@@ -1424,6 +1590,44 @@ def _self_test():
                  c_imported_history, "a fix round"),
                 ("fc/imported-marker-is-unknown-field", "flip/imported-marker-is-unknown-field",
                  c_imported_marker, "unknown field"),
+                ("fc/retry-moves-head", "flip/retry-moves-head", c_retry_moves_head,
+                 "a retry keeps its round's head"),
+                ("fc/baseline-retry-moves-head", "flip/baseline-retry-moves-head",
+                 c_baseline_retry_moves_head, "the head of round 0 attempt 1"),
+                ("fc/carried-leg-after-newer-dispatch", "flip/carried-leg-after-newer-dispatch",
+                 c_carried_leg_after_newer_dispatch, "was dispatched again later in round 3"),
+                ("fc/carried-leg-past-dispatch-not-missing", "flip/carried-leg-past-dispatch-not-missing",
+                 c_carried_leg_past_dispatch_not_missing, "was dispatched again later in round 3"),
+                ("fc/carried-leg-past-missing-leg-with-dispatch",
+                 "flip/carried-leg-past-missing-leg-with-dispatch", c_carried_leg_past_missing_dispatch,
+                 "was dispatched again later in round 3"),
+                ("fc/report-digest-repeat-with-shared-dispatch", "flip/report-digest-repeats-on-one-line",
+                 c_report_digest_repeats_on_one_line, "already carried by another leg, on this line"),
+                ("fc/report-digest-repeat-with-other-family-dispatch", "flip/report-digest-repeats-on-retry",
+                 c_report_digest_repeats_on_retry, "this leg differs from it"),
+                ("fc/report-digest-repeat-with-replayed-dispatch", "flip/report-digest-repeats-next-round",
+                 c_report_digest_repeats_next_round, "already carried by another leg, in round 2"),
+                ("fc/replaces-list-repeats-id", "flip/replaces-list-repeats-id", c_replaces_list_repeats,
+                 "is listed twice"),
+                ("fc/replaces-list-unknown-id", "flip/replaces-list-unknown-id", c_replaces_list_unknown,
+                 "graded before"),
+                ("fc/replaces-list-self", "flip/replaces-list-self", c_replaces_list_self, "graded before"),
+                ("fc/replaces-list-empty", "flip/replaces-list-empty", c_replaces_list_empty,
+                 "at least one id"),
+                ("fc/replaces-list-member-shape", "flip/replaces-list-member-shape",
+                 c_replaces_list_member_shape, "an id"),
+                ("fc/replaces-list-withdrawn-id", "flip/replaces-list-withdrawn-id", c_replaces_list_withdrawn,
+                 "a withdrawn id is never replaced"),
+                ("fc/withdraw-id-replaced-in-list", "flip/withdraw-id-replaced-in-list",
+                 c_withdraw_replaced_in_list, "an id another grade replaces is never withdrawn"),
+                ("fc/source-dispatch-not-reporting", "flip/source-dispatch-not-reporting",
+                 c_source_dispatch_not_reporting, "is not the dispatch_id of a leg on this line"),
+                ("fc/source-dispatch-other-line", "flip/source-dispatch-other-line",
+                 c_source_dispatch_other_line, "is not the dispatch_id of a leg on this line"),
+                ("fc/source-dispatch-not-hex", "flip/source-dispatch-not-hex", c_source_dispatch_shape,
+                 "32 lowercase hex"),
+                ("fc/followup-own-item-other-case", "flip/followup-own-item-other-case",
+                 c_followup_own_item_other_case, "own item"),
         ):
             got = run(build, fresh(), True)
             check(cid, got[0] == "cannot" and want in got[1], got)
