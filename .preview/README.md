@@ -221,7 +221,7 @@ the authority, and the summary further down this page only points to it.
 
 Since plugin version 0.6.0, the pack's Claude Code plugin, `aiqt-guardrails-hooks`, carries the control of
 `future-stamp-write.py` as a handler of its own hook dispatcher, `future_stamp_write` in
-`.aiqt/core/hooks/scripts/aiqt_hooks.py`. The file here stays published unchanged, and it behaves
+`.aiqt/core/hooks/scripts/aiqt_hooks.py`. The file here stays published, and it behaves
 differently from the plugin's handler:
 
 - The plugin's `future_stamp_write` never denies. A write that would record a future-dated timestamp into a
@@ -246,11 +246,11 @@ files are served from this repository's main branch; for a raw download, use
 | `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
 | `clock-inject.py` | `e96d68573f59be39a49d077a885437428fbcc1340bc3ea62c8db8517ec297fc7` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `e83d2aa851fac017b23fa4d952bf5e2291919ab1a7821e5f0196e7370c9208f2` | [future-stamp-write.py](future-stamp-write.py) |
+| `future-stamp-write.py` | `7f36677587e0dfecd277e57f1f39c3bfae92e1206b464625734868d87b7b40f6` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `56178cef3968e1825e9ac77f6b7886360f9bceb1c3ceb2552e3e96cd70670fff` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `989eb43701f2a1db39baf76d6c0f6c6ea33d77d2d39c26e113a7fb1d0cbcdb00` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
@@ -651,8 +651,8 @@ section of its opening docstring. Read that section before relying on a hook; in
   past the unmoved boundary), and when the state is still unreadable at the re-read the
   stored entries are all lost, so every late-arriving message they excused is reported once more.
 - **`future-stamp-write.py`** checks only folders you declare, and only ISO-like timestamp literals. A
-  time in a quote or code span in a record, a time built from parts, or one just after a scheduling word
-  passes, and some table layouts give false positives or misses, which the file lists.
+  time in a quote or code span in a record, a time built from parts, or one with a scheduling word ending
+  at most three words before it passes, and some table layouts give false positives or misses, which the file lists.
 - **`ungated-record.py`** checks recognized gates and literal completion claims in one straight-line
   shell command. It misses separate calls, scripts, nested shell strings, compound-command contents,
   background gates, unrecognized runners, claim words outside its fixed, case-sensitive uppercase list

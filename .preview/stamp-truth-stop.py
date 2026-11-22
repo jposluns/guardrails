@@ -111,8 +111,8 @@ just past the last COMPLETE transcript record evaluated (a trailing record with 
 parse is unfinished, and OFFSET never passes it, so it is evaluated once complete), with a SHA-256 of up to
 256 bytes before OFFSET. The next Stop (with stop_hook_active or not) evaluates only records starting at or
 after OFFSET. Only a Stop that holds the state lock in a usable private state directory writes the file
-(see BLOCK CAP); such a Stop writes it when it finds a violation (a block, or an allow under the cap or
-fail-open), and on a pass when the loaded state records an OFFSET past 0, a pending entry, a nonzero counter
+(see BLOCK CAP); such a Stop writes it when it finds a violation (a block, or a capped or fail-open
+allow), and on a pass when the loaded state records an OFFSET past 0, a pending entry, a nonzero counter
 or a reset or unknown marker, or could not be read (the pass repairs it), when the state is absent under an
 explicit stop_hook_active true, and, when none of those holds, on an observed new turn (the counter-only
 seed: counter 0 and OFFSET 0; see BLOCK CAP). A seed state (OFFSET 0, no pending entry, counter 0, no
@@ -166,7 +166,9 @@ but they are still counted in the final message's refusal (`+N more`) or in the 
 violation detected there is never dropped in silence. A transcript read that fails part-way is not
 covered: no boundary can be persisted, and the older violations that read found are dropped with no
 warning, a known gap.)
-A pass rewrites an unavailable state so it recovers. State I/O never crashes.
+A pass by a Stop that holds the state lock rewrites an unreadable or malformed state file so it recovers;
+this hook never repairs a state directory or subdirectory that is not private, and with no usable one it
+writes nothing. State I/O never crashes.
 STOP_HOOK_ACTIVE (the corrective loop after a block): violations only in messages older than the final one
 never block; a bad FINAL message still blocks, and then older violations are reported with it. So a corrected
 final message always passes.
@@ -210,7 +212,7 @@ re-reads the seeding Stop's final message as an earlier message and refuses it p
 tolerance, whereas with no state that explicit-true pass saves the scanned end with the counter at
 BLOCK_CAP and the unknown marker below, and the later Stop never re-reads it (in this sequence a refusal
 where no state passes; test_clean_true_pass_over_seed_keeps_offset_0; until an explicit false, a later
-Stop in that no-state sequence that finds a violation is allowed under the cap); where
+Stop in that no-state sequence that finds a violation gets a capped allow, allowed with the cap warning); where
 the host omits the field, a NEW user-role entry read as a genuine user message can still restart the count,
 and an externally deleted state file reads as an established 0 and erases the recorded reset history (the
 count protections above need the explicit true, and even under it an earlier version read such a deletion as
@@ -4446,7 +4448,7 @@ def _self_test():
                                          "Correct: [2026-09-23T17:45Z]."))
             self.assertIn(AHEAD_IN, self.final("Correction: I previously wrote [2026-09-23T22:25Z], which was wrong."))
 
-        def test_keyword_must_immediately_precede(self):
+        def test_keyword_must_closely_precede(self):
             # in an earlier version an everyday or distant keyword exempted a composed future stamp
             now = lstamp(self.now)
             for txt in (f"{now} pushed to target branch; ran at 2026-09-23 22:25 EDT",

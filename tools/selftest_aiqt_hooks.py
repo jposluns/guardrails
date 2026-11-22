@@ -65,10 +65,12 @@ while plain non-force and explicit non-protected pushes can allow. The suite ins
 payloads; its submitted Bash command strings are not executed and establish no destination-ref movement.
 
 It covers branch_root (brnrot) through H1-H32: rooted creation allows, an orphaned explicit start
-denies, an unresolvable origin/HEAD asks, non-creation git commands allow, and non-git commands allow;
-the switch long-form create extracts its start and denies an orphan while git-branch --track routes to ASK; git-branch
-upstream-setting forms are non-creation; --track/-t and --orphan (checkout/switch/worktree) and any
-unknown-arity option in a creation-ish command ASK rather than silently allow; and a rooted-but-stale
+denies, a missing origin/HEAD allows a plain local branch, non-creation git commands allow, and non-git
+commands allow;
+the switch long-form create extracts its start and denies an orphan while git-branch --track or -t denies;
+git-branch upstream-setting forms are non-creation; --orphan (checkout/switch/worktree), worktree add --track,
+an abbreviated checkout --track and any unknown-arity option in a creation-ish command deny rather than
+silently allow, while a checkout or switch --track of a rooted ref allows; and a rooted-but-stale
 start allows (only the CI gate's --max-lag catches staleness). Every outcome is asserted from the
 handler's structured decision.
 
@@ -96,19 +98,21 @@ shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which k
 red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
 (gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
 reverted, except in a quoted literal git commit, tag or merge message on a command the guard parses (data
-rows, red with that reading reverted; the parse-failure fallbacks read the whole raw text); the interim
+rows, red with that reading reverted; the parse-failure fallback and the uncertain-'#' path read the whole
+raw text); the interim
 push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
 accepts), a PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable denies, each flip row red with
 that deny reverted, except in a quoted literal git commit, tag or merge message on a command the guard parses
-(data rows, red with that reading reverted; the parse-failure fallbacks read the whole raw text); and the
+(data rows, red with that reading reverted; the parse-failure fallback and the uncertain-'#' path read the
+whole raw text); and the
 write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
-It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
+It also covers the BEST-EFFORT, DENY-and-educate git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
 command modifiers to literal git, every token after the literal commit subcommand is scanned, including
 tokens after `--`; single-quoted literals ALLOW, while escaped literals ALLOW except for the disclosed
-bare-`$`-before-escaped-paren over-ASK. The raw fallback ASKS on a coarse apparent hit. The tests pin
-detected cases, deliberate over-ASKs, and selected named residual ALLOWs; they make no soundness or
+bare-`$`-before-escaped-paren over-deny. The raw fallback DENIES on a coarse apparent hit. The tests pin
+detected cases, deliberate over-denies, and selected named residual ALLOWs; they make no soundness or
 universal-coverage claim.
 
 It also covers the heredoc terminator guard (heredoc_terminator, sectvl): a heredoc opener with no later
@@ -16083,7 +16087,7 @@ def _fsw_unit_suite():
                 cmd = f"echo $(date{glued} -d 2099-01-01T00:00Z) > {PROJ}/private/s.md"
                 self.assertTrue(self.ev("Bash", command=cmd), ascii(cmd))
 
-        def test_keyword_must_immediately_precede(self):
+        def test_keyword_must_closely_precede(self):
             for line in ("hb: 2099-01-01T00:00Z next", "target branch pushed, hb: 2099-01-01T00:00Z",
                          "next we did a b c and hb 2099-01-01T00:00Z"):
                 self.assertTrue(self.ev("Write", file_path=self.store, content=line), line)
@@ -41548,7 +41552,7 @@ def _main_isolated(monitor):
           "http-push; and the push-redirect deny DENIES a git push naming --receive-pack or --exec, a "
           "PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable; the last two except "
           "in a quoted literal git commit, tag or merge message on a command the guard parses (the "
-          "parse-failure fallbacks read the whole raw text). sectvl "
+          "parse-failure fallback and the uncertain-'#' path read the whole raw text). sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS"

@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "ef0a8bb251f172023c3b6e4667458971817964fc2824ca2ae065efa8a1afc966"
+tree-sha256 = "761830aa40b002334fa150eeec1aff7a5608063037a64b79488dd59192bf0306"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2387,13 +2387,13 @@ sha256 = "8a974e4bdfb90410bc659aef1419a764cbf0232bdfd5687deabede8b0319ee0a"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 78971
-sha256 = "a6ce391a64d69ab90a3efca28ee01ce2679d46af0e3e3a076cc3976ff6840ae0"
+bytes = 78992
+sha256 = "3cc707e0951b0cc5021e84411093f6f9c74ce49bf39049e537acc44ac7108efc"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "7213736be236302c74f5c7c6370baa99663c7be7916c31b772bec1dff7af27c1"
+sha256 = "d410188ff610714299155a4bb2e1310a9bc2c7360f7cebf124ef3bc63bb5b2e3"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2412,8 +2412,8 @@ sha256 = "5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
-bytes = 429199
-sha256 = "e83d2aa851fac017b23fa4d952bf5e2291919ab1a7821e5f0196e7370c9208f2"
+bytes = 429224
+sha256 = "7f36677587e0dfecd277e57f1f39c3bfae92e1206b464625734868d87b7b40f6"
 
 [[sources]]
 path = ".preview/pattern-self-match.py"
@@ -2432,8 +2432,8 @@ sha256 = "319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 566509
-sha256 = "56178cef3968e1825e9ac77f6b7886360f9bceb1c3ceb2552e3e96cd70670fff"
+bytes = 566696
+sha256 = "989eb43701f2a1db39baf76d6c0f6c6ea33d77d2d39c26e113a7fb1d0cbcdb00"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -4822,8 +4822,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 3040166
-sha256 = "8c94c86ae55d05abec0ca76d174de0680d1ebaed9211025f9f765d5a92bf0616"
+bytes = 3040369
+sha256 = "4c54088aeba4442f57814a5e32673aee1de80765f20d39cde293b9e57863cf8c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
