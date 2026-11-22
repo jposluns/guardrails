@@ -17,41 +17,68 @@ paragraph sorted as tools/gen_agents.py sort_key sorts it:
     where the reference path is .aiqt/reference/rules/ followed by the rule's derived read path
     (gen_rules.derive, such as aiqt/10-ACCUR-<slug>.md).
 
-BUDGET (.aiqt/core/core-budget.toml). Exactly these keys: format-version (1); entry-cap, the largest joined
-layer an entry may carry, in UTF-16 units, title and id excluded; trigger-cap, the longest detail-trigger in
-characters; file-cap, the largest CORE render in UTF-16 units; and pending, the sorted list of corpus-ids
-over entry-cap that are not split yet. Each cap is a positive integer. The apex is never split (the source
-grammar forbids it), so it is always kept whole and no cap applies to its entry. A pending rule is rendered
-whole until it is split. The pending list may only shrink: every id on it must also be in PENDING_SEED, the
-list as it stood when this renderer was added, so growing it means editing this reviewed file (and so a
-renderers.toml code-digest change); and an id that no longer needs to be there (now split, now within
-entry-cap, or the apex) is a finding until it is removed. file-cap is enforced once pending is empty; until
-then the render is larger than it by construction, and the measured size is printed against it.
+BUDGET (.aiqt/core/core-budget.toml). Exactly two top-level keys: format-version (1) and accepted, a
+non-empty array of tables, the log of every accepted budget in order. Each entry has exactly these keys:
+kind ("seed" for the first entry and only the first, then "shrink" or "raise"); note, a non-empty string
+saying why; entry-cap, the largest joined layer an entry may carry, in UTF-16 units, title and id excluded;
+trigger-cap, the longest detail-trigger in characters; file-cap, the largest CORE render in UTF-16 units;
+and pending, the sorted list of corpus-ids over entry-cap that are not split yet. Each cap is a positive
+integer. The LAST entry is the budget in force. The apex is never split (the source grammar forbids it), so
+it is always kept whole and no cap applies to its entry. A pending rule is rendered whole until it is
+split. file-cap is enforced once pending is empty; until then the render is larger than it by construction,
+and the measured size is printed against it.
+
+THE RATCHET. Caps and pending change only by appending an entry, each compared with the entry before it:
+  - the seed entry must equal the budget as this renderer was added (CAP_SEED and PENDING_SEED here);
+  - a shrink entry may only lower a cap or drop a pending id, never raise a cap or list an id the entry
+    before it does not, and must change something, so a shrink cannot be undone by a second shrink entry;
+  - a raise entry is the only way to raise a cap or put an id back on pending (or add a new one); its kind
+    and note make the raise visible in the file, and every passing run prints how many raise entries the log
+    holds.
+An id on the budget in force that no longer needs to be there (now split, now within entry-cap, or the
+apex) is a finding until a shrink entry drops it. The gate reads only the committed file, not git history:
+deleting or rewriting an entry already in the log is not caught here and shows only as removed lines in
+review. A pending id must be a corpus-id in every entry, and one the corpus holds in the budget in force.
 
 EXIT. 0 clean. 1 on drift (--check) or on a finding, and a finding in write mode writes nothing:
   - a non-apex rule over entry-cap with no split and not on pending; a split rule whose core layer is over
-    entry-cap; a detail-trigger over trigger-cap; a pending id outside PENDING_SEED; a pending id that no
-    longer needs to be there; the render over file-cap while pending is empty;
+    entry-cap; a detail-trigger over trigger-cap; a seed entry that differs from CAP_SEED and PENDING_SEED;
+    a shrink entry that lists a pending id the entry before it does not, raises a cap, or changes nothing;
+    a pending id that no longer needs to be there; the render over file-cap while pending is empty;
   - in the fresh render, and in --check also in the committed file when it differs from the fresh render:
     a frontmatter block; an `@` anywhere (the instruction-budget gate reads an `@` as an import even inside a
     code span, so no `@` is allowed at all); a corpus-id with no entry; a corpus-id with more than one entry;
     an entry line that names no corpus-id or one the corpus does not hold; an entry that differs from the
     entry its source layer renders; and a pointer to a reference path that is not a regular file inside the
     repository (a dangling pointer).
+DIAGNOSTIC GUARDS. Five of those render guards (frontmatter, missing id, duplicate id, unknown id, entry
+differs) are diagnostic: no case the self-test builds makes one of them change an exit code. In --check,
+every committed file they fire on already differs from the fresh render, which is drift (exit 1), so there
+they only name the reason; and no self-test source makes them fire on a fresh render (they would fire there
+only if this renderer wrote an entry line its own pattern misreads). Their flips show the named reason goes
+while the exit stays 1. The other two render guards (an `@`, a dangling pointer) fire on a fresh render
+from a source, and their flips show the exit change from 1 to 0.
+DRIFT is byte identity: the committed file's bytes must equal the fresh render encoded as UTF-8, so a
+CRLF or a lone CR in place of an LF is drift.
 2 cannot evaluate, never a clean pass, for every malformed or missing input: a .aiqt/core/rules/ that is
-absent, not a directory inside the repository, unreadable or holds no source; a malformed source or a
-duplicate corpus-id (gen_rules.load_corpus); a source whose group is not in GROUPS, whose body is empty, or
-whose split leaves an empty core layer; a core-budget.toml that is absent, not a regular file (a symlink or
-a directory), unreadable, not TOML, or off the schema above (an unknown or missing key, a cap that is not a
-positive integer, a format-version other than 1, a pending entry that is not an id, an unsorted or repeated
-pending list, or a pending id the corpus does not hold); a committed render that is not UTF-8; and a
-.aiqt/renders/ that cannot be read as a directory inside the repository. A committed render that is absent
-is drift (exit 1), as for every generated file.
+absent, not a directory inside the repository, unreadable or holds no source; a malformed or non-UTF-8
+source or a duplicate corpus-id (gen_rules.load_corpus); a source with no '# ' title, whose group is not in
+GROUPS, whose body is empty, or whose split leaves an empty core layer; a core-budget.toml that is absent,
+not a regular file (a symlink or a directory), unreadable, not UTF-8, not TOML, or off the schema above (an
+unknown or missing key, an empty or missing log, a kind out of place or unknown, an empty note, a cap that
+is not a positive integer, a format-version other than 1, a pending entry that is not an id, an unsorted or
+repeated pending list, or a pending id in force the corpus does not hold); a committed render that is not
+UTF-8; and a .aiqt/renders/ that cannot be read as a directory inside the repository. A committed render
+that is absent is drift (exit 1), as for every generated file.
 
   gen_rules_core.py               regenerate .aiqt/renders/aiqt-core.md
   gen_rules_core.py --check       exit 1 on drift or a finding, 2 when it cannot evaluate; write nothing
-  gen_rules_core.py --self-test   synthetic trees: every finding, every cannot-evaluate input, and for each
-                                  guard the plan names a flip that shows the case fails without it
+  gen_rules_core.py --self-test   synthetic trees: every finding and every cannot-evaluate input; a flip
+                                  for every guard, for the byte comparison and for the config-lane
+                                  registration of this file's bare launch, showing its case changes outcome
+                                  with it switched off (the exit, or for a diagnostic guard only its named
+                                  reason); and a backstop row for each load check (no-title, empty-layer,
+                                  group-outside), whose case another step also refuses
 """
 import sys
 
@@ -91,8 +118,10 @@ GENSRC_OUTPUTS = (
 CORE_REL = ".aiqt/renders/aiqt-core.md"
 BUDGET_REL = ".aiqt/core/core-budget.toml"
 REFERENCE_PREFIX = ".aiqt/reference/rules/"
-BUDGET_KEYS = ("format-version", "entry-cap", "trigger-cap", "file-cap", "pending")
+BUDGET_KEYS = ("format-version", "accepted")
+ENTRY_KEYS = ("kind", "note", "entry-cap", "trigger-cap", "file-cap", "pending")
 CAP_KEYS = ("entry-cap", "trigger-cap", "file-cap")
+KINDS = ("seed", "shrink", "raise")
 PREAMBLE_CAP = 1000
 GENERATED_COMMENT = ("<!-- GENERATED by tools/gen_rules_core.py from .aiqt/core/rules/; do not hand-edit. A "
                      "preview that nothing loads. -->")
@@ -104,8 +133,10 @@ PREAMBLE = ("Every rule below is in force, whether its entry holds the whole rul
 POINTER = "Full rule, read before {}: `{}`"
 POINTER_PATH_RE = re.compile(r"`(" + re.escape(REFERENCE_PREFIX) + r"[^`]*)`")
 ENTRY_RE = re.compile(r"^(.+?) \(([a-z0-9]{6,})\)\. (.+)$")
-# The pending list as it stood when this renderer was added (sorted). core-budget.toml pending must stay a
-# subset of it, so the list can only shrink without a reviewed edit here.
+# The budget as it stood when this renderer was added. The seed entry of core-budget.toml must equal it, so
+# the start of the log cannot be edited without a reviewed edit here; later entries are judged against the
+# entry before them (THE RATCHET in the module docstring).
+CAP_SEED = {"entry-cap": 400, "trigger-cap": 60, "file-cap": 56000}
 PENDING_SEED = frozenset((
     "abspth", "atmclm", "brnrot", "chgchk", "chkfcl", "citint", "clmobs", "cnsdif",
     "cnsprd", "cnstpr", "cntdef", "cntprd", "deccls", "dfdpth", "dscres", "estsep",
@@ -146,20 +177,45 @@ class Rule:
 
 
 def _title_and_rest(text, name):
-    """(title text, the body lines below the title) of a rule source. Raises ValueError with no title."""
+    """(title text, the body lines below the title) of a rule source; (None, the body lines from the first
+    non-blank one) when that line is not a '# ' title, which LOAD_CHECKS no-title refuses."""
     lines = text.split("\n")
     for index in range(body_first_line(text, name) - 1, len(lines)):
         if lines[index] != "":
             if not lines[index].startswith("# ") or not lines[index][2:].strip():
-                raise ValueError("{}: the first body line is not a '# ' title".format(name))
+                return None, lines[index:]
             return lines[index][2:].strip(), lines[index + 1:]
-    raise ValueError("{}: the body has no title line".format(name))
+    return None, []
+
+
+# The load checks: each returns a cannot-evaluate reason for one loaded rule, or None. They sit in a
+# name-keyed table, so the self-test can switch one off and show its case is then not cannot-evaluate.
+def _no_title(rule, name):
+    return "{}: the first body line is not a '# ' title".format(name) if rule.title is None else None
+
+
+def _empty_layer(rule, name):
+    if rule.layer:
+        return None
+    if rule.split:
+        return "{}: the '## Detail' split leaves an empty core layer".format(name)
+    return "{}: the body below the title is empty".format(name)
+
+
+def _group_outside(rule, name):
+    if rule.group in GROUP_ORDER:
+        return None
+    return "{}: group {!r} is not in gen_claude GROUPS".format(name, rule.group)
+
+
+LOAD_CHECKS = {"no-title": _no_title, "empty-layer": _empty_layer, "group-outside": _group_outside}
 
 
 def load_rules(root):
     """Every rule of root's corpus as a Rule. Raises ValueError or OSError (cannot evaluate) on a corpus
     directory that is absent, not a directory inside root or holds no source, on a malformed source or a
-    duplicate corpus-id, and on a group outside GROUPS, an empty body or an empty core layer."""
+    duplicate corpus-id, and on a LOAD_CHECKS reason: no title, a group outside GROUPS, an empty body or an
+    empty core layer."""
     src_dir = root / ".aiqt" / "core" / "rules"
     _present, problem = dir_or_absent(src_dir, root)
     if problem is not None:
@@ -176,22 +232,21 @@ def load_rules(root):
         core = core_layer(text, src.name)
         if core is None:
             layer, trigger = _joined(rest), None
-            if not layer:
-                raise ValueError("{}: the body below the title is empty".format(src.name))
         else:
             layer, trigger = _joined(core.split("\n")), fm["detail-trigger"]
-            if not layer:
-                raise ValueError("{}: the '## Detail' split leaves an empty core layer".format(src.name))
         rule = Rule(str(fm["corpus-id"]), fm, rel, title, layer, trigger)
-        if rule.group not in GROUP_ORDER:
-            raise ValueError("{}: group {!r} is not in gen_claude GROUPS".format(src.name, rule.group))
+        for name in LOAD_CHECKS:
+            problem = LOAD_CHECKS[name](rule, src.name)
+            if problem is not None:
+                raise ValueError(problem)
         rules.append(rule)
     return rules
 
 
 def load_budget(root, rules):
-    """The validated core-budget.toml as a dict. Raises ValueError or OSError (cannot evaluate) on a file
-    that is absent, not a regular file, unreadable, not TOML or off the schema."""
+    """The validated core-budget.toml as a dict: the budget in force (the last accepted entry's caps and
+    pending) and, under "log", every accepted entry in order. Raises ValueError or OSError (cannot evaluate)
+    on a file that is absent, not a regular file, unreadable, not TOML or off the schema."""
     path = root / BUDGET_REL
     try:
         mode = os.lstat(path).st_mode
@@ -202,29 +257,50 @@ def load_budget(root, rules):
     if not stat.S_ISREG(mode):
         raise ValueError("{} is not a regular file (a symlink, a directory or another kind)".format(BUDGET_REL))
     data = load_toml(path)
-    missing = [key for key in BUDGET_KEYS if key not in data]
-    extra = sorted(key for key in data if key not in BUDGET_KEYS)
-    if missing or extra:
-        raise ValueError("{}: missing key(s) {} and unknown key(s) {}; the keys are exactly {}".format(
-            BUDGET_REL, missing, extra, ", ".join(BUDGET_KEYS)))
+    _exact_keys(data, BUDGET_KEYS, BUDGET_REL)
     version = data["format-version"]
     if type(version) is not int or version != 1:
         raise ValueError("{}: format-version must be 1, got {!r}".format(BUDGET_REL, version))
-    for key in CAP_KEYS:
-        if type(data[key]) is not int or data[key] <= 0:
-            raise ValueError("{}: {} must be a positive integer, got {!r}".format(BUDGET_REL, key, data[key]))
-    pending = data["pending"]
-    if not isinstance(pending, list) or not all(isinstance(cid, str) and CID_RE.match(cid) for cid in pending):
-        raise ValueError("{}: pending must be a list of corpus-ids, got {!r}".format(BUDGET_REL, pending))
-    if len(set(pending)) != len(pending):
-        raise ValueError("{}: pending repeats an id".format(BUDGET_REL))
-    if pending != sorted(pending):
-        raise ValueError("{}: pending is not sorted".format(BUDGET_REL))
+    log = data["accepted"]
+    if not isinstance(log, list) or not log or not all(isinstance(entry, dict) for entry in log):
+        raise ValueError("{}: accepted must be a non-empty array of tables ([[accepted]])".format(BUDGET_REL))
+    for number, entry in enumerate(log, 1):
+        where = "{} accepted entry {}".format(BUDGET_REL, number)
+        _exact_keys(entry, ENTRY_KEYS, where)
+        allowed = KINDS[:1] if number == 1 else KINDS[1:]
+        if entry["kind"] not in allowed:
+            raise ValueError("{}: kind must be {}, got {!r}".format(
+                where, " or ".join('"{}"'.format(kind) for kind in allowed), entry["kind"]))
+        if not isinstance(entry["note"], str) or not entry["note"].strip():
+            raise ValueError("{}: note must be a non-empty string".format(where))
+        for key in CAP_KEYS:
+            if type(entry[key]) is not int or entry[key] <= 0:
+                raise ValueError("{}: {} must be a positive integer, got {!r}".format(where, key, entry[key]))
+        pending = entry["pending"]
+        if not isinstance(pending, list) or not all(isinstance(cid, str) and CID_RE.match(cid)
+                                                    for cid in pending):
+            raise ValueError("{}: pending must be a list of corpus-ids, got {!r}".format(where, pending))
+        if len(set(pending)) != len(pending):
+            raise ValueError("{}: pending repeats an id".format(where))
+        if pending != sorted(pending):
+            raise ValueError("{}: pending is not sorted".format(where))
     known = {rule.cid for rule in rules}
-    unknown = [cid for cid in pending if cid not in known]
+    unknown = [cid for cid in log[-1]["pending"] if cid not in known]
     if unknown:
-        raise ValueError("{}: pending names no rule of the corpus: {}".format(BUDGET_REL, ", ".join(unknown)))
-    return data
+        raise ValueError("{}: pending in force names no rule of the corpus: {}".format(
+            BUDGET_REL, ", ".join(unknown)))
+    budget = {key: log[-1][key] for key in CAP_KEYS + ("pending",)}
+    budget["log"] = log
+    return budget
+
+
+def _exact_keys(table, keys, where):
+    """Raise ValueError unless table holds exactly keys."""
+    missing = [key for key in keys if key not in table]
+    extra = sorted(key for key in table if key not in keys)
+    if missing or extra:
+        raise ValueError("{}: missing key(s) {} and unknown key(s) {}; the keys are exactly {}".format(
+            where, missing, extra, ", ".join(keys)))
 
 
 def render(rules):
@@ -242,7 +318,8 @@ def render(rules):
 
 # --- the guards ---------------------------------------------------------------------------------------
 # Each guard returns its finding lines. They sit in two name-keyed tables, so the self-test can switch one
-# off and show the case it covers then fails (the flip).
+# off and show the outcome of the case it covers then changes (the flip): the exit, or for a diagnostic
+# guard (DIAGNOSTIC GUARDS in the module docstring) only its named reason.
 
 def _over_cap_not_pending(rules, budget, _text, _seed):
     return ["{}: the entry is {} units, over entry-cap {}, and the rule is neither split nor on pending".format(
@@ -263,9 +340,41 @@ def _trigger_over_cap(rules, budget, _text, _seed):
         if rule.split and len(rule.trigger) > budget["trigger-cap"]]
 
 
-def _pending_grew(_rules, budget, _text, seed):
-    return ["{}: on pending but not in PENDING_SEED; the pending list may only shrink".format(cid)
-            for cid in budget["pending"] if cid not in seed]
+def _seed_altered(_rules, budget, _text, seed):
+    first = budget["log"][0]
+    changed = [key for key in CAP_KEYS if first[key] != seed[key]]
+    if set(first["pending"]) != set(seed["pending"]):
+        changed.append("pending")
+    return ["accepted entry 1 (the seed): {} differ(s) from CAP_SEED and PENDING_SEED in "
+            "tools/gen_rules_core.py; append a shrink or raise entry instead".format(", ".join(changed))
+            ] if changed else []
+
+
+def _shrink_entries(budget):
+    """(entry number, entry, the entry before it) for every shrink entry of the log."""
+    log = budget["log"]
+    return [(number, log[number - 1], log[number - 2]) for number in range(2, len(log) + 1)
+            if log[number - 1]["kind"] == "shrink"]
+
+
+def _pending_grew(_rules, budget, _text, _seed):
+    return ["accepted entry {}: {} on pending but not on the entry before it; a shrink entry may not grow "
+            "pending, which takes a raise entry".format(number, cid)
+            for number, entry, before in _shrink_entries(budget)
+            for cid in entry["pending"] if cid not in before["pending"]]
+
+
+def _cap_raised(_rules, budget, _text, _seed):
+    return ["accepted entry {}: {} {} is above {} on the entry before it; a shrink entry may not raise a cap, "
+            "which takes a raise entry".format(number, key, entry[key], before[key])
+            for number, entry, before in _shrink_entries(budget)
+            for key in CAP_KEYS if entry[key] > before[key]]
+
+
+def _shrink_no_change(_rules, budget, _text, _seed):
+    return ["accepted entry {}: a shrink entry that changes nothing from the entry before it".format(number)
+            for number, entry, before in _shrink_entries(budget)
+            if all(entry[key] == before[key] for key in CAP_KEYS + ("pending",))]
 
 
 def _pending_stale(rules, budget, _text, _seed):
@@ -275,7 +384,7 @@ def _pending_stale(rules, budget, _text, _seed):
         rule = by_id[cid]
         if rule.apex or rule.split or units(rule.layer) <= budget["entry-cap"]:
             why = "the apex" if rule.apex else "split" if rule.split else "within entry-cap"
-            stale.append("{}: on pending but {} now; remove it from pending".format(cid, why))
+            stale.append("{}: on pending but {} now; append a shrink entry that drops it".format(cid, why))
     return stale
 
 
@@ -286,7 +395,8 @@ def _file_over_cap(_rules, budget, text, _seed):
 
 
 SOURCE_GUARDS = {"over-cap-not-pending": _over_cap_not_pending, "core-over-cap": _core_over_cap,
-                 "trigger-over-cap": _trigger_over_cap, "pending-grew": _pending_grew,
+                 "trigger-over-cap": _trigger_over_cap, "seed-altered": _seed_altered,
+                 "pending-grew": _pending_grew, "cap-raised": _cap_raised, "shrink-no-change": _shrink_no_change,
                  "pending-stale": _pending_stale, "file-over-cap": _file_over_cap}
 
 
@@ -371,10 +481,17 @@ def render_findings(text, rules, root):
     return [line for name in RENDER_GUARDS for line in RENDER_GUARDS[name](text, rules, root)]
 
 
+def _same_bytes(raw, text):
+    """True when the committed bytes raw are exactly the fresh render text encoded as UTF-8 (no line-ending
+    translation). A name-keyed function, so the self-test can swap in a line-ending-blind comparison."""
+    return raw == text.encode("utf-8")
+
+
 def run(root, check_mode, seed=None):
     """Reconcile root's CORE render. Exit 0 clean, 1 on drift (check mode) or a finding, 2 when it cannot
-    evaluate (see the module docstring). seed stands in for PENDING_SEED (the self-test's synthetic trees)."""
-    seed = PENDING_SEED if seed is None else seed
+    evaluate (see the module docstring). seed stands in for CAP_SEED and PENDING_SEED, a dict of the three
+    caps and pending (the self-test's synthetic trees)."""
+    seed = dict(CAP_SEED, pending=PENDING_SEED) if seed is None else seed
     try:
         rules = load_rules(root)
         budget = load_budget(root, rules)
@@ -388,14 +505,15 @@ def run(root, check_mode, seed=None):
     if check_mode:
         target_dir_present(target, root)
         try:
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            raw = target.read_bytes() if target.exists() else None
+            current = None if raw is None else raw.decode("utf-8")
         except (OSError, UnicodeError) as exc:
             print("error: cannot read {} ({}) (cannot evaluate)".format(target, exc), file=sys.stderr)
             return 2
-        if current is None:
+        if raw is None:
             drift.append("{} is absent".format(CORE_REL))
-        elif current != text:
-            drift.append("{} differs from a fresh render".format(CORE_REL))
+        elif not _same_bytes(raw, text):
+            drift.append("{} differs from a fresh render (bytes compared, line endings included)".format(CORE_REL))
             findings += ["committed: " + line for line in render_findings(current, rules, root)]
     for line in findings:
         print("finding: " + line)
@@ -408,9 +526,12 @@ def run(root, check_mode, seed=None):
     if not check_mode:
         reconcile(target, text, False, root, make_parents=True)
     split = sum(rule.split for rule in rules)
-    print("rules-core: {} entries ({} whole, {} split, {} pending); {} units against file-cap {} ({})".format(
-        len(rules), len(rules) - split, split, len(budget["pending"]), units(text), budget["file-cap"],
-        "reported only while pending is not empty" if budget["pending"] else "enforced"))
+    log = budget["log"]
+    print("rules-core: {} entries ({} whole, {} split, {} pending); {} units against file-cap {} ({}); budget "
+          "log {} accepted entries, {} of them raise entries".format(
+              len(rules), len(rules) - split, split, len(budget["pending"]), units(text), budget["file-cap"],
+              "reported only while pending is not empty" if budget["pending"] else "enforced",
+              len(log), sum(entry["kind"] == "raise" for entry in log)))
     return 0
 
 
@@ -458,7 +579,7 @@ _FM = "---\ncorpus-id: {cid}\norigin: pack\nfamily: {family}\n{keys}slug: {slug}
 _SPLIT_REL = "aiqt/10-QUALI-split-rule.md"
 _LONG_BODY = ("This fixture body is long on purpose, so that its joined text runs past the small entry cap the "
               "fixture budget sets.\n")
-_SEED = frozenset(("longaa1",))
+_SEED = {"entry-cap": 80, "trigger-cap": 60, "file-cap": 100000, "pending": frozenset(("longaa1",))}
 
 
 def _source(cid, slug, keys, body, family="aiqt"):
@@ -480,9 +601,27 @@ def _fixture_sources():
     }
 
 
-def _budget_text(entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longaa1",), extra=""):
-    return "format-version = 1\nentry-cap = {}\ntrigger-cap = {}\nfile-cap = {}\npending = [{}]\n{}".format(
-        entry_cap, trigger_cap, file_cap, ", ".join('"{}"'.format(cid) for cid in pending), extra)
+def _entry_text(kind, entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longaa1",), note="why"):
+    return ('\n[[accepted]]\nkind = "{}"\nnote = "{}"\nentry-cap = {}\ntrigger-cap = {}\nfile-cap = {}\n'
+            'pending = [{}]\n').format(kind, note, entry_cap, trigger_cap, file_cap,
+                                       ", ".join('"{}"'.format(cid) for cid in pending))
+
+
+def _budget_text(entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longaa1",), extra="", kind=None,
+                 entries=None):
+    """A budget: the fixture seed entry (_SEED), then, when any value differs from the seed or kind is
+    given, one more entry of kind (shrink by default) holding the values; or, given entries, the seed
+    entry followed by those _entry_text keyword dicts in order. extra is appended last."""
+    text = "format-version = 1\n" + _entry_text("seed")
+    values = {"entry_cap": entry_cap, "trigger_cap": trigger_cap, "file_cap": file_cap, "pending": pending}
+    if entries is None:
+        entries = []
+        if kind is not None or values != {"entry_cap": 80, "trigger_cap": 60, "file_cap": 100000,
+                                          "pending": ("longaa1",)}:
+            entries = [dict(values, kind=kind or "shrink")]
+    for entry in entries:
+        text += _entry_text(**entry)
+    return text + extra
 
 
 def _tree(base, sources=None, budget=None, reference=True):
@@ -546,6 +685,11 @@ def _both(root, seed=_SEED):
     return codes[0], codes[1], before == after
 
 
+def _write_then_check(root, seed=_SEED):
+    """(write exit, check exit) for a tree: the check sees the render the write made, if it made one."""
+    return _run(root, False, seed)[0], _run(root, True, seed)[0]
+
+
 def _argv_failures():
     """One line per refusal vector main() mishandles: exit 2, run never reached."""
     import io
@@ -588,10 +732,15 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: gen_rules_core {} checks (a synthetic tree renders, re-checks clean and renders the "
           "same bytes twice, with a whole entry, a split entry with its pointer, a pending entry kept whole and "
-          "the groups in index order; a missing id, a duplicate id, an entry differing from its source layer, an "
-          "over-cap entry not on pending, an '@', frontmatter and a dangling pointer are each caught, and each "
-          "case fails with its guard switched off; every malformed or missing input is cannot-evaluate, exit 2, "
-          "with nothing written)".format(len(EXECUTED)))
+          "the groups in index order; an over-cap entry not on pending, an '@' and a dangling pointer each exit "
+          "1 and exit 0 with their guard switched off; a missing, duplicate or unknown id, an entry differing "
+          "from its source layer and frontmatter in the committed file are each named, and lose only that "
+          "name with their guard switched off (drift still exits 1); a CRLF or lone CR is drift; a pending id "
+          "returning after a shrink, a cap raised by a shrink entry, an altered seed and a shrink that changes "
+          "nothing each exit 1 and exit 0 with their guard switched off, as do a stale pending id, a long "
+          "trigger, a core over the cap and the file over its cap, and a raise entry is accepted; every "
+          "malformed or missing input is cannot-evaluate, exit 2, with nothing written; the config-lane tables "
+          "exclude the bare launch and keep the --self-test launch)".format(len(EXECUTED)))
     return 0
 
 
@@ -623,29 +772,58 @@ def _self_test_cases(tmp):
     check("drift/hand-edit-is-exit-1", _run(edited, True)[0] == 1, _run(edited, True))
     absent = _tree(tmp / "absent")
     check("drift/absent-render-is-exit-1", _run(absent, True)[0] == 1, _run(absent, True))
+    # Byte identity: a CRLF, and a lone CR, in place of an LF are drift; the flip swaps in a comparison
+    # that reads the file with line-ending translation, under which both pass.
+    def blind(raw, text):
+        import io
+        return io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8").read() == text
+    for label, case_id, flip_id, mutate in (
+            ("crlf", "drift/crlf-is-exit-1", "flip/crlf-byte-compare", lambda t: t.replace("\n", "\r\n")),
+            ("lone-cr", "drift/lone-cr-is-exit-1", "flip/lone-cr-byte-compare",
+             lambda t: t.replace("\n\n", "\n\r", 1))):
+        root = _committed_case(tmp, label, lambda t: t)
+        (root / CORE_REL).write_bytes(mutate(_core_text(root)).encode("utf-8"))
+        code, out = _run(root, True)
+        check(case_id, code == 1 and "bytes compared" in out, out)
+        saved = globals()["_same_bytes"]
+        globals()["_same_bytes"] = blind
+        try:
+            flipped = _run(root, True)
+        finally:
+            globals()["_same_bytes"] = saved
+        check(flip_id, flipped[0] == 0, flipped)
 
-    # --- the seven plan cases, each with its flip ---
+    # --- the seven plan cases, each with its flip. missing-id, duplicate-id, entry-differs, frontmatter and
+    # unknown-id are diagnostic (module docstring): their flips show the named reason goes while the exit
+    # stays 1 on drift; the other flips show the exit itself change ---
     root = _committed_case(tmp, "missing", lambda t: t.replace("Short rule (shrtaa1). A short fixture rule "
                                                                "body.\n\n", ""))
     code, out = _run(root, True)
     check("case/missing-id", code == 1 and "missing id: shrtaa1" in out, out)
     with _without(RENDER_GUARDS, "missing-id"):
         code, out = _run(root, True)
-    check("flip/missing-id", "missing id: shrtaa1" not in out, out)
+    check("flip/missing-id", code == 1 and "missing id: shrtaa1" not in out, out)
 
     root = _committed_case(tmp, "duplicate", lambda t: t + "\nShort rule (shrtaa1). A short fixture rule body.\n")
     code, out = _run(root, True)
     check("case/duplicate-id", code == 1 and "duplicate id: shrtaa1 has 2 entries" in out, out)
     with _without(RENDER_GUARDS, "duplicate-id"):
         code, out = _run(root, True)
-    check("flip/duplicate-id", "duplicate id: shrtaa1" not in out, out)
+    check("flip/duplicate-id", code == 1 and "duplicate id: shrtaa1" not in out, out)
 
     root = _committed_case(tmp, "differs", lambda t: t.replace("A short fixture rule body.", "A short rule."))
     code, out = _run(root, True)
     check("case/entry-differs", code == 1 and "the entry for shrtaa1 differs from its source layer" in out, out)
     with _without(RENDER_GUARDS, "entry-differs"):
         code, out = _run(root, True)
-    check("flip/entry-differs", "differs from its source layer" not in out, out)
+    check("flip/entry-differs", code == 1 and "differs from its source layer" not in out, out)
+
+    root = _committed_case(tmp, "unknown", lambda t: t + "\nGhost rule (zzzzzz9). Not a rule of the corpus.\n")
+    code, out = _run(root, True)
+    check("case/unknown-id", code == 1 and "the entry names zzzzzz9, which the corpus does not hold" in out, out)
+    with _without(RENDER_GUARDS, "unknown-id"):
+        code, out = _run(root, True)
+    check("flip/unknown-id", code == 1 and "zzzzzz9" not in out, out)
 
     root = _tree(tmp / "overcap", budget=_budget_text(pending=()))
     code, out = _run(root, True)
@@ -671,7 +849,7 @@ def _self_test_cases(tmp):
     check("case/frontmatter", code == 1 and "committed: frontmatter present" in out, out)
     with _without(RENDER_GUARDS, "frontmatter"):
         code, out = _run(root, True)
-    check("flip/frontmatter", "frontmatter present" not in out, out)
+    check("flip/frontmatter", code == 1 and "frontmatter present" not in out, out)
 
     root = _tree(tmp / "dangling", reference=False)
     code, out = _run(root, True)
@@ -681,24 +859,73 @@ def _self_test_cases(tmp):
         flipped = (_run(root, False)[0], _run(root, True)[0])
     check("flip/dangling-pointer", flipped == (0, 0), flipped)
 
+    # --- the ratchet: each accepted entry against the one before it, each guard with its flip ---
+    shortened = _fixture_sources()
+    shortened["long.md"] = shortened["long.md"].replace(_LONG_BODY, "A long rule, now short.\n")
+    shrunk = {"kind": "shrink", "pending": ()}
+    root = _tree(tmp / "shrunk", sources=shortened, budget=_budget_text(entries=[shrunk]))
+    check("ratchet/shrink-entry-accepted", _write_then_check(root) == (0, 0), _run(root, True))
+    # The reviewed defect: the rule grows back and its id returns to pending in a second shrink entry.
+    root = _tree(tmp / "regrow", budget=_budget_text(entries=[shrunk, {"kind": "shrink"}]))
+    code, out = _run(root, True)
+    check("ratchet/pending-regrow-after-shrink", (code,) + _both(root)[1:] == (1, 1, True)
+          and not (root / CORE_REL).exists()
+          and "accepted entry 3: longaa1 on pending but not on the entry before it" in out, out)
+    with _without(SOURCE_GUARDS, "pending-grew"):
+        flipped = _write_then_check(root)
+    check("flip/pending-regrow-after-shrink", flipped == (0, 0), flipped)
+    root = _tree(tmp / "raise", budget=_budget_text(entries=[shrunk, {"kind": "raise", "entry_cap": 90}]))
+    check("ratchet/raise-entry-accepted", _write_then_check(root) == (0, 0), _run(root, True))
+    root = _tree(tmp / "capraise", budget=_budget_text(entries=[shrunk, {"kind": "shrink", "entry_cap": 1000,
+                                                                         "pending": ()}]))
+    code, out = _run(root, True)
+    check("ratchet/cap-raised", code == 1 and "accepted entry 3: entry-cap 1000 is above 80" in out, out)
+    with _without(SOURCE_GUARDS, "cap-raised"):
+        flipped = _write_then_check(root)
+    check("flip/cap-raised", flipped == (0, 0), flipped)
+    root = _tree(tmp / "seedalt", budget=_budget_text().replace("file-cap = 100000", "file-cap = 200000"))
+    code, out = _run(root, True)
+    check("ratchet/seed-altered", (code, _run(root, False)[0], (root / CORE_REL).exists()) == (1, 1, False)
+          and "accepted entry 1 (the seed): file-cap differ(s)" in out, out)
+    with _without(SOURCE_GUARDS, "seed-altered"):
+        flipped = _write_then_check(root)
+    check("flip/seed-altered", flipped == (0, 0), flipped)
+    root = _tree(tmp / "nochange", budget=_budget_text(entries=[{"kind": "shrink"}]))
+    code, out = _run(root, True)
+    check("ratchet/shrink-no-change", code == 1 and "accepted entry 2: a shrink entry that changes nothing" in out,
+          out)
+    with _without(SOURCE_GUARDS, "shrink-no-change"):
+        flipped = _write_then_check(root)
+    check("flip/shrink-no-change", flipped == (0, 0), flipped)
+
     # --- the other findings ---
-    root = _tree(tmp / "grew")
-    code, out = _run(root, True, frozenset())
-    check("finding/pending-grew", code == 1 and "longaa1: on pending but not in PENDING_SEED" in out, out)
-    root = _tree(tmp / "stale", budget=_budget_text(pending=("longaa1", "shrtaa1")))
-    code, out = _run(root, True, frozenset(("longaa1", "shrtaa1")))
+    root = _tree(tmp / "stale", budget=_budget_text(pending=("longaa1", "shrtaa1"), kind="raise"))
+    code, out = _run(root, True)
     check("finding/pending-stale", code == 1 and "shrtaa1: on pending but within entry-cap now" in out, out)
+    with _without(SOURCE_GUARDS, "pending-stale"):
+        flipped = _write_then_check(root)
+    check("flip/pending-stale", flipped == (0, 0), flipped)
     root = _tree(tmp / "trigger", budget=_budget_text(trigger_cap=5))
     code, out = _run(root, True)
     check("finding/trigger-over-cap", code == 1 and "splita1: the detail-trigger is 17 characters" in out, out)
-    root = _tree(tmp / "corecap", budget=_budget_text(entry_cap=5, pending=("longaa1", "secaa11", "shrtaa1")))
-    code, out = _run(root, True, frozenset(("longaa1", "secaa11", "shrtaa1")))
+    with _without(SOURCE_GUARDS, "trigger-over-cap"):
+        flipped = _write_then_check(root)
+    check("flip/trigger-over-cap", flipped == (0, 0), flipped)
+    root = _tree(tmp / "corecap", budget=_budget_text(entry_cap=5, pending=("longaa1", "secaa11", "shrtaa1"),
+                                                      kind="raise"))
+    code, out = _run(root, True)
     check("finding/core-over-cap", code == 1 and "splita1: the core layer is 18 units" in out, out)
+    with _without(SOURCE_GUARDS, "core-over-cap"):
+        flipped = _write_then_check(root)
+    check("flip/core-over-cap", flipped == (0, 0), flipped)
     sources = _fixture_sources()
     sources["long.md"] = sources["long.md"].replace(_LONG_BODY, "A long rule, now short.\n")
     root = _tree(tmp / "filecap", sources=sources, budget=_budget_text(file_cap=10, pending=()))
     code, out = _run(root, True)
     check("finding/file-over-cap-when-pending-empty", code == 1 and "over file-cap 10" in out, out)
+    with _without(SOURCE_GUARDS, "file-over-cap"):
+        flipped = _write_then_check(root)
+    check("flip/file-over-cap", flipped == (0, 0), flipped)
 
     # --- every malformed or missing input is cannot-evaluate (exit 2), with nothing written ---
     def cannot(label, sources=None, budget=None, setup=None):
@@ -761,6 +988,53 @@ def _self_test_cases(tmp):
     sources = _fixture_sources()
     sources["split.md"] = sources["split.md"].replace("The core sentence.\n\n", "")
     check("cannot-evaluate/split-empty-core", cannot("s-emptycore", sources=sources) == (2, 2, True))
+
+    # The load checks are backstops: each case below is also refused (exit 2) by the shared rule reader or
+    # a later step, so the backstop rows show the case still exits 2, without the local reason, with the
+    # load check switched off. The case rows pin which reason a run gives today (the local one only for an
+    # empty body), and load/group-outside-reason shows the group check's own verdict on a rule the shared
+    # reader cannot produce.
+    for label, case_id, backstop_id, check_name, local, edit, local_fires in (
+            ("group-outside-groups", "cannot-evaluate/group-outside-groups", "backstop/group-outside-groups",
+             "group-outside", "is not in gen_claude GROUPS", lambda s: s.replace("facet: ACCUR", "facet: ZZZZ"),
+             False),
+            ("empty-body", "cannot-evaluate/empty-body", "backstop/empty-body", "empty-layer",
+             "the body below the title is empty", lambda s: s.replace("A short fixture\nrule body.\n", ""), True),
+            ("no-title", "cannot-evaluate/no-title", "backstop/no-title", "no-title", "is not a '# ' title",
+             lambda s: s.replace("# Short rule\n\n", ""), False)):
+        sources = _fixture_sources()
+        sources["short.md"] = edit(sources["short.md"])
+        root = _tree(tmp / ("l-" + label), sources=sources)
+        code, out = _run(root, True)
+        check(case_id, _both(root) == (2, 2, True) and code == 2 and (local in out) == local_fires, out)
+        with _without(LOAD_CHECKS, check_name):
+            flipped = _run(root, True)
+        check(backstop_id, flipped[0] == 2 and local not in flipped[1], flipped)
+    outside = Rule("shrtaa1", {"facet": "ZZZZ", "family": "aiqt"}, "x.md", "T", "L", None)
+    inside = Rule("shrtaa1", {"facet": "ACCUR", "family": "aiqt"}, "x.md", "T", "L", None)
+    verdicts = (_group_outside(outside, "x.md"), _group_outside(inside, "x.md"))
+    check("load/group-outside-reason", verdicts[1] is None and verdicts[0] is not None
+          and "is not in gen_claude GROUPS" in verdicts[0], verdicts)
+
+    # Undecodable inputs (the decode is in the shared readers, so these rows have no flip of their own).
+    root = _tree(tmp / "b-notutf8")
+    (root / BUDGET_REL).write_bytes(b'format-version = 1\n# \xff\n')
+    check("cannot-evaluate/budget-not-utf8", _both(root) == (2, 2, True))
+    root = _tree(tmp / "s-notutf8")
+    (root / ".aiqt" / "core" / "rules" / "short.md").write_bytes(b"\xff\xfe\n")
+    check("cannot-evaluate/source-not-utf8", _both(root) == (2, 2, True))
+
+    # The budget log's schema.
+    check("cannot-evaluate/budget-log-empty",
+          cannot("b-log-empty", budget="format-version = 1\naccepted = []\n") == (2, 2, True))
+    kinds = [cannot("b-kind-" + str(index), budget=text) for index, text in enumerate((
+        _budget_text().replace('kind = "seed"', 'kind = "shrink"'),
+        _budget_text(entries=[{"kind": "seed", "pending": ()}]),
+        _budget_text(entries=[{"kind": "lower", "pending": ()}])))]
+    check("cannot-evaluate/budget-kind-out-of-place", kinds == [(2, 2, True)] * 3, kinds)
+    check("cannot-evaluate/budget-note-empty",
+          cannot("b-note", budget=_budget_text(entries=[{"kind": "shrink", "pending": (), "note": " "}]))
+          == (2, 2, True))
     root = _tree(tmp / "t-notutf8")
     _run(root, False)
     (root / CORE_REL).write_bytes(b"\xff\n")
@@ -770,6 +1044,48 @@ def _self_test_cases(tmp):
     check("cannot-evaluate/renders-not-a-directory", _both(root)[:2] == (2, 2))
     failures = _argv_failures()
     check("cannot-evaluate/unknown-argument", not failures, failures)
+
+    # --- the config lanes: a bare launch of this file is its write mode, so tools/selftest_git_fixture_env.py
+    # must exclude it and keep the direct --self-test launch; the flip drops both registrations ---
+    bare, direct = ("tools/gen_rules_core.py",), ("tools/gen_rules_core.py", "--self-test")
+    try:
+        exclusions, directs = _lane_tables()
+    except (OSError, SyntaxError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        exclusions, directs = {}, {}
+        print("lane tables unreadable: {}".format(exc))
+    members = _lane_members(exclusions, directs)
+    check("lanes/bare-launch-excluded-self-test-kept", bare not in members and direct in members, members)
+    flipped = _lane_members({key: value for key, value in exclusions.items() if key != bare},
+                            {key: value for key, value in directs.items() if key != SUITE_ID})
+    check("flip/lanes-bare-launch", bare in flipped and direct not in flipped, flipped)
+
+
+def _lane_tables():
+    """(CONFIG_EXCLUSIONS["all"], CONFIG_DIRECT_SELFTESTS) of tools/selftest_git_fixture_env.py, read as
+    literals from its source (read only, never imported, so that file stays out of this renderer's import
+    closure). Raises on a file that is unreadable or whose two tables are missing or not literals."""
+    import ast
+    path = Path(__file__).resolve().parent / "selftest_git_fixture_env.py"
+    tables = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
+                and node.targets[0].id in ("CONFIG_EXCLUSIONS", "CONFIG_DIRECT_SELFTESTS"):
+            tables[node.targets[0].id] = ast.literal_eval(node.value)
+    return tables["CONFIG_EXCLUSIONS"]["all"], tables["CONFIG_DIRECT_SELFTESTS"]
+
+
+def _lane_members(exclusions, directs):
+    """The config-lane members tools/selftest_git_fixture_env.py _registered_selftests builds from this
+    suite's registered step, under the given CONFIG_EXCLUSIONS["all"] and CONFIG_DIRECT_SELFTESTS: the bare
+    runner and any direct self-test launch, less every excluded identity (a model of that rule, kept to the
+    one suite step)."""
+    step = ("tools/check_selftest_execution.py", "--suite", SUITE_ID)
+    members = {step}
+    if step not in exclusions:
+        members.add(("tools/gen_rules_core.py",))
+        if SUITE_ID in directs:
+            members.add(directs[SUITE_ID])
+    return {member for member in members if member not in exclusions}
 
 
 def shutil_rmtree(path):

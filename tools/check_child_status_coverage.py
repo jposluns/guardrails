@@ -116,7 +116,7 @@ with exit 2). This gate holds where it runs:
      reads a child's status and every declared launch is through a guarded launcher) or RESIDUAL (it reads one
      and has no declared launcher). A LAUNCHER or RESIDUAL entry's direct launch is unguarded, so each must be
      listed in DIRECT_LAUNCH_RESIDUAL, which every run prints by name. A new such entry that is not listed, a
-     listed entry that is now SELF, NOT-APPLICABLE or gone (the list only shrinks), an unregistered hook mode and
+     listed entry that is now SELF, NOT-APPLICABLE or gone (it must leave the list), an unregistered hook mode and
      a declared launch target that does not exist are findings.
   6. switch: DIRECT_LAUNCH_CHECK is False until the Python-floor prelude carries a refusal of its own; set True,
      a LAUNCHER or RESIDUAL entry is a finding whether listed or not, so the residual list must then be empty.
@@ -396,8 +396,9 @@ CHILD_TIMEOUT = 120
 # change, once the Python-floor prelude refuses an ignored SIGCHLD in every entry point.
 DIRECT_LAUNCH_CHECK = False
 # Every entry point that reads a child's exit status and carries no guard of its own, sorted: a direct launch of
-# it from an ignoring parent is unguarded. Computed by this gate's own classification and reviewed; it only
-# shrinks.
+# it from an ignoring parent is unguarded. Computed by this gate's own classification and reviewed. A listed
+# entry that is now guarded, not applicable or gone is a finding until removed; a new entry point of this kind
+# is a finding until it is guarded or listed here, so the list can grow.
 DIRECT_LAUNCH_RESIDUAL = (
     ".github/check_cited_standards_contract.py",
     ".preview/char-policy-write.py",

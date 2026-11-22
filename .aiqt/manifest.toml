@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "8a51999cb71082ad6b2b1c8fdd3d5b4b3c1911c41da1f90ce99eebef421c39ef"
+tree-sha256 = "03fcc48ee0c1640aab14932070f6aeff0c15f3a9da3223835a409e596d9a9d97"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -62,8 +62,8 @@ sha256 = "96a27aba14bd4b95dfdb70ecde7ff78576b34d5ea1acbb6d0e8f4a2e08e34ba7"
 
 [[sources]]
 path = ".aiqt/core/core-budget.toml"
-bytes = 1634
-sha256 = "d121b8a39d9aae966288aea674df3358884b96e1476e788446b48057c35e4de3"
+bytes = 2370
+sha256 = "442f4f893e5e86c598e1a555725fe15588f4f5d1b50be5a115c3494909c459a8"
 
 [[sources]]
 path = ".aiqt/core/dispositions.toml"
@@ -87,8 +87,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 664749
-sha256 = "5ad53ca891f1f2380d13420b5aa8145f30a86793ab15c9f3a7dbc6a2dec8c765"
+bytes = 665288
+sha256 = "a4da46a42f27f424b27d1d632b449ff93a629482e0ef99457f945ba83aefacf4"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -163,7 +163,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3903
-sha256 = "1c11d1a2919d3bc7724068fcb519ec818a502f5bec1cdb7af7ac8b624f7c2d23"
+sha256 = "8e3bcb8443d223bb385f975913c66435c6a39dda519dbc9bc4cac7760edab1f8"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -842,8 +842,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1297744
-sha256 = "7f1564a0c7828c77f2a5bb65f05f671d9099fede536006788dd886fee0cf3f9a"
+bytes = 1298283
+sha256 = "944a2919a8662ab1a43d6c28276f3ca97038f9e51d5558e754abafd3a2db7612"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2467,8 +2467,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 751198
-sha256 = "1d0b3c061fab76b0011d3b4e9369117efa5ec8de1a192a4703adf4a1c98f543d"
+bytes = 751737
+sha256 = "b1f785b124a7959a70cc5d48f675f4004c6aaf0f11862deaec30b1d65034a0cf"
 
 [[sources]]
 path = "GEMINI.md"
@@ -4072,8 +4072,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 817227
-sha256 = "48eabfe35719596ae41eb2af4e9379ab606953ca5f896fa6d7b8c862d0a6c1a5"
+bytes = 817766
+sha256 = "587f1d63977f636b91eb1a209048b0e3307bbc3385ac3a481bcc1dc0dcab8aaf"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4287,8 +4287,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 231473
-sha256 = "230edcdaa4ed56e70113cb52bafab169a9509c9ff384abf2825409ac67c6b550"
+bytes = 231648
+sha256 = "04f0479981f988c03fefd899f750abb565e7778af8a3321c0b5ef3b2e5fff1fd"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4717,8 +4717,8 @@ sha256 = "6b3aa7127b1b70d99d8bfca3579fea1dcf5dd89e740b26eefa3418435f289c5a"
 
 [[sources]]
 path = "tools/gen_rules_core.py"
-bytes = 40109
-sha256 = "3f0f1cb587c11b1d62862accd6148b5813cf8f9cb54adfcfd094c0be6bbe1d24"
+bytes = 59811
+sha256 = "ec7da46ee69ebdedd766541dacf88fc3d34fb01be757b6d97bc7ebce6e3c85ef"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
@@ -4832,8 +4832,8 @@ sha256 = "c0ac9c0f2224547a138f7ffb81befc8e2e6420fb2589fd49d9a9c7b44974d9f3"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 319345
-sha256 = "d26b6279b57ce7147901ecec94f19c91e1a1e0b54edea6faa1556ddaa2647993"
+bytes = 320902
+sha256 = "a0e1449d269632fcadd4b2eab2b2ed9b2056840a8aad3edc8b7b632edd1ec45a"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4842,8 +4842,8 @@ sha256 = "5218fd5dd347aa7f25cebbbce29bff5d48d94b8ffdd219e678ddd8ccc75ffc0d"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 494914
-sha256 = "4d0e5602a3cdfbee1e6d05e59b80e2c3f6222b7e8e415d5d1fa3671c4bc44f4b"
+bytes = 495634
+sha256 = "d1bf4b18ca2b23f852a2647dcca4c9bfb3221374fbd01474714a3832bc7662d2"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"

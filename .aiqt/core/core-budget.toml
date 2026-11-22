@@ -1,15 +1,28 @@
 # .aiqt/core/core-budget.toml: the caps for the CORE render (tools/gen_rules_core.py, which documents the
 # schema and every exit). Hand-maintained; the render reads it to judge its output, never to shape it.
 #
+# accepted is the log of every accepted budget, oldest first; the LAST entry is the budget in force. Each
+# entry holds:
+# kind: "seed" (the first entry only; it must equal CAP_SEED and PENDING_SEED in tools/gen_rules_core.py),
+#   "shrink" or "raise".
+# note: why the entry was made.
 # entry-cap: the largest joined layer one entry may carry (the whole body of an unsplit rule, or the core layer
 #   of a split one), in UTF-16 units, title and corpus-id excluded. The apex is never split and is exempt.
 # trigger-cap: the longest detail-trigger, in characters.
 # file-cap: the largest CORE render, in UTF-16 units; enforced once pending is empty, printed against until then.
-# pending: the sorted corpus-ids of the rules over entry-cap that are not split yet. It may only shrink: every id
-#   must also be in PENDING_SEED in tools/gen_rules_core.py, and an id that is split, now within entry-cap or
-#   the apex is a finding until it is removed here.
+# pending: the sorted corpus-ids of the rules over entry-cap that are not split yet.
+#
+# To change a cap or pending, append an entry; the gate compares each entry with the one before it. A shrink
+# entry may only lower a cap or drop a pending id, and must change something. Raising a cap or putting an id
+# back on pending takes a raise entry, and every passing run prints how many raise entries this log holds.
+# An id that is split, now within entry-cap or the apex is a finding until a shrink entry drops it. The gate
+# reads this file only, not git history: deleting or rewriting an entry already here is not caught by it.
 
 format-version = 1
+
+[[accepted]]
+kind = "seed"
+note = "the caps and pending list as the rules-core renderer was added"
 entry-cap = 400
 trigger-cap = 60
 file-cap = 56000

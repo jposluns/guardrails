@@ -754,6 +754,14 @@ CONFIG_EXCLUSIONS = {
             " cli/unrecognized-arguments-exit-2); its self-test stays in this roster as the direct"
             " --self-test launch, registered in both CI and the local runner, and as the"
             " hook-coverage-selftest suite step.",
+        ("tools/gen_rules_core.py",):
+            "A bare launch is the generator's write mode over this checkout, not a self-test: it"
+            " rewrites .aiqt/renders/aiqt-core.md in the checkout under test and runs none of the"
+            " self-test's checks; its self-test stays in this roster twice: as the"
+            " rules-core-selftest suite step, whose launcher sanitizes the child environment, and"
+            " as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned lane"
+            " still enters that self-test's own entry point without any launcher sanitizing the"
+            " environment first.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -790,6 +798,7 @@ CONFIG_DIRECT_SELFTESTS = {
     "internal-names-selftest": ("tools/check_internal_names.py", "--self-test"),
     "selftest-removal-selftest": ("tools/check_selftest_removal.py", "--self-test"),
     "review-labels-selftest": ("tools/check_review_labels.py", "--self-test"),
+    "rules-core-selftest": ("tools/gen_rules_core.py", "--self-test"),
 }
 
 
