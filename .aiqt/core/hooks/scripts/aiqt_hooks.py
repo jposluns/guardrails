@@ -2390,7 +2390,12 @@ def _decoded_readings(command):
     with every \\c\\\\ pair split (_ansi_c_pair_split_body, _ANSI_C_PAIR_SPLIT_ESCAPE_RE): the escape table before the one shared table read the
     pair as \\c\\ and an escape after it ($'\\c\\\\x67'it as a control character and git), so a command that reading
     matched still matches. A probe that matches any reading matches, so each reading can only add a match to the raw
-    text's probes, never clear one."""
+    text's probes, never clear one. Gate G (_ansi_c_static_relevant) does not apply here: every command that holds $'
+    gets the decoded reading through the one escape table, so the main-path fallbacks that read these readings read a
+    braced escape as bash does (gi$'\\x{74}' as git, where the table before the one shared table read gix{74}) and
+    \\c before a multibyte character as its first byte's control character and U+FFFD (where that table read \\c
+    before an e with an acute accent as a tab); only the \\c\\\\ pair keeps that table's reading, as the third reading
+    above."""
     if "$'" not in command:
         return (_dequoted_text(command),)
     readings = (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
@@ -2455,8 +2460,11 @@ def _ansi_c_static_reading(command):
     plain one. An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
     escape, as this reading does, but the escape table before the one shared table read it as \\c\\ and an escape
     after it ($'\\c\\\\x20Claude' as a control character, a blank and Claude), so a command that reading denied is
-    still denied (the no-reduction rule). Otherwise the scan reads the whole command as above, and returns the rest
-    of the text unchanged from an ANSI-C quote that never closes. Linear; raises only _StaticReadingUncertain."""
+    still denied (the no-reduction rule). An ANSI-C quote holding a \\U code past U+10FFFF (_ansi_c_beyond_index) is
+    refused too: bash builds it as bytes no character names, which the escape table reads as nothing, so
+    --author=x$'\\U110000'Claude would read as xClaude where bash puts those bytes between x and Claude.
+    Otherwise the scan reads the whole command as above, and returns the rest of the text unchanged from an ANSI-C
+    quote that never closes. Linear; raises only _StaticReadingUncertain."""
     if not _ansi_c_static_relevant(command):
         return command
     continued = _ANSI_C_CONTINUED_QUOTE_RE.search(command)
@@ -2467,7 +2475,33 @@ def _ansi_c_static_reading(command):
     if paired >= 0:
         raise _StaticReadingUncertain("an ANSI-C quote holding a \\c\\\\ pair, which the escape table before the one "
                                       "shared table read as two escapes", paired)
+    beyond = _ansi_c_beyond_index(command)
+    if beyond >= 0:
+        raise _StaticReadingUncertain("an ANSI-C quote holding a \\U code past U+10FFFF, which bash builds as bytes "
+                                      "no character names and the escape table reads as nothing", beyond)
     return _ansi_c_static_scan(command)
+
+
+def _ansi_c_beyond_index(command):
+    """The index of the first $' from which an ANSI-C quote (_ANSI_C_QUOTE_RE) holding a \\U escape
+    (_GATE_BASH_ESCAPE_RE) whose code is past U+10FFFF is matched, in command as written or with every
+    backslash-newline removed, matched from every index that holds $' as _ansi_c_pair_index matches; -1 when there
+    is none (and at once when the text \\U is in neither). bash 5.3.9 builds such a code as a byte sequence no
+    Unicode character names (\\U110000 as f4 90 80 80 under C.UTF-8), while the one escape table reads it as
+    nothing (_gate_bash_escape), so the static decoded reading refuses the command rather than read the letters
+    around it as joined. Linear for the reason _ansi_c_static_relevant is; never raises."""
+    joined = command.replace("\\\n", "")
+    for text in ((command, joined) if joined != command else (command,)):
+        if "\\U" not in text:
+            continue
+        at = text.find("$'")
+        while at >= 0:
+            match = _ANSI_C_QUOTE_RE.match(text, at)
+            if match is not None and any(escape.group(5) is not None and int(escape.group(5), 16) > 0x10FFFF
+                                         for escape in _GATE_BASH_ESCAPE_RE.finditer(match.group(1))):
+                return at
+            at = text.find("$'", at + 1)
+    return -1
 
 
 def _ansi_c_pair_index(command):
@@ -2499,7 +2533,8 @@ _ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - 
 # eval $'g\x27\x27it log -p' runs git log -p), U+0001 and U+007F (the CTLESC and CTLNUL characters bash uses
 # internally to mark quoting), a NUL (bash ends the string there, so the letters after it in the quote drop out:
 # --author=$'Cl\0zz'aude is --author=Claude), non-ASCII text (a letter Python's case-insensitive match folds to an
-# ASCII one), nothing in _gate_bash_escape's decoding (a code point past U+10FFFF) and any other text.
+# ASCII one), nothing in _gate_bash_escape's decoding (a code point past U+10FFFF, which bash builds as bytes and
+# the static decoded reading refuses, _ansi_c_beyond_index) and any other text.
 _ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
 # A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
 # the quote (_ansi_c_static_reading refuses it).
@@ -20107,7 +20142,11 @@ _GATE_WORD_BREAK_RE = re.compile(r"[ \t\n;&|()<>`]+")
 
 def _gate_bash_escape(m):
     """The text bash reads for one escape of an ANSI-C $'...' body (a _GATE_BASH_ESCAPE_RE match), with no NUL cut:
-    the character of an octal, \\x, \\x{...}, \\u or \\U code ('' for a code past U+10FFFF), the control character
+    the character of an octal, \\x, \\x{...}, \\u or \\U code ('' for a code past U+10FFFF, which bash 5.3.9 does
+    not read as nothing: it builds the code as a byte sequence no Unicode character names, \\U110000 as f4 90 80 80
+    under C.UTF-8, so the static decoded reading refuses a quote holding one, _ansi_c_beyond_index, while the
+    no-verify gate keeps reading it as nothing, so its deny of --no-ver$'\\U110000'ify, an over-deny, is kept by the
+    no-reduction rule), the control character
     of \\cX (one byte read: a multibyte character gives its first byte's control character and U+FFFD), a letter
     escape's character, \\\\, \\', \\" and \\? as that character, and any other escape kept with its backslash. The
     one escape table of the hooks: _gate_ansi_c_text and the static decoded reading (_ansi_c_body,
@@ -33509,16 +33548,28 @@ def _rwh_static_git_word(command):
     (_RWH_RAW_GIT_WORD_RE) or the letters g, i, t split only by quote characters, backslashes, '$'
     or newlines (_GIT_WORD_RE: g''it, g""it, g\\it, gi$'t', gi$"t", a line continuation) in the
     raw text, or the word git in one of its de-quoted readings (_decoded_readings: an ANSI-C quote's
-    escapes decoded, gi$'\\x74', gi$'\\164', gi$'\\u0074'). Each reading can only add a match to the
-    raw-text test, never clear one, so a command it matches is judged against the hold set as the
-    plain word is. A git word built at RUN TIME (one whose spelling holds a '$' expansion or
-    substitution or a backquote outside single quotes, an unquoted glob character or brace, or that
-    uses a value assigned earlier in the same command) is not read: the disclosed run-time-word
-    residual, tied to the open design question on a git-side control (PD-SHELL-GUARD-STALL). Linear,
-    never raises."""
+    escapes decoded, gi$'\\x74', gi$'\\164', gi$'\\u0074', each quote matched once, left to right), or
+    either test above on the static decoded reading gate G admits (_ansi_c_static_reading, the reading
+    the four guards read: each quote decoded where bash decodes it, so a $' inside single or double
+    quotes or a comment cannot swallow a later quote's opening, as in echo '$'; gi$'\\x74' checkout x),
+    with a refusal of that reading (_StaticReadingUncertain: a '$' and a line continuation before a
+    quote, a \\c\\\\ pair, a \\U code past U+10FFFF, a construct the scan cannot read with certainty)
+    read as a git word. Each reading can only add a match to the raw-text test, never clear one, so a
+    command it matches is judged against the hold set as the plain word is. A git word built at RUN
+    TIME (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes,
+    an unquoted glob character or brace, or that uses a value assigned earlier in the same command) is
+    not read: the disclosed run-time-word residual, tied to the open design question on a git-side
+    control (PD-SHELL-GUARD-STALL). Linear, never raises."""
     if _RWH_RAW_GIT_WORD_RE.search(command) is not None or _GIT_WORD_RE.search(command) is not None:
         return True
-    return any(_RWH_RAW_GIT_WORD_RE.search(text) is not None for text in _decoded_readings(command))
+    if any(_RWH_RAW_GIT_WORD_RE.search(text) is not None for text in _decoded_readings(command)):
+        return True
+    try:
+        static = _ansi_c_static_reading(command)
+    except _StaticReadingUncertain:
+        return True
+    return static != command and (_RWH_RAW_GIT_WORD_RE.search(static) is not None
+                                  or _GIT_WORD_RE.search(static) is not None)
 
 
 # The substitution spellings whose presence anywhere in the raw text (even quoted as data) keeps a
@@ -35540,7 +35591,8 @@ def _rwh_decide(data):
             return ("unverifiable", _rwh_probe_text(cwd))
         return ("allow", None)
     if not _rwh_static_git_word(command):
-        # no git word anywhere in the raw text or its de-quoted readings: nothing here runs git
+        # no git word anywhere in the raw text, its de-quoted readings or its static decoded
+        # reading (whose refusal reads as a git word): nothing here runs git
         # by a spelling this rule models (a git reached through an opaque program name is the
         # disclosed indirect-git residual, and a git word built at run time the disclosed
         # run-time-word residual), so only the session notes (drift, expiry) travel

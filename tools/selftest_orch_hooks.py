@@ -2840,8 +2840,9 @@ def _rwh_cases(tmp):
           [[k != "allow" for k in braced_kinds()], braced_as_written(braced_kinds)],
           [[True] * (len(braced_cmds) + 1), ["allow"] * (len(braced_cmds) + 1)])
     # a \c\\ pair, which bash reads as one escape, is also read split (_ansi_c_pair_split_body) as the table before
-    # the shared one read it ($'\c\\x67'it as a control character and git), so a command that table held stays
-    # held; with the split reading read as the shared one each is allowed (red on revert)
+    # the shared one read it ($'\c\\x67'it as a control character and git), and the static decoded reading refuses
+    # a quote holding one (_ansi_c_pair_index, read as a git word), so a command that table held stays held; with
+    # the split reading read as the shared one and no pair refused each is allowed (red on revert of both)
     pair_cmds = ["$'\\c\\\\x67'it -C " + str(held) + " checkout " + seed,
                  "$'\\c\\\\c\\\\x67'it -C " + str(held) + " reset --hard " + seed]
 
@@ -2852,14 +2853,50 @@ def _rwh_cases(tmp):
         saved = getattr(aiqt_hooks, "_ANSI_C_PAIR_SPLIT_ESCAPE_RE", None)
         if saved is None:
             return fn()
+        paired = getattr(aiqt_hooks, "_ansi_c_pair_index", None)
         aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = aiqt_hooks._GATE_BASH_ESCAPE_RE
+        if paired is not None:
+            aiqt_hooks._ansi_c_pair_index = lambda command: -1
         try:
             return fn()
         finally:
             aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = saved
+            if paired is not None:
+                aiqt_hooks._ansi_c_pair_index = paired
     check("rwh/c-pair-git-word-held-denies-red-on-revert",
           [[k != "allow" for k in pair_kinds()], pair_unsplit(pair_kinds)],
           [[True] * len(pair_cmds), ["allow"] * len(pair_cmds)])
+    # a real ANSI-C quote whose opening an earlier $' (inside single or double quotes, or in a comment) swallows when
+    # the quotes are matched once, left to right, is read by the static decoded reading, which decodes each quote
+    # only where bash decodes it, and a '$' and a line continuation before a quote, which that reading refuses, is
+    # read as a git word; with the predicate as it stood at a9d4881c (raw text and de-quoted readings only) every
+    # one is allowed (red on revert)
+    swallowed_cmds = ["echo '$'; gi$'\\x74' -C " + str(held) + " checkout " + seed,
+                      "echo \"$'\"; gi$'\\x74' -C " + str(held) + " checkout " + seed,
+                      "# $'\ngi$'\\x74' -C " + str(held) + " checkout " + seed,
+                      "echo '$'; gi$'\\x{74}' -C " + str(held) + " checkout " + seed,
+                      "$\\\n'\\x67'it -C " + str(held) + " checkout " + seed]
+    swallowed_inside = ["echo '$'; gi$'\\x74' checkout " + seed, "echo \"$'\"; gi$'\\x74' checkout " + seed,
+                        "# $'\ngi$'\\x74' checkout " + seed, "echo '$'; gi$'\\x{74}' checkout " + seed]
+
+    def swallowed_kinds():
+        return [kind(base, c) for c in swallowed_cmds] + [kind(held, c) for c in swallowed_inside]
+
+    def static_reading_unread(fn):
+        saved = aiqt_hooks._rwh_static_git_word
+        aiqt_hooks._rwh_static_git_word = lambda command: (
+            aiqt_hooks._RWH_RAW_GIT_WORD_RE.search(command) is not None
+            or aiqt_hooks._GIT_WORD_RE.search(command) is not None
+            or any(aiqt_hooks._RWH_RAW_GIT_WORD_RE.search(text) is not None
+                   for text in aiqt_hooks._decoded_readings(command)))
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._rwh_static_git_word = saved
+    check("rwh/swallowed-quote-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in swallowed_kinds()], static_reading_unread(swallowed_kinds)],
+          [[True] * (len(swallowed_cmds) + len(swallowed_inside)),
+           ["allow"] * (len(swallowed_cmds) + len(swallowed_inside))])
     # the static reading adds no match to text carrying no git word, so ordinary commands run inside the held
     # worktree stay allowed; with the gate reading every command as a git word each is withheld (the
     # over-broad gate this row catches)

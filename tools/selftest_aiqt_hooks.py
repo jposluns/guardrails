@@ -6412,6 +6412,16 @@ _STATIC_DECODED_PAIR = (
     ("sdr-pair-cmtidn-author", "commit_identity", "git commit --author=$'\\c\\\\x20Claude' -m x", "deny", "allow"),
     ("sdr-pair-cnsdif-git", "diff_source_pretool", "$'\\c\\\\x67'it log -p", "deny", "allow"),
 )
+# (sdr-beyond-*) A \U code past U+10FFFF, which bash 5.3.9 builds as a byte sequence no Unicode character names
+# (\U110000 as f4 90 80 80 under C.UTF-8) and the one escape table reads as nothing: the static decoded reading refuses a
+# quote that holds one (_ansi_c_beyond_index), so the AI name after it is not read as joined to the text before it
+# (allowed at a9d4881c, where x$'\U110000'Claude read as xClaude), and each row allows under the flip that refuses no
+# such code.
+_STATIC_DECODED_BEYOND = (
+    ("sdr-beyond-cmtidn-author", "commit_identity", "git commit --author=x$'\\U110000'Claude -m x", "deny", "allow"),
+    ("sdr-beyond-cmtidn-author-max", "commit_identity", "git commit --author=x$'\\U7fffffff'Claude -m x", "deny",
+     "allow"),
+)
 # (sdr-gate-brace-*, sdr-gate-pair-*) Gate G reads a braced escape and a \c\\ pair as relevant whatever they decode to
 # (the escape table before the shared one read each as relevant), so these commands, which name neither git nor an
 # AI identity and were denied at 4499130b through the refusal after the construct (_STATIC_GATE_PREFIX, written out
@@ -6424,13 +6434,13 @@ _STATIC_GATE_KEPT = (
 
 
 def _test_static_decoded_braced(failures):
-    """(sdr-brace-*, sdr-pair-*, sdr-gate-brace-*, sdr-gate-pair-*) The static decoded reading and the decoded
-    readings read escapes through the hooks' one escape table: _STATIC_DECODED_BRACED, _STATIC_DECODED_PAIR and
-    _STATIC_GATE_KEPT run as given, the reading itself decodes each braced form ($'\\x{6c}', a long code's low byte,
+    """(sdr-brace-*, sdr-pair-*, sdr-beyond-*, sdr-gate-brace-*, sdr-gate-pair-*) The static decoded reading and the
+    decoded readings read escapes through the hooks' one escape table: _STATIC_DECODED_BRACED, _STATIC_DECODED_PAIR,
+    _STATIC_DECODED_BEYOND and _STATIC_GATE_KEPT run as given, the reading itself decodes each braced form ($'\\x{6c}', a long code's low byte,
     an unclosed brace, \\x{} as the NUL that ends the quote), and _decoded_readings reads gi$'\\x{74}' as git and
     $'\\c\\\\x67'it as git in its pair-split reading. Then the braced rows and readings run under the flip that reads
     a braced escape as written (the escape table before the shared one), the pair rows under the flip that refuses
-    no pair, and the pair-split reading under the flip that reads it as the shared table does: each must take its old
+    no pair, the sdr-beyond rows under the flip that refuses no \\U code past U+10FFFF, and the pair-split reading under the flip that reads it as the shared table does: each must take its old
     result, so each row is red on revert."""
     gate = aiqt_hooks._ansi_c_static_relevant
     for label, name, command, want, _old in _STATIC_DECODED_BRACED + _STATIC_DECODED_PAIR:
@@ -6493,6 +6503,24 @@ def _test_static_decoded_braced(failures):
     finally:
         if paired is not None:
             aiqt_hooks._ansi_c_pair_index = paired
+    for label, name, command, want, _old in _STATIC_DECODED_BEYOND:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+    # Against a tree without the refusal (the revert) the flip has nothing to replace, and each row reports its
+    # failure above instead of raising.
+    beyond = getattr(aiqt_hooks, "_ansi_c_beyond_index", None)
+    if beyond is not None:
+        aiqt_hooks._ansi_c_beyond_index = lambda command: -1
+    try:
+        for label, name, command, _want, old in _STATIC_DECODED_BEYOND:
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != old:
+                failures.append("({}-flip) with no \\U code past U+10FFFF refused the row must take {}, so it pins "
+                                "the refusal; got {}".format(label, old, got))
+    finally:
+        if beyond is not None:
+            aiqt_hooks._ansi_c_beyond_index = beyond
     split = getattr(aiqt_hooks, "_ANSI_C_PAIR_SPLIT_ESCAPE_RE", None)
     if split is not None:
         aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = aiqt_hooks._GATE_BASH_ESCAPE_RE
@@ -6532,8 +6560,8 @@ _STATIC_GATE_IRRELEVANT = (
 )
 # Escapes that are not inert, after the refused construct (diff_source_pretool), with the decision under the flip
 # that reads nothing as relevant (main's): a quote or a backslash (bash quoting in a body eval or sh -c reads again),
-# U+0001 and U+007F (bash's internal quoting marks), a NUL (it ends the string), non-ASCII text and nothing (a code
-# point past U+10FFFF). Each denies through the refusal, and allows under the flips that read nothing as relevant and
+# U+0001 and U+007F (bash's internal quoting marks), a NUL (it ends the string), non-ASCII text and a code point past
+# U+10FFFF (which the escape table reads as nothing and bash builds as bytes). Each denies through the refusal, and allows under the flips that read nothing as relevant and
 # that read the gate before inert escapes were defined (the gate of 72e8287b, gate_before in
 # _test_static_decoded_gate).
 _STATIC_GATE_NOT_INERT = (

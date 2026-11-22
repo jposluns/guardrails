@@ -1866,6 +1866,7 @@ expected-check-ids = [
   "rwh/split-git-word-held-denies-red-on-revert",
   "rwh/braced-hex-git-word-held-denies-red-on-revert",
   "rwh/c-pair-git-word-held-denies-red-on-revert",
+  "rwh/swallowed-quote-git-word-held-denies-red-on-revert",
   "rwh/non-git-text-held-allowed-over-broad-gate",
   "rwh/symlink-alias-denies-red-on-revert",
   "rwh/wrapper-peel-denies-red-on-revert",
