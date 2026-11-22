@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Core adopter-side doctor assertions (VER-CORE Section 12 step 7, plan 4.3). Stdlib only.
 
-  doctor.py [--root DIR]    run the read-only assertions against an install (default: cwd)
+  doctor.py [--root DIR] [--require-gate-record]
+                            run the read-only assertions against an install (default: cwd), then the
+                            clone's gate-record line (assert_gate_record_hooks: the git-side gate record's
+                            stubs, rule gatdis), advisory unless --require-gate-record is given
   doctor.py --self-test     synthetic-tree invariants for each assertion
 
 Importable, parameterized assertion functions in the conformance.py re-orchestration model: the
@@ -10,7 +13,7 @@ them standalone. Default operation is READ-ONLY: no assertion writes, and any st
 (re-pin, carve-out, un-adopt) is a SEPARATE explicit tools/pin.py invocation that carries its own
 authorization, never the doctor's default.
 
-Assertions (plan 4.3): state-completeness, pin-and-manifest, history-chain, open-journal, repoints, reverse-step, transition, unadopt-intent.
+Assertions (plan 4.3): state-completeness, pin-and-manifest, history-chain, open-journal, repoints, reverse-step, transition, unadopt-intent; and, apart from them, the clone-level gate-record line.
 
 HONESTY LIMIT, disclosed in every chain message (10.2): with no keys the pin-history chain is tamper-
 evident against a CASUAL in-place edit of an INTERIOR (non-tail) row ONLY. It is NOT truncation-evident
@@ -395,6 +398,35 @@ ASSERTIONS = (assert_state_completeness, assert_pin_and_manifest, assert_history
               assert_unadopt_intent)
 
 
+def assert_gate_record_hooks(root, require=False):
+    """The git-side gate record (rule gatdis): with a .aiqt/gate-record.toml in root, PASS when the
+    pre-commit, pre-merge-commit and pre-push stubs that python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py
+    gate-record install writes are in place in the clone's common hooks directory and no core.hooksPath stops
+    git running them. A missing, foreign or disabled stub is a FAIL only when require is set
+    (--require-gate-record): a CI checkout or a fresh clone has none, so by default the line is NOT APPLICABLE
+    with the reason and the install command. No configuration, or root not in a git work tree: NOT APPLICABLE.
+    Read-only: it reads the hooks directory and git's configuration, and writes nothing."""
+    if not (Path(root) / ".aiqt" / "gate-record.toml").is_file():
+        return Result("gate-record", NA, "no .aiqt/gate-record.toml")
+    scripts = Path(__file__).resolve().parent.parent / ".aiqt" / "core" / "hooks" / "scripts"
+    sys.path.insert(0, str(scripts))
+    try:
+        import aiqt_hooks
+    finally:
+        sys.path.remove(str(scripts))
+    try:
+        installed, problems = aiqt_hooks.gate_record_status(str(Path(root).resolve()))
+    except aiqt_hooks._GateRecordError as exc:
+        return Result("gate-record", NA if not require else MALFORMED, "not a readable git work tree ({})".format(exc))
+    if installed:
+        return Result("gate-record", PASS, "the gate-record stubs are installed and git runs them")
+    detail = ("; ".join(problems) + "; install with python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py "
+              "gate-record install")
+    if require:
+        return Result("gate-record", FAIL, detail)
+    return Result("gate-record", NA, detail + " (advisory; --require-gate-record makes this a finding)")
+
+
 # --- orchestration ------------------------------------------------------------------------------------
 
 def _adoption_absent(root_fd):
@@ -619,6 +651,35 @@ def self_test():
         close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
         failures.extend(close_failures)
         checked += close_runs
+
+        # The clone-level gate-record line (rule gatdis): NA with no configuration; with one and no stubs, NA
+        # (advisory) by default and FAIL under require; PASS once gate-record install has written the stubs.
+        import subprocess
+        from _git_fixture_env import git_fixture_env
+        check("gate-record: no configuration is NA", assert_gate_record_hooks(tmp, require=True).status == NA)
+        clone = tmp / "gate-record-clone"
+        fixture_env = git_fixture_env()
+        subprocess.run(["git", "init", "-q", str(clone)], check=True, capture_output=True, env=fixture_env)
+        (clone / ".aiqt").mkdir()
+        (clone / ".aiqt" / "gate-record.toml").write_text(
+            'format-version = 1\npre-commit = "full"\npre-push = "full"\n\n[[set]]\nname = "full"\n'
+            'argv = ["true"]\n', encoding="utf-8")
+        saved_env = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(fixture_env)
+        try:
+            check("gate-record: no stubs is advisory NA by default",
+                  assert_gate_record_hooks(clone).status == NA)
+            check("gate-record: no stubs is a FAIL under require",
+                  assert_gate_record_hooks(clone, require=True).status == FAIL)
+            hooks_py = Path(__file__).resolve().parent.parent / ".aiqt" / "core" / "hooks" / "scripts" / "aiqt_hooks.py"
+            done = subprocess.run([sys.executable, "-I", "-B", str(hooks_py), "gate-record", "install"], cwd=str(clone),
+                                  capture_output=True, env=fixture_env)
+            check("gate-record: installed stubs PASS", done.returncode == 0
+                  and assert_gate_record_hooks(clone, require=True).status == PASS)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -636,7 +697,18 @@ def main():
     if "--self-test" in args:
         return self_test()
     root = pin._arg(args, "--root") or "."
-    return run(root)
+    code = run(root)
+    if code == 2 or not Path(root).is_dir():
+        return code
+    # The clone-level gate-record line runs after the install assertions and apart from them (run() stays the
+    # adoption doctor pin.py composes): advisory by default, a finding under --require-gate-record.
+    result = assert_gate_record_hooks(root, require="--require-gate-record" in args)
+    print("  {:<17} {}{}".format(result.aid, result.status, " - " + result.detail if result.detail else ""))
+    if result.status == MALFORMED:
+        return 2
+    if result.status == FAIL:
+        return max(code, 1)
+    return code
 
 
 if __name__ == "__main__":
