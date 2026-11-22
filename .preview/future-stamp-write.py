@@ -6,6 +6,16 @@ the clock and writing them into a store in its NORMAL record format. It is NOT a
 evasion that needs deliberately unusual construction (a variable, a glob, a literal built from parts, a
 schedule word placed before the time) is a disclosed residual, not a defect. It fails OPEN on malformed input.
 
+FROM THE ALTERNATE COPY (a separate release copy of these hooks). Taken: a stderr notice when a supported
+tool's call meets no configured store root (the hook is then inert) and when the Bash analysis spends its
+work budget (the call is then allowed unchecked); neither changes a verdict, and an allow is still empty
+stdout. NOT ADOPTED, because each allows a write this hook denies: its 8 MiB stdin limit (an oversized
+payload failed open; here it is read whole and checked), its exemption of a grep or rg pattern in a
+top-level search whatever the search prints (here that pattern counts like any other data of a store write
+it reaches), and its twelve extra scheduling keywords (see Observed-time vs scheduled). Not taken (test
+harness only): its gating of the host-tool probes behind --integration-test; here they run in every
+--self-test, as before.
+
 Motivated by an assistant composing timestamps from its own sense of time instead of reading the clock,
 drifting up to 4h40m ahead, and persisting those invented times into its durable records
 (timestamp-from-clock; records-first). An observed-time record (a heartbeat, a recorded-at) must come from
@@ -285,6 +295,11 @@ expires and expiry): due, deadline, expir, until, next, scheduled, not before, n
 "target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
 through and valid. Each keyword matches as a WHOLE word, optionally plural (so "validated",
 "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
+The alternate copy's twelve extra scheduling keywords (revisit, "retry after", window, "embargo lifts",
+follow-up, "returns on", "starts at", run_at, rerun, "check back", "moved to", resets) are NOT adopted: each
+would widen this exemption and the table-header exemption below, which uses the same list, so a future
+literal this hook denies ("the maintenance window is T", or one under a `| Window |` header cell) would be
+allowed. stamp-truth-stop.py leaves them out too, and a self-test asserts the two lists are identical.
 
 Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
 markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same
@@ -336,7 +351,8 @@ error writing the DENY line (a closed or full stdout, a broken pipe) no longer f
 cannot be both written and flushed never provably reached the platform, so the hook notes the failure on
 stderr (best-effort) and ends at once with the blocking exit 2 through os._exit (a lost deny blocks, never
 allows; in an earlier version this case was swallowed and the hook exited 0 with the deny lost). An error
-writing any OTHER line (the worker-skip stderr warning) still fails open: it is swallowed, the stream's
+writing any OTHER line (a stderr notice: the worker skip, an unconfigured store root, or an exhausted Bash
+work budget) still fails open: it is swallowed, the stream's
 descriptor is pointed at /dev/null so the exit-time flush cannot fail either, and the hook exits 0; if even
 that rescue fails, it ends at once with os._exit(0). Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1
 (legacy spellings are also accepted, see _is_worker), allows, writing one warning line to stderr (only
@@ -3080,7 +3096,9 @@ def bash_future(cmd, now_us, cwd=None):
             base += len(line) + 1
         return bad
     except _Exhausted:
-        return []  # the work budget ran out: fail open, as for any input the hook cannot evaluate
+        # the work budget ran out: fail open, as for any input the hook cannot evaluate, and say so on stderr
+        _emit_line("future-stamp-write: allowed unchecked; Bash work budget exhausted", sys.stderr)
+        return []
 
 
 def _s(value):
@@ -3174,7 +3192,7 @@ def _emit_line(text, *stream):
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
     (no flush is retried), since any later write or exit flush could fail the hook. Every line this path
-    carries is advisory (the worker-skip stderr warning), so losing one keeps exit 0: the deny line goes
+    carries is advisory (a stderr notice), so losing one keeps exit 0: the deny line goes
     through _emit_deny_line, which fails closed when the deny cannot be written and flushed."""
     # a line meant for another stream (stderr) is written there or dropped, NEVER sent to stdout, the hook's
     # protocol channel: sys.stderr is None when descriptor 2 was closed at startup, and a None default once
@@ -3551,6 +3569,9 @@ def main(argv):
         if not isinstance(payload, dict):
             return 0
         now = datetime.datetime.now(UTC)
+        if payload.get("tool_name") in ("Write", "Edit", "MultiEdit", "Bash") and not store_roots():
+            # an unconfigured store root makes the hook inert; say so on stderr (the allow is unchanged)
+            _emit_line("future-stamp-write: inactive; configure an absolute AIQT_STORE_ROOT", sys.stderr)
         bad = evaluate(payload, now)
     except Exception:
         return 0  # fail-open
@@ -3567,6 +3588,7 @@ def _self_test():
     import subprocess
     import tempfile
     import unittest
+    import unittest.mock
 
     # timed runs execute in a child interpreter under a subprocess timeout, so a hang is
     # INTERRUPTED (subprocess.TimeoutExpired fails the test) rather than stalling the self-test before any bound
@@ -5238,6 +5260,47 @@ def _self_test():
                 os.close(write_end)
             self.assertEqual(p.returncode, 2, p.stderr)
             self.assertIn("could not be written to stdout", p.stderr)
+
+        def test_alternate_schedule_words_not_adopted(self):
+            # the alternate copy's twelve extra scheduling words would allow a future literal this hook denies, so
+            # they stay out until the maintainers decide
+            stamp = "2099-01-01T00:00:00Z"
+            for prefix in ("revisit", "retry after", "maintenance window starts", "embargo lifts",
+                           "follow-up check", "the maintainer returns on", "Release starts at",
+                           "CI will rerun at", "I will check back at", "Standup moved to", "Rate limit resets",
+                           "The maintenance window is", '{"run_at":'):
+                text = prefix + " " + stamp
+                self.assertEqual(self.ev("Write", file_path=self.store, content=text), [stamp], text)
+                self.assertEqual(self.ev("Bash", command="echo '" + text.replace("'", "") +
+                                         "' >> " + self.store), [stamp], text)
+            self.assertEqual(self.ev("Write", file_path=self.store,
+                                     content="| Item | Window |\n|---|---|\n| a | " + stamp + " |"), [stamp])
+
+        def test_search_pattern_reaching_a_store_write_counts(self):
+            # the alternate copy exempted a top-level search's pattern whatever it prints; a matching search prints
+            # lines holding its pattern, so one redirected into a store writes it there and is denied
+            stamp = "2099-01-01T00:00:00Z"
+            for tool in ("rg", "grep"):
+                command = tool + " -F '" + stamp + "' " + self.store + " > " + self.store + ".report"
+                self.assertEqual(self.ev("Bash", command=command), [stamp], command)
+                command = tool + " -F '" + stamp + "' " + self.store + "; echo 'heartbeat: " + stamp + "' >> " + \
+                    self.store
+                self.assertEqual(self.ev("Bash", command=command), [stamp], command)
+
+        def test_skips_are_logged(self):
+            # an unconfigured store root and an exhausted Bash work budget each leave a stderr notice; the
+            # verdict (allow, empty stdout) is unchanged
+            err = io.StringIO()
+            with unittest.mock.patch.object(sys, "stderr", err), \
+                    unittest.mock.patch.dict(os.environ, {"AIQT_STORE_ROOT": ""}):
+                payload = {"tool_name": "Write", "tool_input": {"file_path": self.store, "content": "x"}}
+                self.assertEqual(self.run_stream(io.StringIO(json.dumps(payload))), (0, ""))
+            self.assertIn("inactive; configure", err.getvalue())
+            err = io.StringIO()
+            with unittest.mock.patch.object(sys, "stderr", err), \
+                    unittest.mock.patch.dict(globals(), {"BASH_WORK_BUDGET": 0}):
+                self.assertEqual(self.ev("Bash", command="echo 2099-01-01T00:00Z >> " + self.store), [])
+            self.assertIn("work budget exhausted", err.getvalue())
 
         def test_keywords_match_whole_words(self):
             # follow-up (B): a keyword was a PREFIX, so a word that merely STARTS with one exempted a future literal

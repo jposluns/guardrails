@@ -15,13 +15,22 @@ and PreCompact (held to a warn default by this pack's own choice, not by a claim
 requires each file to be a readable regular file, and reads the manifest itself only as a regular file
 (an absent one is an empty channel; a symlink, dangling or not, or another type fails closed).
 
+GIT-SIDE HOOKS. .aiqt/core/githooks/manifest.toml declares the git hooks (pre-commit, pre-merge-commit,
+pre-push, ...) that are rule-linked controls installed per clone and run by git; they are not Claude Code
+hooks and not in the plugin's hooks.json. load_githooks_manifest reads it with the same absent-is-empty,
+symlink-or-other-type-fails-closed rule as the preview manifest and validates an exact key set (id, rules,
+events, entry, install, default, class, residue): a kebab-case id unique across githooks, hooks and gates,
+a non-empty sorted list of corpus ids present in the corpus, a non-empty list of known git hook events,
+default block, class b or c, and a non-empty residue. Each rule entry carries a `githooks` array of rows
+(id, events, entry, install, platform "git", default, class, residue).
+
 HONEST BOUNDARY. See the BOUNDARY constant below, emitted verbatim into the ledger.
 
-STATUS DERIVATION. A non-empty `gates` array makes a rule gate-linked; else a non-empty `hooks` array
-makes it hook-linked; else prose-only. The label names the most deterministic linkage point only; the
-two arrays carry the FULL linkage, so the precedence collapses nothing (a rule cited by both a hook and
-a gate reads gate-linked yet still lists its hook). Each gate and hook row carries its class letter, so a
-rule linked only through class c gates reads as such from its rows.
+STATUS DERIVATION. A non-empty `gates` array makes a rule gate-linked; else a non-empty `hooks` or
+`githooks` array makes it hook-linked; else prose-only. The label names the most deterministic linkage
+point only; the arrays carry the FULL linkage, so the precedence collapses nothing (a rule cited by both a
+hook and a gate reads gate-linked yet still lists its hook). Each gate, hook and githook row carries its
+class letter, so a rule linked only through class c gates reads as such from its rows.
 
 PREVIEW HOOKS. The hooks published in .preview/ are not shipped controls: they are not in the plugin and
 nothing installs them. .aiqt/core/hooks/preview.toml declares each one and the corpus ids its own module
@@ -128,6 +137,9 @@ PREVIEW_TOOL_EVENTS = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
 PREVIEW_WARN_EVENTS = set(WARN_EVENTS) | {"PostToolUseFailure", "PreCompact"}
 PREVIEW_WARN_ONLY_EVENTS = set(NONBLOCK_EVENTS) | {"PreCompact"}
 PREVIEW_FILE_RE = re.compile(r"^\.preview/[a-z0-9][a-z0-9-]*\.py$")
+GITHOOKS_MANIFEST_REL = ".aiqt/core/githooks/manifest.toml"
+GITHOOK_KEYS = {"id", "rules", "events", "entry", "install", "default", "class", "residue"}
+GITHOOK_EVENTS = {"pre-commit", "pre-merge-commit", "pre-push", "commit-msg", "pre-rebase"}
 RULES_DIR_REL = ".aiqt/core/rules"
 PREVIEW_DECL_REL = ".aiqt/core/hooks/preview.toml"
 PREVIEW_DIR_REL = ".preview"
@@ -168,17 +180,20 @@ BOUNDARY = (
     "control: it is published in .preview/ for manual installation, outside the plugin. The previews list "
     "names the declared preview hooks whose own description names the rule, and a declaration never "
     "changes a status; a hook row carrying channel preview is a preview-channel hook, which links its rule "
-    "as any hook row does. Nothing in this "
+    "as any hook row does. A githook row is a git hook installed per clone: git runs it on the events it "
+    "names only in a clone that installed it, it is not a Claude Code hook, and it links its rule as a hook "
+    "row does (hook-linked when no gate cites the rule). Nothing in this "
     "file is a completeness or coverage measure, and deriving a score from it misreads it.")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces. Sources are the content-bearing inputs the
-# ledger DERIVES from (the corpus and the three manifests, the preview manifest also holding the preview
+# ledger DERIVES from (the corpus and the four manifests, the preview manifest also holding the preview
 # declarations); the roster files are excluded (see ROSTER_FILES).
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/enforceability.json", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/hooks/manifest.toml",
-                 ".aiqt/core/hooks/preview.toml", ".aiqt/core/gates/manifest.toml"),
+                 ".aiqt/core/hooks/preview.toml", ".aiqt/core/gates/manifest.toml",
+                 ".aiqt/core/githooks/manifest.toml"),
      "regenerate": "python3 tools/gen_enforceability.py"},
 )
 
@@ -495,6 +510,78 @@ def load_preview_manifest(path, root, plugin_ids):
     return hooks
 
 
+def load_githooks_manifest(path, corpus_ids, taken_ids):
+    """Parse and validate the git-side hooks manifest (.aiqt/core/githooks/manifest.toml); return its
+    [[githook]] tables. A git hook is installed per clone and run by git, not by Claude Code, so it is
+    neither a plugin hook nor a gate. Only a GENUINELY ABSENT file is an empty list: the path is examined
+    with lstat, which does not follow a link, so a symlink (dangling or not), a directory, or another
+    non-regular file raises ValueError, and an unreadable or malformed one raises (ValueError/OSError ->
+    exit 2). The keys are exactly GITHOOK_KEYS; the id must be unique here and absent from `taken_ids` (the
+    hook and gate ids); rules must be a non-empty, sorted, duplicate-free list of corpus ids that resolve in
+    `corpus_ids`; events a non-empty, duplicate-free list drawn from GITHOOK_EVENTS; default block; class b
+    or c; residue non-empty."""
+    try:
+        st = os.lstat(str(path))
+    except FileNotFoundError:
+        return []
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("{}: the githooks manifest must be a regular file, not a symlink or another file "
+                         "type".format(GITHOOKS_MANIFEST_REL))
+    data = load_toml(path)
+    name = GITHOOKS_MANIFEST_REL
+    extra = set(data) - {"version", "githook"}
+    if extra:
+        raise ValueError("{}: unknown top-level key(s): {}".format(name, ", ".join(sorted(extra))))
+    if data.get("version") != 1 or isinstance(data.get("version"), bool):
+        raise ValueError("{}: version must be the integer 1".format(name))
+    githooks = data.get("githook", [])
+    if not isinstance(githooks, list):
+        raise ValueError("{}: githook must be an array of [[githook]] tables".format(name))
+    seen = set()
+    for gh in githooks:
+        if not isinstance(gh, dict):
+            raise ValueError("{}: every [[githook]] must be a table".format(name))
+        missing = GITHOOK_KEYS - set(gh)
+        if missing:
+            raise ValueError("{}: [[githook]] missing key(s): {}".format(name, ", ".join(sorted(missing))))
+        unknown = set(gh) - GITHOOK_KEYS
+        if unknown:
+            raise ValueError("{}: [[githook]] unknown key(s): {}".format(name, ", ".join(sorted(unknown))))
+        gid = _req_str(gh, "id", "{}: [[githook]]".format(name))
+        where = "{}: [[githook]] {}".format(name, gid)
+        if not ID_RE.match(gid):
+            raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
+        if gid in seen or gid in taken_ids:
+            raise ValueError("{}: duplicate id (unique across the githook, hook and gate ids)".format(where))
+        seen.add(gid)
+        rules = gh["rules"]
+        if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and CID_RE.match(r)
+                                                                for r in rules):
+            raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
+        if rules != sorted(set(rules)):
+            raise ValueError("{}: rules must be unique and sorted".format(where))
+        for rule in rules:
+            if rule not in corpus_ids:
+                raise ValueError("{}: cites corpus-id '{}' not in .aiqt/core/rules/".format(where, rule))
+        events = gh["events"]
+        if not isinstance(events, list) or not events or not all(isinstance(e, str) for e in events):
+            raise ValueError("{}: events must be a non-empty list of git hook names".format(where))
+        if len(set(events)) != len(events):
+            raise ValueError("{}: events must not repeat".format(where))
+        unknown_events = [e for e in events if e not in GITHOOK_EVENTS]
+        if unknown_events:
+            raise ValueError("{}: event(s) {} not one of {}".format(
+                where, ", ".join(unknown_events), ", ".join(sorted(GITHOOK_EVENTS))))
+        _req_str(gh, "entry", where)
+        _req_str(gh, "install", where)
+        if _req_str(gh, "default", where) != "block":
+            raise ValueError("{}: default must be block".format(where))
+        if _req_str(gh, "class", where) not in ("b", "c"):
+            raise ValueError("{}: class must be b or c (a is the gate axis; d is never authored)".format(where))
+        _req_str(gh, "residue", where)  # required, never empty
+    return githooks
+
+
 def roster_scripts(root):
     """Return (union, per_file): the isolated python3 -I -B tools/*.py scripts the roster files invoke, as a union set
     and as a per-file dict. Each ROSTER_FILES entry is read (an absent or unreadable roster raises
@@ -587,6 +674,14 @@ def _gate_row(gate):
             "default": gate["default"], "class": gate["class"], "residue": gate["residue"]}
 
 
+def _githook_row(githook):
+    """The ledger linkage row for one git-side hook: id, events, entry, install, default, class, residue,
+    verbatim from the githooks manifest, and platform "git" (git runs it, in a clone that installed it)."""
+    return {"id": githook["id"], "events": list(githook["events"]), "entry": githook["entry"],
+            "install": githook["install"], "platform": "git", "default": githook["default"],
+            "class": githook["class"], "residue": githook["residue"]}
+
+
 def build_ledger(root):
     """The full .aiqt/enforceability.json text, rendered json.dumps(indent=2, sort_keys=True) plus a
     trailing newline for a deterministic byte-identity target. Raises ValueError/OSError on a malformed
@@ -610,6 +705,8 @@ def build_ledger(root):
     gates = load_gates_manifest(root / GATES_MANIFEST_REL, root)
     roster_union, per_file = roster_scripts(root)
     cross_checks(gates, hooks, corpus_ids, roster_union, per_file)
+    githooks = load_githooks_manifest(root / GITHOOKS_MANIFEST_REL, corpus_ids,
+                                      {h["id"] for h in hooks} | {g["id"] for g in gates})
     previews = load_previews(root, slugs)
 
     entries = []
@@ -617,9 +714,10 @@ def build_ledger(root):
         cid = str(fm["corpus-id"])
         rule_hooks = sorted((h for h in hooks if cid in h["rules"]), key=lambda h: h["id"])
         rule_gates = sorted((g for g in gates if cid in g["rules"]), key=lambda g: g["id"])
+        rule_githooks = sorted((g for g in githooks if cid in g["rules"]), key=lambda g: g["id"])
         if rule_gates:
             status = "gate-linked"
-        elif rule_hooks:
+        elif rule_hooks or rule_githooks:
             status = "hook-linked"
         else:
             status = "prose-only"
@@ -630,6 +728,7 @@ def build_ledger(root):
             "status": status,
             "hooks": [_hook_row(h) for h in rule_hooks],
             "gates": [_gate_row(g) for g in rule_gates],
+            "githooks": [_githook_row(g) for g in rule_githooks],
             "previews": [p["id"] for p in previews if cid in p["rules"]],
         })
     obj = {"version": 1, "boundary": BOUNDARY, "rules": entries, "previews": previews}
@@ -715,7 +814,10 @@ def main():
 #   (ac) one preview manifest holding both kinds generates (exit 0), each kind in its own ledger field,
 #       while a published hook with an entry of each kind fails closed (exit 2);
 #   (ad) a corpus symlinked to a directory inside the root is read, while one symlinked outside the root
-#       fails closed (exit 2) with no ledger written.
+#       fails closed (exit 2) with no ledger written;
+#   (ae) a conformant githooks manifest is read into its rules' githooks rows (a githook alone makes a rule
+#       hook-linked), an absent one is empty, and a bad [[githook]] entry or a non-regular manifest fails
+#       closed (exit 2).
 # These cases exercise this tool's OWN logic (the gates manifest shape, the class-d ledger boundary, the
 # hook and gate no-orphan checks, the roster reconciliation, and drift). The corpus and hooks-manifest
 # read-failure paths and the empty-hook-residue path are validated fail-closed by the reused loaders
@@ -1398,6 +1500,75 @@ def self_test_main():
                 failures.append("a corpus that is a symlink {} expected exit {} with the ledger {}, got {}".format(
                     where, want, "written" if want == 0 else "not written", got))
 
+        # (ae) The git-side hooks manifest: a conformant [[githook]] row is read into the ledger as a githook
+        #      row on its rule (rule dd turns hook-linked, rule aa stays gate-linked yet lists its githook),
+        #      every rule carries a githooks array, and a bad entry fails closed (exit 2).
+        def githook_tree(name, body=None, rules='["ruleaa", "ruledd"]', hid="gh-one", events='["pre-commit", '
+                         '"pre-push"]', default="block", cls="c", extra="", residue="A self-test git hook."):
+            t = _build(tmp / name)
+            ghdir = t / ".aiqt" / "core" / "githooks"
+            ghdir.mkdir(parents=True)
+            if body is None:
+                body = ('version = 1\n\n[[githook]]\nid = "{}"\nrules = {}\nevents = {}\nentry = "run me"\n'
+                        'install = "install me"\ndefault = "{}"\nclass = "{}"\n{}residue = "{}"\n'
+                        .format(hid, rules, events, default, cls, extra, residue))
+            (ghdir / "manifest.toml").write_text(body, encoding="utf-8")
+            return t
+        egood = githook_tree("githook-good")
+        if run_quiet(egood, check=False) != 0 or run_quiet(egood, check=True) != 0:
+            failures.append("githook: a conformant githooks manifest expected exit 0 and a drift-clean check")
+        else:
+            eby = {e["corpus-id"]: e for e in json.loads((egood / LEDGER_REL).read_text(
+                encoding="utf-8"))["rules"]}
+            want_row = {"id": "gh-one", "events": ["pre-commit", "pre-push"], "entry": "run me",
+                        "install": "install me", "platform": "git", "default": "block", "class": "c",
+                        "residue": "A self-test git hook."}
+            if eby.get("ruledd", {}).get("githooks") != [want_row] or \
+                    eby.get("ruledd", {}).get("status") != "hook-linked":
+                failures.append("githook: rule dd must list the githook row and read hook-linked")
+            if eby.get("ruleaa", {}).get("status") != "gate-linked" or \
+                    eby.get("ruleaa", {}).get("githooks") != [want_row]:
+                failures.append("githook: rule aa must stay gate-linked and list its githook row")
+            if any(e.get("githooks") != [] for c, e in eby.items() if c not in ("ruleaa", "ruledd")):
+                failures.append("githook: a rule no githook cites must list an empty githooks array")
+        if run_quiet(_build(tmp / "githook-absent"), check=False) != 0:
+            failures.append("githook: an absent githooks manifest expected exit 0 (no githook)")
+        ecases = [("githook-orphan", dict(rules='["nosuch9"]')),
+                  ("githook-empty-rules", dict(rules="[]")),
+                  ("githook-unsorted-rules", dict(rules='["ruledd", "ruleaa"]')),
+                  ("githook-bad-id", dict(hid="Bad_Id")),
+                  ("githook-gate-id", dict(hid="gate-alpha")),
+                  ("githook-hook-id", dict(hid="hook-rule1")),
+                  ("githook-bad-event", dict(events='["post-commit"]')),
+                  ("githook-no-events", dict(events="[]")),
+                  ("githook-warn", dict(default="warn")),
+                  ("githook-class-a", dict(cls="a")),
+                  ("githook-class-d", dict(cls="d")),
+                  ("githook-unknown-key", dict(extra="bogus = 1\n")),
+                  ("githook-empty-residue", dict(residue="")),
+                  ("githook-no-version", dict(body='[[githook]]\nid = "gh-one"\n')),
+                  ("githook-dup-id", dict(body=None))]
+        for name, kwargs in ecases:
+            t = githook_tree(name, **kwargs)
+            if name == "githook-dup-id":
+                m = t / GITHOOKS_MANIFEST_REL
+                text = m.read_text(encoding="utf-8")
+                m.write_text(text + text[text.index("[[githook]]"):], encoding="utf-8")
+            got = run_caught(t, check=False)
+            if got != 2:
+                failures.append("githook: case {} expected exit 2 (fail-closed), got {!r}".format(name, got))
+        for name in ("githook-manifest-symlink", "githook-manifest-dir"):
+            t = githook_tree(name)
+            m = t / GITHOOKS_MANIFEST_REL
+            if name.endswith("symlink"):
+                m.rename(m.with_name("real.toml"))
+                m.symlink_to("real.toml")
+            else:
+                m.unlink()
+                m.mkdir()
+            if run_caught(t, check=False) != 2:
+                failures.append("githook: case {} expected exit 2 (fail-closed)".format(name))
+
         # .aiqt/ above the ledger symlinked outside the root fails closed (exit 2) in --check and write mode with
         # the ledger there untouched; symlinked inside the root, it is read and the ledger rewritten there.
         failures.extend(linked_dir_failures(tmp, "aiqt", _build, run, ".aiqt", LEDGER_REL))
@@ -1440,7 +1611,12 @@ def self_test_main():
           "channel, and one that is a dangling symlink, a symlink, or a directory fails closed (exit 2); one "
           "manifest holding both kinds generates, and a published hook with an entry of each kind fails "
           "closed (exit 2); a corpus symlinked inside the root is read, and one symlinked outside the root "
-          "fails closed (exit 2) with no ledger written" + note)
+          "fails closed (exit 2) with no ledger written; a githooks manifest row is read into its rules' "
+          "githooks arrays (a githook alone makes a rule hook-linked), an absent githooks manifest is "
+          "empty, and a githook with an orphan, empty or unsorted rules list, a bad or colliding id, an "
+          "unknown or empty events list, a non-block default, class a or d, an unknown key, an empty "
+          "residue, a missing version, a duplicate id, or a manifest that is a symlink or a directory "
+          "fails closed (exit 2)" + note)
     return 0
 
 

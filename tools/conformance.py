@@ -174,8 +174,8 @@ def check_c1(root, cache):
 # --- C2: no drift -----------------------------------------------------------------------------------
 
 def _claude_drift(root, corpus):
-    """Compare .claude/rules/ byte for byte with the rule sources it is copied from, re-rooted at root
-    (never call gen_rules.main()).
+    """Compare .claude/rules/ byte for byte with the full render of the rule sources it is generated from
+    (gen_rules.full_body), re-rooted at root (never call gen_rules.main()).
 
     Returns (status, detail). Absent .claude/rules/ surface -> NOT APPLICABLE (the adopter did not
     install the Claude surface). Present-but-different or orphaned generated files -> FAIL. This is a
@@ -197,8 +197,10 @@ def _claude_drift(root, corpus):
     desired = {}
     try:
         for src, _fm, rel in corpus:
-            desired[rel] = src.read_text(encoding="utf-8")
-    except OSError as exc:
+            # The full render gen_rules writes (gen_rules.full_body): a source using the `## Detail` split is
+            # compared as its unsplit original, never as the split text.
+            desired[rel] = gen_rules.full_body(gen_rules.read_rule_source(src), src.name)
+    except (OSError, ValueError) as exc:
         return (MALFORMED, "cannot read a source rule: {}".format(exc))
     drift = []
     try:
@@ -1228,7 +1230,7 @@ def _write_surfaces(base):
     for s, _fm, rel in corpus:
         target = claude / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(s.read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(gen_rules.full_body(gen_rules.read_rule_source(s), s.name), encoding="utf-8")
 
     _write_adapters(base, corpus)
     cursor = base.joinpath(*gen_cursor.OUT_PARTS)
@@ -1260,7 +1262,7 @@ def _build_mapped_tree(base, rule_text):
     for s, _fm, rel in corpus:
         target = claude / rel
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(s.read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(gen_rules.full_body(gen_rules.read_rule_source(s), s.name), encoding="utf-8")
     _write_adapters(base, corpus, adapters=False)
 
 
@@ -1385,6 +1387,25 @@ def self_test_main():
             failures.append("conformant tree expected exit 0, got {}\n{}".format(code, out))
         if status_of(out, "C3") != PASS or status_of(out, "C2") != PASS:
             failures.append("conformant tree expected C2/C3 PASS in report:\n{}".format(out))
+
+        # 1b. Rule sources using the `## Detail` split: the conformant tree with its two non-apex sources split
+        #     (a detail-trigger key, a core layer and the split line added, the rule's text moved below the split
+        #     unchanged) and every surface left as generated from the unsplit originals -> exit 0, C1/C2/C3 PASS.
+        #     Red when C2 compares a surface (.claude/rules, AGENTS.md, the adapters or the Cursor tree) with the
+        #     split source text instead of its full render (gen_rules.full_body).
+        split = tmp / "split"
+        split.mkdir()
+        _build_conformant(split)
+        for rel, text in (("aiqt/read-before.md", _ACCUR), ("security/input-validation.md", _SECI)):
+            head, sep, rest = text.partition("\n---\n")
+            title, _nl, body = rest.partition("\n")
+            (split / ".aiqt" / "core" / "rules" / rel).write_bytes(
+                (head + "\ndetail-trigger: writing a self-test fixture" + sep + title
+                 + "\n\nA self-test core layer.\n\n## Detail\n" + body).encode("utf-8"))
+        code, out = run_capture(split)
+        if code != 0 or any(status_of(out, cid) != PASS for cid in ("C1", "C2", "C3")):
+            failures.append("split-source tree expected exit 0 and C1/C2/C3 PASS (every surface is the full "
+                            "render of its split source):\n{}".format(out))
 
         # 2. Drifted tree -> non-zero. Corrupt one generated .claude/rules file.
         drifted = tmp / "drifted"
@@ -2511,7 +2532,8 @@ def self_test_main():
                  "runner could still read the chmod-0 dir (root/DAC-bypass): {}; run where POSIX read "
                  "bits are enforced to exercise them.".format(
                      len(skipped_unreadable), ", ".join(skipped_unreadable)))
-    print("SELF-TEST PASS: conformant passes; drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
+    print("SELF-TEST PASS: conformant passes, and so do its surfaces against rule sources using the `## Detail` "
+          "split (compared as their full render); drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
           "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
