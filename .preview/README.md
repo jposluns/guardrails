@@ -36,9 +36,17 @@ advisory note still allows with exit 0). Each file states
 what it does not catch in a section headed `RESIDUAL COVERAGE` in its opening docstring; that section is
 the authority, and the summary further down this page only points to it.
 
-- **`clock-inject.py`** reads the real clock after each tool call and adds one short line to the
-  assistant's context, in the form `CLOCK (read by hook, authoritative): <local time> | <UTC time>`,
-  followed by the session's elapsed time when a lease is configured. The freshest time value in context
+- **`clock-inject.py`** reads the real clock after each tool call and adds two short lines to the
+  assistant's context, both from one reading. The first is
+  `CLOCK (read by hook, authoritative): <local time> | <UTC time>`, followed by the elapsed time when a lease
+  is configured (`session elapsed`, or `transcript elapsed` when the lease records no start time and the
+  hook falls back to the transcript's first entry). The second is a console stamp ready to copy, for example
+  `CONSOLE PREFIX (copy exactly): [2026-11-21 18:33 EST]`: the same instant floored to the minute (never
+  rounded up), `EDT` while Toronto observes daylight saving time and `EST` otherwise. Both lines use the
+  America/Toronto zone from the system zone database whatever the process zone (`TZ`). When that zone entry
+  is missing or cannot be loaded, the CLOCK line uses the process zone instead and the CONSOLE PREFIX line is
+  left out. Hook input over 8 MiB is not read; the clock line is still added, without elapsed time from the
+  transcript. The freshest time value in context
   is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
   `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
   failed); register both to cover both outcomes. The pack's plugin now adds its own host clock line on
@@ -49,10 +57,17 @@ the authority, and the summary further down this page only points to it.
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
   back. Text in code spans, fenced code blocks, and `>` quote lines is not checked, and a time that a
   scheduling word (such as `until`, `due`, or `next run at`) directly precedes is treated as a scheduled
-  time, not a reading. Other times may run up to 1 minute ahead, but the bracketed stamp that opens a
-  message, such as `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate
-  it to the minute and never round up. When that opening stamp uses a zone abbreviation other than the
-  hook's local zone, the hook cannot check it and says so in a note instead of passing silently. Event:
+  time, not a reading. So is a time in a table column whose header cell names a scheduling word, and a
+  line-leading time directly followed by `due:`, `scheduled`, or `certificate rotation`. An opening stamp
+  directly followed by a named past event (`launched`, `released`, `deployed`, `occurred`) is history and is
+  not checked for being too old, though it is still checked for being ahead; and a line that names `total`,
+  `across`, `workers`, `timeout`, or `limit` is not read as the session's elapsed-time footer. Other times
+  may run up to 1 minute ahead, but the bracketed stamp that opens a message, such as
+  `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate it to the minute
+  and never round up. `EST` and `EDT` are checked against America/Toronto from the system
+  zone database whatever the process zone (`TZ`), so the CONSOLE PREFIX stamp that `clock-inject.py` adds is
+  checked under any `TZ`. When that opening stamp uses another zone abbreviation that is not the hook's local
+  zone, the hook cannot check it and says so in a note instead of passing silently. Event:
   `Stop`.
 - **`future-stamp-write.py`** denies a write that would record a future-dated timestamp into a folder you
   have declared as holding working records. An observed-time entry (a heartbeat, a recorded-at value) has
@@ -208,13 +223,13 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `b796beaf2ae352bb55fab5ef5e2ca76d160b2a2c46fe18c9f7b76e58daecb3ca` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `d208b2e7e22e19d01cc6aea5347a0a3548300579f5faaad49312c5c671ef9d4c` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `be125990e7ba4505821be61d832bcac9e7280cca82488f1690c99cce6bda576d` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `fcfdab3d99fe6e0868f27d10fad7fa691c5a5f58ad1f2242e8721e1df4f5312b` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `94e0bb28e7f3b83421a61a3898505f9597221ea96c7204605037a9d211e08f52` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
@@ -382,6 +397,8 @@ fails and report it; do not work around a failed check.
    `/usr/bin/bash` or `/bin/bash`. The `pattern-self-match.py` check that the account name of the user
    running its self-test selects that user reports `SKIPPED` when the user database gives no such name
    made only of the characters its patterns may use, or gives one of digits alone.
+   The `clock-inject.py` check that lab_infra's `require-console-timestamp.py` accepts its CONSOLE PREFIX
+   line reports `SKIPPED` outside a lab_infra checkout, where that file is absent.
    The `char-policy-write.py` policy validator is generated from the marked region of the CI gate
    `tools/check_no_dashes.py` by `tools/gen_char_policy.py`. The hook's self-test compares that region byte
    for byte with the gate's, and a sample of policies and its scope test with the gate. The hook's self-test
@@ -433,7 +450,8 @@ fails and report it; do not work around a failed check.
    session so the settings are read.
 
 6. Smoke-test the live hook. For `clock-inject.py`, run any command in the new session (for example
-   `true`) and confirm a `CLOCK (read by hook, authoritative):` line reaches the assistant's context. For
+   `true`) and confirm a `CLOCK (read by hook, authoritative):` line, followed by a
+   `CONSOLE PREFIX (copy exactly):` line, reaches the assistant's context. For
    the other nine, a passing self-test in step 3 is the check; they stay silent until they see something
    to flag.
 
@@ -516,6 +534,7 @@ content of the command. Their reasons are optional; text inside quotes does not 
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
 | `AIQT_HOOK_STATE_DIR` | The absolute path to a folder for the per-session state of `constraint-reread.py` and `rerun-pass-check.py`. If unset, they use `$XDG_STATE_HOME/aiqt-guardrails`, else `$HOME/.local/state/aiqt-guardrails`. |
 | `AIQT_HOOKS_WORKER` | Set to `1` only in a separate worker process that another program launches to produce output for it to read back (a batch verifier, say), to keep the hooks that read it out of that output; `char-policy-write.py` does not read it and checks worker processes too. Do not set it for a helper session started inside your own session: `future-stamp-write.py` deliberately still checks the record writes such a helper makes, and `clock-inject.py` still gives it the clock. |
+| `AIQT_HOOKS_REQUIRE_CONSOLE_HOOK` | Self-test only, for a lab_infra gate: set to `1` to make the `clock-inject.py` check against lab_infra's `tools/orch-hooks/require-console-timestamp.py` fail, not skip, when that file is absent. Unset, that check reports `SKIPPED` outside a lab_infra checkout. It is separate from the sibling-parity setting, so requiring the sibling clock hooks never requires that lab_infra file. |
 | `G_REF_DIR` | Self-tests only: the folder containing reference hooks for the byte-identity checks in `ungated-record.py`, `unbounded-wait.py`, `record-remove-check.py`, and `pattern-self-match.py`. If unset or empty, they look beside the hook itself. Each missing reference makes its check report `SKIPPED`. |
 
 The lease file marks the session's start on a field line of its own:
@@ -537,16 +556,21 @@ printf 'Active-session: sess-%s\n' "$(date -u +%Y%m%dT%H%M%SZ)" > "$AIQT_LEASE_F
 Each hook is a best-effort guard, and each one states what it does not catch in the `RESIDUAL COVERAGE`
 section of its opening docstring. Read that section before relying on a hook; in outline:
 
-- **`clock-inject.py`** informs and enforces nothing: the assistant can still ignore or mis-copy the line.
-  It reproduces the host clock faithfully, so a wrong host clock gives wrong readings, and elapsed time is
-  only as right as the lease. It does not fire for a tool call rejected before it ran, or across a stretch
-  of prose with no tool call.
+- **`clock-inject.py`** informs and enforces nothing: the assistant can still ignore or mis-copy the lines.
+  It reproduces the host clock and zone database faithfully, so a wrong host clock or stale zone rules give
+  wrong readings, and elapsed time is only as right as the lease; `transcript elapsed` counts from the
+  transcript's first entry, so it overstates a resumed session. The CONSOLE PREFIX line is the minute of
+  the tool call, so a message composed much later carries an old stamp. It does not fire for a tool call
+  rejected before it ran, or across a stretch of prose with no tool call.
 - **`stamp-truth-stop.py`** checks only timestamps written with an explicit zone; an unzoned, 12-hour, or
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
   An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
-  offset, or run the hook under the same `TZ`. An opening stamp read from a different clock that runs ahead
+  offset, or run the hook under the same `TZ`. `EST` and `EDT` are the exception: they are read as
+  America/Toronto whatever the `TZ`, so a foreign zone that shares those letters is not distinguished, and
+  without usable zone data for America/Toronto they are checked only when they are the process zone's. An
+  opening stamp read from a different clock that runs ahead
   of this host's (a remote or container `date`) is refused while it is still later than the time the hook
   compares it with (when the message was recorded, else when the hook runs); put it in a code span. A stamp
   rounded up or composed ahead is likewise refused only while it is later than that time: one whose minute
