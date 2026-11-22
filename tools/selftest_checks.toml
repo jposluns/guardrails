@@ -5517,6 +5517,7 @@ expected-check-ids = [
   "report/format-id",
   "report/estimate-labelled",
   "report/host-label-default",
+  "report/no-absolute-path",
   "report/json-existing-refused",
   # ---------- failed samples ----------
   "measure/failed-sample-no-time",
@@ -5532,6 +5533,9 @@ expected-check-ids = [
   "flag/margin-reaches-measure",
   "report/host-label-supplied",
   "summary/p95-apart-from-max",
+  "flag/from-max-not-p95",
+  "report/values-as-used",
+  "report/p95-max-stated",
   # ---------- the version probe ----------
   "measure/version-probe-failure-refused",
   # ---------- the fixture root and interrupts ----------

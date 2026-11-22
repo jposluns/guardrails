@@ -79,9 +79,12 @@ its own would not be stopped (a residual, disclosed).
 CONDITIONS. The table is preceded by the conditions it was measured under: the load average at start and end
 (os.getloadavg), the CPU count, the harness and hook interpreters, the git version and the fixture sizes, and
 the host label: what --host-label LABEL gives (1 to 100 printable characters, no space at either end), else
-"unlabelled". Reports may be shared, so the hostname is never read; the operator names the host. --json PATH
-writes the same figures and conditions, with the figures' standing as an estimate, under the format id
-aiqt-hook-latency/2 (a PATH that already exists is refused, never overwritten).
+"unlabelled". Reports may be shared, so the hostname is never read; the operator names the host. Nor does a
+condition record an absolute path, which can name a user or the host: the harness interpreter is named by
+its file name and version, each hook interpreter by the command hooks.json gives and its version, and hooks.json
+by its path in the repository, or by its file name alone when it lies outside. --json PATH writes the same
+figures and conditions, with the figures' standing as an estimate, under the format id aiqt-hook-latency/3 (a
+PATH that already exists is refused, never overwritten).
 
 SAMPLES. A completed sample is valid when its outcome is a hook decision: exit 0 with nothing on stdout
 (allow), exit 0 with a permissionDecision of allow, deny or ask (or the older top-level decision approve or
@@ -98,11 +101,17 @@ after every valid sample, and a statistic whose position lands on it reads TIMED
 not a failed sample, so timed-out samples alone never change the exit.
 
 FIGURES AND THE MARGIN. Each row gives the min, median, 95th percentile and max of its valid and timed-out
-samples, beside the configured timeout of its hook (the timeout of its hooks.json entry). The 95th percentile
-is the nearest rank: the sample at position ceil(0.95 n) of the n in sorted order, so with fewer than 20 samples
-it is the max. A row is near its timeout when its max reaches the threshold (one minus --margin) times that
-timeout (default margin 0.5, so half the timeout; the threshold is computed in decimal from the margin as
-written and the timeout, so --margin 0.7 under a 10 s timeout is exactly 3 s): yes when the max is a time at
+samples, beside the configured timeout of its hook (the timeout of its hooks.json entry). A sample is the wall
+time rounded to the microsecond (a median that is the mean of two samples, to a tenth of a microsecond), and
+the table prints each figure in full, so it shows the very value --json holds and the flag compares. The 95th
+percentile is the nearest rank: the sample at position ceil(0.95 n) of the n in sorted order, so with fewer
+than 20 samples it is the max; the text report then says so (for every row, or naming each such row), and each
+row of --json carries p95_is_max_by_rank. --margin takes at most 3 decimal places (a finer one is refused,
+never rounded) and is kept as the decimal written; the threshold is (one minus --margin) times the timeout,
+computed in exact decimal, so --margin 0.7 under a 10 s timeout is exactly 3 s (default margin 0.5, so half
+the timeout). The report gives the margin, each threshold and each timeout as the exact decimals the flag
+used (the margin and the thresholds as decimal strings in --json). A row is near its timeout when its max
+reaches the threshold: yes when the max is a time at
 or above the threshold, or is TIMED OUT under a --case-timeout at or above it (such a sample is known to exceed
 the threshold); no when the max is a time below it; unknown when the max is TIMED OUT under a --case-timeout
 below the threshold, or the row reads NO VALID SAMPLE. After the table one line lists every row flagged yes,
@@ -160,7 +169,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from decimal import Decimal
+from decimal import MAX_EMAX, MAX_PREC, MIN_EMIN, Decimal, Inexact, localcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -184,12 +193,18 @@ INT_OPTIONS = {"--runs": (1, 1000), "--files": (1, 1000000), "--commits": (1, 10
 # --case-timeout must be greater than 0 (an exclusive lower end) and at most this (an inclusive upper end).
 CASE_TIMEOUT_MAX = 3600.0
 # A row is near its timeout when its max reaches (1 - margin) times its hook's configured timeout; --margin is
-# a fraction strictly between 0 and 1, kept as the Decimal it was written as, so the threshold carries no binary
-# floating-point error.
+# a fraction strictly between 0 and 1 of at most MARGIN_PLACES decimal places, kept as the Decimal it was
+# written as, so the threshold carries no binary floating-point error and the report gives the margin used.
 DEFAULT_MARGIN = Decimal("0.5")
+MARGIN_PLACES = 3
 PERCENTILE = 95
+# The fewest samples whose nearest-rank PERCENTILE-th percentile is not the max (20 for the 95th).
+PERCENTILE_APART = next(count for count in range(1, 101) if math.ceil(PERCENTILE * count / 100) < count)
+# A sample is the wall time rounded to this many decimal places of a second (the microsecond); a median of two
+# samples is rounded to one place more, so each figure's shortest decimal is the value the table prints.
+SAMPLE_PLACES = 6
 # The report's format id; bump it whenever a row or the conditions gain, lose or change a field.
-FORMAT = "aiqt-hook-latency/2"
+FORMAT = "aiqt-hook-latency/3"
 # The host label the operator supplies with --host-label; reports may be shared, so the raw hostname is never
 # read, and a run without the option is labelled this.
 DEFAULT_HOST_LABEL = "unlabelled"
@@ -382,6 +397,9 @@ def parse_args(argv):
             fraction = Decimal(value) if DECIMAL_RE.fullmatch(value) else None
             if fraction is None or not 0 < fraction < 1:
                 raise UsageError("--margin takes a fraction greater than 0 and less than 1, not {!r}".format(value))
+            if len(value.partition(".")[2]) > MARGIN_PLACES:
+                raise UsageError("--margin takes at most {} decimal places, not {!r} (a finer margin is refused, "
+                                 "never rounded)".format(MARGIN_PLACES, value))
             opts["margin"] = fraction
         elif arg == "--host-label":
             if not (0 < len(value) <= HOST_LABEL_MAX and value.isprintable() and value.strip() == value):
@@ -497,7 +515,8 @@ def summarize(samples):
     """(min, median, max) of samples, each seconds or None for a timed-out sample. A timed-out sample is
     known only to exceed the case timeout, so it sorts after every completed one, and a statistic whose
     position lands on one is None (TIMED OUT), never a time; an even count's median is the mean of its two
-    middle samples, None when either timed out."""
+    middle samples rounded to SAMPLE_PLACES + 1 places (so its shortest decimal is that mean), None when either
+    timed out."""
     done = sorted(sample for sample in samples if sample is not None)
     ordered = done + [None] * (len(samples) - len(done))
     if not ordered:
@@ -507,8 +526,14 @@ def summarize(samples):
         median = ordered[middle]
     else:
         low, high = ordered[middle - 1], ordered[middle]
-        median = None if low is None or high is None else (low + high) / 2
+        median = None if low is None or high is None else round((low + high) / 2, SAMPLE_PLACES + 1)
     return ordered[0], median, ordered[-1]
+
+
+def _p95_is_max(samples, rank=PERCENTILE):
+    """Whether the nearest-rank position of samples is the last one, so the percentile is the max by rank:
+    True below PERCENTILE_APART samples, False at or above it and for no sample at all."""
+    return bool(samples) and max(1, math.ceil(rank * len(samples) / 100)) == len(samples)
 
 
 def percentile(samples, rank=PERCENTILE):
@@ -528,9 +553,18 @@ def _exact(value):
     return Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
 
 
+def _decimal_text(value):
+    """value as the exact decimal this tool computes with (see _exact), in plain notation: what the report
+    prints for a margin, a threshold, a timeout or a figure, so the printed value is the one used."""
+    return format(_exact(value), "f")
+
+
 def near_threshold(timeout, margin):
-    """(1 - margin) times timeout, in decimal (see _exact): --margin 0.7 under a 10 s timeout is exactly 3."""
-    return _exact(timeout) * (1 - _exact(margin))
+    """(1 - margin) times timeout, in exact decimal (see _exact): --margin 0.7 under a 10 s timeout is exactly
+    3. The arithmetic runs at the largest precision decimal offers with Inexact trapped, so no digit of the
+    margin or the timeout is rounded away, however many it has."""
+    with localcontext(prec=MAX_PREC, Emax=MAX_EMAX, Emin=MIN_EMIN, traps=[Inexact]):
+        return _exact(timeout) * (1 - _exact(margin))
 
 
 def near_timeout(maximum, timeout, margin, case_timeout):
@@ -649,7 +683,7 @@ def _sample(argv, payload, env, cwd, timeout, interrupts=None):
                 except subprocess.TimeoutExpired:
                     child.kill()
                 return Sample(None, None, b"", b"", True, None)
-            elapsed = time.perf_counter() - start
+            elapsed = round(time.perf_counter() - start, SAMPLE_PLACES)
     finally:
         if interrupts is not None:
             interrupts.child = None
@@ -712,8 +746,9 @@ def _utc_now():
 
 
 def _interpreters(hooks, env, cwd, interrupts=None):
-    """For each distinct hook command: where PATH resolves it and the Python version it reports. MeasureError
-    when a command is not on PATH or its version probe fails, since the report would then name no version."""
+    """For each distinct hook command: the Python version it reports (it must resolve on PATH; where it
+    resolves is not kept). MeasureError when a command is not on PATH or its version probe fails, since the
+    report would then name no version."""
     found = {}
     for hook in hooks:
         command = hook.argv[0]
@@ -729,7 +764,8 @@ def _interpreters(hooks, env, cwd, interrupts=None):
             why = _outcome(sample)[0] if sample.code != 0 else "exit 0 with no version on stdout"
             raise MeasureError("the version probe of the hook command {} ({}) failed ({}), so the report would "
                                "name no interpreter version".format(command, path, why))
-        found[command] = {"path": path, "version": version}
+        # The resolved path is not kept: it can name a user or the host (see CONDITIONS in the module docstring).
+        found[command] = {"version": version}
     return found
 
 
@@ -913,22 +949,27 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
             row["min"], row["median"], row["max"] = (summarize(row["samples"]) if row["samples"]
                                                      else (NO_VALID_SAMPLE,) * 3)
             row["p95"] = percentile(row["samples"]) if row["samples"] else NO_VALID_SAMPLE
-            row["near_timeout_threshold_seconds"] = float(near_threshold(row["platform_timeout_seconds"], margin))
+            row["p95_is_max_by_rank"] = _p95_is_max(row["samples"])
+            # the exact decimal the flag below compares with, as a string, never a float that could differ
+            row["near_timeout_threshold_seconds"] = format(near_threshold(row["platform_timeout_seconds"], margin),
+                                                           "f")
             row["near_timeout"] = near_timeout(row["max"], row["platform_timeout_seconds"], margin, case_timeout)
         rows.extend(case_rows)
-    hooks_name = Path(hooks_json)
-    if hooks_name.is_relative_to(ROOT):
-        hooks_name = hooks_name.relative_to(ROOT)
+    # No absolute path enters the conditions (see CONDITIONS in the module docstring): a path can name a user or
+    # the host, and reports may be shared.
+    hooks_name = Path(hooks_json).absolute()
+    hooks_name = (hooks_name.relative_to(ROOT).as_posix() if hooks_name.is_relative_to(ROOT)
+                  else hooks_name.name)
     conditions = {
         "host_label": host_label, "estimate": ESTIMATE_NOTE,
         "started_utc": started, "finished_utc": _utc_now(),
         "load_average_start": load_start, "load_average_end": _loadavg(),
         "cpu_count": os.cpu_count(), "platform": platform.platform(),
-        "harness_python": sys.version, "harness_executable": sys.executable,
+        "harness_python": sys.version, "harness_executable": Path(sys.executable or "unknown").name,
         "hook_interpreters": interpreters, "git_version": git_version,
-        "hooks_json": hooks_name.as_posix(), "runs": runs, "untracked_files": files, "commits": commits,
+        "hooks_json": hooks_name, "runs": runs, "untracked_files": files, "commits": commits,
         "case_timeout_seconds": case_timeout, "command_budget": cap, "write_sizes": list(write_sizes),
-        "margin": float(margin), "percentile": PERCENTILE,
+        "margin": format(_exact(margin), "f"), "percentile": PERCENTILE,
         "order": "one child at a time; each run goes once through the hooks of the case",
     }
     return {"format": FORMAT, "conditions": conditions, "cases": ran, "rows": rows,
@@ -936,10 +977,11 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
 
 
 def _seconds(value):
-    """A statistic as the table shows it: seconds, TIMED OUT (None) or NO VALID SAMPLE (that string)."""
+    """A statistic as the table shows it: seconds as the exact decimal --json holds and the flag compares (see
+    _decimal_text and SAMPLE_PLACES), TIMED OUT (None) or NO VALID SAMPLE (that string)."""
     if value is None:
         return TIMED_OUT
-    return value if isinstance(value, str) else "{:.3f}".format(value)
+    return value if isinstance(value, str) else _decimal_text(value)
 
 
 def render(result):
@@ -953,27 +995,36 @@ def render(result):
     lines = ["hook latency (a measurement, not a gate): wall seconds per hook child, {} run(s) per case, one "
              "child at a time".format(conditions["runs"]),
              "hooks.json: {} (platform timeout per hook there: {} s)".format(
-                 conditions["hooks_json"], ", ".join("{:g}".format(value) for value in timeouts) or "none"),
+                 conditions["hooks_json"], ", ".join(_decimal_text(value) for value in timeouts) or "none"),
              "host: label {}; {} CPU(s), {}; load average (1, 5, 15 min) at start {}, at end {}".format(
                  conditions["host_label"], conditions["cpu_count"], conditions["platform"],
                  load(conditions["load_average_start"]),
                  load(conditions["load_average_end"])),
              "started {}, finished {}".format(conditions["started_utc"], conditions["finished_utc"]),
-             "harness python: {}".format(conditions["harness_python"])]
+             "harness python: {} ({})".format(conditions["harness_executable"], conditions["harness_python"])]
     for command, found in sorted(conditions["hook_interpreters"].items()):
-        lines.append("hook command {}: {} ({})".format(command, found["path"], found["version"]))
+        lines.append("hook command {}: {}".format(command, found["version"]))
     lines.append("git: {}".format(conditions["git_version"]))
-    lines.append("fixture: {} untracked file(s), {} commit(s) on main; case timeout {:g} s".format(
-        conditions["untracked_files"], conditions["commits"], conditions["case_timeout_seconds"]))
+    lines.append("fixture: {} untracked file(s), {} commit(s) on main; case timeout {} s".format(
+        conditions["untracked_files"], conditions["commits"], _decimal_text(conditions["case_timeout_seconds"])))
     lines.append("samples: a failed sample (a nonzero exit, a death by signal, a launch failure, or output that "
                  "names no decision) is counted under failed and contributes no time; {} is known only to exceed "
                  "the case timeout; {} means the row has no valid or timed-out sample".format(TIMED_OUT,
                                                                                          NO_VALID_SAMPLE))
-    lines.append("figures: an estimate measured on this host on the date above, not a fixed fact; p{} s is the "
-                 "nearest-rank {}th percentile; near timeout is yes when the max reaches {:g} times the hook's "
-                 "configured timeout (margin {:g})".format(PERCENTILE, PERCENTILE,
-                                                          near_threshold(1, conditions["margin"]),
-                                                          conditions["margin"]))
+    # The margin is the string the conditions hold, the exact decimal the thresholds were computed from.
+    lines.append("figures: an estimate measured on this host on the date above, not a fixed fact; seconds to the "
+                 "microsecond; p{} s is the nearest-rank {}th percentile; near timeout is yes when the max reaches "
+                 "{} times the hook's configured timeout (margin {})".format(
+                     PERCENTILE, PERCENTILE, format(near_threshold(1, Decimal(conditions["margin"])), "f"),
+                     conditions["margin"]))
+    by_rank = [row for row in result["rows"] if row.get("p95_is_max_by_rank")]
+    if by_rank and len(by_rank) == len(result["rows"]):
+        lines.append("p{} s is the max by rank in every row: each holds fewer than {} valid or timed-out "
+                     "samples".format(PERCENTILE, PERCENTILE_APART))
+    elif by_rank:
+        lines.append("p{} s is the max by rank in {} row(s), each holding fewer than {} valid or timed-out "
+                     "samples (case/hook id): {}".format(PERCENTILE, len(by_rank), PERCENTILE_APART, ", ".join(
+                         "{}/{}".format(_one_line(row["case"]), _one_line(row["hook_id"])) for row in by_rank)))
     lines.append("cases:")
     width = max([len(case["case"]) for case in result["cases"]] + [4])
     lines.extend("  {}  {}".format(case["case"].ljust(width), case["note"]) for case in result["cases"])
@@ -987,7 +1038,7 @@ def render(result):
         table.append((row["case"], row["hook_id"], str(len(row["samples"]) + row["failed_samples"]),
                       str(row["failed_samples"]), _seconds(row["min"]), _seconds(row["median"]),
                       _seconds(row["p95"]), _seconds(row["max"]),
-                      "{:g}".format(row["platform_timeout_seconds"]), row["near_timeout"], outcomes))
+                      _decimal_text(row["platform_timeout_seconds"]), row["near_timeout"], outcomes))
     widths = [max(len(line[column]) for line in table) for column in range(len(header))]
     lines.append("")
     for line in table:
@@ -1175,14 +1226,19 @@ STUB_TIMEOUT = 10
 # The non-default margin run: --margin MARGIN_RUN with orch_ask_guard's configured timeout MARGIN_TIMEOUT puts
 # its threshold at exactly PAST_NAP (0.75 s, which binary floating point computes as 0.7500000000000001), so its
 # nap is near under that margin and would not be under the default (1.25 s); every other hook keeps
-# STUB_TIMEOUT, whose threshold is then exactly 3 s (3.0000000000000004 in binary floating point).
-MARGIN_RUN = "0.7"
+# STUB_TIMEOUT, whose threshold is then exactly 3 s (3.0000000000000004 in binary floating point). The margin
+# is written with a trailing zero, so the report must give the decimal used ("0.70", threshold "0.750"), which
+# a float or a shortest-form print would not.
+MARGIN_RUN = "0.70"
 MARGIN_TIMEOUT = 2.5
 MARGIN_HOST_LABEL = "lab host 7"
 # The p95 run: 20 runs of stub_spike.py as orch_yield_tool, the first SPIKE_NAP long, so the row's nearest-rank
 # 95th percentile (the 19th of 20) is a fast sample and its max is the nap.
 SPIKE_NAP = 0.5
 SPIKE_RUNS = 20
+# The configured timeout the p95 run gives orch_yield_tool: under the default margin its threshold is exactly
+# SPIKE_NAP, which the max reaches and the p95 does not, so the row reads yes only when the flag uses the max.
+SPIKE_TIMEOUT = 1.0
 # A hook id named only in the margin run's stub hooks.json, so the run shows the list is read from there.
 CONFIG_ONLY_ID = "listed_only_in_config"
 SELF_TEST_WRITE_SIZES = (1024, 2048, 4096)
@@ -1302,6 +1358,11 @@ def _bounds_vectors():
               (["--case-timeout", "3600"], True), (["--case-timeout", "3600.001"], False)]
     table += [(["--margin", "0"], False), (["--margin", "0.0"], False), (["--margin", "0.001"], True),
               (["--margin", "0.999"], True), (["--margin", "1"], False), (["--margin", "1.0"], False)]
+    # at most MARGIN_PLACES decimal places: a finer margin (the two below once rounded differently in the
+    # threshold and in the report) is refused, never rounded
+    table += [(["--margin", "0.125"], True), (["--margin", "0.700"], True), (["--margin", "0.7000"], False),
+              (["--margin", "0.1234"], False), (["--margin", "0.99999999999999999"], False),
+              (["--margin", "0.699999999999999999999999999999"], False)]
     table += [(["--host-label", ""], False), (["--host-label", "h"], True),
               (["--host-label", "h" * HOST_LABEL_MAX], True), (["--host-label", "h" * (HOST_LABEL_MAX + 1)], False),
               (["--host-label", "lab host"], True), (["--host-label", " lab"], False),
@@ -1346,7 +1407,10 @@ def _summary_vectors():
              ([3.0, 1.0, 2.0], (1.0, 2.0, 3.0)), ([1.0, 2.0, None], (1.0, 2.0, None)),
              ([1.0, None, None], (1.0, None, None)), ([4.0, 1.0, 3.0, 2.0], (1.0, 2.5, 4.0)),
              ([1.0, 2.0, 3.0, None], (1.0, 2.5, None)), ([1.0, 2.0, None, None], (1.0, None, None)),
-             ([], (None, None, None)))
+             ([], (None, None, None)),
+             # a median of two is rounded to SAMPLE_PLACES + 1 places, so its shortest decimal is the mean
+             # (in binary floating point (0.1 + 0.2) / 2 is 0.15000000000000002)
+             ([0.2, 0.1], (0.1, 0.15, 0.2)), ([0.000001, 0.000002], (0.000001, 0.0000015, 0.000002)))
     wrong = [(samples, summarize(samples)) for samples, want in table if summarize(samples) != want]
     return not wrong, wrong
 
@@ -1373,15 +1437,33 @@ def _near_vectors():
              # binary floating point it would be 3.0000000000000004 and read no), as a float or a Decimal margin
              (3.0, 10, 0.7, 60.0, NEAR_YES), (3.0, 10, Decimal("0.7"), 60.0, NEAR_YES),
              (2.999, 10, 0.7, 60.0, NEAR_NO), (None, 10, 0.7, 3.0, NEAR_YES), (None, 10, 0.7, 2.999, NEAR_UNKNOWN),
-             (0.75, 2.5, Decimal("0.7"), 60.0, NEAR_YES), (1.0, 10, 0.9, 60.0, NEAR_YES))
+             (0.75, 2.5, Decimal("0.7"), 60.0, NEAR_YES), (1.0, 10, 0.9, 60.0, NEAR_YES),
+             # a margin of 30 places: the threshold is a hair above 3 s, so a max of exactly 3 s reads no (at
+             # the default 28-digit precision the threshold rounded to 3 and read yes)
+             (3.0, 10, Decimal("0.699999999999999999999999999999"), 60.0, NEAR_NO))
     wrong = [(row, near_timeout(*row[:4])) for row in table if near_timeout(*row[:4]) != row[4]]
-    # the threshold itself, as each row of --json carries it: exact in decimal, and a float that equals it
-    for timeout, margin, want in ((10, 0.7, "3"), (10, Decimal("0.7"), "3"), (2.5, Decimal("0.7"), "0.75"),
-                                  (10, 0.9, "1"), (0.5, Decimal("0.5"), "0.25")):
+    # the threshold itself, exact in decimal, and as each row of --json carries it: that decimal as a string
+    for timeout, margin, want in ((10, 0.7, "3.0"), (10, Decimal("0.7"), "3.0"), (2.5, Decimal("0.7"), "0.75"),
+                                  (10, 0.9, "1.0"), (0.5, Decimal("0.5"), "0.25"), (10, Decimal("0.70"), "3.00"),
+                                  (10, Decimal("0.99999999999999999"), "0.00000000000000010"),
+                                  (10, Decimal("0.699999999999999999999999999999"),
+                                   "3.000000000000000000000000000010")):
         got = near_threshold(timeout, margin)
-        if got != Decimal(want) or float(got) != float(want):
+        if got != Decimal(want) or format(got, "f") != want:
             wrong.append(("threshold", timeout, margin, got))
     return not wrong, wrong
+
+
+def _strings(value):
+    """Every string in value, a JSON-shaped object: the strings themselves, list items and dict keys and
+    values, at every depth."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() for text in _strings(key) + _strings(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in _strings(item)]
+    return []
 
 
 def _outcome_vectors():
@@ -1875,7 +1957,7 @@ def self_test(report_path=None):
             "git_version", "runs", "untracked_files", "commits", "case_timeout_seconds", "started_utc",
             "finished_utc", "margin", "percentile"))
             and conditions.get("git_version", "").startswith("git version")
-            and conditions.get("margin") == DEFAULT_MARGIN
+            and conditions.get("margin") == "0.5"
             and conditions.get("cpu_count") == os.cpu_count() and len(rows) == 9, sorted(conditions))
         text = out.getvalue()
         lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:]
@@ -1886,9 +1968,10 @@ def self_test(report_path=None):
               and len(lines) == 4 and all(line.count(TIMED_OUT) == 5 and re.search(r" 10  unknown ", line)
                                           and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines),
               text[-1200:])
-        # the report's format id names this field set (rows with p95 and the near-timeout fields, conditions
-        # with the margin, the percentile, the host label and the estimate note)
-        check("report/format-id", written.get("format") == "aiqt-hook-latency/2", written.get("format"))
+        # the report's format id names this field set (rows with p95, p95_is_max_by_rank and the near-timeout
+        # fields, the threshold a decimal string; conditions with the margin as a decimal string, the
+        # percentile, the host label, the estimate note and no absolute path)
+        check("report/format-id", written.get("format") == "aiqt-hook-latency/3", written.get("format"))
         # the figures are labelled a one-host, one-date estimate, in the text and in --json
         check("report/estimate-labelled", "\nfigures: an estimate measured on this host on the date above, not a "
               "fixed fact; " in text and conditions.get("estimate") == "measured on one host on one date under "
@@ -1901,6 +1984,16 @@ def self_test(report_path=None):
               and "\nhost: label unlabelled; {} CPU(s), ".format(os.cpu_count()) in text
               and (not node or node == "unlabelled" or node not in conditions.values()),
               (conditions.get("host_label"), text[:600]))
+        # no condition holds an absolute path, which can name a user or the host: the harness interpreter is
+        # its file name, a hook interpreter its version under its command, hooks.json (outside the repository
+        # here) its file name; and the text prints none of the paths those were read from
+        absolute = [value for value in _strings(conditions) if os.path.isabs(value)]
+        withheld = [path for path in (sys.executable, str(slow_json), str(slow_json.parent)) if path in text]
+        check("report/no-absolute-path", absolute == [] and withheld == []
+              and conditions.get("harness_executable") == Path(sys.executable).name
+              and conditions.get("hooks_json") == "hooks.json"
+              and all(set(found) == {"version"} for found in conditions.get("hook_interpreters", {}).values()),
+              (absolute, withheld, conditions.get("harness_executable"), conditions.get("hook_interpreters")))
         before = figures.read_bytes() if figures.exists() else None
         err = io.StringIO()
         with _recording_roots() as made_again:
@@ -2046,14 +2139,14 @@ def self_test(report_path=None):
         writes = [row for row in margin_rows if row.get("hook_id") == "secrets_shift_left"]
         check("flag/margin-reaches-measure", margin_code == 0 and [
             (row.get("case"), row.get("near_timeout"), row.get("near_timeout_threshold_seconds")) for row in ask]
-            == [("ask-user-question", NEAR_YES, 0.75)] and all(
+            == [("ask-user-question", NEAR_YES, "0.750")] and all(
                 isinstance(row["max"], float) and PAST_NAP <= row["max"]
                 and near_timeout(row["max"], MARGIN_TIMEOUT, DEFAULT_MARGIN, 30.0) == NEAR_NO for row in ask)
             and len(writes) == len(SELF_TEST_WRITE_SIZES) and all(
-                row.get("near_timeout") == NEAR_NO and row.get("near_timeout_threshold_seconds") == 3.0
+                row.get("near_timeout") == NEAR_NO and row.get("near_timeout_threshold_seconds") == "3.00"
                 and row.get("platform_timeout_seconds") == STUB_TIMEOUT for row in writes)
-            and margin_conditions.get("margin") == 0.7
-            and "near timeout is yes when the max reaches 0.3 times the hook's configured timeout (margin 0.7)"
+            and margin_conditions.get("margin") == "0.70"
+            and "near timeout is yes when the max reaches 0.30 times the hook's configured timeout (margin 0.70)"
             in margin_text
             and "near timeout: 1 row(s) (case/hook id): ask-user-question/orch_ask_guard\n" in margin_text,
             (margin_code, margin_err[-400:], ask, writes, margin_conditions.get("margin"), margin_text[-800:]))
@@ -2065,19 +2158,56 @@ def self_test(report_path=None):
         # table's p95 column
         spike_code, spike_text, spike_err, spike_rows = _stub_cli_rows(base, "spike", [
             "--runs", str(SPIKE_RUNS), "--files", "1", "--commits", "1", "--case-timeout", "30", "--hook",
-            "orch_yield_tool"], variant="spike")
+            "orch_yield_tool"], variant="spike", timeouts={"orch_yield_tool": SPIKE_TIMEOUT})
         spiked = [row for row in spike_rows if row.get("hook_id") == "orch_yield_tool"]
         spike_lines = [line.split() for line in spike_text.partition("\ncase ")[2].splitlines()[1:]
                        if line.startswith("schedule-wakeup ")]
         cells = spike_lines[0] if len(spike_lines) == 1 else []
+        # the table prints each figure as the exact decimal --json holds (to the microsecond), never rounded
+        # further, so a printed max and the flag computed from it cannot disagree
         check("summary/p95-apart-from-max", spike_code == 0 and len(spiked) == 1 and all(
             len(row["samples"]) == SPIKE_RUNS and row["p95"] == sorted(row["samples"])[SPIKE_RUNS - 2]
             and row["max"] == max(row["samples"]) and row["max"] >= SPIKE_NAP and row["p95"] < row["max"]
-            and len(cells) >= 8 and cells[2:8] == [str(SPIKE_RUNS), "0", "{:.3f}".format(row["min"]),
-                                                   "{:.3f}".format(row["median"]), "{:.3f}".format(row["p95"]),
-                                                   "{:.3f}".format(row["max"])]
+            and all(round(sample, SAMPLE_PLACES) == sample for sample in row["samples"])
+            and len(cells) >= 8 and cells[2:8] == [str(SPIKE_RUNS), "0", repr(row["min"]), repr(row["median"]),
+                                                   repr(row["p95"]), repr(row["max"])]
             and cells[6] != cells[7] for row in spiked),
             (spike_code, spike_err[-400:], [(row.get("p95"), row.get("max")) for row in spiked], cells))
+        # the near-timeout flag is computed from the max, not the p95: under SPIKE_TIMEOUT and the default
+        # margin the threshold is exactly SPIKE_NAP, which the max (the nap) reaches and the p95 (a fast sample)
+        # does not, so the row reads yes, in --json and in the table, and is named on the flagged line
+        check("flag/from-max-not-p95", spike_code == 0 and len(spiked) == 1 and all(
+            row["near_timeout"] == NEAR_YES and row["near_timeout_threshold_seconds"] == "0.50"
+            and _exact(row["max"]) >= Decimal("0.5") > _exact(row["p95"]) for row in spiked)
+            and len(cells) >= 10 and cells[9] == NEAR_YES
+            and any(line.startswith("near timeout: ") and "schedule-wakeup/orch_yield_tool" in line.split(": ")[-1]
+                    .split(", ") for line in spike_text.splitlines()),
+            (spike_code, [(row.get("p95"), row.get("max"), row.get("near_timeout")) for row in spiked], cells))
+        # the text prints each configured timeout and the case timeout as the exact decimal used, as --json
+        # holds it (SPIKE_TIMEOUT 1.0 and case timeout 30.0, which a shortest-form print would give as 1 and 30)
+        check("report/values-as-used", len(cells) >= 9 and cells[8] == "1.0"
+              and "(platform timeout per hook there: 1.0 s)\n" in spike_text
+              and "; case timeout 30.0 s\n" in spike_text
+              and spiked and spiked[0].get("platform_timeout_seconds") == SPIKE_TIMEOUT,
+              (cells, spike_text[:900]))
+        # the report says when p95 is the max by rank (fewer than PERCENTILE_APART samples): the margin run (one
+        # sample a row) says so for every row, the spike run (20 samples) for none, and a report mixing both
+        # names the rows it holds; each row of --json carries the same fact
+        try:
+            spike_result = json.loads(Path(base, "spike-figures.json").read_text(encoding="utf-8"))
+            mixed_text = render(dict(spike_result, rows=spike_result["rows"] + [
+                dict(spike_result["rows"][0], case="few", samples=[0.25], p95_is_max_by_rank=True)]))
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            mixed_text = "error: {}".format(exc)
+        every_line = "\np95 s is the max by rank in every row: each holds fewer than 20 valid or timed-out samples\n"
+        check("report/p95-max-stated", PERCENTILE_APART == 20
+              and margin_rows and all(row.get("p95_is_max_by_rank") is True for row in margin_rows)
+              and every_line in margin_text
+              and spiked and all(row.get("p95_is_max_by_rank") is False for row in spiked)
+              and "is the max by rank" not in spike_text
+              and "\np95 s is the max by rank in 1 row(s), each holding fewer than 20 valid or timed-out samples "
+                  "(case/hook id): few/orch_yield_tool\n" in mixed_text,
+              (margin_text[-900:], spike_text[-900:], mixed_text[-900:]))
 
         # 8. an interpreter version probe that fails ends the run with exit 2, not a report naming no version
         real_sample = _sample
@@ -2189,8 +2319,11 @@ def self_test(report_path=None):
     print("SELF-TEST PASS: hook-latency {} checks (option bounds at both ends, order statistics and the "
           "nearest-rank 95th percentile with timed-out samples, the near-timeout rule at its boundaries, a stub "
           "that naps past its configured timeout flagged and fast stubs not, a non-default --margin reaching the "
-          "measurement with its threshold exact in decimal, a 20-sample p95 told apart from the max, the format "
-          "id, the estimate label and the host label in the text and --json, the hook list read from hooks.json, "
+          "measurement with its threshold exact in decimal, a margin finer than 3 places refused, the margin, "
+          "thresholds and figures reported as the exact decimals used, a 20-sample p95 told apart from the max, "
+          "the flag computed from the max, p95 stated as the max below 20 samples, the format id, the estimate "
+          "label and the host label in the text and --json, no absolute path in the conditions, the hook list "
+          "read from hooks.json, "
           "an unreadable hooks.json refused before any fixture, the Bash command at its budget and the Write "
           "sizes exact, the real hooks.json resolved and "
           "fully measured, malformed, missing and unmeasured hook ids refused by name, the git fixture shape, "
