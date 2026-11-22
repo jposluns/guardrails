@@ -52,6 +52,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import base64
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -2893,10 +2894,35 @@ def _rwh_cases(tmp):
             return fn()
         finally:
             aiqt_hooks._rwh_static_git_word = saved
+    # an ANSI-C quote inside a backquote substitution whose body bash un-escapes before it parses it
+    # (`$'\\x67'it ...` runs git, since bash turns \\ into \ there) is refused by the static decoded reading
+    # (_ANSI_C_BACKQUOTE_UNSURE_RE) and that refusal is read as a git word; with the backquote refusal
+    # dropped (the reading of b50058c0) each is allowed (red on revert)
+    backquote_cmds = ["echo `$'\\\\x67'it -C " + str(held) + " checkout " + seed + "`",
+                      "echo \"`$'\\\\x67'it -C " + str(held) + " reset --hard " + seed + "`\""]
+    backquote_inside = ["echo `$'\\\\x67'it checkout " + seed + "`"]
+
+    def backquote_kinds():
+        return [kind(base, c) for c in backquote_cmds] + [kind(held, c) for c in backquote_inside]
+
+    # the flip reads its name with getattr, so against a tree without the backquote refusal (the revert) the
+    # row reports its failure instead of raising
+    def backquote_unrefused(fn):
+        saved = getattr(aiqt_hooks, "_ANSI_C_BACKQUOTE_UNSURE_RE", None)
+        if saved is None:
+            return fn()
+        aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = re.compile(r"[^\s\S]")
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = saved
     check("rwh/swallowed-quote-git-word-held-denies-red-on-revert",
-          [[k != "allow" for k in swallowed_kinds()], static_reading_unread(swallowed_kinds)],
+          [[k != "allow" for k in swallowed_kinds()], static_reading_unread(swallowed_kinds),
+           [k != "allow" for k in backquote_kinds()], backquote_unrefused(backquote_kinds)],
           [[True] * (len(swallowed_cmds) + len(swallowed_inside)),
-           ["allow"] * (len(swallowed_cmds) + len(swallowed_inside))])
+           ["allow"] * (len(swallowed_cmds) + len(swallowed_inside)),
+           [True] * (len(backquote_cmds) + len(backquote_inside)),
+           ["allow"] * (len(backquote_cmds) + len(backquote_inside))])
     # the static reading adds no match to text carrying no git word, so ordinary commands run inside the held
     # worktree stay allowed; with the gate reading every command as a git word each is withheld (the
     # over-broad gate this row catches)

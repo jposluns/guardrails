@@ -2425,7 +2425,8 @@ def _ansi_c_static_quote(match):
 
 
 def _ansi_c_static_reading(command):
-    """The STATIC DECODED READING: command with every quote bash decodes from the command text alone written as the
+    """The STATIC DECODED READING: command with every quote bash decodes from the command text alone, and that this
+    reading decodes exactly as bash does (every other one is refused, below), written as the
     literal word text bash assembles from it, so a git word, subcommand or option spelled that way lexes as its
     plain spelling: an ANSI-C $'...' quote whose body holds an escape ($'\\x67'it, git $'\\x63'ommit, git log
     $'\\x2d'p, $'\\x{67}'it) is decoded (_ansi_c_static_quote, the escapes read by the no-verify gate's decoder,
@@ -2445,7 +2446,13 @@ def _ansi_c_static_reading(command):
     word, or the ')' that closes a substitution is word text (echo a\\ #; and echo $(true)#; run what follows).
     Where the scan cannot read a construct with certainty, or where its reading there could differ from the
     comment and here-document reading before this one, ahead of a later $'...' or $"..." quote, it raises
-    _StaticReadingUncertain and each guard that reads it denies (_static_reading_uncertain_deny).
+    _StaticReadingUncertain and each guard that reads it denies (_static_reading_uncertain_deny). It decodes only
+    the quotes it reads exactly as bash does: inside a backquote substitution's body bash turns \\\\ into \\, \\$
+    into $ and \\` into ` (and \\" into ", in a backquote inside double quotes) before it parses the body, and ends
+    the body at its first unescaped backquote, which the scan does not model, so a backslash before a backslash,
+    '$', backquote or quote there, and a backquote inside a quoted string, an ANSI-C quote, a here-document, a
+    '$(...)' or a '${...}' there (_ANSI_C_BACKQUOTE_UNSURE_RE), is refused (`$'\\\\x67'it log -p` and
+    `\\$'\\x67'it log -p` both run git log -p).
     commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding read it BESIDE the command
     itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear one. A word bash builds at
     run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
@@ -2774,6 +2781,14 @@ def _ansi_c_heredoc_word(command, i, limit):
 # A comment's text that reads the same whether a '#' opens a comment or is word text: no quote, backslash, '$',
 # backquote, parenthesis, brace or redirection character (_ansi_c_static_scan).
 _ANSI_C_NEUTRAL_RE = re.compile(r"[^'\"`$\\(){}<>]*")
+# What the scan cannot read exactly as bash does inside a backquote substitution's body (_ansi_c_static_scan): a
+# backslash before another backslash, a '$', a backquote or a quote, and a backquote it does not read as the body's
+# own closing one. bash finds the body's end at its first unescaped backquote and turns \\ into \, \$ into $ and \`
+# into ` (and \" into " in a backquote inside double quotes) before it parses the body, so a doubled or escaped
+# quote opener there is another quote to bash ($'\\x67'it and \$'\x67'it both run git), and a backquote inside a
+# quoted string, an ANSI-C body, a here-document body, a '$(...)' or a '${...}' in the body is undefined in POSIX.
+# The scan reads the body as written and models none of that, so it refuses at each match.
+_ANSI_C_BACKQUOTE_UNSURE_RE = re.compile(r"\\[\\$`'\"]|`")
 
 
 def _ansi_c_static_scan(command):
@@ -2793,8 +2808,14 @@ def _ansi_c_static_scan(command):
     and this one disagree the text from the '#' to its line's end reads the same both ways when it holds none
     of _ANSI_C_NEUTRAL_RE's characters (it is kept as written), and otherwise the scan refuses.
 
-    It refuses (_StaticReadingUncertain) only ahead of the last ANSI-C or locale quote (past it nothing is
-    decoded, so the rest is kept as written): at a '#' at a word start with a parenthesis open, at such a
+    It refuses (_StaticReadingUncertain) only at or ahead of the last ANSI-C or locale quote (past it nothing is
+    decoded, so the rest is kept as written): inside a backquote substitution's body (ticks, the count of '`'
+    contexts open), at each match of _ANSI_C_BACKQUOTE_UNSURE_RE (a backslash before a backslash, '$', backquote
+    or quote, which bash removes or may remove before it parses the body, read in the text the scan walks and in
+    every single-quoted string, ANSI-C quote, here-document delimiter word and quoted here-document body it takes
+    whole; and a backquote met where the innermost context is not that body's own, inside double quotes, an
+    unquoted here-document body, a '$(...)' or a '${...}', where bash ends the body or POSIX leaves it undefined);
+    at a '#' at a word start with a parenthesis open, at such a
     disagreement, at a '${' that opens a bash 5.3 command substitution (${ cmd; } or ${| cmd; }) or a '$['
     arithmetic, at a here-document delimiter word whose bash reading (_ansi_c_heredoc_word) differs from the
     one before this (<<$'E\\x41' ends at the line EA, <<"E\\"F" at E"F) or that it does not model, at a
@@ -2813,16 +2834,20 @@ def _ansi_c_static_scan(command):
     index = None  # _ansi_c_line_index(command), built at the first here-document body
     word_at = 0
     nl_at = -1  # the index of the first newline at or after i once looked up (len(command) when none)
+    ticks = 0  # how many '`' contexts stack holds: inside a backquote body when nonzero
     last = max(command.rfind("$'"), command.rfind('$"'))
     i, n = 0, len(command)
     while True:
         if queue:
             start, end, quoted = queue.pop()
             if quoted:
+                if ticks and start <= last and _ANSI_C_BACKQUOTE_UNSURE_RE.search(command, start, end) is not None:
+                    raise _StaticReadingUncertain("a quoted here-document body inside a backquote substitution "
+                                                  "that holds a backquote or a backslash bash removes there", start)
                 out.append(command[start:end])
                 i = word_at = end
                 continue
-            frames.append((end, len(stack), len(depth), queue))
+            frames.append((end, len(stack), len(depth), queue, ticks))
             queue = []
             stack.append("H")
             i = start
@@ -2831,7 +2856,7 @@ def _ansi_c_static_scan(command):
         if i >= limit:
             if not frames:
                 break
-            _end, height, levels, queue = frames.pop()
+            _end, height, levels, queue, ticks = frames.pop()
             del stack[height:]
             del depth[levels:]
             pending = []
@@ -2843,6 +2868,10 @@ def _ansi_c_static_scan(command):
         c = command[i]
         top = stack[-1] if stack else None
         if c == "\\" and i + 1 < limit:
+            if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.match(command, i) is not None:
+                raise _StaticReadingUncertain("a backslash before a backslash, '$', backquote or quote inside a "
+                                              "backquote substitution, which bash may remove before it parses the "
+                                              "body", i)
             if command[i + 1] == "\n" and word_at == i and top not in ('"', "H"):
                 word_at = i + 2  # bash removes a line continuation first, so a word start stays one
             out.append(command[i:i + 2])
@@ -2852,8 +2881,12 @@ def _ansi_c_static_scan(command):
             if c == '"' and top == '"':
                 stack.pop()
             elif c == "`":
+                if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.match(command, i) is not None:
+                    raise _StaticReadingUncertain("a backquote inside double quotes or a here-document body inside "
+                                                  "a backquote substitution", i)
                 stack.append("`")
                 depth.append(0)
+                ticks += 1
                 word_at = i + 1
             elif command.startswith("$(", i):
                 stack.append("(")
@@ -2922,6 +2955,9 @@ def _ansi_c_static_scan(command):
         if command.startswith("<<", i):
             match = _ANSI_C_HEREDOC_RE.match(command, i, limit)
             if match is not None:
+                if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.search(command, i, match.end()) is not None:
+                    raise _StaticReadingUncertain("a here-document delimiter word inside a backquote substitution "
+                                                  "that holds a backquote or a backslash bash removes there", i)
                 word = match.group(2)
                 delim = re.sub(r"\\(.)", r"\1", word.replace("'", "").replace('"', ""))
                 quoted = any(q in word for q in "'\"\\")
@@ -2956,11 +2992,18 @@ def _ansi_c_static_scan(command):
         if c == "'":
             close = command.find("'", i + 1, limit)
             end = limit if close < 0 else close + 1
+            if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.search(command, i, end) is not None:
+                raise _StaticReadingUncertain("a single-quoted string inside a backquote substitution that holds a "
+                                              "backquote or a backslash bash removes there", i)
             out.append(command[i:end])
             i = end
             continue
         if c == "$" and i + 1 < limit and command[i + 1] == "'":
             match = _ANSI_C_QUOTE_RE.match(command, i, limit)
+            if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.search(
+                    command, i, limit if match is None else match.end()) is not None:
+                raise _StaticReadingUncertain("an ANSI-C quote inside a backquote substitution that holds a "
+                                              "backquote or a backslash bash removes there", i)
             if match is None:
                 out.append(command[i:limit])
                 i = limit
@@ -2979,9 +3022,14 @@ def _ansi_c_static_scan(command):
             if top == "`":
                 stack.pop()
                 depth.pop()
+                ticks -= 1
             else:
+                if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.match(command, i) is not None:
+                    raise _StaticReadingUncertain("a backquote inside a '$(...)', '<(...)', '>(...)' or '${...}' "
+                                                  "inside a backquote substitution", i)
                 stack.append("`")
                 depth.append(0)
+                ticks += 1
                 word_at = i + 1
         elif command.startswith("$(", i) or (top != "{" and command.startswith(("<(", ">("), i)):
             stack.append("(")  # a process substitution closes as $(...) does: <(true)# is one word
@@ -33560,7 +33608,9 @@ def _rwh_static_git_word(command):
     the four guards read: each quote decoded where bash decodes it, so a $' inside single or double
     quotes or a comment cannot swallow a later quote's opening, as in echo '$'; gi$'\\x74' checkout x),
     with a refusal of that reading (_StaticReadingUncertain: a '$' and a line continuation before a
-    quote, a \\c\\\\ pair, a \\U code past U+10FFFF, a construct the scan cannot read with certainty)
+    quote, a \\c\\\\ pair, a \\U code past U+10FFFF, a backslash before a backslash, '$', backquote or
+    quote or a backquote it does not model inside a backquote substitution's body, a construct the scan
+    cannot read with certainty)
     read as a git word, so such a command, even one that names no git, fails closed wherever a git-word
     command outside the read-only grammar does (a missing or relative cwd included, with no hold live):
     the disclosed over-refusal. Each reading can only add a match to the raw-text test, never clear one,

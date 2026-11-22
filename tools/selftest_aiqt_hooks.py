@@ -6535,6 +6535,108 @@ def _test_static_decoded_braced(failures):
             aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = split
 
 
+# (sdr-bq-*) Inside a backquote substitution's body bash turns \\ into \, \$ into $ and \` into ` (and \" into " in a
+# backquote inside double quotes) before it parses the body (F1 of the review of b50058c0): `$'\\x67'it ...` and
+# `\$'\x67'it ...` both run git, and `gi\$"t" ...` runs git through a locale quote (bash 5.3.9). The static decoded
+# reading does not model that un-escaping, so it refuses a backslash before a backslash, '$', backquote or quote in
+# such a body, and a backquote it does not read as the body's own closing one (_ANSI_C_BACKQUOTE_UNSURE_RE): each
+# guard denies. Each row is (label, handler name, command, decision at b50058c0), the decision each takes under the
+# flip that drops that refusal, so each row is red on revert; each row's plain twin denies (sdr-bq-*-plain).
+_STATIC_DECODED_BACKQUOTE = (
+    ("sdr-bq-sectvl-doubled", "commit_msg_subst", "echo `$'\\\\x67'it commit -m \"$(id)\"`", "allow"),
+    ("sdr-bq-sectvl-escaped", "commit_msg_subst", "echo `\\$'\\x67'it commit -m \"$(id)\"`", "allow"),
+    ("sdr-bq-sectvl-locale", "commit_msg_subst", "echo `gi\\$\"t\" commit -m \"$(id)\"`", "allow"),
+    ("sdr-bq-cmtidn-doubled", "commit_identity", "echo `git commit --author=$'\\\\x43'laude -m x`", "allow"),
+    ("sdr-bq-cmtidn-double-quoted", "commit_identity", "echo \"`git commit --author=$'\\\\x43'laude -m x`\"",
+     "allow"),
+    ("sdr-bq-cmtidn-escaped", "commit_identity", "echo `git commit --author=\\$'\\x43'laude -m x`", "allow"),
+    ("sdr-bq-expbnd-doubled", "git_explicit_binding", "echo `git add --all && git $'\\\\x70'ush`", "allow"),
+    ("sdr-bq-expbnd-escaped", "git_explicit_binding", "echo `git add --all && git \\$'\\x70'ush`", "allow"),
+    ("sdr-bq-expbnd-locale", "git_explicit_binding", "echo `git add --all && git \\$\"push\"`", "allow"),
+    ("sdr-bq-cnsdif-doubled", "diff_source_pretool", "echo `git $'\\\\x6c'og -p` >&2", "allow"),
+    ("sdr-bq-cnsdif-escaped", "diff_source_pretool", "echo `git \\$'\\x6c'og -p` >&2", "allow"),
+    ("sdr-bq-cnsdif-locale", "diff_source_pretool", "echo `gi\\$\"t\" log -p` >&2", "allow-note"),
+)
+_STATIC_DECODED_BACKQUOTE_PLAIN = (
+    ("sdr-bq-sectvl-plain", "commit_msg_subst", "echo `git commit -m \"$(id)\"`"),
+    ("sdr-bq-cmtidn-plain", "commit_identity", "echo `git commit --author=Claude -m x`"),
+    ("sdr-bq-expbnd-plain", "git_explicit_binding", "echo `git add --all && git push`"),
+    ("sdr-bq-cnsdif-plain", "diff_source_pretool", "echo `git log -p` >&2"),
+)
+# The other backquote nesting the scan does not model, ahead of an ANSI-C quote: each reading refuses, and reads
+# with no refusal under the flip.
+_STATIC_DECODED_BACKQUOTE_REFUSED = (
+    ("sdr-bq-refuse-sq-backquote", "echo `echo '`'`; gi$'\\x74' log"),
+    ("sdr-bq-refuse-dq-backquote", "echo `echo \"`date`\"`; gi$'\\x74' log"),
+    ("sdr-bq-refuse-subst-backquote", "echo `echo $(echo `date`)`; gi$'\\x74' log"),
+    ("sdr-bq-refuse-escaped-backquote", "echo `echo \\`date\\``; gi$'\\x74' log"),
+    ("sdr-bq-refuse-heredoc-quoted", "echo `cat <<'E'\n\\$x\nE\n`; gi$'\\x74' log"),
+    ("sdr-bq-refuse-ansi-c-backquote", "echo `echo $'a`'`; gi$'\\x74' log"),
+    ("sdr-bq-refuse-dq-escaped-quote", "echo \"`echo \\\"x\\\"`\"; gi$'\\x74' log"),
+    ("sdr-bq-refuse-doubled-dollar", "echo `echo \\\\$'\\x74'`"),
+)
+# Backquote bodies the scan reads exactly as bash does: still decoded (no over-reach), and a backslash pair after the
+# last ANSI-C quote is past the refusal (nothing is decoded there).
+_STATIC_DECODED_BACKQUOTE_READ = (
+    ("sdr-bq-reading-plain", "echo `git $'\\x6c'og -p`", "echo `git log -p`"),
+    ("sdr-bq-reading-after", "echo `date`; gi$'\\x74' log", "echo `date`; git log"),
+    ("sdr-bq-reading-other-escape", "echo `printf a\\ b`; gi$'\\x74' log", "echo `printf a\\ b`; git log"),
+    ("sdr-bq-reading-past-last", "gi$'\\x74' log; echo `printf \\\\`", "git log; echo `printf \\\\`"),
+)
+
+
+def _test_static_decoded_backquote(failures):
+    """(sdr-bq-*) The static decoded reading refuses what it cannot read exactly as bash does inside a backquote
+    substitution's body: _STATIC_DECODED_BACKQUOTE rows deny (their plain twins deny too), and
+    _STATIC_DECODED_BACKQUOTE_REFUSED readings refuse, while _STATIC_DECODED_BACKQUOTE_READ readings still decode.
+    Then, under the flip that drops the backquote refusal (_ANSI_C_BACKQUOTE_UNSURE_RE matching nothing, the scan
+    of b50058c0), each guard row takes its decision at b50058c0 and each refused reading reads with no refusal, so
+    each row is red on revert."""
+    for label, name, command, _old in _STATIC_DECODED_BACKQUOTE:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != "deny":
+            failures.append("({}) {} on {!r}: expected deny, got {}".format(label, name, command, got))
+    for label, name, command in _STATIC_DECODED_BACKQUOTE_PLAIN:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != "deny":
+            failures.append("({}) {} on {!r}: expected deny, got {}".format(label, name, command, got))
+    for label, command in _STATIC_DECODED_BACKQUOTE_REFUSED:
+        try:
+            got = aiqt_hooks._ansi_c_static_reading(command)
+        except aiqt_hooks._StaticReadingUncertain:
+            continue
+        failures.append("({}) _ansi_c_static_reading({!r}) must refuse (_StaticReadingUncertain); it read {!r}"
+                        .format(label, command, got))
+    for label, command, want in _STATIC_DECODED_BACKQUOTE_READ:
+        try:
+            got = aiqt_hooks._ansi_c_static_reading(command)
+        except aiqt_hooks._StaticReadingUncertain as exc:
+            got = "refused: {}".format(exc)
+        if got != want:
+            failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
+                label, command, want, got))
+    # The flip reads its name with getattr, so against a tree without the refusal (the revert) each row reports its
+    # failure above instead of raising.
+    unsure = getattr(aiqt_hooks, "_ANSI_C_BACKQUOTE_UNSURE_RE", None)
+    if unsure is not None:
+        aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = re.compile(r"[^\s\S]")
+    try:
+        for label, name, command, old in _STATIC_DECODED_BACKQUOTE:
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != old:
+                failures.append("({}-flip) with no backquote refusal the row must take its decision at b50058c0 "
+                                "{}, so it pins the refusal; got {}".format(label, old, got))
+        for label, command in _STATIC_DECODED_BACKQUOTE_REFUSED:
+            try:
+                aiqt_hooks._ansi_c_static_reading(command)
+            except aiqt_hooks._StaticReadingUncertain as exc:
+                failures.append("({}-flip) with no backquote refusal _ansi_c_static_reading({!r}) must read with no "
+                                "refusal, so the row pins the refusal; it refused: {}".format(label, command, exc))
+    finally:
+        if unsure is not None:
+            aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = unsure
+
+
 # (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, a '$' and a line
 # continuation before a quote (_ANSI_C_CONTINUED_QUOTE_RE, whatever the quote holds), or an ANSI-C quote
 # with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, to anything but one inert
@@ -39062,6 +39164,7 @@ def _main_isolated(monitor):
         _test_fallback_views(failures)
         _test_static_decoded_reading(failures)
         _test_static_decoded_braced(failures)
+        _test_static_decoded_backquote(failures)
         _test_static_decoded_gate(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
