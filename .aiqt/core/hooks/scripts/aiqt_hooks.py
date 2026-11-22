@@ -2445,12 +2445,49 @@ def _ansi_c_static_reading(command):
     itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear one. A word bash builds at
     run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
     unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
-    decoded: the disclosed run-time-word residual. Returns command itself when no such quote is found, and the
-    rest of the text unchanged from an ANSI-C quote that never closes. Linear; raises only
-    _StaticReadingUncertain."""
-    if "$'" not in command and '$"' not in command:
+    decoded: the disclosed run-time-word residual. GATE G comes first (_ansi_c_static_relevant): when the command
+    holds no locale quote and no ANSI-C quote with an escape that can spell part of a guarded word, the reading is
+    command itself, so there is no extra reading and no refusal and each guard runs main's path unchanged (an
+    escape that decodes only to a blank, a control character, a quote, a backslash or non-ASCII text, as in
+    printf $'done\\n', spells no git word, subcommand, option or identity value). Otherwise the scan reads the whole
+    command as above, and returns the rest of the text unchanged from an ANSI-C quote that never closes. Linear;
+    raises only _StaticReadingUncertain."""
+    if not _ansi_c_static_relevant(command):
         return command
     return _ansi_c_static_scan(command)
+
+
+# The characters an ANSI-C escape may decode to and spell part of a word a guard tests (_ansi_c_static_relevant):
+# printable, non-blank ASCII ('!' to '~') other than the single quote, the double quote and the backslash.
+_ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - frozenset("'\"\\")
+
+
+def _ansi_c_static_relevant(command):
+    """GATE G of the static decoded reading (_ansi_c_static_reading), which needs no grammar: True when command
+    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote one of whose escapes
+    (_ANSI_C_ESCAPE_RE) decodes (_ansi_c_escape) to a character in _ANSI_C_RELEVANT_CHARS; False otherwise, and
+    then the guards read no static decoded reading and refuse nothing on its account. The quote is matched on its
+    own (_ANSI_C_QUOTE_RE, which ends it at the same unescaped single quote bash does) from EVERY index that holds
+    $', with no tracking of the quoting around it, so a spurious match that starts earlier (inside single quotes,
+    a comment or a here-document body) and swallows a real quote's opening cannot hide that quote: its own index
+    is matched again. A $' or $" inside other quotes is read the same way, so it can only make the command
+    relevant, which keeps the scan's path. An escape that decodes only to a blank, a control character, a quote, a
+    backslash or non-ASCII text, or to nothing (a code point past U+10FFFF), is not relevant; an escape bash keeps
+    unchanged (an unknown letter such as \\q) holds its letter and is relevant. Linear: a match from one index ends
+    no later than the single quote of the next $' (the character before that quote is the '$', not a backslash,
+    so no escape holds it), so the matches together read each character a bounded number of times. Never
+    raises."""
+    if '$"' in command:
+        return True
+    at = command.find("$'")
+    while at >= 0:
+        match = _ANSI_C_QUOTE_RE.match(command, at)
+        if match is not None:
+            for escape in _ANSI_C_ESCAPE_RE.finditer(match.group(1)):
+                if not _ANSI_C_RELEVANT_CHARS.isdisjoint(_ansi_c_escape(escape)):
+                    return True
+        at = command.find("$'", at + 1)
+    return False
 
 
 # A here-document operator (<< or <<-, not the <<< here-string) and its delimiter word, as bash reads them.

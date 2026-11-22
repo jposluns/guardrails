@@ -6324,7 +6324,9 @@ def _test_static_decoded_reading(failures):
             failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
     for label, command, want in (
             ("sdr-reading-plain", "git $'\\x6c'og -p", "git log -p"),
-            ("sdr-reading-quoted", "printf $'a\\tb'", "printf 'a\tb'"),
+            ("sdr-reading-quoted", "printf $'a\\tb'; gi$'\\x74' log", "printf 'a\tb'; git log"),
+            ("sdr-reading-gate-none", "printf $'a\\tb'", "printf $'a\\tb'"),
+            ("sdr-reading-gate-none-refusable", "echo $(true)#; printf $'a\\tb'", "echo $(true)#; printf $'a\\tb'"),
             ("sdr-reading-dq-literal", "echo \"$'\\x60'\"", "echo \"$'\\x60'\""),
             ("sdr-reading-dq-subst", "echo \"$(git $'\\x6c'og)\"", "echo \"$(git log)\""),
             ("sdr-reading-locale", "gi$\"t\" log", "gi\"t\" log"),
@@ -6383,6 +6385,105 @@ def _test_static_decoded_reading(failures):
                                 "so it pins the reading; got {}".format(label, old, got))
     finally:
         aiqt_hooks._ansi_c_static_reading = reading
+
+
+# (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, or an ANSI-C quote
+# with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, makes the reading run;
+# otherwise there is no extra reading and no refusal. _STATIC_GATE_PREFIX is a construct the scan refuses ahead of a
+# relevant quote. The F6 commands hold no git word: each guard allows them (main does) and denied them before G.
+_STATIC_GATE_PREFIX = "echo $(date +%F)#nightly; "
+_STATIC_GATE_GUARDS = (("sectvl", "commit_msg_subst"), ("cmtidn", "commit_identity"),
+                       ("expbnd", "git_explicit_binding"), ("cnsdif", "diff_source_pretool"))
+_STATIC_GATE_F6 = (
+    ("array", "files=(\n  a.py # first\n  b.py\n)\nprintf $'%s\\n' \"${files[@]}\""),
+    ("subshell", "(\n  # build first\n  make\n) && printf $'done\\n'"),
+    ("subst-hash", "echo $(date +%F)#nightly; printf $'x\\n'"),
+)
+# Irrelevant escapes after the refused construct (diff_source_pretool): each allows, and denies under the flip that
+# reads every quote as relevant (the reading before G).
+_STATIC_GATE_IRRELEVANT = (
+    ("sdr-gate-blank", _STATIC_GATE_PREFIX + "printf $'\\x20'"),
+    ("sdr-gate-control", _STATIC_GATE_PREFIX + "printf $'\\cA'"),
+    ("sdr-gate-single-quote", _STATIC_GATE_PREFIX + "printf $'\\x27'"),
+    ("sdr-gate-double-quote", _STATIC_GATE_PREFIX + "printf $'\\x22'"),
+    ("sdr-gate-backslash", _STATIC_GATE_PREFIX + "printf $'\\\\'"),
+    ("sdr-gate-non-ascii", _STATIC_GATE_PREFIX + "printf $'\\u00e9'"),
+    ("sdr-gate-past-unicode", _STATIC_GATE_PREFIX + "printf $'\\U00110000'"),
+    ("sdr-gate-delete", _STATIC_GATE_PREFIX + "printf $'\\x7f'"),
+    ("sdr-gate-named", _STATIC_GATE_PREFIX + "printf $'\\t\\n\\r\\e\\a\\v\\f\\b\\0'"),
+)
+# Relevant escapes: (label, handler name, command, decision under the flip that reads nothing as relevant). Each
+# denies, through the refusal after the construct or through the decoded word.
+_STATIC_GATE_RELEVANT = (
+    ("sdr-gate-hex", "diff_source_pretool", _STATIC_GATE_PREFIX + "git $'\\x6c'og -p", "allow"),
+    ("sdr-gate-octal", "commit_msg_subst", _STATIC_GATE_PREFIX + "git c$'\\157'mmit -m \"$(hostname)\"", "allow"),
+    ("sdr-gate-unicode", "git_explicit_binding", _STATIC_GATE_PREFIX + "git add --all && git $'\\u0070'ush",
+     "allow"),
+    ("sdr-gate-identity", "commit_identity",
+     _STATIC_GATE_PREFIX + "git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "allow"),
+    ("sdr-gate-locale", "diff_source_pretool", _STATIC_GATE_PREFIX + "gi$\"t\" log -p", "allow-note"),
+    ("sdr-gate-unknown-escape", "diff_source_pretool", _STATIC_GATE_PREFIX + "git log $'\\q'", "allow-note"),
+    ("sdr-gate-after-irrelevant", "diff_source_pretool", "printf $'\\t'; git $'\\x6c'og -p", "allow"),
+)
+# A spurious $' inside single quotes whose match swallows the real quote's opening: each denies, and allows under the
+# flip that matches the quotes once, left to right, without overlap, instead of from every index.
+_STATIC_GATE_EVERY_INDEX = (
+    ("sdr-gate-every-index-sectvl", "commit_msg_subst", "echo '$'; $'\\x67'it commit -m \"$(hostname)\""),
+    ("sdr-gate-every-index-cmtidn", "commit_identity",
+     "echo '$'; git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y"),
+    ("sdr-gate-every-index-expbnd", "git_explicit_binding", "echo '$'; git add -A; git $'\\x70'ush"),
+    ("sdr-gate-every-index-cnsdif", "diff_source_pretool", "echo '$'; git $'\\x6c'og -p"),
+)
+
+
+def _test_static_decoded_gate(failures):
+    """(sdr-gate-*) Gate G (_ansi_c_static_relevant): each irrelevant row (the F6 commands under every guard, and each
+    class of escape that spells no guarded word) allows and its gate reads nothing relevant; each relevant row denies
+    and its gate reads a relevant quote. Then every row runs again under a flip: the irrelevant rows with every
+    ANSI-C or locale quote read as relevant (the reading before G), where they must deny; the relevant rows with
+    nothing read as relevant, where they must take main's decision; and the every-index rows with the quotes
+    matched once without overlap, where they must allow. So each row is red without the gate's part it names."""
+    gate = aiqt_hooks._ansi_c_static_relevant
+    irrelevant = [("sdr-gate-f6-{}-{}".format(name, rule), handler, command)
+                  for name, command in _STATIC_GATE_F6 for rule, handler in _STATIC_GATE_GUARDS]
+    irrelevant += [(label, "diff_source_pretool", command) for label, command in _STATIC_GATE_IRRELEVANT]
+    relevant = list(_STATIC_GATE_RELEVANT) + [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]
+    for label, name, command in irrelevant:
+        if gate(command):
+            failures.append("({}) _ansi_c_static_relevant({!r}) must read no relevant quote".format(label, command))
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != "allow":
+            failures.append("({}) {} on {!r}: expected allow, got {}".format(label, name, command, got))
+    for label, name, command, _flip in relevant:
+        if not gate(command):
+            failures.append("({}) _ansi_c_static_relevant({!r}) must read a relevant quote".format(label, command))
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != "deny":
+            failures.append("({}) {} on {!r}: expected deny, got {}".format(label, name, command, got))
+
+    def matched_once(command):
+        if '$"' in command:
+            return True
+        return any(not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._ansi_c_escape(escape))
+                   for match in aiqt_hooks._ANSI_C_QUOTE_RE.finditer(command)
+                   for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1)))
+
+    flips = (
+        ("every quote relevant", lambda command: "$'" in command or '$"' in command,
+         [row + ("deny",) for row in irrelevant]),
+        ("nothing relevant", lambda command: False, list(_STATIC_GATE_RELEVANT)),
+        ("quotes matched once without overlap", matched_once, [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]),
+    )
+    try:
+        for how, flip, rows in flips:
+            aiqt_hooks._ansi_c_static_relevant = flip
+            for label, name, command, want in rows:
+                got = _decision(getattr(aiqt_hooks, name), command)
+                if got != want:
+                    failures.append("({}-flip) with the gate reading {} the row must take {}, so it pins the gate; "
+                                    "got {}".format(label, how, want, got))
+    finally:
+        aiqt_hooks._ansi_c_static_relevant = gate
 
 
 def _test_heredoc_terminator(failures):
@@ -38631,6 +38732,7 @@ def _main_isolated(monitor):
         _test_wait_loop_deny_text(failures, tmp)
         _test_fallback_views(failures)
         _test_static_decoded_reading(failures)
+        _test_static_decoded_gate(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
