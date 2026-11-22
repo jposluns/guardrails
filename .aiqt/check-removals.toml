@@ -19,6 +19,27 @@ observed = "ratchet/raise-kind-refused runs a raise entry with the pin moved to 
 
 [[removal]]
 suite = "rules-core-selftest"
+id = "history/one-commit-on-main-accepted"
+state = "unreachable"
+capability-removed = "the self-comparison of tools/gen_rules_core.py when the merge base with main is HEAD, removed in the change that adds this entry: such a run now also compares with HEAD's first parent read from the raw commit, so a root commit on main (one commit, as a fresh one-commit repository is) is cannot-evaluate and no longer passes"
+observed = "cannot-evaluate/main-run-root-commit runs a one-commit repository on main and asserts exit 2 in both modes with nothing written; flip/main-run-root-commit asserts it passes with the first-parent read switched off; history/main-run-shrink-accepted asserts a clean run on main with a parent still passes"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "history/one-commit-per-entry-rules-apply"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "history/main-run-per-entry-rules-apply"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "flip/one-commit-per-entry-rules-apply"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "flip/main-run-per-entry-rules-apply"
+
+[[removal]]
+suite = "rules-core-selftest"
 id = "ratchet/raise-after-pin-pending"
 state = "covered"
 covered-by-suite = "rules-core-selftest"

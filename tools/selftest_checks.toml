@@ -7862,13 +7862,26 @@ expected-check-ids = [
   # history still accepts a shrink appended since main, and a main with no budget file
   "history/shrink-appended-accepted",
   "history/no-budget-at-merge-base-accepted",
-  # one commit with HEAD on main (as the release reproduce step builds): the merge base is HEAD and passes,
-  # the per-entry rules still refuse an over-cap entry (exit 0 with that guard off), and the same commit on
-  # master has no main to read (exit 2)
-  "history/one-commit-on-main-accepted",
+  # HEAD on main (a run on main, or a HEAD main already contains): the merge base is HEAD, so HEAD's first
+  # parent (read from the raw commit) is compared as well. A shrink on main undone by a later commit on main
+  # is refused (at the tip and with HEAD behind main) and passes with the parent read switched off; a
+  # replacement ref cannot swap the parent (exit 0 once honoured); a clean main run appending a shrink
+  # passes; a root commit on main is exit 2 (exit 0 with the parent read off) and an unreadable parent is
+  # refused by the parent read; the same commit on master has no main to read (exit 2); the per-entry
+  # rules still refuse an over-cap entry on main (exit 0 with that guard off)
+  "history/main-run-undo-refused",
+  "flip/main-run-undo-refused",
+  "history/head-contained-in-main-undo-refused",
+  "flip/head-contained-in-main-undo-refused",
+  "history/main-run-parent-replace-ignored",
+  "flip/main-run-parent-replace-ignored",
+  "history/main-run-shrink-accepted",
+  "cannot-evaluate/main-run-root-commit",
+  "flip/main-run-root-commit",
+  "cannot-evaluate/main-run-parent-unreadable",
   "cannot-evaluate/one-commit-not-on-main",
-  "history/one-commit-per-entry-rules-apply",
-  "flip/one-commit-per-entry-rules-apply",
+  "history/main-run-per-entry-rules-apply",
+  "flip/main-run-per-entry-rules-apply",
   # a replacement ref or a grafts line cannot move the merge base; exit 0 once git is let honour them
   "history/replace-ref-ignored",
   "flip/replace-ref-ignored",

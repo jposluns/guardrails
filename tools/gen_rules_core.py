@@ -30,29 +30,40 @@ it is always kept whole and no cap applies to its entry. A pending rule is rende
 split. file-cap is enforced once pending is empty; until then the render is larger than it by construction,
 and the measured size is printed against it.
 
-HISTORY. The budget is judged against the log as committed at the merge base of HEAD with main, read from
-git (read only: rev-parse, merge-base, ls-tree and cat-file, with replacement refs ignored, the graft file
-pinned to the empty null device, the commit-graph not consulted, every transport refused by
-protocol.allow=never, and no caller GIT_ variable, global or system config). main is refs/remotes/origin/main
-when it resolves to a commit, else refs/heads/main. Where that commit holds a budget file:
+HISTORY. The budget is judged against the log as committed at the merge base of HEAD with main and, where
+that merge base is HEAD itself, also at HEAD's first parent, read from git (read only: rev-parse,
+merge-base, ls-tree and cat-file, with replacement refs ignored, the graft file pinned to the empty null
+device, the commit-graph not consulted, every transport refused by protocol.allow=never, and no caller GIT_
+variable, global or system config). main is refs/remotes/origin/main when it resolves to a commit, else
+refs/heads/main. Where HEAD is on main (a run on main itself, or any HEAD main already contains), the merge
+base is the revision under check, so comparing with it alone would compare the log with itself; HEAD's
+first parent is then read as HEAD's raw commit object records it (rev-parse HEAD^@ under the same settings,
+so no replacement ref, graft line or commit-graph can change it, and a shallow repository is refused
+first), and a root commit, a malformed parent id or a parent that is not a readable commit is
+cannot-evaluate (exit 2), never a self-comparison that passes. Each comparison below runs against every commit read (the merge base
+and, where read, the first parent); a commit that holds no budget file is left out. Where a compared
+commit holds a budget file:
   - every entry committed there must be held here unchanged, in place, every key compared (the note and the
     kind included), so deleting or rewriting an entry committed at the merge base is a finding;
   - the budget in force here may not hold a pending id that is not on the budget in force there, or a cap
     above it, with no exception: the pending list and the caps only shrink. This comparison reads nothing
     from CAP_SEED, PENDING_SEED or ACCEPTED, so adding an id to pending fails whatever else changes, an edit
     to those pins included.
-Where that commit holds no budget file (the change that adds one), nothing is compared there: there is no
+Where no compared commit holds a budget file (the change that adds one), nothing is compared: there is no
 list yet to grow, and the seed, the pin and the per-entry rules below bound the log. Where the base cannot
 be read (git cannot run, the root is not the top of a git work tree, the repository is shallow, neither
-main ref resolves, HEAD is not a commit, there is no merge base or more than one, or the budget there is
-not a regular file, not UTF-8, not TOML or off the schema), the result is cannot-evaluate (exit 2), never
-a pass. An entry appended since the merge base is
-not history yet: until it is on main, these two checks do not cover it, and the per-entry rules below do.
-Where HEAD is on main (a repository of one commit on main, such as the fresh one the release reproduce step
-builds, or a run on main itself), the merge base is HEAD: the log is compared with itself, these two checks
-find nothing, and the per-entry rules below decide. A repository whose only branch is not main has no main
-to read: cannot-evaluate, as above.
-What this does not show: that main itself was reviewed, or anything about an entry before it reached main.
+main ref resolves, HEAD is not a commit, there is no merge base or more than one, HEAD is on main and its
+first parent cannot be read as above, or a budget read there is not a regular file, not UTF-8, not TOML or
+off the schema), the result is cannot-evaluate (exit 2), never a pass. An entry appended since the merge
+base is not history yet: until it is on main, these two checks do not cover it, and the per-entry rules
+below do. A repository of one commit on main is a root commit with HEAD on main: cannot-evaluate. The
+throwaway repositories that replay this check (the release reproduce step, tools/gen_rules.py's class check,
+tools/check_gensrc_failclose.py's template) commit the checked tree on top of a commit holding the tree of
+the checked commit's first parent, so the comparison there is with that tree; they hold those two commits
+only. A repository whose only branch is not main has no main to read: cannot-evaluate, as above.
+What this does not show: that main itself was reviewed, anything about an entry before it reached main, or
+anything about a change on main older than HEAD's first parent (each run on main compares one step: HEAD,
+or the working tree, against HEAD's first parent and HEAD).
 
 THE RATCHET (per entry, within the log here). The pending list and the caps only shrink; there is no raise:
   - the seed entry must equal the budget as this renderer was added (CAP_SEED and PENDING_SEED here);
@@ -62,9 +73,10 @@ THE RATCHET (per entry, within the log here). The pending list and the caps only
   - ACCEPTED here pins one accepted entry: its number in the log, its caps and its pending. The log must
     hold that entry and it must equal the pin. Moving the pin admits nothing (the rule above holds for
     every entry, and HISTORY reads no pin). The pin proves no history (HISTORY does); what it adds is that
-    where the merge base holds no budget file, or is HEAD itself, a pinned shrink entry cannot be deleted or
-    rewritten unseen.
-Every passing run prints the pinned entry number and the merge base it compared with. An id on the budget
+    where no compared commit holds a budget file, a pinned shrink entry cannot be deleted or rewritten
+    unseen.
+Every passing run prints the pinned entry number, the merge base it compared with and, where it read one,
+HEAD's first parent. An id on the budget
 in force that no longer needs to be there (now split, now within entry-cap, or the apex) is a finding
 until a shrink entry drops it. Every logged pending id must fully
 match the corpus-id pattern (an id with a trailing newline is refused) in every entry, here and at the
@@ -75,8 +87,9 @@ EXIT. 0 clean. 1 on drift (--check) or on a finding, and a finding in write mode
     entry-cap; a detail-trigger over trigger-cap; a seed entry that differs from CAP_SEED and PENDING_SEED;
     a log that does not hold the entry ACCEPTED pins, or holds it with other values; any entry after the
     seed that lists a pending id the entry before it does not or raises a cap; an entry after the seed that
-    changes nothing; an entry committed at the merge base with main that is deleted or rewritten here; a
-    pending id in force that is not on the budget in force there, or a cap in force above it; a pending id
+    changes nothing; an entry committed at the merge base with main (or, where that is HEAD, at HEAD's
+    first parent) that is deleted or rewritten here; a pending id in force that is not on the budget in
+    force there, or a cap in force above it; a pending id
     that no longer needs to be there; the render over file-cap while pending is empty;
   - in the fresh render, and in --check also in the committed file when it differs from the fresh render:
     a frontmatter block; an `@` anywhere (the instruction-budget gate reads an `@` as an import even inside a
@@ -104,8 +117,8 @@ among them), a pending entry that is not an id, an unsorted or
 repeated pending list, or a pending id in force the corpus does not hold); a committed render that is not
 UTF-8, or is there but is not a regular file (a symbolic link, wherever it points, a directory or another
 kind), which neither mode reads or writes through; a .aiqt/renders/ that cannot be read as a directory
-inside the repository; and a budget at the merge base with main that cannot be read (HISTORY), in both
-modes. A committed render that is absent is drift (exit 1), as for every generated file.
+inside the repository; and a budget at the merge base with main, or at HEAD's first parent where the merge
+base is HEAD, that cannot be read, a root commit on main among them (HISTORY), in both modes. A committed render that is absent is drift (exit 1), as for every generated file.
 Write mode opens the render without following a symbolic link in its last component.
 
   gen_rules_core.py               regenerate .aiqt/renders/aiqt-core.md
@@ -113,8 +126,9 @@ Write mode opens the render without following a symbolic link in its last compon
   gen_rules_core.py --self-test   synthetic trees (real git repositories for HISTORY): every finding and
                                   every cannot-evaluate input; a flip for every guard, for the byte
                                   comparison, the id pattern, the render target check, the linked-directory
-                                  probe, the replacement-ref and graft settings and the fail-closed base
-                                  read, showing its case changes outcome with it switched off (the exit, or
+                                  probe, the replacement-ref and graft settings, the fail-closed base read
+                                  and the first-parent read on main, showing its case changes outcome with
+                                  it switched off (the exit, or
                                   for a diagnostic guard only its named reason); a backstop row for each
                                   load check (no-title, empty-layer, group-outside), whose case another step
                                   also refuses; and the config-lane rows, which read each lane runner's real
@@ -193,10 +207,10 @@ PENDING_SEED = frozenset((
 # One accepted entry of core-budget.toml (THE RATCHET): its number in the log ("entries") and its caps and
 # pending. The log must hold that entry with exactly these values. The pinned entry is the seed today; it may
 # be moved forward to a later shrink entry. Moving it admits nothing: every entry after the seed may only
-# shrink whatever the pin says, and against main the budget is judged by the log committed at the merge base,
-# which reads neither this pin nor the seed. The pin proves no history (the merge-base read below does that);
-# what it adds is that where the merge base holds no budget file, or is HEAD itself, a pinned shrink entry
-# cannot be deleted or rewritten unseen.
+# shrink whatever the pin says, and against main the budget is judged by the log committed at the merge base
+# (and, where that is HEAD, at HEAD's first parent), which reads neither this pin nor the seed. The pin proves
+# no history (the base read below does that); what it adds is that where no compared commit holds a budget
+# file, a pinned shrink entry cannot be deleted or rewritten unseen.
 ACCEPTED = dict(CAP_SEED, entries=1, pending=PENDING_SEED)
 # The refs read as main, in order: the first that resolves to a commit is used (HISTORY in the docstring).
 MAIN_REFS = ("refs/remotes/origin/main", "refs/heads/main")
@@ -401,10 +415,12 @@ def _git_lines(root, what, *args):
 
 def _read_base(root):
     """The budget log as committed at the merge base of HEAD with main: a dict of the main ref used, the
-    merge-base commit and "log", the validated log there or None when that commit holds no budget file.
-    Raises ValueError (cannot evaluate, never a pass) when it cannot be read: no git, root not the top of a
-    git work tree, a shallow repository, no main ref, no HEAD commit, no merge base or more than one, or a
-    budget there that is not a regular file, not UTF-8, not TOML or off the schema. A name-keyed function."""
+    merge-base commit, "log", the validated log there or None when that commit holds no budget file, and
+    "parent": None, or, when the merge base is HEAD itself, {"commit": HEAD's first parent, "log": the log
+    there or None}. Raises ValueError (cannot evaluate, never a pass) when it cannot be read: no git, root
+    not the top of a git work tree, a shallow repository, no main ref, no HEAD commit, no merge base or more
+    than one, a merge base that is HEAD with a root commit or an unreadable first parent, or a budget read
+    there that is not a regular file, not UTF-8, not TOML or off the schema. A name-keyed function."""
     top = _git_lines(root, "root is not a git work tree", "rev-parse", "--show-toplevel")
     if len(top) != 1 or os.path.realpath(top[0]) != os.path.realpath(root):
         raise ValueError("{} is not the top of a git work tree (git names {!r})".format(root, top))
@@ -433,14 +449,57 @@ def _read_base(root):
     if len(bases) != 1:
         raise ValueError("HEAD and {} have {} merge bases ({}); exactly one is needed".format(
             main[0], len(bases), ", ".join(bases) or "no common ancestor"))
-    base = {"ref": main[0], "commit": bases[0], "log": None}
-    where = "{} at the merge base {} with {}".format(BUDGET_REL, bases[0][:12], main[0])
-    proc = _base_git(root, "ls-tree", "-z", "--full-tree", bases[0], "--", BUDGET_REL)
+    base = {"ref": main[0], "commit": bases[0], "parent": None,
+            "log": _budget_at(root, bases[0], "{} at the merge base {} with {}".format(
+                BUDGET_REL, bases[0][:12], main[0]))}
+    if bases[0] == head[0]:
+        # HEAD is on main (a run on main, or any HEAD main already contains): the merge base is the revision
+        # under check, so comparing with it alone compares the log with itself. HEAD's first parent, as its
+        # raw commit records it, is compared as well; a root commit or an unreadable parent is
+        # cannot-evaluate (ValueError), never a self-comparison that passes.
+        parent = _head_first_parent(root, head[0])
+        if parent is not None:
+            base["parent"] = {"commit": parent, "log": _budget_at(root, parent, "{} at {}".format(
+                BUDGET_REL, _parent_where({"parent": {"commit": parent}, "ref": main[0]})))}
+    return base
+
+
+def _head_first_parent(root, head):
+    """The first parent of the commit head as its raw commit object records it: `rev-parse <head>^@` (every
+    parent, first parent first) under _base_git_env, so no replacement ref can swap the object, the graft
+    file is the empty null device and the commit-graph is not consulted (a shallow repository, whose
+    boundary would hide parents, is refused before this read). Raises ValueError (cannot evaluate) when head
+    is a root commit, the parent named is not a full object id, or that parent is not a readable commit. A
+    name-keyed function, so the self-test can switch it off (the flip: the run on main then compares the log
+    with itself again)."""
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head) is None:
+        raise ValueError("HEAD resolves to {!r}, not a full object id".format(head))
+    # head is a full hex id, so the argument cannot read as an option (without --verify, rev-parse would echo
+    # an --end-of-options marker as output).
+    parents = _git_lines(root, "HEAD {}: its parents cannot be read".format(head[:12]), "rev-parse", head + "^@")
+    if not parents:
+        raise ValueError("HEAD {} is on main and is a root commit, so there is no earlier revision to compare "
+                         "the budget with (a run on main compares with HEAD's first parent)".format(head[:12]))
+    parent = parents[0]
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parent) is None:
+        raise ValueError("HEAD {}: git names a malformed first parent {!r}".format(head[:12], parent))
+    proc = _base_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", parent + "^{commit}")
+    if proc.returncode != 0 or proc.stdout.decode("ascii", "replace").strip() != parent:
+        raise ValueError("HEAD {}: its first parent {} is not a readable commit (git exited {}), so the budget "
+                         "there cannot be read".format(head[:12], parent[:12], proc.returncode))
+    return parent
+
+
+def _budget_at(root, commit, where):
+    """The validated budget log committed at commit, or None when that commit holds no budget file; where
+    names it in each message. Raises ValueError (cannot evaluate) on a budget there that is not a regular
+    file, not UTF-8, not TOML or off the schema, or on a git failure."""
+    proc = _base_git(root, "ls-tree", "-z", "--full-tree", commit, "--", BUDGET_REL)
     if proc.returncode != 0:
         raise ValueError("{}: git ls-tree exited {} ({})".format(where, proc.returncode, _git_stderr(proc)))
     records = [record for record in proc.stdout.split(b"\x00") if record]
     if not records:
-        return base
+        return None
     meta, _tab, name = records[0].partition(b"\t")
     parts = meta.split(b" ")
     if len(records) != 1 or name != BUDGET_REL.encode("ascii") or len(parts) != 3:
@@ -458,8 +517,7 @@ def _read_base(root):
         raise ValueError("{} is not UTF-8 ({})".format(where, exc)) from None
     except (ValueError, RecursionError, MemoryError) as exc:
         raise ValueError("{} cannot be parsed as TOML ({}: {})".format(where, type(exc).__name__, exc)) from None
-    base["log"] = _validated_log(data, where)
-    return base
+    return _validated_log(data, where)
 
 
 def _is_cid(cid):
@@ -576,39 +634,52 @@ def _base_where(base):
     return "the merge base {} with {}".format(base["commit"][:12], base["ref"])
 
 
+def _parent_where(base):
+    return "the first parent {} of HEAD (HEAD is the merge base with {})".format(
+        base["parent"]["commit"][:12], base["ref"])
+
+
+def _history(base):
+    """(where, log) for every committed log the budget is compared with: the merge base with main and,
+    when that merge base is HEAD itself, HEAD's first parent; a commit that holds no budget file is left
+    out (nothing to compare there)."""
+    found = [] if base["log"] is None else [(_base_where(base), base["log"])]
+    parent = base.get("parent")
+    if parent is not None and parent["log"] is not None:
+        found.append((_parent_where(base), parent["log"]))
+    return found
+
+
 def _base_rewritten(_rules, budget, _text, pins):
-    """Every entry committed at the merge base with main must be held here unchanged, in place: none
-    deleted, none rewritten (every key compared, the note and the kind included)."""
-    base = pins["base"]
-    if base["log"] is None:
-        return []
-    log, held = budget["log"], base["log"]
-    findings = []
-    if len(log) < len(held):
-        findings.append("the log holds {} accepted entries, fewer than the {} committed at {}; an entry "
-                        "committed there was deleted".format(len(log), len(held), _base_where(base)))
-    for number in range(1, min(len(log), len(held)) + 1):
-        changed = [key for key in ENTRY_KEYS if log[number - 1][key] != held[number - 1][key]]
-        if changed:
-            findings.append("accepted entry {}: {} differ(s) from the entry committed at {}; an entry "
-                            "committed there may not be rewritten, append an entry instead".format(
-                                number, ", ".join(changed), _base_where(base)))
+    """Every entry committed at the merge base with main (and, when that is HEAD, at HEAD's first parent)
+    must be held here unchanged, in place: none deleted, none rewritten (every key compared, the note and
+    the kind included)."""
+    log, findings = budget["log"], []
+    for where, held in _history(pins["base"]):
+        if len(log) < len(held):
+            findings.append("the log holds {} accepted entries, fewer than the {} committed at {}; an entry "
+                            "committed there was deleted".format(len(log), len(held), where))
+        for number in range(1, min(len(log), len(held)) + 1):
+            changed = [key for key in ENTRY_KEYS if log[number - 1][key] != held[number - 1][key]]
+            if changed:
+                findings.append("accepted entry {}: {} differ(s) from the entry committed at {}; an entry "
+                                "committed there may not be rewritten, append an entry instead".format(
+                                    number, ", ".join(changed), where))
     return findings
 
 
 def _base_grew(_rules, budget, _text, pins):
-    """Against the budget in force at the merge base with main, the budget in force here may not hold an
-    id that is not there or a cap above it, with no exception: the pending list and the caps only shrink.
-    It reads nothing the pins (CAP_SEED, PENDING_SEED, ACCEPTED) hold, so no edit to them changes it."""
-    base = pins["base"]
-    if base["log"] is None:
-        return []
-    before = base["log"][-1]
-    findings = ["{}: on pending in force but not on pending at {}, and the pending list may only "
-                "shrink".format(cid, _base_where(base)) for cid in budget["pending"]
-                if cid not in before["pending"]]
-    findings += ["{} {} is above {} at {}, and no cap may be raised".format(
-        key, budget[key], before[key], _base_where(base)) for key in CAP_KEYS if budget[key] > before[key]]
+    """Against the budget in force at the merge base with main (and, when that is HEAD, at HEAD's first
+    parent), the budget in force here may not hold an id that is not there or a cap above it, with no
+    exception: the pending list and the caps only shrink. It reads nothing the pins (CAP_SEED,
+    PENDING_SEED, ACCEPTED) hold, so no edit to them changes it."""
+    findings = []
+    for where, held in _history(pins["base"]):
+        before = held[-1]
+        findings += ["{}: on pending in force but not on pending at {}, and the pending list may only "
+                     "shrink".format(cid, where) for cid in budget["pending"] if cid not in before["pending"]]
+        findings += ["{} {} is above {} at {}, and no cap may be raised".format(
+            key, budget[key], before[key], where) for key in CAP_KEYS if budget[key] > before[key]]
     return findings
 
 
@@ -808,13 +879,18 @@ def run(root, check_mode, seed=None, accepted=None, base=None):
         _write_render(target, text)
     split = sum(rule.split for rule in rules)
     log = budget["log"]
+
+    def held(committed):
+        return "no budget file committed there" if committed is None else \
+            "{} accepted entries committed there, held unchanged".format(len(committed))
+    compared = "{}: {}".format(_base_where(base), held(base["log"]))
+    if base.get("parent") is not None:
+        compared += "; {}: {}".format(_parent_where(base), held(base["parent"]["log"]))
     print("rules-core: {} entries ({} whole, {} split, {} pending); {} units against file-cap {} ({}); budget "
-          "log {} accepted entries, shrink only, accepted pin at entry {}; {}: {}".format(
+          "log {} accepted entries, shrink only, accepted pin at entry {}; {}".format(
               len(rules), len(rules) - split, split, len(budget["pending"]), units(text), budget["file-cap"],
               "reported only while pending is not empty" if budget["pending"] else "enforced",
-              len(log), pins["accepted"]["entries"],
-              _base_where(base), "no budget file committed there" if base["log"] is None else
-              "{} accepted entries committed there, held unchanged".format(len(base["log"]))))
+              len(log), pins["accepted"]["entries"], compared))
     return 0
 
 
@@ -1046,7 +1122,8 @@ def _git_tree(base, main_sources=None, main_budget=None, head_sources=None, head
               branch="main"):
     """A git repository at base: one commit on branch holding main_sources and main_budget (main_budget
     False: no budget file there), then branch topic checked out from it with head_sources and head_budget
-    written to the working tree, uncommitted. Returns base."""
+    written and committed there (an empty commit when nothing changes), so HEAD is an ordinary branch commit
+    that main does not contain and the merge base is the commit on branch. Returns base."""
     root = _tree(base, sources=main_sources, budget=None if main_budget is False else main_budget)
     (root / ".git").rmdir()
     if main_budget is False:
@@ -1056,6 +1133,8 @@ def _git_tree(base, main_sources=None, main_budget=None, head_sources=None, head
     _fx_git(root, "commit", "-q", "--no-verify", "-m", "main")
     _fx_git(root, "checkout", "-q", "-b", "topic")
     _put(root, head_sources, head_budget)
+    _fx_git(root, "add", "-A")
+    _fx_git(root, "commit", "-q", "--no-verify", "--allow-empty", "-m", "topic")
     return root
 
 
@@ -1121,9 +1200,13 @@ def self_test_main():
           "refused whatever else changes (a raise entry exit 2; with the raise kind put back, each of two "
           "guards alone; the seed entry, the seed and the pin all rewritten), a replacement ref or a grafts "
           "line cannot move the merge base (exit 0 once honoured), a shrink appended since main and a main "
-          "with no budget pass, one commit on main passes against the merge base HEAD while its per-entry "
-          "rules still refuse an over-cap entry (exit 0 with that guard off) and the same commit on master is "
-          "exit 2, and no git, no repository, a shallow clone, no main, no merge base and a budget at "
+          "with no budget pass; on main, where the merge base is HEAD, a shrink undone by a later commit on "
+          "main is refused against HEAD's first parent (at main's tip and with HEAD behind it; exit 0 with "
+          "the parent read off), a replacement ref cannot swap that parent (exit 0 once honoured), a clean "
+          "main run appending a shrink passes, a root commit on main is exit 2 (exit 0 with the parent read "
+          "off), an unreadable parent is refused, the per-entry rules still refuse an over-cap entry (exit 0 "
+          "with that guard off) and one commit on master is exit 2; and no git, no repository, a shallow "
+          "clone, no main, no merge base and a budget at "
           "the merge base off the schema or not a regular file are each exit 2 with nothing written, an "
           "unreadable base read as absent letting the undo pass; each config lane's real roster keeps the "
           "--self-test launch and the suite step and leaves the bare launch out)".format(len(EXECUTED)))
@@ -1682,38 +1765,139 @@ def _history_cases(tmp, shortened, shrunk):
     check("history/no-budget-at-merge-base-accepted", got[0] == (0, 0, True)
           and "no budget file committed there" in got[1], (got, why))
 
-    # A repository of one commit with HEAD on main, as the release reproduce step builds: the merge base is
-    # HEAD, the log is compared with itself, and the per-entry rules decide. The same commit on a branch that
-    # is not main (a bare `git init` with no default branch configured gives master) has no main to read.
-    def one_commit(label, budget, branch):
-        """(a repository at tmp/label holding the fixture tree and budget in one commit on branch, HEAD
-        there, or None, why it could not be built)."""
+    def honouring_env():
+        env = _BASE_GIT_ENV_SAVED()
+        del env["GIT_NO_REPLACE_OBJECTS"], env["GIT_GRAFT_FILE"]
+        return env
+
+    _BASE_GIT_ENV_SAVED = globals()["_base_git_env"]
+
+    @contextmanager
+    def honouring():
+        """Replacement refs and the repository's graft file honoured for the block (the flip)."""
+        globals()["_base_git_env"] = honouring_env
         try:
-            root = _tree(tmp / label, budget=budget)
+            yield
+        finally:
+            globals()["_base_git_env"] = _BASE_GIT_ENV_SAVED
+
+    # HEAD on main (a run on main, or any HEAD main already contains): the merge base is HEAD, the revision
+    # under check, so HEAD's first parent (read from the raw commit) is compared as well. A root commit on
+    # main has no earlier revision: cannot-evaluate, never a self-comparison that passes. The same commit on
+    # a branch that is not main (a bare `git init` with no default branch configured gives master) has no
+    # main to read.
+    def on_main(label, steps, branch="main"):
+        """(a repository at tmp/label with one commit on branch per (sources, budget) step, each None to keep
+        that part as it is, HEAD at the last, then the list of commit ids, or None and why it could not be
+        built). The first step's sources and budget make the tree (None: the fixture defaults)."""
+        try:
+            first_sources, first_budget = steps[0]
+            root = _tree(tmp / label, sources=first_sources, budget=first_budget)
             (root / ".git").rmdir()
             _fx_git(root, "init", "-q", "-b", branch)
-            _fx_git(root, "add", "-A")
-            _fx_git(root, "commit", "-q", "--no-verify", "-m", "one commit")
-            return root, _fx_git(root, "rev-parse", "HEAD")
+            commits = []
+            for number, (sources, budget) in enumerate(steps):
+                if number:
+                    _put(root, sources, budget)
+                _fx_git(root, "add", "-A")
+                _fx_git(root, "commit", "-q", "--no-verify", "--allow-empty", "-m", "step {}".format(number))
+                commits.append(_fx_git(root, "rev-parse", "HEAD"))
+            return root, commits
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return None, "fixture: {}".format(exc)
 
-    root, head = one_commit("h-one", seed_budget, "main")
-    got = judged(root)
-    check("history/one-commit-on-main-accepted", got[0] == (0, 0, True)
-          and "the merge base {} with refs/heads/main".format(head[:12]) in got[1]
-          and "1 accepted entries committed there, held unchanged" in got[1], (got, head))
-    root, why = one_commit("h-one-master", seed_budget, "master")
-    got = (None, why) if root is None else (_both(root, base=READ_BASE), _run(root, True, base=READ_BASE)[1])
+    @contextmanager
+    def parent_read_off():
+        """The first-parent read switched off (the flip): a run on main compares the log with itself only,
+        as before the fix."""
+        saved = globals()["_head_first_parent"]
+        globals()["_head_first_parent"] = lambda _root, _head: None
+        try:
+            yield
+        finally:
+            globals()["_head_first_parent"] = saved
+
+    # The reviewed defect: main holds the shrink (C1), then a commit on main (C2) deletes that shrink entry
+    # and restores the unsplit rule. Judged on main at C2, the merge base is C2 itself; against C2's first
+    # parent C1 the undo is refused, and with the parent read switched off it passes (the defect).
+    undo = [(shortened, shrunk_budget), (_fixture_sources(), seed_budget)]
+    root, commits = on_main("h-main-undo", undo)
+    got, out = judged(root)
+    check("history/main-run-undo-refused", got == (1, 1, False)
+          and "fewer than the 2 committed at the first parent {} of HEAD".format(commits[0][:12]) in out
+          and "longaa1: on pending in force but not on pending at the first parent" in out, (got, out, commits))
+    with parent_read_off():
+        flipped = judged(root)
+    check("flip/main-run-undo-refused", flipped[0] == (0, 0, True), flipped)
+    # HEAD already contained in main but not its tip (main moved on past the undo): the merge base is HEAD,
+    # so the same first-parent comparison applies.
+    root, commits = on_main("h-behind-main", undo + [(None, None)])
+    try:
+        if root is not None:
+            _fx_git(root, "checkout", "-q", "--detach", commits[1])
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        root, commits = None, "fixture: {}".format(exc)
+    got, out = judged(root)
+    check("history/head-contained-in-main-undo-refused", got == (1, 1, False)
+          and "the first parent" in out, (got, out, commits))
+    with parent_read_off():
+        flipped = judged(root)
+    check("flip/head-contained-in-main-undo-refused", flipped[0] == (0, 0, True), flipped)
+    # A replacement ref cannot swap HEAD's first parent: main is R (seed only), C1 (the shrink), C2 (the
+    # undo); `git replace --graft C2 R` would make C2's parent read as R and the undo pass.
+    root, commits = on_main("h-main-replace", [(None, seed_budget)] + undo)
+    try:
+        if root is not None:
+            _fx_git(root, "replace", "--graft", commits[2], commits[0])
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        root, commits = None, "fixture: {}".format(exc)
+    got, out = judged(root)
+    check("history/main-run-parent-replace-ignored", got == (1, 1, False)
+          and "the first parent" in out, (got, out, commits))
+    with honouring():
+        flipped = judged(root)
+    check("flip/main-run-parent-replace-ignored", flipped[0] == (0, 0, True), flipped)
+    # Preserved outcome: a clean run on main whose HEAD appends a shrink passes, comparing with HEAD and with
+    # its first parent.
+    root, commits = on_main("h-main-clean", [(None, seed_budget), (shortened, shrunk_budget)])
+    got, out = judged(root)
+    check("history/main-run-shrink-accepted", got == (0, 0, True)
+          and "the first parent {} of HEAD (HEAD is the merge base with refs/heads/main): 1 accepted entries "
+              "committed there, held unchanged".format(commits[0][:12]) in out, (got, out, commits))
+    # A root commit on main (one commit, as a fresh one-commit repository is): no earlier revision, so
+    # cannot-evaluate; with the parent read switched off it is the self-comparison that passes.
+    root, commits = on_main("h-one", [(None, seed_budget)])
+    got = (None, commits) if root is None else (_both(root, base=READ_BASE), _run(root, True, base=READ_BASE)[1])
+    check("cannot-evaluate/main-run-root-commit", got[0] == (2, 2, True) and "is a root commit" in got[1], got)
+    with parent_read_off():
+        flipped = judged(root)
+    check("flip/main-run-root-commit", flipped[0] == (0, 0, True), flipped)
+    # An unreadable first parent (its object missing) is cannot-evaluate, read directly from the parent read.
+    root, commits = on_main("h-lost-parent", undo)
+    try:
+        if root is None:
+            raise RuntimeError(commits)
+        loose = root / ".git" / "objects" / commits[0][:2] / commits[0][2:]
+        loose.unlink()
+        _head_first_parent(root, commits[1])
+        lost = "no error"
+    except ValueError as exc:
+        lost = str(exc)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        lost = "fixture: {}".format(exc)
+    check("cannot-evaluate/main-run-parent-unreadable", "is not a readable commit" in lost, lost)
+    root, commits = on_main("h-one-master", [(None, seed_budget)], branch="master")
+    got = (None, commits) if root is None else (_both(root, base=READ_BASE), _run(root, True, base=READ_BASE)[1])
     check("cannot-evaluate/one-commit-not-on-main", got[0] == (2, 2, True) and "resolves to a commit" in got[1],
           got)
-    root, why = one_commit("h-one-overcap", _budget_text(pending=()), "main")
+    # The per-entry rules still decide on main: two commits on main with an over-cap rule off pending.
+    root, commits = on_main("h-main-overcap", [(None, _budget_text(pending=())), (None, None)])
     got = judged(root)
-    check("history/one-commit-per-entry-rules-apply", got[0] == (1, 1, False) and "longaa1: the entry is" in got[1],
-          (got, why))
+    check("history/main-run-per-entry-rules-apply", got[0] == (1, 1, False) and "longaa1: the entry is" in got[1],
+          (got, commits))
     with _without(SOURCE_GUARDS, "over-cap-not-pending"):
         flipped = judged(root)
-    check("flip/one-commit-per-entry-rules-apply", flipped[0] == (0, 0, True), flipped)
+    check("flip/main-run-per-entry-rules-apply", flipped[0] == (0, 0, True), flipped)
 
     # Replacement refs and grafts are ignored: main is C1 (seed only) then C2 (the shrink), the topic
     # branch starts at C2 and undoes the shrink. A replacement ref C2 -> C1, or a grafts line giving the
@@ -1736,22 +1920,7 @@ def _history_cases(tmp, shortened, shrunk):
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return None, None, None, "fixture: {}".format(exc)
 
-    def honouring_env():
-        env = _BASE_GIT_ENV_SAVED()
-        del env["GIT_NO_REPLACE_OBJECTS"], env["GIT_GRAFT_FILE"]
-        return env
-
-    _BASE_GIT_ENV_SAVED = globals()["_base_git_env"]
-
-    @contextmanager
-    def honouring():
-        globals()["_base_git_env"] = honouring_env
-        try:
-            yield
-        finally:
-            globals()["_base_git_env"] = _BASE_GIT_ENV_SAVED
-
-    root, first, second, why = undo_after_shrink("h-replace", False)
+    root, first, second, why = undo_after_shrink("h-replace", True)
     if root is not None:
         try:
             _fx_git(root, "replace", second, first)
@@ -1823,7 +1992,7 @@ def _history_cases(tmp, shortened, shrunk):
     try:
         if root is None:
             raise RuntimeError(why)
-        _fx_git(root, "commit", "-q", "--no-verify", "-a", "-m", "second")
+        _fx_git(root, "commit", "-q", "--no-verify", "--allow-empty", "-a", "-m", "second")
         _fx_git(tmp, "clone", "-q", "--depth", "1", "--no-single-branch", root.as_uri(), str(clone))
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         clone, why = None, "fixture: {}".format(exc)

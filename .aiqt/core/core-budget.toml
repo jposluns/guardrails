@@ -13,18 +13,21 @@
 # pending: the sorted corpus-ids of the rules over entry-cap that are not split yet.
 #
 # The gate reads this file as committed at the merge base of HEAD with main (origin/main, else main; read
-# only, replacement refs and grafts ignored). Every entry committed there must stay here unchanged, every key
-# compared, so deleting or rewriting an entry already on main is a finding. Against the budget in force
-# there, any id on pending that is not there, or any cap above it, is a finding, with no exception and
-# whatever else changes (that comparison reads neither the seed nor the pin in the generator).
-# Where that read fails (no git, a shallow clone, no main, no merge base) the gate cannot evaluate (exit 2).
-# An entry not yet on main is covered by the per-entry rules only. To lower a cap or drop a pending id,
-# append a shrink entry; the gate compares each entry with the one before it, and every entry after the
-# seed may only lower a cap or drop a pending id, and must change something. ACCEPTED in
-# tools/gen_rules_core.py pins one entry (its position here, its caps and its pending), which this log must
-# hold unchanged; moving it admits nothing. Once this file is on main, no later change can raise a cap or
-# put an id on pending. An id that is split, now within entry-cap or the apex is a finding until a shrink
-# entry drops it.
+# only, replacement refs and grafts ignored) and, where that merge base is HEAD itself (a run on main, or a
+# HEAD main already contains), also at HEAD's first parent, read from HEAD's raw commit. Every entry
+# committed at each commit read must stay here unchanged, every key compared, so deleting or rewriting such
+# an entry is a finding. Against the budget in force at each, any id on pending that is not there, or any
+# cap above it, is a finding, with no exception and whatever else changes (that comparison reads neither
+# the seed nor the pin in the generator). Where a read fails (no git, a shallow clone, no main, no merge
+# base, or HEAD on main with no readable first parent, a one-commit repository on main among them) the
+# gate cannot evaluate (exit 2). An entry not yet on main is covered by the per-entry rules only. To lower a
+# cap or drop a pending id, append a shrink entry; the gate compares each entry with the one before it, and
+# every entry after the seed may only lower a cap or drop a pending id, and must change something. ACCEPTED
+# in tools/gen_rules_core.py pins one entry (its position here, its caps and its pending), which this log
+# must hold unchanged; moving it admits nothing. So a change the gate judges cannot raise a cap or put an id
+# on pending above the commits it compares with: on a branch, the merge base with main; on main, HEAD's
+# first parent. Each run compares that one step; it does not show the gate ran on every commit of main. An
+# id that is split, now within entry-cap or the apex is a finding until a shrink entry drops it.
 
 format-version = 1
 

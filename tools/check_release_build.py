@@ -430,8 +430,12 @@ def _fresh_git_env():
 # template names it. _fresh_git_env() reads no global or system config, so a bare `git init` takes git's
 # built-in default (master on git 2.53), and a replayed generator that reads main (gen_rules_core.py reads
 # its merge base with refs/heads/main) would find none and exit 2. With main named, a materialized checkout
-# is one commit on main: its merge base with main is HEAD, so gen_rules_core.py compares the budget log
-# with itself and its per-entry rules decide.
+# is HEAD on main, so its merge base with main is HEAD and gen_rules_core.py compares the budget log with
+# HEAD's first parent (and HEAD). _materialized_check therefore commits the checked commit's first parent's
+# raw tree first and the checked tree on top of it, so that comparison is with the log the checked commit's
+# real first parent holds, never with the log itself; a checked commit that records no parent (a root
+# commit) gives a one-commit checkout, where gen_rules_core.py's root-commit rule exits 2 as it does in the
+# source repository.
 
 
 def _pin_fixture_version(repo, failures, env, version="1.0.0"):
@@ -534,15 +538,63 @@ def _regen_fixture_version_outputs(repo, case, failures, env):
         return None
 
 
+def _raw_first_parent(root, sha):
+    """The first parent of the commit `sha` (an annotated tag peeled first, at most 8 levels) as its RAW
+    commit object records it: the first `parent` header of the commit body read through _release_schema's
+    object funnel (replacement refs, the graft file and the commit-graph off, every body re-hashed against
+    its id), so no replacement ref, graft line or commit-graph can change which parent is read. None when
+    the commit records no parent (a root commit). Raises GateError (cannot-evaluate) when the object cannot
+    be read, is not a commit, or names a parent that is not a full object id. A name-keyed function, so the
+    self-test can switch it off (the flip: the throwaway repository is one commit again)."""
+    try:
+        oid = _release_schema._resolve_commit_oid(root, sha)
+        for _level in range(8):
+            otype, body = _release_schema.verified_object(root, oid)
+            if otype != "tag":
+                break
+            oid = _release_schema._verified_tag_peel(oid, body)
+        else:
+            raise SchemaError("tag chain at {} does not peel to a commit within 8 levels".format(sha))
+        if otype != "commit":
+            raise SchemaError("object {} is a {}, not a commit".format(oid, otype))
+    except SchemaError as exc:
+        raise GateError("cannot read the parents of {}: {}".format(sha, exc))
+    for line in body.split(b"\n\n", 1)[0].split(b"\n")[1:]:
+        if line.startswith(b"parent "):
+            parent = line[7:].decode("ascii", "replace")
+            if not _release_schema.OBJECTID_RE.fullmatch(parent):
+                raise GateError("commit {} names a malformed first parent {!r}; fail-closed".format(oid, parent))
+            return parent
+    return None
+
+
+def _clear_checkout(co):
+    """Remove everything in the throwaway checkout co except its .git directory (the first-parent tree is
+    committed, then replaced by the checked tree)."""
+    for entry in co.iterdir():
+        if entry.name == ".git":
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
 def _materialized_check(root, sha, commands_fn, what):
     """Raw-materialize `sha` into a throwaway FRESH git repo and run each check command `commands_fn(co)`
     returns inside it. The tree is materialized from RAW blob bytes (git ls-tree + cat-file, round-4 finding
     1: NO worktree checkout, so no smudge/clean filter can restore old bytes and hide a change), then
-    re-init'd as a FRESH git repo (empty config, so the source repo's filter drivers cannot run) purely so
-    the git-based commands have a repository: one commit on a branch named main (init.defaultBranch), so a command
-    that reads main finds it and its merge base with main is HEAD. A command exit 1 is a drift/content
-    finding; a launch failure or a child exit outside {0,1} is cannot-evaluate and raises GateError -> exit 2,
-    never downgraded to a finding. Returns findings."""
+    re-init'd as a FRESH git repo (empty config, so the source repo's filter drivers cannot run) so the
+    git-based commands have a repository on a branch named main (init.defaultBranch): a command that reads
+    main finds it and its merge base with main is HEAD. Where `sha` records a first parent
+    (_raw_first_parent), that parent's raw tree is materialized and committed first and `sha`'s tree is
+    committed on top of it, so HEAD's first parent there holds the tree `sha`'s real first parent holds and
+    tools/gen_rules_core.py --check compares the budget log with it (a run on main compares one step: HEAD
+    with its first parent). The throwaway repository holds those two commits only, so a history check that
+    reads further back than the first parent sees nothing there. A root `sha` gives one commit, as in the
+    source repository. A command exit 1 is a drift/content finding; a launch failure or a child exit
+    outside {0,1} is cannot-evaluate and raises GateError -> exit 2, never downgraded to a finding. Returns
+    findings."""
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-{}-".format(what)))
         co = tmp / "co"
@@ -551,6 +603,37 @@ def _materialized_check(root, sha, commands_fn, what):
         raise GateError("{}: cannot create a temporary directory ({}); fail-closed".format(what, exc))
     env = _fresh_git_env()
     try:
+        parent = _raw_first_parent(root, sha)
+        if parent is not None:
+            # The first parent's raw tree, committed first on main (the same pins as the staging commit below,
+            # spelled out so the maintenance-pin scan resolves them), then cleared for the checked tree.
+            try:
+                _release_schema.materialize_tree_raw(root, parent, co)
+            except SchemaError as exc:
+                raise GateError("cannot materialize the first parent {} for {}: {}".format(parent, what, exc))
+            def _parent_staged(r):
+                if r.returncode != 0:
+                    raise GateError("cannot commit the first parent {} for {}: {}".format(
+                        parent, what, r.stderr.decode("utf-8", "replace").strip()))
+            try:
+                _parent_staged(subprocess.run(["git", "-C", str(co), "-c", "init.defaultBranch=main", "init", "-q"],
+                                              capture_output=True, env=env))
+                _parent_staged(subprocess.run(
+                    ["git", "-C", str(co), "-c", "user.name=aiqt", "-c", "user.email=a@b.invalid",
+                     "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                     "add", "-A"], capture_output=True, env=env))
+                _parent_staged(subprocess.run(
+                    ["git", "-C", str(co), "-c", "user.name=aiqt", "-c", "user.email=a@b.invalid",
+                     "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                     "commit", "-q", "--allow-empty", "-m", what + " first parent", "--no-verify"],
+                    capture_output=True, env=env))
+            except OSError as exc:
+                raise GateError("cannot launch git to commit the first parent for {} ({}); fail-closed".format(
+                    what, exc))
+            try:
+                _clear_checkout(co)
+            except OSError as exc:
+                raise GateError("{}: cannot clear the first parent's tree ({}); fail-closed".format(what, exc))
         try:
             _release_schema.materialize_tree_raw(root, sha, co)
         except SchemaError as exc:
@@ -578,7 +661,7 @@ def _materialized_check(root, sha, commands_fn, what):
             _staged(subprocess.run(
                 ["git", "-C", str(co), "-c", "user.name=aiqt", "-c", "user.email=a@b.invalid",
                  "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                 "commit", "-q", "-m", what, "--no-verify"], capture_output=True, env=env))
+                 "commit", "-q", "--allow-empty", "-m", what, "--no-verify"], capture_output=True, env=env))
         except OSError as exc:
             raise GateError("cannot launch git to stage the tree for {} ({}); fail-closed".format(
                 what, exc))
@@ -2036,14 +2119,25 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     # generators, keeping the tree internally self-consistent at whatever state HEAD is in.
                     # The development refusal keeps its OWN case below, on a development tree derived from
                     # this one, so each rule is tested by itself.
+                    # The candidate gets a real first parent: the archive as extracted, committed on main
+                    # first. The reproduce step's throwaway repository commits that parent's tree under the
+                    # candidate's, so tools/gen_rules_core.py --check compares the budget log with it there;
+                    # a root-commit candidate would give a one-commit throwaway, which that check refuses
+                    # exit 2 (a root commit on main).
+                    ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                            env=_fresh_git_env()).returncode == 0
+                             for a in (["-c", "init.defaultBranch=main", "init", "-q"],
+                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
+                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit",
+                                        "-q", "-m", "genesis parent", "--no-verify"]))
                     gchangelog = gcand / "changelog.toml"
                     gchangelog.write_text(_strip_unreleased_table(gchangelog.read_text(encoding="utf-8")),
                                           encoding="utf-8")
                     gcut = None
-                    ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
-                                            env=_fresh_git_env()).returncode == 0
-                             for a in (["-c", "init.defaultBranch=main", "init", "-q"],
-                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"]))
+                    ok = ok and all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                                   env=_fresh_git_env()).returncode == 0
+                                    for a in (["-c", "init.defaultBranch=main", "init", "-q"],
+                                              ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"]))
                     if ok:
                         gver = _regen_fixture_version_outputs(gcand, "genesis cut candidate", failures,
                                                               _fresh_git_env())
@@ -2139,7 +2233,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             # finding. The flip moves the same fresh repository's branch off main first (git branch -m, as a
             # bare `git init` under _fresh_git_env()'s empty config left it on master with git 2.53): the
             # same probe then exits 1, one drift finding. It shows the row reads the branch name; it does not
-            # revert the init argv, which stays literal so the maintenance-pin scan resolves it.
+            # revert the init argv, which stays literal so the maintenance-pin scan resolves it. fb is a root
+            # commit, so its throwaway repository holds one commit (the first-parent rows below cover a
+            # checked commit that has a parent).
             fb = tmp / "fresh-branch"
             _init(fb)
             (fb / "marker.txt").write_text("one commit\n", encoding="utf-8")
@@ -2163,6 +2259,93 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
             if fb_flip != ["fresh-branch drift: {!r} rc=1".format(" ".join(fb_probe))]:
                 failures.append("(fresh-branch flip) with the fresh repository's branch moved off main, the "
                                 "probe of refs/heads/main must exit 1 (one drift finding); got {}".format(fb_flip))
+
+            # (first parent) The reproduce step's throwaway repository commits the checked commit's first
+            # parent's raw tree under the checked tree (_materialized_check), so tools/gen_rules_core.py
+            # --check there compares the budget log with the log that first parent holds. The source is
+            # `git archive HEAD` of this checkout, four commits on main: fp0 the archive, fp1 a shrink entry
+            # appended to the budget log (file-cap lowered by one), fp2 a clean change on top (a marker file),
+            # fp3 the shrink entry deleted again (the undo). In the throwaway repository gen_rules_core.py
+            # --check must pass at fp2 (its first parent fp1 holds the shrink fp2 keeps) and fail at fp3 (one
+            # drift finding: its first parent fp2 holds the entry fp3 deletes). The flip switches
+            # _raw_first_parent off, so the throwaway is one commit again as before this change: both runs
+            # are then cannot-evaluate (a root commit on main), so each row depends on the first parent
+            # being committed. What the rows do not show: a check reading further back than the first parent
+            # (the throwaway holds two commits only). The source reuses the genesis case's `git archive HEAD`
+            # (arch above), so these rows add no read of the real checkout.
+            fp_arch = arch
+            if fp_arch.returncode != 0 or not fp_arch.stdout:
+                errors.append("(first parent) `git archive HEAD` returned rc={} / {} bytes; the first-parent "
+                              "rows cannot be verified, so the self-test is cannot-evaluate (exit 2)".format(
+                                  fp_arch.returncode, len(fp_arch.stdout or b"")))
+            else:
+                import tarfile
+                fp = tmp / "first-parent"
+                fp.mkdir()
+                fp_budget = fp / ".aiqt" / "core" / "core-budget.toml"
+                fp_core = ["python3", "tools/gen_rules_core.py", "--check"]
+
+                def _fp_commit(message):
+                    if not all(subprocess.run(["git", "-C", str(fp), *a], capture_output=True,
+                                              env=_fresh_git_env()).returncode == 0
+                               for a in (["-c", "init.defaultBranch=main", "init", "-q"],
+                                         ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
+                                         ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit",
+                                          "-q", "-m", message, "--no-verify"])):
+                        raise RuntimeError("could not commit {!r}".format(message))
+                    return subprocess.run(["git", "-C", str(fp), "rev-parse", "HEAD"], capture_output=True,
+                                          text=True, env=_fresh_git_env(), check=True).stdout.strip()
+
+                def _fp_findings(sha):
+                    try:
+                        return _materialized_check(fp, sha, lambda _co: [fp_core], "first-parent")
+                    except GateError as exc:
+                        return ["GateError: {}".format(exc)]
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(fp_arch.stdout), mode="r:") as tf:
+                        tf.extractall(fp)
+                    fp_seed_text = fp_budget.read_text(encoding="utf-8")
+                    fp_in_force = tomllib.loads(fp_seed_text)["accepted"][-1]
+                    _fp_commit("fp0 archive")
+                    fp_budget.write_text(fp_seed_text + (
+                        '\n[[accepted]]\nkind = "shrink"\nnote = "self-test: file-cap lowered by one"\n'
+                        "entry-cap = {}\ntrigger-cap = {}\nfile-cap = {}\npending = {}\n").format(
+                            fp_in_force["entry-cap"], fp_in_force["trigger-cap"], fp_in_force["file-cap"] - 1,
+                            json.dumps(fp_in_force["pending"])), encoding="utf-8")
+                    _fp_commit("fp1 shrink")
+                    (fp / "first-parent-marker.txt").write_text("clean change\n", encoding="utf-8")
+                    fp_clean = _fp_commit("fp2 clean")
+                    fp_budget.write_text(fp_seed_text, encoding="utf-8")
+                    fp_undo = _fp_commit("fp3 undo")
+                except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is cannot-evaluate
+                    errors.append("(first parent) the source repository could not be built ({}); the "
+                                  "first-parent rows cannot be verified, so the self-test is cannot-evaluate "
+                                  "(exit 2)".format(exc))
+                else:
+                    fp_undo_finding = ["first-parent drift: {!r} rc=1".format(" ".join(fp_core))]
+                    got = _fp_findings(fp_clean)
+                    if got:
+                        failures.append("(first parent, clean) the throwaway run of gen_rules_core.py --check "
+                                        "at a clean commit whose first parent holds the same budget log must "
+                                        "pass; got {}".format(got))
+                    got = _fp_findings(fp_undo)
+                    if got != fp_undo_finding:
+                        failures.append("(first parent, undo) the throwaway run of gen_rules_core.py --check at "
+                                        "a commit that deletes a shrink entry its first parent holds must be "
+                                        "one drift finding {}; got {}".format(fp_undo_finding, got))
+                    saved_first_parent = globals()["_raw_first_parent"]
+                    globals()["_raw_first_parent"] = lambda _root, _sha: None
+                    try:
+                        flip_clean, flip_undo = _fp_findings(fp_clean), _fp_findings(fp_undo)
+                    finally:
+                        globals()["_raw_first_parent"] = saved_first_parent
+                    for label, flipped in (("clean", flip_clean), ("undo", flip_undo)):
+                        if len(flipped) != 1 or not flipped[0].startswith("GateError: ") \
+                                or "is a root commit" not in flipped[0]:
+                            failures.append("(first parent flip, {}) with the first parent not committed the "
+                                            "throwaway is one commit, so gen_rules_core.py --check must be "
+                                            "cannot-evaluate (a root commit on main); got {}".format(
+                                                label, flipped))
 
             # (round-4 finding 4) a first-pin candidate whose check_clauses --genesis is CANNOT-EVALUATE
             # (a corrupt inventory, child exit 2) must raise GateError -> exit 2, not append a finding. The
@@ -3140,7 +3323,10 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "(None vs GateError), a genesis run_pre_tag on a cut candidate auto-requiring first-pin evidence "
               "as its only finding and refusing the same tree reopened for development "
               "exit 2, the reproduce step's fresh repository holding refs/heads/main (one drift finding "
-              "with its branch moved off main), and a first-pin cannot-evaluate raising exit 2, all over "
+              "with its branch moved off main), the reproduce step's throwaway repository committing the "
+              "checked commit's first parent's tree under it, so gen_rules_core.py --check there passes on a "
+              "clean change and is one drift finding on an undo (each exit 2 with the first parent not "
+              "committed), and a first-pin cannot-evaluate raising exit 2, all over "
               "RAW-materialized (no-worktree) candidate trees (round-4 finding 1); and the round-5 cases "
               "(dormancy needs zero tags AND zero rows with a lightweight/unrecorded tag flagged (finding "
               "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "

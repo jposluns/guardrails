@@ -894,7 +894,9 @@ def _valued_option_failures():
 # a usage line whatever its arguments, which the refusal shape alone would pass, is reported, and so are one that
 # runs a mode writing nothing with no argument and one whose --check writes.
 # The check over the real generators is hermetic: they run only inside a throwaway git repository that
-# _gen_argv_head_copy builds from `git archive HEAD` (extracted, then git init, add and commit there), each child
+# _gen_argv_head_copy builds from `git archive HEAD` (extracted, then git init, add and commit there, on top of a
+# first commit holding `git archive` of HEAD's first parent where HEAD has one, so tools/gen_rules_core.py --check
+# there compares the budget log with that parent's log; _gen_argv_first_parent_failures shows it), each child
 # with the copy as its working directory and an environment holding no GIT_* variable of the caller
 # (_git_fixture_env.git_fixture_env). An uncommitted or stale file in the developer's working tree therefore cannot
 # fail the check, and a generator's write that resolves its path from its own location or working directory, even
@@ -931,11 +933,13 @@ def _valued_option_failures():
 #   posix.mkfifo, which the os.mkfifo wrapper does not reach, or an extension module's own I/O) is not seen by the
 #   hook, and the status comparison sees it only when it changes a file in the copy: such a write of identical
 #   bytes, or one to a path outside the copy, would pass this check; so would such a write by an allowed git read;
-# - the copy is read from the real checkout by `git archive HEAD` in the fixture environment (no caller HOME, XDG
-#   or system configuration is read), with one command-line safe.directory entry naming that checkout's resolved
-#   path, so a checkout owned by another uid is still copied (_gen_argv_head_copy); that entry lets git read the
-#   checkout whatever the caller's own safe.directory setting says. What the rows show: the entry is the only one,
-#   it is on the archive read alone, it names that resolved path (the foreign-owner row,
+# - the copy is read from the real checkout by `rev-parse HEAD^@` and `git archive` (of HEAD's first parent, where
+#   there is one, and of HEAD) in the fixture environment (no caller HOME, XDG or system configuration is read),
+#   each with one command-line safe.directory entry naming that checkout's resolved path, so a checkout owned by
+#   another uid is still copied (_gen_argv_head_copy); that entry lets git read the checkout whatever the caller's
+#   own safe.directory setting says. The copy holds two commits at most, so a history read further back than
+#   HEAD's first parent sees nothing there. What the rows show: the entry is the only one, it is on the reads of
+#   the checkout alone, it names that resolved path (the foreign-owner row,
 #   _gen_argv_foreign_owner_failures, which stands in for the other uid with git's GIT_TEST_ASSUME_DIFFERENT_OWNER
 #   switch, so a git that ignores that switch is reported, not passed), and a resolved path that git would read as
 #   a pattern (one holding `*`, such as one ending in `/*`) or not as a plain absolute path is refused before any
@@ -1336,27 +1340,38 @@ def _gen_argv_safe_directory(root):
     return resolved, None
 
 
-def _gen_argv_head_copy(root, dest, **overrides):
-    """Build at dest (which must not exist) a throwaway git repository holding the committed tree of root's HEAD:
-    `git archive HEAD` of root, extracted into dest, then git init, add and commit there. Return None, or a
-    failure line when the copy could not be built.
-    The archive read is the one git call here on a checkout this self-test did not create. It keeps the fixture
-    environment, so no caller or system configuration is read, and carries exactly one command-line safe.directory
-    entry, naming root and nothing else, so a root owned by another uid is still read (git honours safe.directory
-    given on the command line). A root whose resolved path git would read as a pattern is refused before dest is
-    made or git runs (_gen_argv_safe_directory). The fixture calls in dest carry no such entry. overrides go to the
-    archive read's environment only (the foreign-owner row)."""
+def _gen_argv_first_parent(root, entry, **overrides):
+    """(parent, None): the first parent of root's HEAD, or None when HEAD is a root commit; or (None, failure line).
+    Read with `rev-parse HEAD^@` (every parent, first parent first) under the safe.directory entry for root, with
+    replacement refs ignored (--no-replace-objects and GIT_NO_REPLACE_OBJECTS=1), the graft file pinned to the null
+    device and the commit-graph off, so none of them changes which parent is read. A name-keyed function, so the
+    self-test can switch it off (the flip: the copy is one commit again)."""
+    done = _gen_argv_git(root, "-c", "safe.directory=" + entry, "-c", "core.commitGraph=false", "--no-replace-objects",
+                         "rev-parse", "HEAD^@",
+                         **dict(overrides, GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull))
+    if done.returncode != 0:
+        return None, "class check: built no copy, the parents of HEAD of {} cannot be read (exit {}): {!r}".format(
+            root, done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
+    parents = done.stdout.decode("ascii", "replace").split()
+    if not parents:
+        return None, None
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parents[0]) is None:
+        return None, "class check: built no copy, HEAD of {} names a malformed first parent {!r}".format(
+            root, parents[0])
+    return parents[0], None
+
+
+def _gen_argv_extract(root, entry, rev, dest, **overrides):
+    """`git archive <rev>` of root (under the safe.directory entry for root, replacement refs ignored), extracted
+    into dest: None, or a failure line."""
     import tarfile
-    entry, problem = _gen_argv_safe_directory(root)
-    if problem:
-        return problem
-    dest.mkdir()
     tar = dest.parent / (dest.name + ".tar")
     done = _gen_argv_git(root, "-c", "safe.directory=" + entry, "archive", "--format=tar", "-o",
-                         str(tar), "HEAD", **overrides)
+                         str(tar), rev, **overrides)
     if done.returncode != 0:
-        return "class check: built no copy, git archive HEAD of {} failed (exit {}): {!r}".format(
-            root, done.returncode, done.stderr.decode("utf-8", "replace")[-300:])
+        return "class check: built no copy, git archive {} of {} failed (exit {}): {!r}".format(
+            "HEAD" if rev == "HEAD" else rev[:12], root, done.returncode,
+            done.stderr.decode("utf-8", "replace")[-300:])
     try:
         with tarfile.open(str(tar), mode="r:") as archive:
             if hasattr(tarfile, "data_filter"):
@@ -1364,15 +1379,56 @@ def _gen_argv_head_copy(root, dest, **overrides):
             else:
                 archive.extractall(str(dest))
     except (OSError, tarfile.TarError) as exc:
-        return "class check: built no copy, extracting the HEAD archive failed: {}".format(exc)
+        return "class check: built no copy, extracting the {} archive failed: {}".format(
+            "HEAD" if rev == "HEAD" else "first-parent", exc)
     finally:
         tar.unlink()
-    return _gen_argv_commit(dest)
+    return None
+
+
+def _gen_argv_head_copy(root, dest, **overrides):
+    """Build at dest (which must not exist) a throwaway git repository holding the committed tree of root's HEAD:
+    `git archive HEAD` of root, extracted into dest, then git init, add and commit there. Where root's HEAD has a
+    first parent (_gen_argv_first_parent), `git archive` of that parent is extracted and committed first, on main,
+    and HEAD's tree is committed on top of it, so the copy's HEAD has a first parent holding the tree root's HEAD's
+    first parent holds: tools/gen_rules_core.py --check in the copy (HEAD on main, so its merge base with main is
+    HEAD) then compares the budget log with that parent's log. A root commit gives a one-commit copy, as in root.
+    The copy holds those two commits only. Return None, or a failure line when the copy could not be built.
+    The parent read and the archive reads are the git calls here on a checkout this self-test did not create. They
+    keep the fixture environment, so no caller or system configuration is read, and carry exactly one command-line
+    safe.directory entry, naming root and nothing else, so a root owned by another uid is still read (git honours
+    safe.directory given on the command line). A root whose resolved path git would read as a pattern is refused
+    before dest is made or git runs (_gen_argv_safe_directory). The fixture calls in dest carry no such entry.
+    overrides go to the reads of root only (the foreign-owner row)."""
+    import shutil
+    entry, problem = _gen_argv_safe_directory(root)
+    if problem:
+        return problem
+    parent, problem = _gen_argv_first_parent(root, entry, **overrides)
+    if problem:
+        return problem
+    dest.mkdir()
+    if parent is not None:
+        problem = (_gen_argv_extract(root, entry, parent, dest, **dict(overrides, GIT_NO_REPLACE_OBJECTS="1"))
+                   or _gen_argv_commit(dest))
+        if problem:
+            return problem
+        try:
+            for child in dest.iterdir():
+                if child.name == ".git":
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        except OSError as exc:
+            return "class check: built no copy, clearing the first parent's tree failed: {}".format(exc)
+    return _gen_argv_extract(root, entry, "HEAD", dest, **overrides) or _gen_argv_commit(dest)
 
 
 def _gen_argv_commit(dest):
     """git init, add (every file, ignored ones too) and commit in dest: None, or a failure line."""
-    for args in (("init", "-q"), ("add", "-A", "-f"), ("commit", "-q", "-m", "class check copy")):
+    for args in (("init", "-q"), ("add", "-A", "-f"), ("commit", "-q", "--allow-empty", "-m", "class check copy")):
         done = _gen_argv_git(dest, *args)
         if done.returncode != 0:
             return "class check: built no copy, git {} failed in {} (exit {}): {!r}".format(
@@ -1384,11 +1440,12 @@ def _gen_argv_commit(dest):
 # (git refuses such a checkout as of dubious ownership unless protected configuration names it in safe.directory,
 # and the fixture environment pins away the caller's global configuration where that entry usually lives). The
 # self-test cannot change a file's owner, so git's own test switch GIT_TEST_ASSUME_DIFFERENT_OWNER=1 (git's ownership
-# check then treats the checkout as another uid's) stands in, given to the archive read only. A control shows the
-# switch bites on this git: the same read with no safe.directory entry must be refused for dubious ownership, so a
-# git that ignores the switch is reported rather than passed. Then _gen_argv_head_copy must build the copy (red when
-# its safe.directory entry is removed), with exactly one safe.directory entry, naming that checkout, on the archive
-# read and none on any fixture call.
+# check then treats the checkout as another uid's) stands in, given to the reads of the checkout only. A control
+# shows the switch bites on this git: the archive read with no safe.directory entry must be refused for dubious
+# ownership, so a git that ignores the switch is reported rather than passed. Then _gen_argv_head_copy must build the
+# copy (red when its safe.directory entry is removed), with its two reads of the checkout first (the parent read,
+# then the archive of HEAD; the checkout is one commit, so no first-parent archive), each with exactly one
+# safe.directory entry, naming that checkout, and the owner switch, and none on any fixture call.
 _GEN_ARGV_FOREIGN_OWNER = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
 
 
@@ -1432,14 +1489,18 @@ def _gen_argv_foreign_owner_failures():
                             "with its committed files; got {!r}, seed.txt {}".format(
                                 got, "present" if seed.is_file() else "absent"))
         archives = [call for call in calls if "archive" in call[1]]
+        parent_reads = [call for call in calls if "rev-parse" in call[1]]
         entries = [[arg for arg in args if arg.startswith("safe.directory")] for _cwd, args, _env in calls]
-        expected = [[trust]] + [[]] * (len(calls) - 1)
-        if (len(archives) != 1 or calls[:1] != archives or archives[0][0] != source
-                or archives[0][2] != _GEN_ARGV_FOREIGN_OWNER or entries != expected
-                or any(overrides for _cwd, _args, overrides in calls[1:])):
-            failures.append("foreign-owner row: expected the archive read of {} first, with the one entry {!r} and "
-                            "the owner switch, then only fixture calls with no safe.directory entry and no override; "
-                            "got {!r}".format(source, trust, calls))
+        expected = [[trust]] * 2 + [[]] * (len(calls) - 2)
+        if (len(archives) != 1 or len(parent_reads) != 1 or calls[:2] != parent_reads + archives
+                or archives[0][0] != source or parent_reads[0][0] != source
+                or archives[0][2] != _GEN_ARGV_FOREIGN_OWNER
+                or parent_reads[0][2] != dict(_GEN_ARGV_FOREIGN_OWNER, GIT_NO_REPLACE_OBJECTS="1",
+                                              GIT_GRAFT_FILE=os.devnull)
+                or entries != expected or any(overrides for _cwd, _args, overrides in calls[2:])):
+            failures.append("foreign-owner row: expected the parent read, then the archive read, of {} first, each "
+                            "with the one entry {!r} and the owner switch, then only fixture calls with no "
+                            "safe.directory entry and no override; got {!r}".format(source, trust, calls))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
@@ -1483,6 +1544,90 @@ def _gen_argv_glob_root_failures():
                 failures.append("glob-path row: a checkout at {} must be refused before any git call, with the "
                                 "safe.directory failure line and no copy; got {!r}, copy {}, git calls {!r}".format(
                                     source, got, "present" if os.path.lexists(copy) else "absent", calls))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return failures
+
+
+# The first-parent rows: the class check's copy commits HEAD's first parent's tree under HEAD's tree, so
+# tools/gen_rules_core.py --check in the copy (HEAD on main, so the merge base is HEAD) compares the budget log with
+# the log that first parent holds, not with itself. The source is a copy of this checkout's HEAD with three commits
+# on top: a shrink entry appended to the budget log (file-cap lowered by one), a clean change (a marker file), then
+# the shrink entry deleted again (the undo). A copy of the source at the clean change must pass gen_rules_core.py
+# --check (exit 0: its first parent holds the shrink it keeps) and a copy at the undo must fail it (exit 1: its first
+# parent holds the entry it deletes). The flip switches _gen_argv_first_parent off, so the copy is one commit again,
+# as before this change: both runs are then exit 2 (a root commit on main), so each row depends on the first parent
+# being committed. What the rows do not show: a check reading further back than the first parent (the copy holds two
+# commits only).
+def _gen_argv_first_parent_failures():
+    """The first-parent rows (see the comment above): one failure line per broken expectation."""
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    import tomllib
+    from _git_fixture_env import git_fixture_env
+    failures = []
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-argv-parent-"))
+
+    def core_check(copy):
+        done = subprocess.run([sys.executable, "tools/gen_rules_core.py", "--check"], capture_output=True,
+                              timeout=300, cwd=str(copy), env=git_fixture_env())
+        return done.returncode, done.stderr.decode("utf-8", "replace")
+
+    def copied(name):
+        copy = tmp / name
+        problem = _gen_argv_head_copy(source, copy)
+        return (None, problem) if problem else core_check(copy)
+
+    try:
+        source = tmp / "source"
+        problem = _gen_argv_head_copy(Path(__file__).resolve().parent.parent, source)
+        if problem:
+            return ["first-parent rows: " + problem]
+        budget = source / ".aiqt" / "core" / "core-budget.toml"
+        seed_text = budget.read_text(encoding="utf-8")
+        in_force = tomllib.loads(seed_text)["accepted"][-1]
+        budget.write_text(seed_text + (
+            '\n[[accepted]]\nkind = "shrink"\nnote = "self-test: file-cap lowered by one"\nentry-cap = {}\n'
+            "trigger-cap = {}\nfile-cap = {}\npending = {}\n").format(
+                in_force["entry-cap"], in_force["trigger-cap"], in_force["file-cap"] - 1,
+                json.dumps(in_force["pending"])), encoding="utf-8")
+        problem = _gen_argv_commit(source)
+        (source / "first-parent-marker.txt").write_text("clean change\n", encoding="utf-8")
+        problem = problem or _gen_argv_commit(source)
+        if problem:
+            return ["first-parent rows: " + problem]
+        clean = copied("clean")
+        if clean[0] != 0:
+            failures.append("first-parent row (clean): a copy whose first parent holds the budget log it keeps must "
+                            "pass gen_rules_core.py --check (exit 0); got {!r}".format((clean[0], clean[1][-300:])))
+        saved = _gen_argv_first_parent
+        globals()["_gen_argv_first_parent"] = lambda _root, _entry, **_overrides: (None, None)
+        try:
+            flip_clean = copied("clean-flip")
+        finally:
+            globals()["_gen_argv_first_parent"] = saved
+        budget.write_text(seed_text, encoding="utf-8")
+        problem = _gen_argv_commit(source)
+        if problem:
+            return failures + ["first-parent rows: " + problem]
+        undo = copied("undo")
+        if undo[0] != 1:
+            failures.append("first-parent row (undo): a copy that deletes a shrink entry its first parent holds must "
+                            "fail gen_rules_core.py --check (exit 1); got {!r}".format((undo[0], undo[1][-300:])))
+        globals()["_gen_argv_first_parent"] = lambda _root, _entry, **_overrides: (None, None)
+        try:
+            flip_undo = copied("undo-flip")
+        finally:
+            globals()["_gen_argv_first_parent"] = saved
+        for label, flipped in (("clean", flip_clean), ("undo", flip_undo)):
+            if flipped[0] != 2 or "is a root commit" not in flipped[1]:
+                failures.append("first-parent flip ({}): with the first parent not committed the copy is one "
+                                "commit, so gen_rules_core.py --check must exit 2 (a root commit on main); got "
+                                "{!r}".format(label, (flipped[0], flipped[1][-300:])))
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        failures.append("first-parent rows: the fixture could not be built or run: {}".format(exc))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
@@ -3277,6 +3422,9 @@ def self_test_main():
     # A checkout whose resolved path git would read as a pattern (ending in `/*`, or holding `*`) is refused before
     # any git call (red when _gen_argv_safe_directory's refusal is removed).
     failures.extend(_gen_argv_glob_root_failures())
+    # The class check's copy gives HEAD its first parent's tree as a parent commit, so gen_rules_core.py --check in a
+    # copy passes on a clean change and fails on an undo (red when the parent read is switched off: exit 2 both).
+    failures.extend(_gen_argv_first_parent_failures())
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -3297,7 +3445,9 @@ def self_test_main():
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
           "nothing, here and in every tools/gen_*.py, each of which, on a tree made stale on purpose, ends at a "
           "write in its copy with no argument and exits 1 with nothing blocked under --check, and a valued option "
-          "never takes a following flag as its value; "
+          "never takes a following flag as its value; the class check's copy commits HEAD's first parent's tree "
+          "under HEAD's, so gen_rules_core.py --check in a copy passes on a clean change and fails on an undo "
+          "(each exit 2 with the first parent not committed); "
           "{}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_SPLIT_CASES), len(_SPLIT_REVERTS),

@@ -106,7 +106,10 @@ they cannot deny it categorically: a generator can still share state through a C
 per-call tempdirs, the parent of its own $HOME/$TMPDIR, or any fixed path outside its sandbox. Full
 isolation would require OS-level confinement (a namespace or container); that purely-adversarial case is
 out of scope (the gate runs the project's own trusted generators) and is left to code review. Sources are not swept (a separate invariant). The gate tests a copy of the working
-tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
+tree, so it captures local uncommitted edits; on CI, HEAD equals the tree. The template commits that copy on
+top of a commit holding the tree of HEAD's first parent (where HEAD has one), so a git-reading generator that
+compares with HEAD's first parent (tools/gen_rules_core.py on main) compares the copy with that tree; the
+template holds those two commits only.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
@@ -389,6 +392,62 @@ def _remove_gc_debris(git_dir):
             os.unlink(str(path))
 
 
+def _real_root_first_parent(real_root, env, deadline):
+    """The first parent of real_root's HEAD, or None when HEAD is a root commit: `rev-parse HEAD^@` (every
+    parent, first parent first) in real_root with core.fsmonitor and the commit-graph off, replacement refs
+    ignored (--no-replace-objects) and the graft file pinned to the null device, so none of them changes
+    which parent is read. A failed read (an unborn HEAD among them), a timeout or a parent that is not a
+    full object id raises OSError (cannot-evaluate). A name-keyed function, so the self-test can switch it
+    off (the flip: the template is one commit again)."""
+    timeout = _setup_timeout(deadline, SETUP_CALL_TIMEOUT)
+    try:
+        proc = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
+                               "-c", "core.commitGraph=false", "--no-optional-locks", "--no-replace-objects",
+                               "rev-parse", "HEAD^@"],
+                              capture_output=True, env=dict(env, GIT_GRAFT_FILE=os.devnull),
+                              timeout=timeout, shell=False)
+    except subprocess.TimeoutExpired:
+        raise OSError("real_root `git rev-parse HEAD^@` exceeded its {:g} s setup bound; fail-closed"
+                      .format(timeout)) from None
+    if proc.returncode != 0:
+        raise OSError("cannot read the parents of real_root's HEAD (git rev-parse exit {}); fail-closed"
+                      .format(proc.returncode))
+    parents = proc.stdout.decode("ascii", "replace").split()
+    if not parents:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", parents[0]):
+        raise OSError("real_root's HEAD names a malformed first parent {!r}; fail-closed".format(parents[0]))
+    return parents[0]
+
+
+def _extract_first_parent(real_root, parent, staging, env, deadline):
+    """`git archive` of the commit parent in real_root (core.fsmonitor off, replacement refs ignored),
+    extracted into the new directory staging. OSError (cannot-evaluate) on any failure or timeout."""
+    import io
+    import tarfile
+    timeout = _setup_timeout(deadline, SETUP_CALL_TIMEOUT)
+    try:
+        proc = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
+                               "--no-optional-locks", "--no-replace-objects", "archive", "--format=tar", parent],
+                              capture_output=True, env=dict(env, GIT_NO_REPLACE_OBJECTS="1"),
+                              timeout=timeout, shell=False)
+    except subprocess.TimeoutExpired:
+        raise OSError("real_root `git archive` of the first parent exceeded its {:g} s setup bound; "
+                      "fail-closed".format(timeout)) from None
+    if proc.returncode != 0:
+        raise OSError("cannot archive real_root's first parent {} (git archive exit {}); fail-closed"
+                      .format(parent[:12], proc.returncode))
+    staging.mkdir()
+    try:
+        with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r:") as archive:
+            if hasattr(tarfile, "data_filter"):
+                archive.extractall(str(staging), filter="data")
+            else:
+                archive.extractall(str(staging))
+    except tarfile.TarError as exc:
+        raise OSError("cannot extract real_root's first parent {} ({}); fail-closed".format(parent[:12], exc))
+
+
 def _materialize_git(template, real_root, deadline=None):
     """D6: materialize a REAL minimal git repository in the sandbox TEMPLATE so a git-reading generator
     (for example gen_manifest.py, whose `git ls-files` enumerates the tracked surface) runs its baseline
@@ -532,6 +591,26 @@ def _materialize_git(template, real_root, deadline=None):
 
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
+    # The first parent of real_root's HEAD, where it has one, is committed first: its tree (`git archive` of
+    # that parent, extracted outside the template) is staged through --work-tree and committed on main, and
+    # the index is then emptied, so the tracked-set commit below lands on top of it. tools/gen_rules_core.py
+    # --check in the sandbox (HEAD on main, so its merge base with main is HEAD) then compares the budget log
+    # with the log real_root's HEAD's first parent holds, never with itself. A real_root HEAD that is a root
+    # commit gives a one-commit template, as in real_root.
+    parent = _real_root_first_parent(real_root, env, deadline)
+    if parent is not None:
+        staging = template.parent / (template.name + "-first-parent")
+        try:
+            _extract_first_parent(real_root, parent, staging, env, deadline)
+            if git(template, "--work-tree=" + str(staging), "add", "-A", "-f").returncode != 0:
+                raise OSError("cannot git-add the first parent's tree into the failclose template")
+            if git(template, "commit", "-q", "--allow-empty", "-m", "failclose first parent",
+                   "--no-verify").returncode != 0:
+                raise OSError("cannot commit the first parent into the failclose sandbox template")
+            if git(template, "read-tree", "--empty").returncode != 0:
+                raise OSError("cannot empty the failclose template index after the first-parent commit")
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
     # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
     probe_timeout = _setup_timeout(deadline, SETUP_CALL_TIMEOUT)
@@ -556,7 +635,7 @@ def _materialize_git(template, real_root, deadline=None):
     present = [p for p in tracked if (template / p).is_file()]
     if present and git(template, "add", "--", *present).returncode != 0:
         raise OSError("cannot git-add the tracked set into the failclose template")
-    if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
+    if git(template, "commit", "-q", "--allow-empty", "-m", "failclose template", "--no-verify").returncode != 0:
         raise OSError("cannot commit the failclose sandbox template")
     # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
     # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
@@ -1711,6 +1790,7 @@ _SELF_TEST_VECTORS = (
     "fsmonitor probe",
     "forced probe failure",
     "tracked-set mismatch",
+    "first-parent template",
     "no-maintenance flags",
     "template gc overrun",
     "template object-store check",
@@ -2695,6 +2775,72 @@ def _self_test_main_isolated():
                     expect_sweep(2, "tracked-set mismatch: expected cannot-evaluate exit 2 (the materialized "
                                     "template index must equal real_root's tracked set)"))
 
+        # (q2) FIRST PARENT: the template commits real_root's HEAD's first parent's tree under the tracked set,
+        #     so tools/gen_rules_core.py --check in the template (HEAD on main, so its merge base is HEAD)
+        #     compares the budget log with the log that first parent holds. The fixture is a copy of this
+        #     checkout's working tree (copied as the sweep copies it, so no git read of the checkout is made)
+        #     with three commits: fp0 the copy, fp1 a shrink entry appended to the budget
+        #     log (file-cap lowered by one), fp2 a clean change (a marker file); then fp3 deletes the shrink
+        #     entry again (the undo). A template of the fixture at fp2 must pass gen_rules_core.py --check
+        #     (exit 0) and one at fp3 must fail it (exit 1). The flip switches _real_root_first_parent off, so
+        #     the template is one commit again, as before this change: both runs are then exit 2 (a root
+        #     commit on main), so each row depends on the first parent being committed. What it does not show:
+        #     a check reading further back than the first parent (the template holds two commits only).
+        def _first_parent_fixture():
+            import json
+            import tomllib
+            fpr = tmp / "first-parent"
+            shutil.copytree(repo_root(), fpr, symlinks=False, ignore=_copy_ignore)
+            budget = fpr / ".aiqt" / "core" / "core-budget.toml"
+            seed_text = budget.read_text(encoding="utf-8")
+            in_force = tomllib.loads(seed_text)["accepted"][-1]
+            _git_fixture(fpr, "init", "-q", "--template=")
+            _git_fixture(fpr, "add", "-A")
+            _git_fixture(fpr, "commit", "-q", "-m", "fp0 copy", "--no-verify")
+            budget.write_text(seed_text + (
+                '\n[[accepted]]\nkind = "shrink"\nnote = "self-test: file-cap lowered by one"\n'
+                "entry-cap = {}\ntrigger-cap = {}\nfile-cap = {}\npending = {}\n").format(
+                    in_force["entry-cap"], in_force["trigger-cap"], in_force["file-cap"] - 1,
+                    json.dumps(in_force["pending"])), encoding="utf-8")
+            _git_fixture(fpr, "add", "-A")
+            _git_fixture(fpr, "commit", "-q", "-m", "fp1 shrink", "--no-verify")
+            (fpr / "first-parent-marker.txt").write_text("clean change\n", encoding="utf-8")
+            _git_fixture(fpr, "add", "-A")
+            _git_fixture(fpr, "commit", "-q", "-m", "fp2 clean", "--no-verify")
+            return fpr, budget, seed_text
+
+        def _evaluate_first_parent(fixture):
+            fpr, budget, seed_text = fixture
+
+            def core_check(label, parent_read=True):
+                template = tmp / "first-parent-template-{}".format(label)
+                shutil.copytree(fpr, template, symlinks=False, ignore=_copy_ignore)
+                saved = globals()["_real_root_first_parent"]
+                if not parent_read:
+                    globals()["_real_root_first_parent"] = lambda _root, _env, _deadline: None
+                try:
+                    _materialize_git(template, fpr)
+                finally:
+                    globals()["_real_root_first_parent"] = saved
+                try:
+                    return _run_check(template / "tools" / "gen_rules_core.py", template)
+                finally:
+                    shutil.rmtree(template, ignore_errors=True)
+
+            got = {"clean": core_check("clean"), "clean flip": core_check("clean-flip", parent_read=False)}
+            budget.write_text(seed_text, encoding="utf-8")
+            _git_fixture(fpr, "add", "-A")
+            _git_fixture(fpr, "commit", "-q", "-m", "fp3 undo", "--no-verify")
+            got["undo"] = core_check("undo")
+            got["undo flip"] = core_check("undo-flip", parent_read=False)
+            want = {"clean": 0, "clean flip": 2, "undo": 1, "undo flip": 2}
+            if got != want:
+                failures.append("first parent: gen_rules_core.py --check in the template must pass on a clean "
+                                "change (0) and fail on an undo (1), each exit 2 (a root commit on main) with "
+                                "the first parent not committed; want {}, got {}".format(want, got))
+
+        _run_vector(cannot, failures, "first-parent template", _first_parent_fixture, _evaluate_first_parent)
+
         # (r) Every TEMPLATE git command carries the no-maintenance hardening flags (gc.auto=0,
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
         #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
@@ -3655,7 +3801,10 @@ def _self_test_main_isolated():
           "git-reading generator passes (exit 0) because the sandbox template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
           "executed by the probe (no outside write) thanks to -c core.fsmonitor=false; and a forced probe "
-          "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
+          "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; the "
+          "template commits the first parent's tree of real_root's HEAD under the tracked set, so "
+          "gen_rules_core.py --check there passes on a clean change and fails on an undo (each exit 2 with "
+          "the first parent not committed); and "
           "every template git command carries the no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
           "copytree of the template; a template gc that overruns its bound is non-fatal (a conformant repo "
