@@ -943,16 +943,16 @@ def _record_digest(body):
 
 def _record_digest_matches(body, recorded):
     """True iff `recorded` is the per-record digest of `body` (_record_digest), or the digest of the same
-    canonical serialization as an emitter before the U+2028/U+2029 escape spelled it (the escape of each
-    written as the literal character, _opf_emit.prior_separator_spelling), so a digest recorded over a body
-    holding one of those characters before that escape still reconciles. Either spelling is a function of
-    the parsed body alone, so a changed body matches neither. Raises `_opf_emit.EmitError` as _record_digest
-    does."""
+    canonical serialization as an earlier emitter spelled it (_opf_emit.prior_spellings: before the U+00AD
+    escape, the soft hyphen written literally; before the U+2028/U+2029 escape, those and the soft hyphen
+    written literally), so a digest recorded over a body holding one of those characters before its escape
+    still reconciles. Every spelling is a function of the parsed body alone, so a changed body matches none.
+    Raises `_opf_emit.EmitError` as _record_digest does."""
     text = _opf_emit.emit(body)
     if recorded == "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
         return True
-    prior = _opf_emit.prior_separator_spelling(text)
-    return prior != text and recorded == "sha256:" + hashlib.sha256(prior.encode("utf-8")).hexdigest()
+    return any(recorded == "sha256:" + hashlib.sha256(prior.encode("utf-8")).hexdigest()
+               for prior in _opf_emit.prior_spellings(text))
 
 
 def _under_any(p, prefixes):

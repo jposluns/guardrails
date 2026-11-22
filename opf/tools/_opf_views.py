@@ -3921,7 +3921,7 @@ def _self_test():
         # bytes the byte-canon scan forbids. These document the hole the whole-body fail-closed scan (in
         # _render_resolved) closes.
         for _lbl, _cp in (("zwsp", 0x200B), ("zwnj", 0x200C), ("zwj", 0x200D),
-                          ("wj", 0x2060), ("bom", 0xFEFF), ("rlo", 0x202E)):
+                          ("wj", 0x2060), ("bom", 0xFEFF), ("shy", 0x00AD), ("rlo", 0x202E)):
             _mt = _md_text("a" + chr(_cp) + "b")
             check("md-text-passes-forbidden-" + _lbl, chr(_cp) in _mt)
             check("byte-canon-flags-forbidden-" + _lbl,
@@ -4787,7 +4787,8 @@ def _self_test():
         ]) + "\n"
         for _bcls, _bcp in (("zero-width-u200b", 0x200B), ("zero-width-u200c", 0x200C),
                             ("zero-width-u200d", 0x200D), ("word-joiner-u2060", 0x2060),
-                            ("bom-ufeff", 0xFEFF), ("bidi-rlo-u202e", 0x202E)):
+                            ("bom-ufeff", 0xFEFF), ("soft-hyphen-u00ad", 0x00AD),
+                            ("bidi-rlo-u202e", 0x202E)):
             _bcroot = new_root()
             write_toml(_bcroot, "manifest.toml", manifest)
             empty_indexes(_bcroot)

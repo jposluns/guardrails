@@ -11,7 +11,11 @@ stdlib only, pure.
 """
 import re
 
-ZERO_WIDTH = tuple(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
+# The zero-width class: U+200B, U+200C, U+200D, U+2060, U+FEFF, and U+00AD SOFT HYPHEN, a format character
+# that renders nothing except at a line break, so a literal one hides inside a word as the others do. Every
+# consumer of FORBIDDEN (this scan, AIQT's check_byte_canon.py and its allowance names, opf's view generator,
+# and opf's record emitter, whose self-test pins its own copy of the set to this one) refuses or escapes it.
+ZERO_WIDTH = tuple(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD))
 BIDI = tuple(chr(c) for c in (0x061C, 0x200E, 0x200F)
              + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
 FORBIDDEN = {ch.encode("utf-8"): ch for ch in ZERO_WIDTH + BIDI}

@@ -13,7 +13,7 @@ gen_manifest, and the engine evaluation additionally catches a nested tracked .g
 overriding the root one.
 
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
-and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
+(the zero-width class includes U+00AD SOFT HYPHEN) and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
 splits on both), held in _byte_canon.LINE_SEPARATORS. The separators stay out of FORBIDDEN because opf's
 view generator reads that set (opf's record emitter escapes both sets); no allowance clears them. Like the
 rest of the 3.1 scan, the separator scan reads every in-scope path except the [checkout].binary roster, and
@@ -73,12 +73,13 @@ SUPPORTED = ("linux", "macos")
 ROADMAP = ("windows",)
 # Every vector class the published set may carry (3.4); each fail class names the scan leg it exercises.
 VECTOR_CLASSES = ("pass", "crlf", "bare-cr", "trailing-whitespace", "zero-width", "bidi", "bidi-mark",
-                  "word-joiner", "bom", "no-final-newline", "double-final-newline", "invalid-utf8",
-                  "empty")
+                  "word-joiner", "soft-hyphen", "bom", "no-final-newline", "double-final-newline",
+                  "invalid-utf8", "empty")
 # Classes that MUST appear in the published set (a missing one is fail-closed): one per released leg,
-# including the newly-covered bidi marks and the word joiner so those controls cannot silently drop.
+# including the newly-covered bidi marks, the word joiner and the soft hyphen so those controls cannot
+# silently drop.
 REQUIRED_VECTOR_CLASSES = ("pass", "crlf", "trailing-whitespace", "zero-width", "bidi", "bidi-mark",
-                           "word-joiner", "invalid-utf8", "empty")
+                           "word-joiner", "soft-hyphen", "invalid-utf8", "empty")
 # Each non-"pass" class is bound to a substring of the SPECIFIC scan_bytes finding it must provoke, so a
 # vector's class name proves its own scan leg fired, not merely that some finding did. The overlapping
 # codepoint classes name their exact U+codepoint (the U+{:04X} the scan emits), so swapping one class's
@@ -89,6 +90,7 @@ CLASS_FINDING = {
     "trailing-whitespace": "trailing whitespace",
     "zero-width": "U+200B",
     "word-joiner": "U+2060",
+    "soft-hyphen": "U+00AD",
     "bidi": "U+202E",
     "bidi-mark": "U+200E",
     "bom": "leading UTF-8 BOM",
@@ -448,6 +450,9 @@ def self_test_main():
         ("empty", b"", True),
         ("zero-width", "a{}b\n".format(chr(0x200B)).encode("utf-8"), True),
         ("word-joiner", "a{}b\n".format(chr(0x2060)).encode("utf-8"), True),
+        ("soft-hyphen", "co{}op\n".format(chr(0x00AD)).encode("utf-8"), True),
+        ("soft-hyphen-escape-text", b'x = "co\\u00ADop"\n', False),
+        ("soft-hyphen-neighbours", "a{}{}b\n".format(chr(0x00AC), chr(0x00AE)).encode("utf-8"), False),
         ("bidi", "a{}b\n".format(chr(0x202E)).encode("utf-8"), True),
         ("bidi-mark-lrm", "a{}b\n".format(chr(0x200E)).encode("utf-8"), True),
         ("bidi-mark-rlm", "a{}b\n".format(chr(0x200F)).encode("utf-8"), True),
@@ -800,6 +805,7 @@ def self_test_main():
     own_bytes = {"crlf": b"bad\r\n", "bare-cr": b"bad\rx\n", "trailing-whitespace": b"bad \n",
                  "zero-width": "a{}b\n".format(chr(0x200B)).encode("utf-8"),
                  "word-joiner": "a{}b\n".format(chr(0x2060)).encode("utf-8"),
+                 "soft-hyphen": "co{}op\n".format(chr(0x00AD)).encode("utf-8"),
                  "bidi": "a{}b\n".format(chr(0x202E)).encode("utf-8"),
                  "bidi-mark": "a{}b\n".format(chr(0x200E)).encode("utf-8"),
                  "bom": BOM + b"a\n", "no-final-newline": b"abc", "double-final-newline": b"abc\n\n",
@@ -823,9 +829,42 @@ def self_test_main():
             elif not any(CLASS_FINDING[row["class"]] in f for f in found):
                 failures.append("vector {}: class {!r} did not provoke its scan leg (findings: {})".format(
                     row["name"], row["class"], found))
+        # Flip: with U+00AD dropped from the shared scanner's set, every published soft-hyphen vector must
+        # stop provoking its leg (red), and must provoke it again once the set is restored, so the class
+        # row proves the codepoint's membership, not merely that some finding fired.
+        shy_rows = [r for r in _load_vectors(repo_root()) if r["class"] == "soft-hyphen"]
+        if not shy_rows:
+            failures.append("no published soft-hyphen vector to flip")
+        saved_set = (_bc.FORBIDDEN, _bc.FORBIDDEN_RE)
+        try:
+            _bc.FORBIDDEN = {b: c for b, c in saved_set[0].items() if c != chr(0x00AD)}
+            _bc.FORBIDDEN_RE = re.compile(b"|".join(re.escape(b) for b in sorted(_bc.FORBIDDEN)))
+            for row in shy_rows:
+                data = base64.b64decode(row["payload-base64"], validate=True)
+                if any(CLASS_FINDING["soft-hyphen"] in f for f in scan_bytes(data)):
+                    failures.append("vector {}: still provoked U+00AD with U+00AD removed from the set "
+                                    "(the flip did not go red)".format(row["name"]))
+        finally:
+            _bc.FORBIDDEN, _bc.FORBIDDEN_RE = saved_set
+        for row in shy_rows:
+            data = base64.b64decode(row["payload-base64"], validate=True)
+            if not any(CLASS_FINDING["soft-hyphen"] in f for f in scan_bytes(data)):
+                failures.append("vector {}: did not provoke U+00AD after the flip was restored".format(
+                    row["name"]))
     except (GateError, KeyError, ValueError) as exc:
         print("error: vectors unusable ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
+    # No reduction: every codepoint the shared set held before U+00AD joined it is still forbidden, U+00AD is,
+    # and an allowance row may name U+00AD (the allowance names derive from the same sets).
+    for cp in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F),
+               *range(0x2066, 0x206A), 0x00AD):
+        if FORBIDDEN.get(chr(cp).encode("utf-8")) != chr(cp):
+            failures.append("U+{:04X} is missing from _byte_canon.FORBIDDEN".format(cp))
+    try:
+        validate_allowances(repo_root(), [dict(good_row, codepoints=["U+00AD"])], {"x"})
+    except GateError as exc:
+        if "outside the forbidden sets" in str(exc):
+            failures.append("an allowance naming U+00AD was rejected as outside the forbidden sets")
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -834,8 +873,8 @@ def self_test_main():
     print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg (direct and through "
           "run() over a temp tree), allowance scoping, "
           "coverage logic, the containment "
-          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, and the "
-          "published vectors all hold")
+          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, the "
+          "published vectors and the soft-hyphen vector flip all hold")
     return 0
 
 
