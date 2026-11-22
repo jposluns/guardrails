@@ -5295,7 +5295,8 @@ def _rdp_carry_cases(base):
         [("deny", True), ("deny", True), ("warn", True)])
     # Mutants of the one argv helper: a content-blind listing (name and status only) passes the binary
     # row, while dropping --binary alone does not, since --full-index index lines name both blob ids;
-    # rename detection (-M) passes the rename row.
+    # rename detection (-M) passes the rename row's byte comparison, which only the touched-path refusal
+    # behind it then stops (old.txt is touched and differs between the bases).
     intact = aiqt_hooks._rdp_carry_diff_argv
     no_binary = lambda b, c: tuple(a for a in intact(b, c) if a != "--binary")
     check("rdp/carry-mutation-binary", [
@@ -5305,8 +5306,8 @@ def _rdp_carry_cases(base):
         _rdp_kind(carry(*binary_row))], ["allow", "deny", "deny"])
     renames = lambda b, c: tuple("-M" if a == "--no-renames" else a for a in intact(b, c))
     check("rdp/carry-mutation-renames", [
-        _rdp_kind(_rdp_mutant([("_rdp_carry_diff_argv", renames)], lambda: carry(*rename_row))),
-        _rdp_kind(carry(*rename_row))], ["allow", "deny"])
+        _named(_rdp_mutant([("_rdp_carry_diff_argv", renames)], lambda: carry(*rename_row)), "touches 'old.txt'"),
+        _named(carry(*rename_row), "does not transfer")], [("deny", True), ("deny", True)])
     # Repository configuration that shapes diff output, set in the fixture repository: the verdicts hold,
     # and the external diff program never runs. The control is the same rows without the poison.
     poison_rows = ((amended, x, [], None), (y, x, ["seed.txt"], None), (y_other, x, ["seed.txt"], None),
@@ -5338,6 +5339,99 @@ def _rdp_carry_cases(base):
     check("rdp/carry-config-poison", (control, poisoned, external_ran),
           (["allow", "allow", "deny", "deny", "deny"], ["allow", "allow", "deny", "deny", "deny"], False))
     check("rdp/carry-mutation-plumbing", (plumbing != poisoned, poisoned == control), (True, True))
+    # A brief names one reviewed commit, so a reviewed range is not recognized: naming the range's tip
+    # compares that commit's own diff alone, and the earlier commit's path counts only as a path that
+    # differs between the bases (here f.txt, reopened). A squash of the range is compared with the tip's
+    # diff alone and is refused as a different diff; a merge stays UNVERIFIABLE (rdp/carry-merge).
+    r_first = _rdp_carry_commit(cf, cf.seed, {"f.txt": "f\n"}, "range, first commit")
+    r_tip = _rdp_carry_commit(cf, r_first, {"other.txt": "o\n"}, "range, tip")
+    r_tip_alone = _rdp_carry_commit(cf, b1, {"other.txt": "o\n"}, "range tip replayed alone")
+    r_squash = _rdp_carry_commit(cf, b1, {"f.txt": "f\n", "other.txt": "o\n"}, "range squashed")
+    check("rdp/carry-range-tip-only", [
+        _named(carry(r_tip_alone, r_tip, ["seed.txt"], ("other.txt",)), "not reopened: 'f.txt'"),
+        _rdp_kind(carry(r_tip_alone, r_tip, ["f.txt", "seed.txt"], ("other.txt",))),
+        _named(carry(r_squash, r_tip, ["f.txt", "seed.txt"], ("f.txt", "other.txt")), "does not transfer")],
+        [("deny", True), "allow", ("deny", True)])
+    # A change that only sets a file's mode has no index line, so a base that edits that file's content
+    # leaves the two patches byte-identical; a base change inside a touched file still forces a new review,
+    # reopen line or not. The flip replays the same mode change on a base that moves another file.
+    x_chmod = _rdp_carry_commit(cf, cf.seed, {"seed.txt": ("seed\n", 0o755)}, "mode only")
+    y_chmod = _rdp_carry_commit(cf, b1, {"seed.txt": ("seed\nmoved\n", 0o755)}, "mode only, replayed")
+    y_chmod_alone = _rdp_carry_commit(cf, b3, {"seed.txt": ("seed\n", 0o755)}, "mode only, on B3")
+    check("rdp/carry-mode-only-base-moved", [
+        _named(carry(y_chmod, x_chmod, ["seed.txt"], ("seed.txt",)), "touches 'seed.txt'", "new review"),
+        _named(carry(y_chmod, x_chmod, (), ("seed.txt",)), "touches 'seed.txt'"),
+        _rdp_kind(carry(y_chmod_alone, x_chmod, ["old.txt"], ("seed.txt",)))],
+        [("deny", True), ("deny", True), "allow"])
+    # A path that differs between the bases but cannot be written on a reopen line (one holding a line
+    # break or a character the label screen refuses, or one that is not UTF-8) withholds the carry as
+    # UNVERIFIABLE, naming the path and saying to declare none. The flip is a path holding a tab, which a
+    # reopen line can name.
+    unnameable = []
+    for name in ("nl\nhere.txt", "bad\udcff.txt", "ctl\x01here.txt"):
+        b_bad = _rdp_carry_commit(cf, cf.seed, {name: "n\n"}, "base adds an unnameable path")
+        unnameable.append(_named(carry(_rdp_carry_commit(cf, b_bad, change, "change on it"), x),
+                                 "cannot be named on a 'Review-reopen:' line", "'Review-carried-from:' none"))
+    b_tab = _rdp_carry_commit(cf, cf.seed, {"tab\there.txt": "t\n"}, "base adds a path with a tab")
+    unnameable.append(_rdp_kind(carry(_rdp_carry_commit(cf, b_tab, change, "change on it"), x, ["tab\there.txt"])))
+    check("rdp/carry-unnameable-base-path", unnameable, [("unverifiable", True)] * 3 + ["allow"])
+    # A second carried line is withheld on every target, none included; the flip is one none line.
+    _rdp_git(cf.root, "checkout", "-q", "--detach", x)
+    cf.authority(x + "\n")
+    check("rdp/carry-duplicate-none-non-revision", [_named(cf.dispatch(cf.brief(lines)), w) for lines, w in (
+        (["Review-target: not-a-review", "Review-carried-from: none", "Review-carried-from: none"],
+         "has 2 'Review-carried-from:' lines"),
+        (["Review-target: working-tree", "Review-carried-from: none"], "declares target working-tree"))],
+        [("unverifiable", True), ("warn", True)])
+    # An empty reopen value is withheld; the flip names the moved path.
+    check("rdp/carry-empty-reopen", [_named(carry(y, x, [""]), "empty 'Review-reopen:' value"),
+                                     _rdp_kind(carry(y, x, ["seed.txt"]))], [("unverifiable", True), "allow"])
+    # Replacement refs and grafts on the carried revision's side are ignored: S is the replayed change
+    # resolved otherwise, committed on Y, so its own diff differs from Y_other's; read through a replace ref
+    # to S2 (the same tree on B1), or a graft giving S the parent B1, it would match. The flip carries
+    # from S2 itself.
+    s_carried = _rdp_carry_commit(cf, y, {"src/a.py": "a = 3\n"}, "resolved otherwise, on Y")
+    s2 = _rdp_carry_commit(cf, b1, dict(change, **{"src/a.py": "a = 3\n"}), "resolved otherwise, on B1")
+    grafts = cf.root / ".git" / "info" / "grafts"
+    side_got = []
+    _rdp_git(cf.root, "replace", s_carried, s2)
+    try:
+        side_got.append(_named(carry(y_other, s_carried), "does not transfer"))
+    finally:
+        _rdp_git(cf.root, "replace", "-d", s_carried)
+    grafts.parent.mkdir(parents=True, exist_ok=True)
+    grafts.write_text("{} {}\n".format(s_carried, b1), encoding="utf-8")
+    try:
+        side_got.append(_named(carry(y_other, s_carried), "does not transfer"))
+    finally:
+        grafts.unlink()
+    side_got.append(_rdp_kind(carry(y_other, s2)))
+    check("rdp/carry-replace-graft-carried-side", side_got, [("deny", True)] * 2 + ["allow"])
+    # Gitlinks, judged by the check itself (a populated submodule is not needed): the same gitlink on both
+    # sides carries, a different one does not, and a gitlink that differs between the bases must be
+    # reopened.
+    def gitlink(parent, path, oid, message):
+        _rdp_git(cf.root, "checkout", "-q", "--detach", parent)
+        _rdp_git(cf.root, "update-index", "--add", "--cacheinfo", "160000,{},{}".format(oid, path))
+        _rdp_git(cf.root, "commit", "-q", "-m", message)
+        return _rdp_git(cf.root, "rev-parse", "HEAD")
+
+    def direct(pin, source, reopen=()):
+        parents = aiqt_hooks._rdp_commit_parents(str(cf.root), pin)
+        found = dict(carried=[source], reopen=list(reopen))
+        return aiqt_hooks._rdp_carry_check(dict(cf.binding, labels=labels), found, str(cf.root), "sha1", pin,
+                                           parents, parents[0])[0]
+    x_link = gitlink(cf.seed, "sub", cf.seed, "gitlink c1")
+    y_link = gitlink(b1, "sub", cf.seed, "gitlink c1, replayed")
+    y_link_other = gitlink(b1, "sub", x, "gitlink c2")
+    base_c1 = gitlink(cf.seed, "sub", cf.seed, "base with gitlink c1")
+    base_c2 = gitlink(cf.seed, "sub", x, "base with gitlink c2")
+    x_on_c1 = _rdp_carry_commit(cf, base_c1, {"g.txt": "g\n"}, "change beside gitlink c1")
+    y_on_c2 = _rdp_carry_commit(cf, base_c2, {"g.txt": "g\n"}, "change beside gitlink c2")
+    _rdp_git(cf.root, "checkout", "-q", "--detach", x)
+    check("rdp/carry-gitlink", [direct(y_link, x_link, ["seed.txt"]), direct(y_link_other, x_link, ["seed.txt"]),
+                                direct(y_on_c2, x_on_c1), direct(y_on_c2, x_on_c1, ["sub"])],
+          ["ok", "deny", "deny", "ok"])
 
 
 def _rdp_ls(cwd, background):

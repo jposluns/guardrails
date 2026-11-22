@@ -1167,12 +1167,24 @@ of a `revision` target:
   than 16 times `max_brief_bytes`, is withheld as `UNVERIFIABLE:`.
 - Patches that differ are refused: the reason names the first differing patch line and its section,
   and says the review does not transfer.
-- With identical patches, the paths that differ between the two bases (the carried revision's first
-  parent and the pin's first parent) must equal the `Review-reopen:` lines exactly. A path that
-  differs but is not reopened, and a reopened path that is identical in both bases, are refused;
-  equality allows.
+- With identical patches, a path that differs between the two bases (the carried revision's first
+  parent and the pin's first parent) but cannot be written on a `Review-reopen:` line is withheld as
+  `UNVERIFIABLE:`, with a reason that names it and says to declare `none` and dispatch a full review.
+  Such a path is not UTF-8, or holds a newline, another line boundary, or a character the label
+  screen refuses (a tab is allowed).
+- With identical patches, a path the change touches that also differs between the bases is refused
+  as needing a new review. Only a change to a file's mode alone reaches this step, since its section
+  names no blob; for any other touched file such a base change already makes the patches differ.
+- Otherwise the paths that differ between the two bases must equal the `Review-reopen:` lines
+  exactly. A path that differs but is not reopened, and a reopened path that is identical in both
+  bases, are refused; equality allows.
 - A `Review-carried-from:` value other than `none`, or a `Review-reopen:` line, on a `working-tree`
-  or `not-a-review` target is refused: a carried review needs a revision target.
+  or `not-a-review` target is refused: a carried review needs a revision target. Two or more
+  `Review-carried-from:` lines on such a target, `none` included, are withheld as `UNVERIFIABLE:`.
+- A brief names one reviewed commit, so a reviewed range or squash is not recognized. Naming a
+  range's tip compares that commit's own diff alone; the earlier commits' paths count only where they
+  differ between the bases. A squash of a reviewed range is compared with the tip's diff alone, so it
+  is refused unless the two match. Name the single commit that was reviewed.
 
 The hook cannot decide whether the change relies on a file, or is called or consumed by one, so it
 over-approximates: review reopens on every path that differs between the bases.
@@ -1287,11 +1299,17 @@ Limits:
   between the bases, which over-refuses large base moves at the cost of a full review. Interactions
   outside the repository (the toolchain, system libraries, network services, an unpinned dependency)
   are not seen.
-- The carried review check models one commit against its first parent. Reviewed ranges, squashes and
-  merges are cannot-evaluate, not modelled.
-- The byte comparison is strict, so a base change inside a touched file always forces a new review,
-  and a large diff can hit the patch cap or the time budget and be withheld. The patch cap is
-  measured after git's output has been read.
+- The carried review check compares one commit with its first parent. A merge on either side is
+  cannot-evaluate. Reviewed ranges and squashes are not recognized: naming a range's tip compares only
+  that commit's own diff, and a squash is compared with the tip's diff alone, so name the single
+  commit that was reviewed.
+- A base change inside a touched file always forces a new review: the byte comparison refuses one in
+  a file whose content the change edits, and a separate check refuses one in a file whose mode alone
+  the change sets. A large diff can hit the patch cap or the time budget and be withheld. The patch
+  cap is measured after git's output has been read.
+- A path that differs between the bases but cannot be written on a reopen line (not UTF-8, or holding
+  a newline, another line boundary or a character the label screen refuses) withholds every carry
+  across those bases as cannot-evaluate; declare `none` and dispatch a full review.
 - A stopped rebase, whose HEAD differs from its branch ref, is not addressed. Not built: a hook-owned
   record of allowed pins that a carried revision must name, a check of the mid-operation markers of an
   in-progress rebase, merge, cherry-pick or revert, and diff-shaping keys in the shared config-lane

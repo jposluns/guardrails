@@ -34635,14 +34635,28 @@ def _rdp_carry_first_difference(old, new):
     return (at + 1, section, line.decode("utf-8", "replace")[:80])
 
 
+def _rdp_carry_nameable(path):
+    """Whether a path git reports (bytes) can be written as a reopen line's value: UTF-8, with no newline,
+    no other line boundary (_RDP_NONPHYSICAL) and no character the label screen refuses (_rdp_hidden)."""
+    try:
+        text = path.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return not any(ch in text for ch in ("\n",) + _RDP_NONPHYSICAL) and _rdp_hidden(text) is None
+
+
 def _rdp_carry_check(cfg, found, repo, fmt, pin, pin_parents, pin_base):
     """The carried-review check (rule evgcmp), run last for a revision brief where the binding declares the
     carry labels: ("ok", note) when the brief carries no review ("none", note empty), carries one from the
-    pin itself (a note), or carries one whose replayed diff is byte-identical to the reviewed diff and whose
-    reopen lines name exactly the paths that differ between the reviewed and the new bases (note empty);
-    otherwise ("deny"|"unverifiable", message) for the first failure. Both patches are written by
-    _rdp_carry_diff_argv. Whether the change relies on, or is called or consumed by, a file that differs
-    between the bases is not computed: review must reopen on every such path, an over-approximation."""
+    pin itself (a note), or carries one whose replayed diff is byte-identical to the reviewed diff, that
+    touches no path that differs between the reviewed and the new bases, and whose reopen lines name exactly
+    those paths (note empty); otherwise ("deny"|"unverifiable", message) for the first failure. Both patches
+    are written by _rdp_carry_diff_argv. It compares one commit with its first parent: a merge on either
+    side is unverifiable, and a reviewed range or squash is not recognized, since the brief names one
+    commit (naming a range's tip compares that commit's own diff alone). A path that differs between the
+    bases but cannot be written on a reopen line (_rdp_carry_nameable) is unverifiable. Whether the change
+    relies on, or is called or consumed by, a file that differs between the bases is not computed: review
+    must reopen on every such path, an over-approximation."""
     labels = cfg["labels"]
     if "carried" not in labels:
         return ("ok", "")
@@ -34721,6 +34735,22 @@ def _rdp_carry_check(cfg, found, repo, fmt, pin, pin_parents, pin_base):
         return ("unverifiable", "the paths that differ between the reviewed base {} and the new base {} "
                 "cannot be read".format(source_base, pin_base))
     moved_b = set(moved)
+    unnameable = sorted(m.decode("utf-8", "replace") for m in moved_b if not _rdp_carry_nameable(m))
+    if unnameable:
+        return ("unverifiable", "{} differs between the reviewed base {} and the new base {} but cannot be named "
+                "on a {!r} line (it is not UTF-8, or holds a line break or a character the label screen "
+                "refuses), so review cannot reopen on it{}".format(
+                    _rdp_listing(unnameable), source_base, pin_base, labels["reopen"], full))
+    touched = _rdp_git_records(repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames",
+                               "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", pin_base, pin)
+    if touched is None:
+        return ("unverifiable", "the paths {} changes cannot be read".format(pin))
+    inside = sorted(m.decode("utf-8") for m in moved_b & set(touched))
+    if inside:
+        return ("deny", "the review of {} is carried to {} with a byte-identical diff, but the change touches {}, "
+                "which differs between the reviewed base {} and the new base {} (a change to a file's mode "
+                "alone names no blob); a base change inside a touched file needs a new review (rule "
+                "evgcmp){}".format(source, pin, _rdp_listing(inside), source_base, pin_base, full))
     reopen_b = set(r.encode("utf-8") for r in reopen)
     if moved_b != reopen_b:
         parts = []
@@ -36671,6 +36701,9 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
                 "needs a revision target (rule evgcmp), so declare {!r} {} or target the revision".format(
                     brief, target, cfg["labels"]["carried"], cfg["labels"]["reopen"], cfg["labels"]["carried"],
                     _RDP_CARRY_NONE))
+    if target != "revision" and "carried" in cfg["labels"] and len(found["carried"]) > 1:
+        return ("unverifiable", "the brief {} has {} {!r} lines; at most one is allowed".format(
+            brief, len(found["carried"]), cfg["labels"]["carried"]))
     if target != "revision":
         # the guard-events row is the only record of this departure from revision reconciliation, so a failed
         # append is reported on the note (the allow stands)
