@@ -67,9 +67,18 @@ def _tag_hex(tag, width):
     return hashlib.sha256(tag.encode("ascii")).hexdigest()[:width]
 
 
-def _leg(family, findings, tag, state="complete"):
+def _verdict(state, findings):
+    """The verdict a leg's report states, by default: none on an empty or missing leg, blockers when the
+    leg reports an open finding, no-blockers otherwise."""
+    if state in ("empty", "missing"):
+        return "none"
+    return "blockers" if any(status == "open" for _, status in findings) else "no-blockers"
+
+
+def _leg(family, findings, tag, state="complete", verdict=None):
     return {org.F_FAMILY: family, org.F_STATE: state, org.F_DISPATCH: _tag_hex("d" + tag, 32),
             org.F_REPORT: _tag_hex("r" + tag, 64),
+            org.F_VERDICT: _verdict(state, findings) if verdict is None else verdict,
             org.F_FINDINGS: [{org.F_ID: fid, org.F_STATUS: status} for fid, status in findings]}
 
 
@@ -357,6 +366,8 @@ def c_attempt_gap(d, bad):
     _set(objs, (3, org.F_LEGS, 0, org.F_FINDINGS), [{org.F_ID: "F-4", org.F_STATUS: "open"}])
     _set(objs, (3, org.F_LEGS, 1, org.F_FINDINGS), [{org.F_ID: "F-4", org.F_STATUS: "open"}])
     retry[org.F_ATTEMPT] = 3 if bad else 2
+    for index, leg in enumerate(retry[org.F_LEGS]):
+        leg[org.F_DISPATCH] = _tag_hex("dretry{}".format(index), 32)  # a retry is a new dispatch
     objs.append(retry)
     return _validate(_write(d, _lines(objs)))
 
@@ -479,6 +490,7 @@ def _missing_leg(bad, findings, report):
     leg[org.F_STATE] = "missing"
     leg[org.F_HEAD] = None
     leg[org.F_DISPATCH] = None
+    leg[org.F_VERDICT] = "none"
     leg[org.F_REPORT] = report if bad else None
     leg[org.F_FINDINGS] = findings if bad else []
     return objs
@@ -497,6 +509,7 @@ def c_empty_findings(d, bad):
     objs = _golden()
     leg = objs[2][org.F_LEGS][1]
     leg[org.F_STATE] = "empty"
+    leg[org.F_VERDICT] = "none"
     leg[org.F_FINDINGS] = [{org.F_ID: "F-4", org.F_STATUS: "open"}] if bad else []
     return _validate(_write(d, _lines(objs)))
 
@@ -806,7 +819,8 @@ def c_linear(d, bad):
     obj = {org.F_SEQ: 4, org.F_PREV: org.ZERO_DIGEST}
     obj.update(_r3([("F-4", "open"), ("F-40", "open")], [("F-4", "open")], grades))
     try:
-        got = "ok", org._check_round(obj, "line 5", ITEM, frozenset({FAM_A, FAM_B}), graded, set(), (2, 1))
+        got = "ok", org._check_round(obj, "line 5", ITEM, frozenset({FAM_A, FAM_B}), org.Ledger(graded),
+                                     (2, 1))
     except org.CannotEvaluate as exc:
         got = "cannot", str(exc)
     if graded.iterations:
@@ -819,6 +833,132 @@ def c_bounded_reason(d, bad):
     if got[0] == "cannot" and len(got[1]) > 1000:
         return "unbounded", "a {}-character reason".format(len(got[1]))
     return got
+
+
+# ---------- every value accepted is one the reader can verify (round gate 8) ----------
+
+def c_dispatch_shared(d, bad):
+    # One dispatch_id on both legs of one line: two families cannot share one dispatch.
+    shared = _golden()[2][org.F_LEGS][0][org.F_DISPATCH]
+    return _obj(d, bad, (2, org.F_LEGS, 1, org.F_DISPATCH), shared, "f" * 32)
+
+
+def c_dispatch_replayed(d, bad):
+    # The baseline round's leg dispatch replayed on the first fix round.
+    replay = _golden()[1][org.F_LEGS][0][org.F_DISPATCH]
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_DISPATCH), replay, "f" * 32)
+
+
+def c_permit_reused(d, bad):
+    # The first fix round's permit carried again on the second fix round.
+    return _obj(d, bad, (3, org.F_PERMIT), PERMITS[1], PERMITS[3])
+
+
+def c_verdict_absent(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_VERDICT), DELETE, "blockers")
+
+
+def c_verdict_vocabulary(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_VERDICT), "BLOCKERS", "blockers")
+
+
+def c_verdict_complete_none(d, bad):
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_VERDICT), "none", "blockers")
+
+
+def c_verdict_blockers_no_open(d, bad):
+    return _extra_round(d, bad, lambda b: _round(
+        3, 1, HEADS[3], PERMITS[3],
+        [_leg(FAM_A, [("F-4", "closed")], "a3", verdict="blockers" if b else "no-blockers"),
+         _leg(FAM_B, [("F-4", "closed")], "b3")], []))
+
+
+def c_verdict_empty_leg(d, bad):
+    objs = _golden()
+    leg = objs[2][org.F_LEGS][1]
+    leg[org.F_STATE] = "empty"
+    leg[org.F_FINDINGS] = []
+    leg[org.F_VERDICT] = "no-blockers" if bad else "none"
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_verdict_missing_leg(d, bad):
+    objs = _missing_leg(False, [], None)
+    objs[2][org.F_LEGS][1][org.F_VERDICT] = "blockers" if bad else "none"
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_withdrawn_reported_again(d, bad):
+    objs = _golden()
+    objs[3][org.F_WITHDRAWN] = [{org.F_ID: "F-7", org.F_BASIS: "duplicate of F-4"}]
+    objs.append(_r3([("F-4", "open")], [("F-4", "open")] + ([("F-7", "open")] if bad else [])))
+    return _validate(_write(d, _lines(objs)))
+
+
+HANGUL_FILLER, COMBINING_ACUTE, BRAILLE_BLANK = chr(0x3164), chr(0x0301), chr(0x2800)
+
+
+def c_source_hangul_filler(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE), HANGUL_FILLER, "fam-a report, entry three")
+
+
+def c_source_combining_alone(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE), COMBINING_ACUTE * 2,
+                "fam-a report, entry three")
+
+
+def c_basis_braille_blank(d, bad):
+    return _extra_round(d, bad, _withdraw({org.F_ID: "F-7", org.F_BASIS: BRAILLE_BLANK},
+                                          {org.F_ID: "F-7", org.F_BASIS: "duplicate of F-4"}))
+
+
+REASON_LIMIT = 1000  # far under org.MAX_REASON, so a reason the cut alone bounded fails these rows
+
+
+def _short(got):
+    if got[0] == "cannot" and len(got[1]) > REASON_LIMIT:
+        return "unbounded", "a {}-character reason".format(len(got[1]))
+    return got
+
+
+def c_unknown_key_bounded(d, bad):
+    return _short(_obj(d, bad, (2, "k" * 300000), 0, DELETE))
+
+
+def c_unknown_keys_bounded(d, bad):
+    objs = _golden()
+    if bad:
+        for n in range(20000):
+            objs[2]["k{}".format(n)] = 0
+    return _short(_validate(_write(d, _lines(objs))))
+
+
+def c_ungraded_bounded(d, bad):
+    ids = ["G-{}".format(n) for n in range(3000)]
+    return _short(_extra_round(d, bad, lambda b: _r3(
+        [("F-4", "open")] + [(fid, "open") for fid in ids], [("F-4", "open")],
+        [] if b else [_grade(fid, "LOW", "fam-a report") for fid in ids])))
+
+
+def c_argv_bounded(d, bad):
+    path = _write(d, _lines(_golden()))
+    return _short(_cli_framed(["x" * 100000] if bad else ["validate", "--record", path]))
+
+
+def c_path_bounded(d, bad):
+    path = _write(d, _lines(_golden()))
+    return _short(_cli_framed(["validate", "--record",
+                               os.path.join(d, "a" * 3000, "item.jsonl") if bad else path]))
+
+
+def c_reason_cut(d, bad):
+    text = "r" * (org.MAX_REASON * 4 if bad else 100)
+    reason = str(org.CannotEvaluate(text))
+    if len(reason) > org.MAX_REASON:
+        return "unbounded", "a {}-character reason".format(len(reason))
+    if bad:
+        return "cannot", reason
+    return ("ok", reason) if reason == text else ("changed", reason)
 
 
 def _self_test():
@@ -854,7 +994,7 @@ def _self_test():
         objs.append(_round(3, 2, HEADS[3], PERMITS[3],
                            [_leg(FAM_A, [("F-4", "open")], "a4"),
                             {org.F_FAMILY: FAM_B, org.F_STATE: "missing", org.F_DISPATCH: None,
-                             org.F_REPORT: None, org.F_FINDINGS: []}], []))
+                             org.F_REPORT: None, org.F_VERDICT: "none", org.F_FINDINGS: []}], []))
         got = _validate(_write(d, _lines(objs)))
         check("accept/every-leg-state-and-retry", got[0] == "ok" and got[1]["last_round"] == 3
               and got[1]["last_attempt"] == 2, got)
@@ -880,6 +1020,17 @@ def _self_test():
         objs = _set(_golden(), (3, org.F_GRADES, 0, org.F_SOURCE), "fam-a report,　entry three")
         got = _validate(_write(d, _lines(objs)))
         check("accept/space-separator-beside-text", got[0] == "ok", got)
+        d = fresh()
+        objs = _set(_golden(), (3, org.F_GRADES, 0, org.F_SOURCE), "fam-a report," + HANGUL_FILLER
+                    + "entry three")
+        got = _validate(_write(d, _lines(objs)))
+        check("accept/blank-looking-filler-beside-text", got[0] == "ok", got)
+        d = fresh()
+        objs = _set(_golden(), (3, org.F_LEGS, 0, org.F_VERDICT), "no-blockers")
+        _set(objs, (3, org.F_LEGS, 1, org.F_STATE), "degraded")
+        _set(objs, (3, org.F_LEGS, 1, org.F_VERDICT), "none")
+        got = _validate(_write(d, _lines(objs)))
+        check("accept/no-blockers-beside-open-finding-and-none-on-degraded-leg", got[0] == "ok", got)
         d = fresh()
         relinked = []
         digest = org.ZERO_DIGEST
@@ -933,7 +1084,8 @@ def _self_test():
         check("cli/no-arguments-exit-2", code == 2 and err.startswith("CANNOT EVALUATE: usage"),
               (code, out, err))
         # A value carried in a reason (here the record path) cannot break the framing: stdout stays one
-        # JSON object (holding the exact path) then one line, stderr one line, all printable ASCII.
+        # JSON object (holding the path as the reader's one bounded formatter quotes it) then one line,
+        # stderr one line, all printable ASCII.
         for cid, name in (("cli/refusal-path-lf-stays-framed", "no\nsuch.jsonl"),
                           ("cli/refusal-path-cr-stays-framed", "no\rsuch.jsonl"),
                           ("cli/refusal-path-line-separator-stays-framed", "no such.jsonl"),
@@ -945,11 +1097,12 @@ def _self_test():
                 head = json.loads(rows[0])
             except ValueError:
                 head = None
+            shown = org._show(bad_path)
             check(cid, code == 2 and len(rows) == 3 and rows[2] == "" and out.isascii() and err.isascii()
                   and err.count("\n") == 1 and err.endswith("\n") and isinstance(head, dict)
-                  and head.get("decision") == "CANNOT_EVALUATE" and bad_path in head.get("reason", "")
-                  and rows[1].startswith("CANNOT_EVALUATE ") and org.printable(bad_path) in rows[1]
-                  and err.startswith("CANNOT EVALUATE: ") and org.printable(bad_path) in err,
+                  and head.get("decision") == "CANNOT_EVALUATE" and shown in head.get("reason", "")
+                  and rows[1].startswith("CANNOT_EVALUATE ") and org.printable(shown) in rows[1]
+                  and err.startswith("CANNOT EVALUATE: ") and org.printable(shown) in err,
                   (code, out, err))
         sample = "a\nb\\c\x7fé \udcff\U0001f600"
         check("cli/printable-escape-is-ascii-and-unambiguous", org.printable(sample)
@@ -1076,6 +1229,40 @@ def _self_test():
                 ("fc/withdraw-basis-whitespace", "flip/withdraw-basis-whitespace",
                  c_withdraw_basis_whitespace, "at least one not whitespace"),
                 ("fc/withdraw-twice", "flip/withdraw-twice", c_withdraw_twice, "already withdrawn"),
+                ("fc/dispatch-id-shared-on-one-line", "flip/dispatch-id-shared-on-one-line",
+                 c_dispatch_shared, "already carried by another leg"),
+                ("fc/dispatch-id-replayed-across-rounds", "flip/dispatch-id-replayed-across-rounds",
+                 c_dispatch_replayed, "already carried by another leg"),
+                ("fc/permit-reused-across-rounds", "flip/permit-reused-across-rounds", c_permit_reused,
+                 "is bound to round 1 already"),
+                ("fc/leg-verdict-absent", "flip/leg-verdict-absent", c_verdict_absent, "missing field"),
+                ("fc/leg-verdict-vocabulary", "flip/leg-verdict-vocabulary", c_verdict_vocabulary,
+                 "is not one of"),
+                ("fc/complete-leg-verdict-none", "flip/complete-leg-verdict-none", c_verdict_complete_none,
+                 "a complete leg carries its family's verdict"),
+                ("fc/blockers-without-open-finding", "flip/blockers-without-open-finding",
+                 c_verdict_blockers_no_open, "blockers with no open finding"),
+                ("fc/empty-leg-verdict", "flip/empty-leg-verdict", c_verdict_empty_leg,
+                 "state empty states no verdict"),
+                ("fc/missing-leg-verdict", "flip/missing-leg-verdict", c_verdict_missing_leg,
+                 "state missing states no verdict"),
+                ("fc/withdrawn-reported-again", "flip/withdrawn-reported-again",
+                 c_withdrawn_reported_again, "was withdrawn on an earlier line"),
+                ("fc/source-ref-hangul-filler", "flip/source-ref-hangul-filler", c_source_hangul_filler,
+                 "visible"),
+                ("fc/source-ref-combining-mark-alone", "flip/source-ref-combining-mark-alone",
+                 c_source_combining_alone, "visible"),
+                ("fc/withdraw-basis-braille-blank", "flip/withdraw-basis-braille-blank",
+                 c_basis_braille_blank, "visible"),
+                ("fc/unknown-field-name-bounded", "flip/unknown-field-name-bounded", c_unknown_key_bounded,
+                 "unknown field"),
+                ("fc/unknown-field-set-bounded", "flip/unknown-field-set-bounded", c_unknown_keys_bounded,
+                 "20000 unknown field"),
+                ("fc/ungraded-list-bounded", "flip/ungraded-list-bounded", c_ungraded_bounded,
+                 "3000 reported finding(s)"),
+                ("fc/argv-bounded", "flip/argv-bounded", c_argv_bounded, "usage"),
+                ("fc/path-bounded", "flip/path-bounded", c_path_bounded, "path component"),
+                ("fc/reason-cut-at-max", "flip/reason-cut-at-max", c_reason_cut, "reason cut at"),
         ):
             got = run(build, fresh(), True)
             check(cid, got[0] == "cannot" and want in got[1], got)
