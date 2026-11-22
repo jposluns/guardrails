@@ -6388,9 +6388,11 @@ def _test_static_decoded_reading(failures):
 
 
 # (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, or an ANSI-C quote
-# with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, makes the reading run;
-# otherwise there is no extra reading and no refusal. _STATIC_GATE_PREFIX is a construct the scan refuses ahead of a
-# relevant quote. The F6 commands hold no git word: each guard allows them (main does) and denied them before G.
+# with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, to anything but one inert
+# character (a blank or a control character from U+0002), or to an inert character in a command that names git or
+# an AI identity, makes the reading run; otherwise there is no extra reading and no refusal. _STATIC_GATE_PREFIX is a
+# construct the scan refuses ahead of a relevant quote. The F6 commands hold no git word: each guard allows them
+# (main does) and denied them before G.
 _STATIC_GATE_PREFIX = "echo $(date +%F)#nightly; "
 _STATIC_GATE_GUARDS = (("sectvl", "commit_msg_subst"), ("cmtidn", "commit_identity"),
                        ("expbnd", "git_explicit_binding"), ("cnsdif", "diff_source_pretool"))
@@ -6399,18 +6401,66 @@ _STATIC_GATE_F6 = (
     ("subshell", "(\n  # build first\n  make\n) && printf $'done\\n'"),
     ("subst-hash", "echo $(date +%F)#nightly; printf $'x\\n'"),
 )
-# Irrelevant escapes after the refused construct (diff_source_pretool): each allows, and denies under the flip that
-# reads every quote as relevant (the reading before G).
+# Inert escapes after the refused construct, in a command that names neither git nor an AI identity
+# (diff_source_pretool): each allows, and denies under the flip that reads every quote as relevant (the reading
+# before G).
 _STATIC_GATE_IRRELEVANT = (
     ("sdr-gate-blank", _STATIC_GATE_PREFIX + "printf $'\\x20'"),
-    ("sdr-gate-control", _STATIC_GATE_PREFIX + "printf $'\\cA'"),
-    ("sdr-gate-single-quote", _STATIC_GATE_PREFIX + "printf $'\\x27'"),
-    ("sdr-gate-double-quote", _STATIC_GATE_PREFIX + "printf $'\\x22'"),
-    ("sdr-gate-backslash", _STATIC_GATE_PREFIX + "printf $'\\\\'"),
-    ("sdr-gate-non-ascii", _STATIC_GATE_PREFIX + "printf $'\\u00e9'"),
-    ("sdr-gate-past-unicode", _STATIC_GATE_PREFIX + "printf $'\\U00110000'"),
-    ("sdr-gate-delete", _STATIC_GATE_PREFIX + "printf $'\\x7f'"),
-    ("sdr-gate-named", _STATIC_GATE_PREFIX + "printf $'\\t\\n\\r\\e\\a\\v\\f\\b\\0'"),
+    ("sdr-gate-control", _STATIC_GATE_PREFIX + "printf $'\\cB'"),
+    ("sdr-gate-named", _STATIC_GATE_PREFIX + "printf $'\\t\\n\\r\\e\\a\\v\\f\\b'"),
+    ("sdr-gate-inert-in-word", _STATIC_GATE_PREFIX + "printf $'done\\x20now\\n'"),
+)
+# Escapes that are not inert, after the refused construct (diff_source_pretool), with the decision under the flip
+# that reads nothing as relevant (main's): a quote or a backslash (bash quoting in a body eval or sh -c reads again),
+# U+0001 and U+007F (bash's internal quoting marks), a NUL (it ends the string), non-ASCII text and nothing (a code
+# point past U+10FFFF). Each denies through the refusal, and allows under the flips that read nothing as relevant and
+# that read the gate before inert escapes were defined (the gate of 72e8287b, gate_before in
+# _test_static_decoded_gate).
+_STATIC_GATE_NOT_INERT = (
+    ("sdr-gate-ctlesc", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\cA'", "allow"),
+    ("sdr-gate-single-quote", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\x27'", "allow"),
+    ("sdr-gate-double-quote", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\x22'", "allow"),
+    ("sdr-gate-backslash", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\\\'", "allow"),
+    ("sdr-gate-non-ascii", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\u00e9'", "allow"),
+    ("sdr-gate-past-unicode", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\U00110000'", "allow"),
+    ("sdr-gate-delete", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\x7f'", "allow"),
+    ("sdr-gate-nul", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\0'", "allow"),
+)
+# An escape inside a value commit_identity tests (F1 of the review of 72e8287b): each denies (the parent 83d6980b
+# denies each), and allows under the flips that read nothing as relevant and that read the gate of 72e8287b. The
+# rows whose escapes are all inert (inert-subject) also allow under the flip that finds no subject, and
+# sdr-gate-id-stripped-name, whose AI name bash assembles past a backslash, allows under the flip whose subject text
+# keeps its quoting.
+_STATIC_GATE_IDENTITY = (
+    ("sdr-gate-id-author-blank", "git commit --author=$'Claude\\x20Bot <bot@example.com>' -m x", True),
+    ("sdr-gate-id-author-tab", "git commit --author=$'Claude\\tBot <bot@example.com>' -m x", True),
+    ("sdr-gate-id-author-ctlesc", "git commit --author=$'\\x01Claude <c@example.com>' -m x", False),
+    ("sdr-gate-id-author-double-quote", "git commit --author=$'\\x22Claude\\x22 <c@example.com>' -m x", False),
+    ("sdr-gate-id-author-single-quote", "git commit --author=$'\\x27Claude <c@example.com>' -m x", False),
+    ("sdr-gate-id-author-backslash", "git commit --author=$'\\x5cClaude <c@example.com>' -m x", False),
+    ("sdr-gate-id-trailer-blank", "git commit -m $'fix\\n\\nCo-Authored-By:\\x20Claude'", True),
+    ("sdr-gate-id-trailer-tab", "git commit -m $'fix\\n\\nCo-Authored-By:\\tClaude'", True),
+    ("sdr-gate-id-author-nul", "git commit --author=$'Cl\\0zz'aude -m x", False),
+    ("sdr-gate-id-email-nul", "EMAIL=$'Cl\\0zz'aude true", False),
+    ("sdr-gate-id-email-blank", "EMAIL=$'\\x20Claude' true", True),
+    ("sdr-gate-id-stripped-name", "EMAIL=$'\\x20'Cl\\aude true", True),
+)
+# An inert escape inside a body eval or sh -c reads again (F3 of the review of 72e8287b): diff_source_pretool notes
+# each (as the parent did), and allows under the flips that read nothing as relevant, that read the gate of 72e8287b
+# and that find no subject.
+_STATIC_GATE_REPARSED = (
+    ("sdr-gate-eval-blank", "eval $'git\\x20log -p'"),
+    ("sdr-gate-sh-c-newline", "bash -c $'true\\ngit log -p'"),
+)
+# A '$' and a line continuation before a quote (F2 of the review of 72e8287b): each guard denies (the scan's refusal),
+# and takes the parent's decision under the flips that refuse no continued quote and that read the gate on the
+# command as written only (no backslash-newline removed).
+_STATIC_GATE_CONTINUED = (
+    ("sdr-gate-continued-sectvl", "commit_msg_subst", "$\\\n'\\x67'it commit -m \"$(hostname)\"", "allow"),
+    ("sdr-gate-continued-cmtidn", "commit_identity", "git $\\\n'\\x63'ommit --author=Claude -m y", "allow"),
+    ("sdr-gate-continued-expbnd", "git_explicit_binding", "git add -A; git $\\\n'\\x70'ush", "allow"),
+    ("sdr-gate-continued-cnsdif", "diff_source_pretool", "git $\\\n'\\x6c'og -p", "allow"),
+    ("sdr-gate-continued-locale", "diff_source_pretool", "git $\\\n\"log\" -p", "allow-note"),
 )
 # Relevant escapes: (label, handler name, command, decision under the flip that reads nothing as relevant). Each
 # denies, through the refusal after the construct or through the decoded word.
@@ -6442,24 +6492,33 @@ def _test_static_decoded_gate(failures):
     and its gate reads a relevant quote. Then every row runs again under a flip: the irrelevant rows with every
     ANSI-C or locale quote read as relevant (the reading before G), where they must deny; the relevant rows with
     nothing read as relevant, where they must take main's decision; and the every-index rows with the quotes
-    matched once without overlap, where they must allow. So each row is red without the gate's part it names."""
+    matched once without overlap, where they must allow. The rows the review of 72e8287b added (F1 to F4) run under
+    their own flips as well: the gate of 72e8287b (every escape that decodes to no printable, non-blank ASCII other
+    than a quote or backslash read as irrelevant), no subject found, a subject text that keeps its quoting, no
+    continued quote refused, and the gate read on the command as written only. So each row is red without the
+    gate's part it names."""
     gate = aiqt_hooks._ansi_c_static_relevant
     irrelevant = [("sdr-gate-f6-{}-{}".format(name, rule), handler, command)
                   for name, command in _STATIC_GATE_F6 for rule, handler in _STATIC_GATE_GUARDS]
     irrelevant += [(label, "diff_source_pretool", command) for label, command in _STATIC_GATE_IRRELEVANT]
-    relevant = list(_STATIC_GATE_RELEVANT) + [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]
+    relevant = (list(_STATIC_GATE_RELEVANT) + list(_STATIC_GATE_NOT_INERT)
+                + [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]
+                + [(label, "commit_identity", command, "allow") for label, command, _inert in _STATIC_GATE_IDENTITY]
+                + [(label, name, command, "deny") for label, name, command, _flip in _STATIC_GATE_CONTINUED])
+    reparsed = [(label, "diff_source_pretool", command) for label, command in _STATIC_GATE_REPARSED]
     for label, name, command in irrelevant:
         if gate(command):
             failures.append("({}) _ansi_c_static_relevant({!r}) must read no relevant quote".format(label, command))
         got = _decision(getattr(aiqt_hooks, name), command)
         if got != "allow":
             failures.append("({}) {} on {!r}: expected allow, got {}".format(label, name, command, got))
-    for label, name, command, _flip in relevant:
+    for label, name, command, want in ([row[:3] + ("deny",) for row in relevant]
+                                       + [row + ("allow-note",) for row in reparsed]):
         if not gate(command):
             failures.append("({}) _ansi_c_static_relevant({!r}) must read a relevant quote".format(label, command))
         got = _decision(getattr(aiqt_hooks, name), command)
-        if got != "deny":
-            failures.append("({}) {} on {!r}: expected deny, got {}".format(label, name, command, got))
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
 
     def matched_once(command):
         if '$"' in command:
@@ -6468,22 +6527,87 @@ def _test_static_decoded_gate(failures):
                    for match in aiqt_hooks._ANSI_C_QUOTE_RE.finditer(command)
                    for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1)))
 
+    def gate_before(command):
+        # The gate of 72e8287b: from every index, an escape is relevant only when it decodes to a character in
+        # _ANSI_C_RELEVANT_CHARS, on the command as written.
+        if '$"' in command:
+            return True
+        at = command.find("$'")
+        while at >= 0:
+            match = aiqt_hooks._ANSI_C_QUOTE_RE.match(command, at)
+            if match is not None and any(
+                    not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._ansi_c_escape(escape))
+                    for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1))):
+                return True
+            at = command.find("$'", at + 1)
+        return False
+
+    def as_written(command):
+        return aiqt_hooks._ansi_c_static_relevant_text(command, command.replace("\\\n", ""))
+
+    identity = [(label, "commit_identity", command) for label, command, _inert in _STATIC_GATE_IDENTITY]
+    inert_subject = [(label, "commit_identity", command) for label, command, inert in _STATIC_GATE_IDENTITY if inert]
+    not_inert = [(label, "commit_identity", command) for label, command, inert in _STATIC_GATE_IDENTITY if not inert]
+    stripped = [row for row in identity if row[0] == "sdr-gate-id-stripped-name"]
     flips = (
-        ("every quote relevant", lambda command: "$'" in command or '$"' in command,
+        ("_ansi_c_static_relevant", "every quote relevant", lambda command: "$'" in command or '$"' in command,
          [row + ("deny",) for row in irrelevant]),
-        ("nothing relevant", lambda command: False, list(_STATIC_GATE_RELEVANT)),
-        ("quotes matched once without overlap", matched_once, [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]),
+        ("_ansi_c_static_relevant", "nothing relevant", lambda command: False,
+         list(_STATIC_GATE_RELEVANT) + list(_STATIC_GATE_NOT_INERT)
+         + [row + ("allow",) for row in identity + reparsed]),
+        ("_ansi_c_static_relevant", "quotes matched once without overlap", matched_once,
+         [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]),
+        ("_ansi_c_static_relevant", "as 72e8287b did", gate_before,
+         [row[:3] + ("allow",) for row in _STATIC_GATE_NOT_INERT] + [row + ("allow",) for row in identity + reparsed]),
+        ("_ansi_c_static_subject", "no subject", lambda command: False,
+         [row + ("allow",) for row in inert_subject + reparsed] + [row + ("deny",) for row in not_inert]),
+        ("_ANSI_C_SUBJECT_STRIP_RE", "a subject text that keeps its quoting", re.compile(r"[^\s\S]"),
+         [row + ("allow",) for row in stripped]),
+        ("_ANSI_C_CONTINUED_QUOTE_RE", "no continued quote refused", re.compile(r"[^\s\S]"),
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED]),
+        ("_ansi_c_static_relevant", "the command as written only", as_written,
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED]),
     )
-    try:
-        for how, flip, rows in flips:
-            aiqt_hooks._ansi_c_static_relevant = flip
+    for how_attr, how, flip, rows in flips:
+        saved = getattr(aiqt_hooks, how_attr)
+        setattr(aiqt_hooks, how_attr, flip)
+        try:
             for label, name, command, want in rows:
                 got = _decision(getattr(aiqt_hooks, name), command)
                 if got != want:
                     failures.append("({}-flip) with the gate reading {} the row must take {}, so it pins the gate; "
                                     "got {}".format(label, how, want, got))
+        finally:
+            setattr(aiqt_hooks, how_attr, saved)
+    # A name bash assembles past an inert escape that vanishes (a newline after a backslash, a line continuation in
+    # the body eval reads again): the subject is found in the text with the inert escape removed, and is not found
+    # under the flip that removes no inert escape.
+    command = "eval \"gi\\\\\"$'\\n't log -p"
+    if not gate(command):
+        failures.append("(sdr-gate-subject-inert-dropped) _ansi_c_static_relevant({!r}) must find the subject bash "
+                        "assembles past an inert escape".format(command))
+    dropped = aiqt_hooks._ansi_c_inert_dropped
+    aiqt_hooks._ansi_c_inert_dropped = lambda match: match.group(0)
+    try:
+        if gate(command):
+            failures.append("(sdr-gate-subject-inert-dropped-flip) with no inert escape removed the subject must not "
+                            "be found in {!r}, so the row pins the removal".format(command))
     finally:
-        aiqt_hooks._ansi_c_static_relevant = gate
+        aiqt_hooks._ansi_c_inert_dropped = dropped
+    # Every name AI_IDENTITY_RE matches is a subject (_ANSI_C_SUBJECT_RE), so the subject check keeps step with it: the
+    # letters each alternative of its first group starts with, and its two address forms.
+    group = re.search(r"\\b\(([^()]*(?:\([^()]*\)[^()]*)*)\)\\b", aiqt_hooks.AI_IDENTITY_RE.pattern)
+    names = [re.match(r"[a-z]*", alternative).group(0) for alternative in group.group(1).split("|")] if group else []
+    names += ["@anthropic.com", "@openai.com"]
+    if not group or not all(names):
+        failures.append("(sdr-gate-subject-names-read) cannot read the names of AI_IDENTITY_RE {!r}".format(
+            aiqt_hooks.AI_IDENTITY_RE.pattern))
+    for name in names:
+        if not aiqt_hooks.AI_IDENTITY_RE.search(name + ("4o" if name == "gpt" else "")):
+            failures.append("(sdr-gate-subject-names-identity) AI_IDENTITY_RE must match {!r}".format(name))
+        if not aiqt_hooks._ANSI_C_SUBJECT_RE.search(name):
+            failures.append("(sdr-gate-subject-names-subject) _ANSI_C_SUBJECT_RE must find the AI name {!r} "
+                            "AI_IDENTITY_RE matches".format(name))
 
 
 def _test_heredoc_terminator(failures):

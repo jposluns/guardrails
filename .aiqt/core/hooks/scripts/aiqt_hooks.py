@@ -2446,47 +2446,126 @@ def _ansi_c_static_reading(command):
     run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
     unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
     decoded: the disclosed run-time-word residual. GATE G comes first (_ansi_c_static_relevant): when the command
-    holds no locale quote and no ANSI-C quote with an escape that can spell part of a guarded word, the reading is
-    command itself, so there is no extra reading and no refusal and each guard runs main's path unchanged (an
-    escape that decodes only to a blank, a control character, a quote, a backslash or non-ASCII text, as in
-    printf $'done\\n', spells no git word, subcommand, option or identity value). Otherwise the scan reads the whole
-    command as above, and returns the rest of the text unchanged from an ANSI-C quote that never closes. Linear;
-    raises only _StaticReadingUncertain."""
+    holds no locale quote and no ANSI-C quote with an escape that can change a value a guard tests, the reading is
+    command itself, so there is no extra reading and no refusal and each guard takes the decision of its path
+    without the static reading (an escape that decodes to one blank or control character, as in printf $'done\\n',
+    in a command whose text names neither git nor an AI identity). A '$' followed by a line continuation before a
+    quote ($<backslash-newline>'\\x67'it), which bash joins into an ANSI-C or locale quote, makes the command
+    relevant and is refused (_StaticReadingUncertain), since the scan reads the quote after the continuation as a
+    plain one. Otherwise the scan reads the whole command as above, and returns the rest of the text unchanged from
+    an ANSI-C quote that never closes. Linear; raises only _StaticReadingUncertain."""
     if not _ansi_c_static_relevant(command):
         return command
+    continued = _ANSI_C_CONTINUED_QUOTE_RE.search(command)
+    if continued is not None:
+        raise _StaticReadingUncertain("a '$' and a line continuation before a quote, which bash joins into an ANSI-C "
+                                      "or locale quote this reading does not decode", continued.start())
     return _ansi_c_static_scan(command)
 
 
 # The characters an ANSI-C escape may decode to and spell part of a word a guard tests (_ansi_c_static_relevant):
 # printable, non-blank ASCII ('!' to '~') other than the single quote, the double quote and the backslash.
 _ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - frozenset("'\"\\")
+# The characters an INERT escape decodes to (_ansi_c_static_relevant): one blank or ASCII control character from
+# U+0002 to U+0020. None of them is a letter or bash quoting, so one can split or end the letters around it, or
+# vanish where eval or sh -c reads the text again (a newline after a backslash there is a line continuation), but
+# never stands in a name. Not inert: a single quote, double quote or backslash (bash quoting in a body read again:
+# eval $'g\x27\x27it log -p' runs git log -p), U+0001 and U+007F (the CTLESC and CTLNUL characters bash uses
+# internally to mark quoting), a NUL (bash ends the string there, so the letters after it in the quote drop out:
+# --author=$'Cl\0zz'aude is --author=Claude), non-ASCII text (a letter Python's case-insensitive match folds to an
+# ASCII one), nothing in _ansi_c_escape's decoding (a code point past U+10FFFF) and any other text.
+_ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
+# A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
+# the quote (_ansi_c_static_reading refuses it).
+_ANSI_C_CONTINUED_QUOTE_RE = re.compile(r"\$(?:\\\n)+['\"]")
+# The SUBJECT of an inert escape (_ansi_c_static_relevant): every value the four guards that read the static decoded
+# reading test needs one of these names in the text bash assembles. commit_msg_subst, git_explicit_binding and
+# diff_source_pretool test git words, subcommands, options and paths of a git command, so the text names git;
+# commit_identity tests identity values and trailers, every one of which it flags only when AI_IDENTITY_RE names an
+# AI in it (a git identity variable names git as well), so the text names one of AI_IDENTITY_RE's names. Matched
+# with no word boundary and in any case, so it can only find more than those tests do. Keep it in step with
+# AI_IDENTITY_RE.
+_ANSI_C_SUBJECT_RE = re.compile(r"(?i)git|claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt")
+# What bash removes between the letters of a word it assembles that the subject check reads past: a quote, a
+# backslash, a '$' (one before a quote), a backquote (an empty substitution) and a line continuation.
+_ANSI_C_SUBJECT_STRIP_RE = re.compile(r"\\\n|[\\'\"$`]")
+
+
+def _ansi_c_inert_dropped(match):
+    """match (_ANSI_C_ESCAPE_RE) removed when it is an inert escape (_ANSI_C_INERT_CHARS), else kept as written."""
+    return "" if _ansi_c_escape(match) in _ANSI_C_INERT_CHARS else match.group(0)
+
+
+def _ansi_c_inert_quote(match):
+    """One ANSI-C quote (_ANSI_C_QUOTE_RE) with its inert escapes removed (_ansi_c_inert_dropped)."""
+    return "$'" + _ANSI_C_ESCAPE_RE.sub(_ansi_c_inert_dropped, match.group(1)) + "'"
+
+
+def _ansi_c_static_subject(command):
+    """True when command names git or an AI identity (_ANSI_C_SUBJECT_RE) in any of three texts, each with every
+    quote, backslash, '$', backquote and line continuation then removed (_ANSI_C_SUBJECT_STRIP_RE): command itself
+    (a backslash outside quotes quotes the letter after it: gi\\t is git), command with the inert escapes of each
+    ANSI-C quote removed (the quotes matched once, left to right), and command with every inert escape removed
+    wherever it stands (so a quote that match swallows is read too). These are the only commands in which an inert
+    escape (_ANSI_C_INERT_CHARS) can change a value one of the four guards tests: an inert escape decodes to no
+    letter, so every letter of a name in the text bash assembles around it, or in a body eval or sh -c reads again,
+    is a letter of the raw text, with only what these texts remove between them (the escape vanishes there when a
+    backslash before its newline makes a line continuation). The letters and digits of an escape that is not
+    removed (x20) can only add a match. Linear, never raises."""
+    texts = (command, _ANSI_C_QUOTE_RE.sub(_ansi_c_inert_quote, command),
+             _ANSI_C_ESCAPE_RE.sub(_ansi_c_inert_dropped, command))
+    return any(_ANSI_C_SUBJECT_RE.search(_ANSI_C_SUBJECT_STRIP_RE.sub("", text)) for text in texts)
 
 
 def _ansi_c_static_relevant(command):
     """GATE G of the static decoded reading (_ansi_c_static_reading), which needs no grammar: True when command
-    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote one of whose escapes
-    (_ANSI_C_ESCAPE_RE) decodes (_ansi_c_escape) to a character in _ANSI_C_RELEVANT_CHARS; False otherwise, and
-    then the guards read no static decoded reading and refuse nothing on its account. The quote is matched on its
-    own (_ANSI_C_QUOTE_RE, which ends it at the same unescaped single quote bash does) from EVERY index that holds
-    $', with no tracking of the quoting around it, so a spurious match that starts earlier (inside single quotes,
-    a comment or a here-document body) and swallows a real quote's opening cannot hide that quote: its own index
-    is matched again. A $' or $" inside other quotes is read the same way, so it can only make the command
-    relevant, which keeps the scan's path. An escape that decodes only to a blank, a control character, a quote, a
-    backslash or non-ASCII text, or to nothing (a code point past U+10FFFF), is not relevant; an escape bash keeps
-    unchanged (an unknown letter such as \\q) holds its letter and is relevant. Linear: a match from one index ends
-    no later than the single quote of the next $' (the character before that quote is the '$', not a backslash,
-    so no escape holds it), so the matches together read each character a bounded number of times. Never
+    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an escape (_ANSI_C_ESCAPE_RE)
+    that can change a value one of the four guards that read the reading tests (words, identity values, trailers
+    and paths), read as the guards' own lexer reads it (the escape's letter kept: $'\\x20' as x20) rather than as
+    bash does: one whose decoding (_ansi_c_escape) holds a character in _ANSI_C_RELEVANT_CHARS (it spells part of a git
+    word, subcommand, option or path) or is not a single inert character (_ANSI_C_INERT_CHARS: a NUL, non-ASCII
+    text, nothing, or more than one character), or an inert escape in a command whose text names git or an AI
+    identity (_ansi_c_static_subject). An inert escape there can split, end or join the value around it: a blank
+    or control character makes a word boundary AI_IDENTITY_RE needs ($'\\x20Claude'), a newline starts a trailer's
+    line, and a blank or newline splits words in a body eval or sh -c reads again (eval $'git\\x20log -p'), where
+    a newline after a backslash is a line continuation. False otherwise, and then the guards read no static decoded
+    reading and refuse nothing on its account. The command is read as written and with every backslash-newline
+    removed, so a '$', a line continuation and a quote (refused in _ansi_c_static_reading) read as the quote bash
+    joins them into; each reading can only add a quote. The quote is matched on its own (_ANSI_C_QUOTE_RE, which
+    ends it at the same unescaped single quote bash does) from EVERY index that holds $', with no tracking of the
+    quoting around it, so a spurious match that starts earlier (inside single quotes, a comment or a here-document
+    body) and swallows a real quote's opening cannot hide that quote: its own index is matched again. A $' or $"
+    inside other quotes is read the same way, so it can only make the command relevant, which keeps the scan's
+    path. An escape bash keeps unchanged (an unknown letter such as \\q) holds its letter and is relevant. Linear: a
+    match from one index ends no later than the single quote of the next $' (the character before that quote is the
+    '$', not a backslash, so no escape holds it), so the matches together read each character a bounded number of
+    times, and the subject is read at most once for the command as written and once for its joined text. Never
     raises."""
-    if '$"' in command:
+    joined = command.replace("\\\n", "")
+    return _ansi_c_static_relevant_text(command, joined) or (
+        joined != command and _ansi_c_static_relevant_text(joined, joined))
+
+
+def _ansi_c_static_relevant_text(text, joined):
+    """_ansi_c_static_relevant over one reading text of the command; joined is the command with every
+    backslash-newline removed, the text the subject check reads (_ansi_c_static_subject)."""
+    if '$"' in text:
         return True
-    at = command.find("$'")
+    subject = None
+    at = text.find("$'")
     while at >= 0:
-        match = _ANSI_C_QUOTE_RE.match(command, at)
+        match = _ANSI_C_QUOTE_RE.match(text, at)
         if match is not None:
             for escape in _ANSI_C_ESCAPE_RE.finditer(match.group(1)):
-                if not _ANSI_C_RELEVANT_CHARS.isdisjoint(_ansi_c_escape(escape)):
+                decoded = _ansi_c_escape(escape)
+                if not _ANSI_C_RELEVANT_CHARS.isdisjoint(decoded) or len(decoded) != 1 or (
+                        decoded not in _ANSI_C_INERT_CHARS):
                     return True
-        at = command.find("$'", at + 1)
+                if subject is None:
+                    subject = _ansi_c_static_subject(joined)
+                if subject:
+                    return True
+        at = text.find("$'", at + 1)
     return False
 
 
