@@ -194,6 +194,7 @@ guarded-surfaces = [
     "tools/gen_renderers.py",
     "tools/gen_roadmap.py",
     "tools/gen_rules.py",
+    "tools/gen_rules_core.py",
     "tools/gen_secret_patterns.py",
     "tools/gen_site.py",
     "tools/gen_skill.py",

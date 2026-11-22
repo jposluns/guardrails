@@ -512,6 +512,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/gen_reference_facts.py",
     "tools/gen_renderers.py",
     "tools/gen_rules.py",
+    "tools/gen_rules_core.py",
     "tools/gen_skill.py",
     "tools/gen_worker_pack.py",
     "tools/import_cwe.py",

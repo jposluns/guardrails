@@ -2,8 +2,9 @@
 """Render .aiqt/core/renderers.toml: the manifest-covered RENDERER/GENERATOR DECLARATION (VER-CORE 6.5,
 R9-5). Offline, stdlib only, fail-closed.
 
-For each declared adapter renderer (gen_agents, gen_adapters, gen_claude, gen_cursor, gen_rules, gen_skill,
-gen_worker_pack) this tool STATICALLY PARSES (ast, never import) the generator's module-level RENDERER_DECL
+For each declared adapter renderer (gen_agents, gen_adapters, gen_claude, gen_cursor, gen_rules,
+gen_rules_core, gen_skill, gen_worker_pack) this tool STATICALLY PARSES (ast, never import) the
+generator's module-level RENDERER_DECL
 literal ({"renderer-id": <str>, "semantics-revision": <int>}) and its GENSRC_OUTPUTS targets (recovered
 through gen_gensrc's own validated loader, the house import-reuse pattern), computes the ORDERED PACK-LOCAL
 IMPORT CLOSURE (the entrypoint plus every tools/<module>.py it transitively imports, entrypoint first then
@@ -83,8 +84,8 @@ RENDERERS_REL = ".aiqt/core/renderers.toml"
 # The declared adapter renderers, in a fixed hand-kept order (not sorted by renderer-id or by file name) for a
 # deterministic render; reordering changes the bytes of renderers.toml. build_rows fails closed when a
 # tools/*.py file declares RENDERER_DECL but is absent here (_declared_renderer_stems).
-RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_skill",
-             "gen_worker_pack")
+RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_rules_core",
+             "gen_skill", "gen_worker_pack")
 
 
 class GateError(Exception):

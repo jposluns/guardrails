@@ -7775,3 +7775,62 @@ expected-check-ids = [
   # revert: the incident case turns red when the id comparison is removed
   "revert/id-check-removed",
 ]
+
+[[suite]]
+id = "rules-core-selftest"
+runner = "tools/gen_rules_core.py"
+expected-check-ids = [
+  # good: a synthetic tree renders in the CORE format and re-checks clean
+  "good/generate-then-check-clean",
+  "good/opens-with-comment-title-preamble",
+  "good/whole-entry-is-joined-body",
+  "good/split-entry-is-core-plus-pointer",
+  "good/pending-entry-kept-whole",
+  "good/groups-in-index-order",
+  "good/file-cap-reported-while-pending",
+  # drift: a hand edit and an absent render are exit 1
+  "drift/hand-edit-is-exit-1",
+  "drift/absent-render-is-exit-1",
+  # case and flip: each guard's case is caught, and fails with that guard switched off
+  "case/missing-id",
+  "flip/missing-id",
+  "case/duplicate-id",
+  "flip/duplicate-id",
+  "case/entry-differs",
+  "flip/entry-differs",
+  "case/over-cap-not-pending",
+  "flip/over-cap-not-pending",
+  "case/at-import",
+  "flip/at-import",
+  "case/frontmatter",
+  "flip/frontmatter",
+  "case/dangling-pointer",
+  "flip/dangling-pointer",
+  # finding: the budget's other findings
+  "finding/pending-grew",
+  "finding/pending-stale",
+  "finding/trigger-over-cap",
+  "finding/core-over-cap",
+  "finding/file-over-cap-when-pending-empty",
+  # cannot-evaluate: every malformed or missing input is exit 2 with nothing written
+  "cannot-evaluate/budget-absent",
+  "cannot-evaluate/budget-directory",
+  "cannot-evaluate/budget-symlink",
+  "cannot-evaluate/budget-not-toml",
+  "cannot-evaluate/budget-unknown-key",
+  "cannot-evaluate/budget-missing-key",
+  "cannot-evaluate/budget-format-version",
+  "cannot-evaluate/budget-cap-not-positive-int",
+  "cannot-evaluate/budget-pending-not-ids",
+  "cannot-evaluate/budget-pending-unsorted",
+  "cannot-evaluate/budget-pending-repeated",
+  "cannot-evaluate/budget-pending-unknown-id",
+  "cannot-evaluate/rules-absent",
+  "cannot-evaluate/rules-empty",
+  "cannot-evaluate/source-missing-corpus-id",
+  "cannot-evaluate/source-duplicate-corpus-id",
+  "cannot-evaluate/split-empty-core",
+  "cannot-evaluate/render-not-utf8",
+  "cannot-evaluate/renders-not-a-directory",
+  "cannot-evaluate/unknown-argument",
+]

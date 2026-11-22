@@ -261,6 +261,11 @@ class = "pack-immutable"
 note = "The generated worker-pack read surface (tools/gen_worker_pack.py); the dispatcher injects these bytes into every worker brief."
 
 [[release-class]]
+path = ".aiqt/renders/aiqt-core.md"
+class = "pack-immutable"
+note = "The CORE render preview (tools/gen_rules_core.py), generated from .aiqt/core/rules/ and drift-gated; a path nothing loads (outside .claude/, not named like CLAUDE.md, imported by no file)."
+
+[[release-class]]
 path = ".claude/rules/README.md"
 class = "pack-immutable"
 note = "Hand-authored shipped pack content, an explicit per-path entry (4.2)."

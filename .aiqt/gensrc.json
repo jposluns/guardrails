@@ -116,6 +116,14 @@
       "target": ".aiqt/release/root.txt"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_rules_core.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".aiqt/renders/aiqt-core.md"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_reference_facts.py",
       "sources": [

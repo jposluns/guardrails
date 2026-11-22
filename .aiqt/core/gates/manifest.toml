@@ -214,6 +214,15 @@ class = "a"
 residue = "A byte-identity drift gate over the artefact tools/gen_worker_pack.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
 
 [[gate]]
+id = "rules-core-drift"
+script = "tools/gen_rules_core.py"
+rules = ["gensrc"]
+platform = "ci"
+default = "block"
+class = "a"
+residue = "A byte-identity drift gate over the CORE preview tools/gen_rules_core.py generates from its declared source, which also fails on a CORE budget or shape finding (an unsplit rule over the entry cap and not pending, a pending id outside the seed the generator holds, an at sign, frontmatter, a missing, repeated or altered entry, a dangling pointer). It does not judge whether a core layer keeps the meaning of its full rule, it does not show that nothing loads the preview path, its pending ratchet holds only while the seed in the generator is left unchanged, and it covers only the target that generator declares."
+
+[[gate]]
 id = "draft-site-drift"
 script = "tools/gen_draft_site.py"
 rules = ["gensrc"]
