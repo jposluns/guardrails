@@ -5514,8 +5514,11 @@ expected-check-ids = [
   "report/exit-zero-with-timeouts",
   "report/json-conditions",
   "report/table-plain",
+  "report/format-id",
+  "report/estimate-labelled",
+  "report/host-label-default",
   "report/json-existing-refused",
-  # ---------- failed samples and the version probe ----------
+  # ---------- failed samples ----------
   "measure/failed-sample-no-time",
   "measure/mixed-row-valid-only",
   "report/no-valid-sample-shown",
@@ -5526,6 +5529,10 @@ expected-check-ids = [
   "flag/slow-stub-flagged",
   "flag/fast-stub-not-flagged",
   "hooks/list-from-config",
+  "flag/margin-reaches-measure",
+  "report/host-label-supplied",
+  "summary/p95-apart-from-max",
+  # ---------- the version probe ----------
   "measure/version-probe-failure-refused",
   # ---------- the fixture root and interrupts ----------
   "measure/fixture-root-removed",
