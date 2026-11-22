@@ -3702,7 +3702,8 @@ _NUL_BASH_COMMANDS = (
 # inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
 # and inert outside it, so tools/selftest_orch_hooks.py builds that scope for their rows.
 _SCOPED_BASH_HANDLERS = frozenset((
-    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "review_workdir_hold"))
+    "orch_truncation_guard", "orch_untracked_wait_loop", "orch_deliverable_exec_guard", "review_dispatch_pin",
+    "review_workdir_hold"))
 # The always-on Bash hooks that deny an empty or blank command on their own (gensrc_guard: its write-sink
 # detector reads no command in it). With the shared reader reverted to the lax empty read their malformed rows
 # still deny, which is pinned; a second revert to a lax read of a harmless command (true) must go red, so
@@ -9843,6 +9844,7 @@ _DEADLINE_CASES = {
     "inline_errexit": ("sep_semicolon", "heredocs", "nest_parens", "cd_git_fetch_unbal", "errexit_guarded",
                        "errexit_nest_parens", "errexit_case_arms", "errexit_note_after", "errexit_unread_after"),
     "orch_ask_guard": ("ask_long",),
+    "orch_deliverable_exec_guard": ("git_words", "nest_cmdsubst"),
     "orch_resume_barrier": ("git_words", "write_content"),
     "orch_truncation_guard": ("nest_cmdsubst_background", "git_words"),
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),

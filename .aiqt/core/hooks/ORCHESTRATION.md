@@ -1,9 +1,9 @@
 # The orchestrator-integrity suite
 
-Seven controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
+Eight controls over one substrate: a stop-work guard (Stop, TeammateIdle, and the scheduled-yield
 tools), a record-drift gate, a background-dispatch truncation guard, an unattended-ask blocker, a
-resume audit with a mutation barrier, a lease-heartbeat keeper (PostToolUse and Stop, warn-only),
-and a mistakes register. One registry declares the adopter's
+deliverable-exec guard, a resume audit with a mutation barrier, a lease-heartbeat keeper (PostToolUse
+and Stop, warn-only), and a mistakes register. One registry declares the adopter's
 bindings; one pure decision core (decide_yield in scripts/aiqt_hooks.py) makes every yield judgement,
 so a new yield path is covered by adding a binding, never by re-implementing judgement.
 
@@ -18,8 +18,9 @@ Where a registry is looked up (two scopes):
 
 - Every component except the truncation guard (the stop guard, the scheduled-yield and
   TeammateIdle bindings, the unattended-ask blocker, the resume audit and barrier, the dispatch
-  ledger, the prompt stamp, and the untracked wait-loop guard) looks only at the git-resolved
-  toplevel of the session cwd. With no git toplevel, or where the registry loader reads the registry
+  ledger, the prompt stamp, the untracked wait-loop guard, and the deliverable-exec guard, which
+  also consults the project directory the hook environment names, as its own section below says)
+  looks only at the git-resolved toplevel of the session cwd. With no git toplevel, or where the registry loader reads the registry
   there as absent, each of them is inert. A toplevel the loader cannot examine (a regular file, a
   directory this process cannot search, or one holding a regular file named `.aiqt`) reads as bad,
   not absent.
@@ -276,6 +277,7 @@ directory below, and a declaration there arms slice confinement.
   "state_dir": "path",
   "yield_tools": ["ScheduleWakeup", "CronCreate"],
   "dispatch_tools": [],
+  "deliverable_dirs": ["/abs/path/to/draft-staging", "/abs/path/to/hand-back"],
   "review_dispatch": {"commands": ["orch-dispatch"], "brief_option": "--brief",
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
@@ -500,6 +502,663 @@ foreign-lease blocker as blocked only when its ref is covered by a fresh validat
 evidence-freshness check still applies). Undeclared means the free-text evidence path stands,
 byte-identical to prior behaviour; declared but with no readable fresh snapshot holds the affected
 items (cannot-evaluate), never blocked and never actionable.
+
+## The deliverable directories (`deliverable_dirs`)
+
+`deliverable_dirs` arms the deliverable-exec guard (`orch-deliverable-exec-guard`, rule wowo01,
+PreToolUse Bash): a non-empty list of ABSOLUTE directories the orchestrator receives worker
+deliverables in, the draft staging directories and the hand-back directory. Prefer the narrowest
+hand-back path the harness can name over a whole shared tree; an entry may not be the filesystem root
+or hold the session repository root.
+
+The guard holds its property BY CONSTRUCTION rather than by listing the shell forms that run a file,
+which shell's open grammar never lets a list close. A Bash call is IN SCOPE of a declared directory
+when its raw text names one (a directory spelling at a path boundary, or any literal absolute path
+resolving under one), when a lexed operand or redirect target resolves into one (resolved against the
+effective working directory, which follows literal `cd`/`pushd`), or when the payload working
+directory itself resolves into one. Once that walk loses the working directory (`cd -`, a bare `cd` to
+HOME, a `cd` operand it cannot read, a `cd` it does not track such as one behind a `NAME=value` prefix,
+`builtin` or `command`, or any `pushd`, `popd` or `dirs` word, even as an argument), every later
+segment with a relative operand (any argument that is not an absolute path, options included, a
+relative command path, or a relative file redirect target) is in scope. A segment whose shell word
+(`sh`, `bash`, `dash`, `zsh`, `ksh` and the other launch shells `ash`, `mksh`, `rbash`, `yash`,
+`posh`, `busybox`, `fish`, `csh` and `tcsh`), `source` or dot builtin, or python-family word reads its
+program from stdin or a descriptor (no script operand, `-s` in a single-dash cluster, a `-` operand,
+or a program operand naming a descriptor: `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N` or
+`/proc/<pid>/fd/N` after lexical normalisation, or a relative operand whose last component is
+`stdin`, `stdout`, `stderr` or all digits or whose last-but-one component is `fd`; found after a
+leading reserved word or grouping token, `NAME=value` prefixes, the `env`, `nice`, `timeout` and
+`time` wrappers, and `exec`, `command` or `builtin`) is in scope whenever any directory is declared, so
+a pipe into one, `bash -s`, `python3 -`, `bash /dev/stdin`, `source /dev/stdin`, `. /dev/fd/0`,
+`python3 /dev/stdin`, `if true; then bash; fi` and a quoted here-document fed to one deny. Every
+program name this guard matches on the deny side (the shells, the python family, the launch,
+program-text, runner, sed, privilege and stdin-wrapper words) is matched by its last path component
+with an optional version suffix (an optional `-`, or a `.` after a name that ends in a digit, then
+dot-separated numeric components of at most four digits): `bash5.2`, `zsh-5.9`, `ksh2020`,
+`python3.14t`, `python-3.12`, `perl5.36.0`, `php8.2`, `lua5.4`, `tclsh8.6`, `gawk-5.1.0`,
+`sqlite3.40`, `pytest-3.11`, each also as `/usr/bin/bash5.2` or `./zsh5`. Shell builtins and keywords
+take no suffix, and the allowlist's own names below stay exact (a suffixed name there is another
+program, so it is refused in scope). Out of scope the call passes untouched. IN SCOPE the call is
+DENIED unless EVERY lexed segment is a closed-allowlist read-only form with its registered options:
+`cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`, `diff`, and the coreutils hash tools (`sha256sum`,
+`sha1sum`, `sha224sum`, `sha384sum`, `sha512sum`, `md5sum`, `b2sum`, `cksum`, `sum`); `cp` with the
+declared file only as a SOURCE (the path cp actually WRITES must resolve outside every declared
+directory and must not land under a `.git/hooks` directory or at an orchestration registry file this
+guard reads; a directory destination resolves to destination/basename and a `cp -r` merge lands inside
+the existing directory, both computed before the check; below a directory source every name in the
+source tree, read as it stands when the guard runs, is joined onto that target and judged the same way,
+so a recursive copy of a whole `.git` or `.aiqt` directory denies where its hook or registry file
+lands; and `cp`'s link and target-directory spellings are off the grammar); `git apply` (with `--check`, `--stat`,
+`--numstat`, `--summary`, the quiet/verbose flags, `-p<n>`, `--index`, `--cached`, `--3way`, `--reject`,
+`--recount`, `--allow-empty`, `--unidiff-zero` and the `--whitespace=`/`--directory=`/`--exclude=`/
+`--include=` value options) and `git diff --no-index` (with the report flags, `-U<n>` and a `--`
+separator), BOTH only when the git process's effective working directory and every `-C` target resolve
+OUTSIDE every declared directory (the only accepted global option is a literal `-C` to such a directory;
+a `-C`, `--git-dir` or `--work-tree` into a declared directory, or any other global option, denies,
+since git reads that directory's repository config and attributes before any operand) AND when neither
+the working directory nor any `-C` target is, or lies inside, a path created or written in this SAME
+call (by an earlier `cp`, write redirect or `mkdir` segment), and no `.git` file or directory written in
+this call sits in it or in any of its ancestors (git searches upward from a subdirectory for its
+repository, so either would hand git a repository the command itself just built, with worker-controlled
+config such as `diff.external`); both sides of that comparison are taken as written and through
+realpath, so an existing symlink alias of the written directory counts as the same directory; `bash -n` on
+EXACTLY one script operand with no other option and no `+`-prefixed token (a `+n`, `+o noexec` or a
+second option turns bash's noexec back off, so the script would run); `python3 -I`, or a shell, running
+ONE script that is an EXISTING REGULAR FILE resolving outside every declared directory and outside
+`/dev` and `/proc` (so `/dev/stdin`, `/dev/fd/N` and `/proc/self/fd/N` are refused) and NOT resolving
+inside a Python standard-library directory (a stdlib program used as the reader, such as `cProfile`,
+`pydoc`, `timeit`, `code` or `pickle`, would run the file or a stdin program handed to it; `runpy` loads
+frozen (its `__spec__.origin` is `frozen`), yet its spec and `__file__` still name a `runpy.py` in the
+standard-library directory, as does `__spec__.loader_state.filename`; no enumeration of these stays true
+across versions, so the refusal is by standard-library containment), BOTH only when the effective working directory is itself outside every
+declared directory (a copy run from inside one can source or import a deliverable by a relative path,
+the same way the git form guards its working directory); and `cd` to one literal absolute directory
+outside the declared directories (the session's exit from a declared cwd). The reader or script the python/shell
+form runs may ITSELF import or run a path it is handed as data; the guard does not read it and does not
+prevent that. The standard-library exclusion is by containment only: a program outside those
+directories that runs the file or stdin it is handed passes as the reader, for example a third-party
+tool in site-packages or dist-packages (`pytest`, `coverage`) or a distribution launcher script such
+as `/usr/bin/pydoc3`. The standard-library set is built lazily inside the guard, and a failure to
+build it refuses every reader instead of stopping the shared hook script for every hook. The command word must be a BARE allowlisted name (a name with a slash, so a file named
+like a reader that sits inside a declared directory, never matches), and a segment carrying any
+assignment prefix, wrapper, builtin, reserved word, substitution, backtick, glob, brace, tilde, an
+ANSI-C `$'...'` quote, `xargs`, `find`, or any unlisted word is simply not on the allowlist and denies.
+A command the lexer cannot read (an unquoted heredoc, a here-string, a process substitution, an
+unbalanced quote, or a quoted heredoc in a position the lexer cannot place) is in scope whenever any
+directory is declared and is never judged out of scope from its raw text or working directory: with no
+lexed tokens, nothing shows that a relative operand, a `cd`, an expansion or a quote splice does not
+reach a declared directory. It has no segments to match, so it denies whole. A nested shell `-c` body is
+classified recursively through the wrapper spellings it reads (a bare or path-qualified shell word;
+`NAME=value` prefixes and the `env`, `command`, `nohup` and `timeout` wrappers, peeled repeatedly
+(`env`'s words are read ONLY against a closed set of option forms it fully parses: the bare flags
+`-i`/`--ignore-environment` with the lone `-` spelling, `-0`/`--null` and `-v`/`--debug`, and the
+value options `-u`/`--unset`, `-C`/`--chdir` and `-a`/`--argv0` in their separate, attached and
+`=`-attached spellings, so a consumed value is not read as the command word; `env`'s
+`-S`/`--split-string` carries a whole command line that env re-splits, which the guard does not
+reproduce, so an `env` call carrying `-S`/`--split-string` in any value-bearing spelling is one the
+guard cannot read: it is denied IN SCOPE unless a plain reading of every word of the call (each word
+also read with its quote and backslash characters stripped, so a quote-spliced spelling of a declared
+directory is seen) shows it outside the declared directories; any OTHER `env` option word or cluster
+(`-vS'...'`, `-vu FOO`, an abbreviated long option such as `--uns`, a signal option, an unknown
+option, or a value option missing its value), and any pre-command word containing `=` the assignment
+grammar rejects (`1a=x`, `a.b=x`, `=x`), which env consumes as an assignment and runs the word after
+it, likewise make the `env` call one the guard cannot read, which puts the command IN SCOPE by itself,
+so it is denied unless every segment is an allowlisted read-only form; `timeout`'s
+`-k`/`-s`/`--kill-after`/`--signal` take their values);
+the shell's options before the body, where `-c` counts only as a letter of a single-dash option cluster,
+each `o` or `O` letter of a cluster takes the next word, `--rcfile` and `--init-file` take the next word,
+and other long options are flags; and `eval`), so a declared directory a quote splice hides from the
+raw text is still reached; a relative `cd`/`pushd` while CDPATH is set (assigned in the command as a
+`CDPATH=` prefix or export, a `printf -v CDPATH`, or a bare `CDPATH` operand of `read`, `mapfile` or
+`readarray`, each also behind `NAME=value` prefixes or `command`, or inherited in the hook process's own
+environment) is unresolvable and puts the command in scope, since the cd may land in a
+declared directory through a CDPATH entry; and a declared directory spelled inside an ANSI-C `$'...'`
+quote is read for scope from a decoded copy of the command. Each judged operand and each declared directory is
+compared both as written and through realpath, so a symlink into or out of a directory is caught either
+way; a write-shaped redirect must provably land outside every declared directory and not under a
+`.git/hooks` directory or at a registry file, while reads and quoted-heredoc bodies fed to an
+allowlisted reader pass.
+
+Unread launch targets. A segment that runs an interpreter, sources a file or runs a command-running
+wrapper is ALSO in scope when the guard cannot show that every file it will execute or import lies
+outside the declared directories. The guard does not read more to show that (it evaluates no
+expansion, no glob and no module search); it narrows instead. The launch words are the python family,
+the shells (`sh`, `bash`, `dash`, `zsh`, `ksh`, `ash`, `mksh`, `rbash`, `yash`, `posh`, `busybox`,
+`fish`, `csh`, `tcsh`), `source` and the dot builtin, `eval`, `exec`, the interpreters `perl`, `ruby`,
+`node`, `nodejs`, `php`, `lua`, `tclsh`, `Rscript`, `awk` (and `gawk`, `mawk`, `nawk`), `make` and
+`gmake`, and the command-running words `xargs`, `find`, `parallel`, `nohup`, `setsid`, `stdbuf`,
+`sudo`, `su`, `watch`, `flock`, `ionice`, `taskset`, `chrt`, `strace`, `ltrace`, `nice`, `time`,
+`timeout`, `env`, `command`, `builtin` and `trap`. Such a word anywhere in a segment counts, and so does
+a command word holding a slash or one the lexer reads as opaque. Such a launch is in scope when: any of
+its words or input redirect targets carries an expansion, glob, brace or tilde the lexer reads as opaque (so
+`python3 ~/x/drafts/evil.py`, `python3 $HOME/...`, `python3 <dir>/dra?ts/...` and
+`python3 <dir>/{drafts,zz}/...` deny), an ANSI-C or locale quote, or a tilde after `=` or `:`; a
+python-family run can reach a declared directory through its module search (a declared directory at
+or below the working directory for `-c`, `-m` and a stdin program, or below the script's directory for
+a script, unless `-I` or `-P` is given; or at or below a directory on the hook interpreter's `sys.path`,
+the hook environment's `PYTHONPATH`, or a `PYTHONPATH`/`PYTHONHOME`/`PYTHONUSERBASE`/`PYTHONSTARTUP`
+value the call assigns; an unknown working directory counts as reaching), so `python3 -m drafts.evil`
+and `python3 -c "import drafts.evil"` from the declared directory's parent deny (and, under the
+refuse-wide rule below, so does `python3 -I -m drafts.evil` there); a shell or `source` operand
+without a slash (bash looks it up in PATH and the working directory) while the working directory is
+unknown or a PATH directory of the hook environment lies inside a declared directory; any relative
+launch operand while the working directory is unknown; and any launch while a PATH directory of the
+hook environment lies inside a declared directory. Module names are never resolved: reaching the
+search root is enough. The working directory a launch runs in follows `env -C`/`--chdir` and
+`sudo -D`/`--chdir` in its segment (an opaque or unresolvable value makes it unknown); any other
+wrapper that moves it (a `chroot`, a program's own `chdir`) is not followed. The VALUE of every `NAME=value` and `--option=value` word, and each
+`:`-separated part of it, is also resolved against the effective working directory, so
+`PYTHONPATH=drafts python3 -m evil`, `BASH_ENV=drafts/x.sh bash -c true` and
+`PATH=drafts:/usr/bin runme` from the declared directory's parent are in scope. A write destination at
+or below any `.git` directory (its `config`, which sets `core.fsmonitor`, `core.hooksPath` and
+`diff.external`, as well as its `hooks`), a file or directory itself named `.git`, a `.gitconfig` and
+a path ending in `git/config` is configuration that executes on the next ordinary git command, and is
+refused like `.git/hooks`.
+
+Refuse wide, allow narrow. Wherever any directory is declared, a construct this guard does not fully
+read puts the command IN SCOPE whatever directory it names, so only the closed allowlist can pass it,
+and none of these constructs is on the allowlist. Each test reads the widest view: the raw command
+text (quoted strings and here-document bodies included) for command substitutions, and every word of a
+segment wherever it stands for the rest. The constructs:
+
+- a command substitution (`$( )`, an arithmetic `$(( ))` or a backquote) anywhere in the raw text. The
+  one proof that clears one is a `$( )` whose WHOLE body is `cat` reading one here-document with a
+  quoted delimiter (`git commit -m "$(cat <<'EOF' ... EOF)"`), which is literal data; every other `$(`
+  and backquote, inside such a body too, is judged on its own, so a commit message holding a backquote
+  denies (use `git commit -F <file>`).
+- an unquoted here-document or a here-string: the lexer refuses both, so the command is unread and
+  refuses whole. There is no re-reading of either (the previous release's re-reading let a command
+  substitution beside one through).
+- program text: `eval`, `trap`, `perl`, `ruby`, `node`, `php`, `lua`, `tclsh`, `Rscript`, `awk` (and
+  `gawk`, `mawk`, `nawk`), `busybox`, `watch`, `su`, `script`, `flock`, `ssh`, `rsync`, `parallel`,
+  `gdb`, the vi and emacs editors, `ed`, `dc` and `sqlite3` (a `!` command or a `.shell` or `.system`
+  dot-command runs a shell command line) and the other words `_NRD_PROGRAM_TEXT_WORDS` lists (a lone
+  `--version` or `--help` after `ed`, `dc` or `sqlite3`, the whole segment being those two words,
+  prints and exits and is not program text: `sqlite3 --version`); a
+  python-family `-c`; a shell `-c` body the wrapper peel does not read (behind `xargs`, `find -exec`,
+  `sudo`); a shell's `--command` or `--init-command` option and fish's `-C`; a python or shell word
+  reading its program from stdin behind a launch wrapper, a runner or a privilege or sandbox wrapper
+  (`poetry run python`, `uv run bash`, `doas bash`); a shell, `source` or python-family program operand
+  naming a descriptor wherever the word stands, and a descriptor named as a startup file
+  (`BASH_ENV=/dev/stdin`, `ENV=/dev/fd/0`, `--rcfile /dev/stdin`); a descriptor handed to any
+  `python3 -m` module (`cProfile`, `profile`, `trace`, `doctest` and `pydoc` run the file they are
+  handed); an `env -S` or `--split-string` command line that holds a shell, `source`, python-family,
+  runner or program-text word (`env -S 'bash -s'`, `env -S 'bash -c ...'`: env re-splits it into the
+  command it runs, which no other test reads), or any quote, backslash or `$`, since env reads those
+  itself (`env -S'bash\_-s'`, `env -S"'b''ash' -s"` and `env -S'${SHELL} -s'` each run a shell
+  reading stdin); and `sed` with any script other
+  than line addresses with `p`, `d`, `n` and `q` (sed's `e` command runs a shell command).
+- a test collector or runner started from an ancestor of a declared directory: a `python3 -m` run (with
+  `-I` too: `unittest discover` and pytest put their start directory on `sys.path` themselves), a
+  python script named like a collector, and `pytest`, `tox`, `nox`, `coverage`, `make`, `npm`, `cargo`,
+  `go` and the other words `_NRD_RUNNER_WORDS` lists, when the working directory is unknown or at or
+  above a declared directory, or any word resolves to a path at or above one.
+- from ANY working directory, a runner carrying its own program text or a program read from stdin or a
+  descriptor (`_nrd_runner_text`): any word or `=`-value naming a descriptor; `make` or `gmake`
+  `--eval`, `-E` or a makefile of `-` (an unambiguous long-option prefix too: `--ev=`, `--fil -`);
+  `npm`, `npx`, `pnpm` or `yarn` `-c`, `--call`, `--shell-mode`,
+  a `--shell` or `--script-shell` setting, `npm explore` or `yarn exec`; `ipython` or `ipython3` `-c`,
+  `--c=`, a `--Class.trait=` word or no script operand; `jupyter console`, `qtconsole` or a
+  `--Class.trait=` word, and `jupyter-console` or `jupyter-qtconsole` (a segment of only one of these
+  IPython or Jupyter console words and a lone `--version` or `--help` is not program text:
+  `ipython --version`); `tox -x` (also inside a short
+  cluster such as `-qx`) or `--override`; `cargo --config`; `pytest`, `py.test`, `pytest-3`,
+  `py.test-3` or `pytest3` `-o` or `--override-ini`;
+  `coverage run -m` and a `python3 -m` run of `timeit`, `code`, `pdb`, `asyncio`, `IPython`, `idlelib`,
+  `ipdb`, `pudb`, `ptpython` or `bpython`, or of a runner module whose own words do
+  (`python3 -m pytest -o`).
+- git configuration that can run program text: `git -c` with a key outside a closed inert set
+  (`color.*`, `core.quotepath`, `user.name`, `user.email`, `advice.*`, `init.defaultBranch`,
+  `column.ui`, `i18n.*`, `core.autocrlf`), any `--config-env`, an `--exec-path=` value, a `git config`
+  call that sets a key outside that set or edits, and any `GIT_*`, `PAGER`, `EDITOR`, `VISUAL`,
+  `LESSOPEN`, `BROWSER` or askpass assignment word.
+- any word or file redirect target naming configuration that executes, read or written: a `.git`
+  component in any letter case, a bare repository (`repo.git/config`, or a directory holding `HEAD` and
+  `objects/`), a `.gitconfig` or `git/config` path, a shell startup file, `.envrc`, `.gitmodules`,
+  anything in a `.claude` directory, an ssh `config`, `rc` or `environment` file, and a Python
+  `sitecustomize.py`, `usercustomize.py`, `.pythonrc` or `.pth` file. The same set is refused as a `cp`
+  or write-redirect destination in scope. An allowlisted reader still passes (`cat ~/.bashrc`,
+  `ls .git/hooks`).
+
+Operator note: setting `deliverable_dirs` changes how the WHOLE session's Bash calls are judged, not
+only calls that name a declared directory: every construct above, a program on stdin (`python3 -` with
+a quoted here-document, a pipe into `bash`), an unquoted here-document or here-string, and a launch
+carrying any expansion deny wherever a directory is declared. When containment is observed (the
+`contained` mode of "Containment and tripwire mode" below) these constructs still deny, since such a
+program can build the custodian route at run time; only the lost-working-directory and
+unknown-working-directory rules are dropped, and calls that show the custodian route are judged
+against its form.
+
+The guard finds its registry and `deliverable_dirs` INDEPENDENTLY of the payload working directory:
+it consults the project directory the hook environment names (`CLAUDE_PROJECT_DIR`, the path the
+installed hook commands are themselves launched through) unioned with the session cwd's git-resolved
+toplevel. So a working directory inside a declared directory, inside or outside a repository, cannot
+disarm the guard; sitting in a declared directory in that case refuses commands outside the
+allowlist above. Where neither anchor is present the hook is inert, as it is with no registry.
+
+Accepted costs (observed over-denies the allowlist causes). A reader or inspection tool the allowlist
+does not name denies on a declared path even where it only reads: `python3 -c` with a
+hashlib/pathlib/json snippet, `python -m json.tool` or `-m tokenize`, `sed`, `awk`, `xargs sha256sum`,
+`stat`, `cmp`, `od`, `xxd`, `realpath`, `tar -tf`, a coreutils hash tool with a glob operand
+(`sha256sum <dir>/*`, an unquoted glob is opaque), `git diff --no-index` with an option outside its
+registered grammar (`--color`, `--word-diff`), a patch tool other than `git apply` (`patch -p1`,
+`git am`), a reader behind a wrapper (`timeout`, `command`, `env`), `command -v`/`-V` before a `-c` shell
+(the wrapper peel reaches the `-c` body and classifies it, though `command -v`/`-V` then only prints the
+operand's name and runs nothing), an `env` call carrying an option word or cluster outside the closed
+set the peel parses, a value-bearing `-S`/`--split-string` whose words are not all plainly outside the
+declared directories, or a pre-command `=` word the assignment grammar rejects, which denies even where
+its raw text names no declared directory and what env would run reaches nothing from one
+(`env -vS'echo hi'`, `env -iv ls`, and a `-S` call whose separate-value spelling this host's env does
+not split yet whose body spells a declared directory), a reader whose command word carries
+an option outside the tool's registered grammar, and a `python3 -I` reader script that resolves inside
+a Python standard-library directory (even a benign one) since stdlib programs run their argument. A
+`cd` INTO a declared directory is not an allowlisted move, so `cd <dir>; ls` denies; and the shell and
+python copy-run forms deny when the effective working directory is itself inside a declared directory,
+even though the copy they run lives outside. After `cd -`, a bare `cd`, an unreadable `cd` operand, an
+untracked `cd`, or any `pushd`, `popd` or `dirs` word (even an argument, as in `echo cd`), every later
+command outside the allowlist that carries a relative operand denies wherever a directory is declared,
+even where it reaches none (`cd -; make test`, `pushd /tmp; git status`). A shell or python-family word
+reading its program from stdin denies wherever a directory is declared, even where the program names
+none (`echo 'echo hi' | bash`, `python3 -` with a quoted here-document, a bare `bash`, `bash -s`,
+`bash --login`, and, behind a wrapper option the peel cannot parse, the first shell or python word
+with nothing after it even where it is only an argument, as in `env -vu FOO echo bash`). A program
+operand or runner word that only looks like a descriptor denies too (a script named `stdin` or `0`,
+`make stdin`, `cargo test -p stdout`, and any relative path whose last-but-one component is `fd`, such
+as `python3 tools/fd/run.py`, `bash scripts/fd/build.sh` or `pytest tests/fd/test_io.py`, since the
+relative test does not resolve it against the working directory), a descriptor handed to a `python3
+-m` module that only reads it (`python3 -m json.tool /dev/stdin`; with no operand it reads stdin and
+passes), an `env -S` line holding a launch word, a quote, a backslash or a `$` even where what it
+runs is inert (`env -S'bash -c' 'echo hi'`, `env -S'echo "hi"'`), as do `ed`, `dc` and `sqlite3` with any script (`sqlite3 x.db 'select 1'`), `ipython`
+with no script operand other than a lone `--version` or `--help` (`ipython --colors=NoColor`), and a
+runner program-text option that runs nothing (`pytest -o addopts=-q`, `make -E ''`). A lone
+`--version` or `--help` of the other program-text words (`perl --version`, `sed --version`, `vim
+--version`, `env --version`, `rsync --version`) still denies: fbdff942 refused each, and the guard
+allows nothing it refused. A word that is a listed name plus a version suffix denies wherever it
+stands, even as an argument that names no program (`openssl genpkey -algorithm ed448` reads `ed448`
+as `ed`, and `mkdir -p build/node18` reads `node18` as `node`), with one exception: an operand of a
+package tool (`dpkg`, `dpkg-query`, `apt`, `apt-get`, `apt-cache`, `pip` or `pip3`) that is the
+segment's command word, spelled bare or under `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` or
+`/usr/local/bin`, with no `PATH` assignment before it, is read by its exact name when it is a bare
+package name (no `/`, no `=` and no leading `-`), so `dpkg -L lua5.4`, `apt-get download php8.2` and
+`pip download node18` are allowed, while the exact listed names there still deny as at fbdff942
+(`dpkg -L lua`), and so do a path operand (`dpkg -L /usr/bin/lua5.4`), an option word or option value,
+which apt and dpkg can run as a command (`apt-get -o APT::Update::Pre-Invoke::=/usr/bin/lua5.4
+update`, `dpkg --pre-invoke=/usr/bin/lua5.4`), the value word after dpkg's `--pre-invoke`,
+`--post-invoke` or `--status-logger` (`dpkg --pre-invoke lua5.4`), and the same operand behind a wrapper (`sudo
+apt-get download php8.2`) or after a path command word (`./dpkg -L lua5.4`). An unquoted
+heredoc or any other construct the lexer cannot read denies whole wherever a directory is declared,
+even where it only prints and names no declared directory from a working directory outside them all
+(`cat <<EOF > out.txt`, `grep -c x <<< 'xyz'`, a here-document with a trailing space after its
+delimiter, and `cd <ancestor> && cat <<EOF`, which the previous release re-read and allowed, deny
+again). Every refuse-wide construct denies wherever a directory is declared even where it names none:
+`python3 -I -c 'print(1)'`, `awk '{print $1}'`, `sed 's/a/b/'`, a commit message built with
+`$(cat <<'EOF' ... EOF)` whose body holds a backquote or `$(`, `git -c` outside the inert keys,
+`GIT_PAGER=cat git log`, `make` or `pytest` from an ancestor of a declared directory, and an ordinary
+command whose word names a `.git` path, a `.gitmodules`, a shell startup file or a `.claude` path
+unless every segment is an allowlisted reader (`git add .gitmodules` denies). A launch carrying any expansion, glob, brace or tilde
+denies wherever a directory is declared, even where it names none (`python3 tools/run.py "$X"`,
+`bash ~/bin/x.sh`, `for f in *.py; do python3 -I r.py "$f"; done`); a `python3 -m` or `-c` run (or a
+script run without `-I`/`-P` whose directory is an ancestor of a declared directory) from an ancestor
+of a declared directory denies, even `python3 -m pytest` and `python3 -I -m unittest`, so a declared
+directory inside the working tree makes those runs deny from the tree's root (run from a directory
+that is not an ancestor); a launch word that is only an argument (`echo python3`, `grep -r make`) is judged as a
+launch; a `PYTHONPATH`-style assignment that cannot be placed (an empty or relative part with no known
+working directory) puts every python launch in the call in scope; and a `cp` or redirect onto any path
+under a `.git` directory, a `.git` file, a `.gitconfig` or a `git/config` path denies even where it
+writes an inert file.
+`cp` into a declared directory denies even though `cp` runs nothing, and a one-call `cp` to a copy
+outside the directories FOLLOWED by running that copy (`cp ... && bash <copy>` or
+`cp ...; python3 -I <copy>`) denies alike, since the copy is not yet an existing regular file when the
+guard checks: neither the shell nor the python reader form can verify
+it, so both deny (consistent). A git command whose working directory or `-C` target is, or lies
+inside, a directory written in the same call denies even when no `.git` was copied into it (for
+example `cp -r <dir>/plain <out>/; git -C <out>/plain diff --no-index ...`), and so does one under any
+ancestor that received a `.git` in the same call even where a nearer repository would be found first.
+A `cp` whose directory source cannot be read whole or holds more than 20000 entries denies, as does a
+`cp` whose source is not a regular file and is, contains or lies inside a path an earlier segment of
+the same call wrote. Beside the nested `-c` body the shell reads, the token a looser reading takes as
+the body (the word after the first option whose letters include `c`, a long option such as `--norc`
+included) is classified too, so a `--rcfile` file name or a stray option word there can deny a call
+whose real body is an allowlisted read. The escape for each is the same: read the file with the Read tool,
+use an allowlisted reader, or hand the path to a reader script kept outside the declared directories
+(copy in one call, run the existing copy in the next).
+
+Residuals (not caught, by construction). A command that reaches a declared file WITHOUT naming it or
+its directory in the call text and from a working directory that is not itself declared: a path held
+in a shell variable assigned in an earlier call and named through a word the lexer reads as literal, a
+path built by concatenation at run time, an expansion the lexer reads as opaque in a segment that
+launches no listed interpreter, source or wrapper, or a symlink or hard link made ELSEWHERE that points into a declared directory
+while the command names only the alias outside it. `bash -n` sources a `BASH_ENV` file set in an
+EARLIER call (an earlier-call variable the call text does not carry), the remaining disclosed path for
+the syntax-check form. The CDPATH handling covers the in-call spellings listed above: a relative `cd`
+with CDPATH set in THIS call by a `CDPATH=` prefix or export, a `printf -v CDPATH`, or a bare `CDPATH`
+operand of `read`, `mapfile` or `readarray` (each also behind `NAME=value` prefixes or `command`), or
+inherited, denies; any OTHER in-call spelling that assigns CDPATH (for example `builtin read`) is not
+detected, so a relative `cd` after it is not put in scope. A declared directory spelled in an ANSI-C
+`$'...'` quote is read for scope. An inherited CDPATH is read from the hook process's OWN environment
+(the payload the hook runs under, which need not equal the Bash tool's interactive shell environment),
+and a CDPATH assigned in an EARLIER call is the same earlier-call-variable residual. The nested `-c`
+recursion reads only the wrapper spellings listed above; a `-c` body behind any other wrapper word (for
+example `exec`, `nice`, `setsid`, `stdbuf` or `sudo`), and a `-c` body reachable only behind
+an opaque expansion or a command substitution the lexer cannot read, is not classified, so a declared
+directory a quote splice hides inside such a body is not reached. The `cp` tree check reads each
+directory source as it stands when the guard runs; names an earlier segment of the same call adds
+without a tracked write (a `git apply`) are not seen. The same-call written-path comparison resolves
+symlinks as they stand when the guard runs. A write destination is constrained only at a `.git`
+directory or file, a `.gitconfig`, a `git/config` path and the registry files this guard reads; any
+OTHER write target outside the declared directories (another file in a live checkout, a user dotfile
+such as `~/.bashrc`, an `include.path` or `GIT_CONFIG_GLOBAL` file, a `.gitattributes` naming a filter
+configured elsewhere, a PATH directory, a crontab) is unconstrained by this guard and left to the
+write-scope guard and the operator. Nothing in such a call's text or payload distinguishes the first
+class. The unread-launch-target test covers only its listed launch words: a program outside them that
+runs a file or program text it is handed (`sed` with an `e` command, `git -c` aliases, `ssh`, `vim`,
+`gdb -x`) is not put in scope by an expansion, and an expansion in a NON-launch segment (for example
+`cp ~/x/drafts/evil.py ~/.bashrc`) is not in scope. Its module-search test reads the HOOK
+interpreter's `sys.path`, user site and `PYTHONPATH`, and the hook process's PATH; a different target
+interpreter (a virtual environment, `pypy3`, another version), a `.pth` file, a PATH or `PYTHONPATH`
+exported in an earlier call, and a `PYTHON*` variable assigned through a builtin other than a
+`NAME=value` word are not seen. Python program TEXT (`-c`, a quoted here-document) that opens, execs or
+`os.chdir`s to a declared path it builds at run time is not read (the existing `-c` residual), and a
+script or reader the guard allows may still import siblings or run what it is handed. A launch word
+whose command word is resolved through a PATH that only the session shell holds is not seen. Running an UNREAD copy outside the directories is also not caught: the rule's "full reading" half
+stays judgement-level, because no hook state could prove a full reading (Read limits and truncation
+stand in the way). A reader or script run outside the directories may itself import or run a path it is
+handed as data; the guard does not read it. A program fed on stdin to an interpreter other than a shell,
+`source` or python-family word (`perl`, `ruby`, `node`, `awk -f -`), or to a shell behind a wrapper the
+peel does not read (`xargs`, `sudo`, `stdbuf`), is not put in scope by the stdin rule (the program-text
+and wrapper parts of the refuse-wide test refuse those listed here). A shell or python word reading
+its program from stdin is refused in exactly four positions: as the segment's command word after
+the stdin-program peel (a leading reserved word or grouping token, `NAME=value` prefixes, `env`,
+`nice`, `timeout` and `time` within their option grammar, then `exec`, `command` or `builtin`); as
+the first shell, `source` or python word of a segment whose wrapper carries an option outside that
+grammar; and anywhere in a segment after one of the stdin wrappers (`_NRD_STDIN_WRAPPERS`): the launch
+words (`eval`, `exec`, `perl`, `ruby`, `node`, `nodejs`, `php`, `lua`, `tclsh`, `Rscript`, `awk`,
+`gawk`, `mawk`, `nawk`, `make`, `gmake`, `xargs`, `find`, `parallel`, `nohup`, `setsid`, `stdbuf`,
+`sudo`, `su`, `watch`, `flock`, `ionice`, `taskset`, `chrt`, `strace`, `ltrace`, `nice`, `time`,
+`timeout`, `env`, `command`, `builtin`, `trap`), the runner words (`_NRD_RUNNER_WORDS`: `poetry run`,
+`uv run`, `npm exec` and the rest), and `doas`, `pkexec`, `runuser`, `setpriv`, `sudoedit`, `chroot`,
+`unshare`, `nsenter`, `firejail`, `bwrap`, `systemd-run`, `unbuffer`, `chronic`, `valgrind`,
+`fakeroot`, `faketime` and `proot`, each with a version suffix and in a path form too; and inside an
+`env -S` or `--split-string` line. Behind any OTHER word it is not refused
+(`setarch x86_64 bash` and `linux32 bash`, `capsh --`, `prlimit`, `numactl`,
+`rlwrap`, `dbus-run-session`, `cgexec`, `torsocks`, the dynamic loader `ld.so bash`, `conda run`,
+`pixi run`, `pipx run`, `uvx`, `nix-shell`, and any other program that runs the next word). A shell
+whose name is none of the launch shells under any version suffix (`toybox sh`, `elvish`, `nu`,
+`xonsh`) and an interpreter or command runner outside the program-text words (`m4`, `gnuplot`,
+`psql`, `mysql`, `at`, `batch`, `crontab`, `tmux`, `tar --to-command` or `--checkpoint-action=exec`, `zip
+-TT`, `man -P`, `git rebase -x`, `git difftool -x`, `git submodule foreach`, the python debugger
+launcher `pdb3`, and a hook command an `apt-get -o` or `dpkg` option names, such as
+`APT::Update::Pre-Invoke::=bash` or `dpkg --pre-invoke=bash`, whose value the guard reads only as one
+word) is not read either, nor
+is a listed name under a suffix outside the version grammar (`bash-static`, `python3-dbg`,
+`perl5.36-thread`) or a renamed copy (the launch-under-another-name list below).
+
+Launch under another name. Each way of running a shell or interpreter under a name other than a
+listed one that this guard reads (R1 to R4) is refused in every mode wherever a directory is
+declared, whatever the call names:
+
+- R1, the /proc rule (one class, not a list of forms): a command word or launched path that passes
+  through `/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr` or a descriptor path at ANY
+  component, after any resolution the guard performs, or that the guard cannot resolve. `/proc` holds
+  the running program itself (`/proc/<pid>/exe`), every file a descriptor holds open (`fd/N`,
+  `map_files/<range>`, a directory: `3</proc/self` makes `/dev/fd/3/exe` the shell) and links back
+  into the whole tree (`root`, `cwd`), so no list of its spellings closes. The guard reads the word as
+  written and lexically normalised, then walks it component by component as the kernel does: each
+  symbolic link the filesystem shows at judgement time is replaced by its target and a `..` applies
+  to the resolved prefix (so `/dev/fd/../exe`, `/proc/self/root/../proc/self/exe`, `/proc/net/../exe`,
+  `/usr/../proc/self/exe` and a link made in an earlier call that points into `/proc` all count), and
+  the walk never reads inside `/proc` or a descriptor: the first such component decides. A walk that
+  cannot finish (a link loop, more than 40 links, a component it cannot stat) counts, and so does a
+  relative command word with no known working directory (after `cd -` or another lost-cwd word, or a
+  payload with no working directory); a relative command word with a known working directory (the
+  payload's, followed through literal `cd`) is walked from it (`cd /proc/self && ./exe`). It applies
+  to a command word after the stdin-program peel (or the first such word behind a wrapper option
+  outside its grammar), with any arguments (`... | /proc/self/exe`, `exec /proc/self/exe`, `nice
+  /proc/self/exe`, `/proc/self/exe -c '...'`, `/dev/fd/3 3</bin/bash`, `/dev/fd/3/exe 3</proc/self`);
+  to every word with a slash after a stdin wrapper except a plain descriptor (`sudo /proc/self/exe`,
+  `sudo /dev/fd/3/exe`; `make -f /dev/stdin` is read as an operand, U4); and to every word inside an
+  `env -S` or `--split-string` text. For a bare command word the launched path is found by a `PATH`
+  search, so a `PATH` this call sets (a `PATH=` or `PATH+=` word anywhere: a prefix, `export`,
+  `declare`, `env`) counts when any entry passes through `/proc` or a descriptor after the same walk,
+  is `/dev` itself, is relative or empty with no known working directory (and is walked from the
+  known one otherwise: `cd /proc/self && PATH=. exe`), or holds an expansion other than `$PATH` or
+  `${PATH}`, a glob, a brace, a tilde or a quote (`PATH=/proc/self exe`, `PATH=/dev stdin`,
+  `PATH=/usr/bin:/proc/self ls`, `export PATH=$HOME/bin:$PATH`); and a bare command word that is
+  `exe`, all digits, `stdin`, `stdout` or `stderr` counts whatever `PATH` is (a `PATH` set in an
+  earlier call). The readings of the earlier releases stay as fail-closed readings of a word the walk
+  places outside `/proc`: a relative word whose last component is `exe`, whose last-but-one is
+  `map_files`, or that names a descriptor (`./0`), and an absolute word with a `..` read that way too.
+- R2, a privilege or session word that starts a shell itself: `sudo` with `-s`, `-i`, `--shell` or
+  `--login` (a short cluster holding `s` or `i` before a letter that takes a value, such as `-Es`; a
+  long prefix of at least four characters, such as `--sh`; an opaque option word), `doas -s`,
+  `pkexec` with no command, and `newgrp`, `sg`, `run0` and `machinectl shell` in any form, as the
+  command word or after a stdin wrapper (`setsid sudo -s`).
+- R3, an `env -S` or `--split-string` text holding a privilege word (`sudo`, `sudoedit`, `su`,
+  `doas`, `pkexec`, `runuser`, `setpriv`) or an R2 word, whatever follows it (`env -S'sudo -s'`,
+  `env -S'sudo -n true'`).
+- R4, a program bound to another name in the same call: `hash` with an option cluster holding `p`
+  or an opaque word after it (`hash -p /bin/bash ls`), `alias` with a `NAME=value` or opaque
+  operand (`alias zz=bash`), any word holding `BASH_CMDS` or `BASH_ALIASES` (`printf -v
+  'BASH_CMDS[ls]' /bin/bash`, `printf -v 'BASH_ALIASES[zz]' bash`, `declare`, `read`, a direct
+  assignment), and `printf -v` with an opaque target (`printf -v "$N" /bin/bash`). Each refuses
+  the whole call, so `... | ls` after such a binding never runs past this guard. A word that only
+  looks like one counts too (`echo hash -p`, `grep BASH_CMDS notes.txt`).
+
+The scan never crashes the hook: an input it cannot evaluate (any exception while reading or
+judging it, such as the `TypeError` an ANSI-C here-document delimiter like `<<$'\cß'` raised) is
+refused as cannot-evaluate in every mode, and in tripwire mode the deny text names that reason.
+Accepted over-denies of R1, wherever a directory is declared: a `PATH` this call sets with an
+expansion other than `$PATH` (`export PATH=$HOME/.local/bin:$PATH`), a relative command word with no
+known working directory (`./run.sh` after `cd -`), a command word through `/proc` or a
+descriptor that cannot run (`/proc/self`, `/dev/fd`), and a word with a slash through `/proc` behind
+a stdin wrapper even where it is only an operand (`find /proc -name x`, `xargs cat /proc/meminfo`,
+`sudo cat /proc/x`). `doas` with an option word holding an `s` (`doas --version`) is refused in every
+mode, as 74fe3128 refused it (doas has no long options, so it starts no shell; the no-reduction rule
+keeps the refusal).
+
+Not read (residuals, counted: 6). U1, a copy or hard link of a shell or python made in this call or
+an earlier one and run under its own name (`cp /bin/bash /tmp/x`, `install`, `cat /bin/bash >
+/tmp/x`, then `... | /tmp/x`), a symbolic link made in THIS call (`ln -s /proc/self/exe /tmp/x &&
+... | /tmp/x`: the R1 walk reads the filesystem at judgement time, so a link made in an earlier call
+that points into `/proc` or a descriptor counts), and any of these placed in a `PATH` directory and
+run by a bare name, or reached by a bare name through a `PATH` set in an earlier call (R1 reads only a
+`PATH` this call sets). U2, a binding made in an EARLIER call (a
+`hash -p` entry, an alias, a `BASH_CMDS` or `BASH_ALIASES` entry, a function) or in this call
+through a name built at run time (`v=BASH_; v+=CMDS; declare "${v}[ls]=/bin/bash"`), the existing
+earlier-call-variable and concatenation residuals. U3, a wrapper that starts the account's shell
+when it is given no command, with no shell word in the segment (`unshare`, `nsenter`, `chroot <dir>`,
+`fakeroot`, `firejail`, `proot`, `systemd-run --shell` or `-S`, `setarch x86_64` or `linux32` with no
+command, `capsh --`, `tmux`, `screen`), since the guard does
+not hold each one's option grammar to tell a command from an option value; `script`, `su` and
+`runuser` are program-text words and refused. U4, a word behind a stdin wrapper that the guard reads as an operand,
+not as the launched path: a bare or relative word other than the R1 spellings (`cd /proc/self/fd &&
+sudo 3`, `sudo fd/3`, `setsid exe`), a plain descriptor path (`sudo /dev/fd/3 3</bin/bash`, `nohup
+/proc/self/fd/3`), and a bare `exe` or a `PATH=` word inside an `env -S` text (`env -S'PATH=/proc/self
+exe'`); and a path component replaced between judgement and run (the R1 walk reads the filesystem
+once, at judgement time, so a link changed by another process before the call runs is not seen). U5, a
+shell or python reached through the dynamic loader or another program that runs the next word (`/lib64/ld-linux-x86-64.so.2 /bin/bash`, `setarch x86_64 bash` and the other words
+listed above) and a shell whose name is no listed launch shell (`toybox sh`, `elvish`, above). U6,
+`sudo -e` or `sudoedit`, which run an editor named by `SUDO_EDITOR`, `VISUAL` or `EDITOR` set in an
+earlier call. A `coproc` reads its own pipe, not the segment's input, so
+`... | coproc bash` runs nothing it is fed; `coproc` is not peeled as a reserved word, so `coproc
+bash < /tmp/f.sh` is not read as a stdin program, which matters only for a file outside the
+declared directories (the copy-out-and-run residual below). A program
+decoded and written to a file outside the declared directories and run by a later segment of the
+same call (`echo ... | base64 -d > /tmp/f.sh && bash /tmp/f.sh`, or through a FIFO) is the
+copy-out-and-run residual: the run names only that file. A descriptor reached through an alias the lexical test does not read (a symlink to
+`/dev/stdin` made in this or an earlier call, or a relative operand other than the listed names after
+the working directory moved into `/dev` or `/proc`) is read as an ordinary script. A runner's recipe
+or configuration FILE from a working directory that is not an ancestor of a declared directory, a
+runner option outside the listed program-text options, and a runner option carried in an environment
+variable (`MAKEFLAGS`, `PYTEST_ADDOPTS`, `TOX_OVERRIDE`, an `npm_config_*` name, a `CARGO_*` name,
+`RUSTC_WRAPPER`) are not read. `less` is not a program-text word: with no terminal it copies its input
+like `cat`, and its command keys come from the terminal, not the pipe. A payload with no absolute
+working directory leaves the walk's starting directory unknown, and a relative operand is then judged
+out of scope unless a `cd`, `pushd`, `popd` or `dirs` word in the call has lost the directory. A
+symlink swapped between the check and the run is not prevented; one already in place is caught in
+either direction by the lexical-plus-realpath union.
+
+The key is validated fail-closed with a limited blast radius: an entry that is not a non-empty
+absolute NUL-free string, normalizes to the filesystem root, or holds the session repository root
+(which would refuse every interpreter call in the tree) makes the key malformed, and a malformed key,
+like a present-but-unreadable registry, denies ONLY interpreter-shaped candidates (an interpreter
+word, source or the dot builtin, exec, direct path execution, an indirection word, or a
+loader-environment assignment) until the operator repairs it; every other command is unaffected.
+Without the key the guard is entirely inert: the operator must declare it in the live registry, or the
+hook protects nothing, with two exceptions it shares with the untracked wait-loop guard: a payload with
+no `tool_name`, and a command string holding a NUL (bash runs the text before the NUL), deny in every
+session before any registry is read. It reads the command through the shared Bash command reader, so in
+key scope a missing, non-object or non-string command denies. Like the untracked wait-loop guard it is
+not lease-gated (a bounded worker running a deliverable in place is equally wrong) and never reads
+`AIQT_ORCH_REQUIRE_REGISTRY`.
+
+### Containment and tripwire mode
+
+The primary control for wowo01's run-in-place half is OS containment, not shell parsing: the declared
+directories live on a `noexec` mount that the orchestrator account cannot open, so `python3 x.py`,
+`bash x.sh` or `source x` run in place from there fail at `open()` whatever the shell spelling. `noexec`
+alone is not enough: it stops `execve()` and `mmap(PROT_EXEC)` (binaries, shared libraries, `./x`, a
+shebang script), but not an interpreter that reads the file as data. The guard stays as a disclosed
+best-effort tripwire.
+
+The probe. Once per hook call, after the directories are known, `_nrd_containment` reads, for each
+declared directory (as written and as `os.path.realpath` resolves it), whether `os.statvfs(d).f_flag`
+carries `os.ST_NOEXEC` (noexec) and whether `os.access(d, os.R_OK)` and `os.access(d, os.X_OK)` are both
+false for the hook's account while `os.stat(d).st_uid` is not that account's effective uid (sealed: an
+owner can chmod its own directory back to openable, even in an earlier segment of the same call, so a
+directory the hook's account owns is never sealed). `os.stat` is read before and after the other reads:
+a directory that vanishes (the second `os.stat` fails) or is replaced (another `st_dev` or `st_ino`)
+during the probe is a probe failure, never read as sealed (`os.access` answers false for a path that is
+gone). It reads no file content. The result is one of three modes:
+
+- `contained`: every directory is noexec and sealed. The scan runs as a tripwire.
+- `noexec-only`: every directory is noexec and at least one can be opened or is owned by the hook's
+  account. The scan runs exactly as before, row for row: `noexec` alone does not stop interpreters.
+- `none`: anything else, including no declared directory, a missing `os.ST_NOEXEC` and any failure of
+  the probe. The scan runs exactly as before, row for row.
+
+No decision moves toward allow unless containment is observed.
+
+Tripwire mode (`contained`) keeps every test that relates a command to a declared directory: a payload
+working directory inside one, the raw text (and its ANSI-C-decoded copy) naming one, an argv word or
+redirect target resolving into one, an assignment or `--option=` value resolving into one, the nested
+`-c` recursion, the CDPATH widening, and the unread-launch-target test apart from its
+unknown-working-directory part (so a python module search reaching a declared directory, a `PATH` entry
+inside one, and a launch carrying an expansion, glob, brace, tilde or ANSI-C quote still deny). It also
+keeps every test of a construct whose program the guard does not read: the unreadable-command rule, the
+command-substitution rule, the stdin-program rule, the opaque-`env` rule, and the program-text part of
+the refuse-wide segment test (program text, a python `-c`, an unread shell `-c` body, a sed script, git
+configuration that runs program text, a program-running environment assignment, configuration that
+executes) and its collector and runner path test (a test collector, build runner or `python -m` run
+that may start at or above a declared directory). Such a program can build the custodian route at run
+time where no text test sees it (base64 text decoded into `bash`, `python3 -c` or `perl -e` joining
+the call, a git alias, or a runner's own program text: `make --eval`, `npx -c`, `ipython -c`,
+`python3 -I -m timeit`), so these constructs are refused in every mode, as fbdff942 refused them. It
+skips only the session-wide tests that exist solely because a declared file could be opened: the
+lost-working-directory relative-operand rule and the part of the launch test that counts an unknown
+working directory as reaching a declared one. In tripwire mode, and only there, the closed allowlist also
+lists the custodian reader form, exactly:
+
+    sudo -u orch-deliv /usr/local/bin/orch-deliverable cat <relative name>
+    sudo -u orch-deliv /usr/local/bin/orch-deliverable ls <relative name>
+
+spelled literally (single-spaced, unquoted, the exact path and one of the two verbs) with no other
+word, option or assignment, and a name made of `[A-Za-z0-9._-]` components joined by `/`, with no
+leading `/` or `-` and no `.` or `..` component (no quote, glob, space or newline can appear in it).
+
+Tripwire mode puts in scope every call that shows the custodian route: its raw or ANSI-C-decoded text
+holds `orch-deliv` (which the helper's name holds too), or a lexed word holds it or is a privilege word
+(`sudo`, `sudoedit`, `su`, `doas`, `pkexec`, `runuser`, `setpriv`), or, for a call the lexer cannot
+read, such a word stands in its text. In scope every segment must pass the closed allowlist, and a
+segment that reads the helper's output through a pipe (directly or through read forms) must be
+`git apply` (after any `-C <dir>`) or a read form (`cat`, `wc`, `head`, `tail`, `ls`, `file`, `grep`,
+`diff` or a hash tool). So `... cat x.py | python3`, `... | bash`, `... | sh -s`, `... | python3 -I
+reader.py`, `source <(...)` and `echo "$(...)"` are refused, as fbdff942 refused them; the helper alone,
+redirected to a file outside the declared directories, or piped into `git apply` or a read form, is
+allowed. A call that names `sudo` for anything else as a word is refused in tripwire mode too, and
+a privilege word inside an `env -S` or `--split-string` text is refused in every mode (`env -S'sudo
+-s'` and `env -S'sudo -n true'`, R3 under "Launch under another name" above). The deny reason
+names the store as the registry's `deliverable_dirs` declares it and this route in tripwire mode; in the
+other two modes it adds one sentence saying containment was not observed, naming the directory and the
+property that failed, so the strict guard applies.
+
+`tools/nrd_differential.py --base <file>` judges a generated corpus (873 forms, 13 of them spellings
+that hide the helper route, 5 runners whose own program text joins it, and 60 tightened rows that
+fbdff942 allows and that must be refused in every mode) with the fbdff942
+module (the file `git show fbdff94248d1f040f9dfcb069323734012d96e3e:.aiqt/core/hooks/scripts/aiqt_hooks.py`
+prints, checked by sha256) and with this hook forced to each mode, running none of them. It fails when a
+form changes verdict in `none` or `noexec-only`, or when `contained` allows a form fbdff942 refused that
+is not a helper data read: every exact helper form in its text starts a command and the pipeline it
+opens feeds only `git apply` or a read form, and with each helper form replaced by `cat` of a file
+outside the declared directories, fbdff942 allows it. The two relaxations above have no form in that
+corpus; the self-test pins them (`nrd-contain/tripwire-relaxations-allow-contained`), pins the runner
+path test in every mode (`nrd-contain/runner-path-test-same-every-mode`) and runs the same comparator
+with a stand-in base (`nrd-contain/differential-*`).
+
+Operator steps (host work, outside this repository; each is its own request to the host owner):
+
+1. R1, filesystem: a disk-backed filesystem (not tmpfs) mounted at `/var/lib/orch-deliverables` with
+   `rw,noexec,nosuid,nodev`, its own fstab entry, root directory `root:root 0711`.
+2. R2, account: a system user and group `orch-deliv` (no login, no home) owning
+   `/var/lib/orch-deliverables/<UID>/` for each adopting orchestrator UID, mode 0700, no ACL entries.
+3. R3, helper and sudoers: the root-owned helper `/usr/local/bin/orch-deliverable` (`put`, `cat`, `ls`;
+   it refuses symlinks, hard links, FIFOs, devices, oversize files, absolute names and `..`), and a
+   sudoers rule letting each adopting orchestrator run exactly that path as `orch-deliv`, NOPASSWD,
+   `env_reset`, no `SETENV`.
+4. R4, orch-verify: publish the deliverable and every sidecar through `orch-deliverable put`, and stage
+   hand-backs under an orchestrator-owned 0700 directory on the noexec mount.
+5. R5: stop offering the `/dev/shm` hand-back route to adopting orchestrators.
+6. R6: move the draft extraction directory into the store, written only through `put`.
+7. R7: confirm that no other mount of the same source lacks `noexec`.
+8. R8: run the host acceptance checks as the orchestrator account and keep the raw output.
+
+Only then point the live registry's `deliverable_dirs` at the store directories. The self-test
+(`nrd-contain/` in `tools/selftest_orch_hooks.py`) SIMULATES the three modes with a stubbed `os.statvfs`,
+`os.access` and `os.stat` and a forced probe: it proves the hook's logic, not the host. Until the host steps are
+done and their checks pass, the probe reports `none` (or `noexec-only`) and the strict guard applies.
+
+Residuals the tripwire states (in addition to "Residuals" above):
+
+1. Copy-out and run: `orch-deliverable cat x > y.py`, then `python3 y.py` (in the same call or a later
+   one). The helper gives the bytes, and running them is the rule's judgement-level step; the copy
+   names no declared directory, so its run is not refused. Piping the helper's output straight into an
+   interpreter, a shell or a reader script is refused (above) wherever the call's text shows the
+   custodian route. A spelling that hides both `orch-deliv` and the privilege word from the text and
+   builds the call in a construct the guard does not read (base64 text decoded into a shell, program
+   text joining the call, a command substitution) is refused by the unreadable-command, substitution,
+   stdin-program and program-text tests, which tripwire mode keeps. A program in a file outside the
+   declared directories that builds the call (`python3 r.py`, written by an earlier call, another
+   tool, or an earlier segment of the same call that decodes text into the file) is not seen, as at
+   fbdff942, and neither is such text decoded into a shell or python word that reads stdin behind a
+   wrapper outside the stdin wrappers listed under "Residuals" above (`setarch x86_64 bash`), into
+   a shell or interpreter none of the listed names covers under any version suffix (`elvish`, `m4`),
+   or into a shell launched under another name in a way this guard does not read (U1 to U6 under
+   "Launch under another name" above: a copy or link run under its own name, a binding made in an
+   earlier call or through a name built at run time, `unshare` or `chroot <dir>` with no command).
+2. The run scratch during a run: the orchestrator owns it and it is not contained.
+3. The stage window between the broker's staging and publication.
+4. The reply text itself (`.out` and stdout): code in a reply can be written to a file and run.
+5. Host misconfiguration the probe cannot see at the moment of the run: a remount between the probe
+   and the run (time of check to time of use), a permission, ACL or ownership change made between the
+   probe and the run by an account that may make it (root, a `CAP_FOWNER` holder, or the custodian),
+   another mount of the same filesystem without `noexec`, root or `CAP_DAC_READ_SEARCH`, or a wider
+   sudoers rule. The probe reads the hook's account, which is
+   assumed to be the account the Bash tool runs as.
+6. The existing residuals: same-UID registry edits and non-Bash tools (the write-scope guard covers the
+   structured write tools).
+7. In tripwire mode the forms the two skipped tests refused (a relative operand or an interpreter
+   launch after the walk loses the working directory, such as `cd - && python3 x.py`) are allowed
+   wherever they name no declared directory; under containment a file there cannot be opened, so they
+   no longer reach one, but a host that only LOOKS contained to the probe (item 5) loses them. A test
+   collector or build runner started at or above a declared directory (`pytest` or `make` there) is
+   still refused in every mode, since its own program text can build the custodian route. From a
+   working directory that is not an ancestor of a declared directory a runner's listed program-text
+   options (`make --eval`, `npx -c`, `ipython -c`, `python3 -I -m timeit`, the full list above) are
+   refused in every mode, but its recipe or configuration file, an unlisted option and an option
+   carried in an environment variable are not read, in every mode; under containment such a file or
+   option can build the custodian route from any such directory. The host-side refusal of a pipe or
+   terminal on the custodian helper's output is a separate host change.
+8. In the `noexec-only` and `none` modes every residual listed above still applies, unchanged.
 
 ## The lease heartbeat
 
@@ -1737,3 +2396,5 @@ The stop guard's blocker substantiation is itself largely ACTOR-AUTHORABLE: the 
 The escape sentinel opens the clean-ALLOW channel only as an operator-created artefact: a regular file with a single hard link, reached without following any symlinked path component, resolved under the state-dir anchor (an absolute or '..' path outside it is rejected), owned by a uid other than this guard's, and not group- or other-writable; any other present file is ignored, recorded (a failed record write is warned about in the hook's banner, or in the block reason of a denied Stop or TeammateIdle), and normally raised once at the next resume. Uid inequality proves not-self, never operator identity; component resolution is a best-effort lstat walk under the anchor, so a narrow window between the walk and the descriptor-bound stat remains.
 
 The registry file is the confinement's trust root (a guardrail-config-integrity surface, review-gated where committed). The anti-shrinkage checkpoint's first window has no union to compare; an init marker distinguishes that genuine first window from a checkpoint deleted after a prior window (held as a possible reset), and the bound logs what it drops to guard-events, where a failed append is warned about in the hook's output, so a drop is never silent. A checkpoint or init marker that cannot be written is named in the hook's output (the deny reason and banner of a scheduling call, the block reason of a denied Stop or TeammateIdle, or the banner or note of an allow) whether or not its guard-events row is written; an unwritten checkpoint does not record that window's items, so one that then vanishes or is demoted before a later checkpoint write succeeds is not held as such unless an earlier checkpoint records it, and an unwritten init marker holds that window as cannot-evaluate. The checkpoint also records each open id's eligibility (granted-and-open vs proposed/ungranted), so a demotion of a previously-actionable id to proposed or ungranted with no closed receipt is held (cannot-evaluate) rather than silently routed to the harmless proposed bucket; that eligibility memory lives in the same actor-writable state dir, raising the bar without being categorical. Deleting the marker and the checkpoint together, like deleting the turn state to restart the loop bound, is the same actor-writable-state residual. The loop bound remains a deliberate, exhaustible, marked exit. Each denial and each forced exit appends its own guard-events row, and each forced exit also a row in an append-only forced-exit log, whose rows the next resume normally raises once (at least once if recording that they were raised fails). Neither record is guaranteed: a failed append leaves no row, and the hook then adds a short recording-failure warning to its output (the block reason of a denied Stop or TeammateIdle, which has no banner; the deny reason and the banner of a denied scheduling call; the banner of a forced exit) while the decision stands, so the loss is reported, not silent. The guard-events row of an ALLOW released by the operator escape is the only record that the override was used, so a failed append there adds the same kind of warning (in the banner of a Stop or TeammateIdle, in the note of a scheduling call) while the ALLOW stands. The row of a clean ALLOW with no escape is the over-fire metric only and is best effort: a failed append there is not reported. Host clock control defeats every freshness check here (out of threat model). The roster of yield primitives is fixed at generation and re-reconciled when the toolchain changes.
+
+The deliverable-exec guard is path-textual and allowlist-by-construction: a Bash call in scope of a declared `deliverable_dirs` directory (its raw text names one, a lexed operand or redirect target resolves into one, or its working directory is inside one) is denied unless every lexed segment is a closed read-only allowlist form with registered options (the readers, the hash tools, `cp` with the declared file only as a source, `git apply`, `git diff --no-index`, `bash -n`, `python3 -I` with a reader script outside the directories taking the path as data, and `cd` out), so a compound command, backtick, substitution, wrapper, builtin, assignment prefix, `xargs`, `find`, or any unlisted word in scope denies, and a command the lexer cannot read is always in scope and denies whole, since nothing short of lexing shows that it names no declared directory. A relative operand after the walk loses the working directory (`cd -`, a bare or unreadable `cd`, an untracked `cd`, or a `pushd`, `popd` or `dirs` word) is in scope, and so is a shell or python-family word reading its program from stdin wherever a directory is declared. It arms independently of the payload working directory (the project directory the hook environment names, unioned with the session cwd's git toplevel), so a cwd inside a declared directory cannot disarm it. It does not catch a command that reaches a declared file WITHOUT naming it or its directory and from an undeclared working directory (a path in a shell variable set in an earlier call, concatenation, an opaque expansion, or an alias symlink or hard link made elsewhere), a program fed on stdin to an interpreter other than a shell or python-family word or behind a wrapper the peel does not read, a `-c` body behind such a wrapper, running an unread COPY outside the directories (the rule's judgement-level half: no hook state could prove a full reading), any non-Bash tool (the write-scope guard covers the structured write tools), or a symlink swapped between the check and the run. It accepts the over-denies this inversion causes (a reader outside the allowlist, a reader behind a wrapper or with an unregistered option, an unlexable construct, an unrelated command with a relative operand after a lost working directory, an unrelated program a shell or python reads from stdin, and `cp` into a declared directory, each denied in scope even where nothing runs; the escape is an allowlisted reader or a reader script outside the directories taking the path as data). The registry that declares the directories is writable by the same uid through Bash, the existing registry-integrity residual, and, apart from the missing-tool_name and NUL-command denials every registry-scoped Bash guard shares, the guard is entirely inert wherever the key is not declared.
