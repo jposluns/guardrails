@@ -714,10 +714,11 @@ Build the primitives every later step relies on.
   reproduces the file's bytes exactly. The writers refuse any file that fails this
   byte-reproduction test, such as one carrying comments (section 8.8, Authoring operations, item 2;
   section 9.2, Store schema upgrades), with the one exception section 5.7 states: the canonical
-  serialization writes U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as
-  six-character backslash-u escapes, and "a file that differs from it only by holding either
-  character literally inside a basic string, as files written by earlier tooling do, still
-  passes, reads back as the same values, and is re-spelled with the escapes by its next write".
+  serialization writes U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR and U+00AD SOFT HYPHEN
+  inside a string as six-character backslash-u escapes, and "a file that differs from it only by
+  holding any of these characters literally inside a basic string, as files written by earlier
+  tooling do, still passes, reads back as the same values, and is re-spelled with the escapes by
+  its next write".
   Section 5.7 also rules that a write that would grow a store file past the store reader's size
   cap "refuses instead, before anything is written", so a record operation never rewrites a
   readable store into one the reader refuses. The serialization itself is yours to fix
@@ -848,10 +849,10 @@ Acceptance checks:
 
 - Re-emitting a parsed canonical file gives identical bytes; a file with a comment or a
   non-canonical layout is detected as non-canonical. A file that differs from the canonical
-  serialization only by holding U+2028 literally inside a basic string, and one only by holding
-  U+2029, each passes, reads back as the same values, and is re-spelled with the escapes by its
-  next write (section 5.7). A write that would grow a store file past the store reader's size cap
-  refuses before anything is written.
+  serialization only by holding U+2028 literally inside a basic string, one only by holding
+  U+2029, and one only by holding U+00AD, each passes, reads back as the same values, and is
+  re-spelled with the escapes by its next write (section 5.7). A write that would grow a store
+  file past the store reader's size cap refuses before anything is written.
 - An unreadable or malformed input produces cannot-evaluate in a unit test, never a pass.
 - A path with a `..` component, a backslash or an absolute form is refused.
 - The declaration check yields cannot-evaluate for each of these declarations: absent,
@@ -1191,13 +1192,14 @@ containment.
   Your own store registers no `[unmanaged]` path, so this arises only in test stores.
 - Section 5.7 says "`opf doctor`, and the pre-commit hook that runs it, also refuses a machine-store
   TOML file that is not in canonical form, at every run rather than only before a write: such a
-  file is a C-CONTAINMENT finding, with the same allowance for a literal U+2028 or U+2029." So the
-  validator applies the step 1 byte-reproduction test to every machine-store TOML file, the record
+  file is a C-CONTAINMENT finding, with the same allowance for a literal U+2028, U+2029 or
+  U+00AD." So the validator applies the step 1 byte-reproduction test to every machine-store TOML
+  file, the record
   archive's bucket files included ("A bucket's `archive.toml`, `worklog.toml` and
   `<type>.index.toml` are checked at every import status"), and reports each file that fails it as
   a C-CONTAINMENT finding naming the file, while a file that differs from the canonical
-  serialization only by holding U+2028 or U+2029 literally inside a basic string passes. Its remedy
-  is the maintainer's reviewed edit that restores the canonical bytes (step 14, Ordering, row R22).
+  serialization only by holding U+2028, U+2029 or U+00AD literally inside a basic string passes.
+  Its remedy is the maintainer's reviewed edit that restores the canonical bytes (step 14, Ordering, row R22).
   Section 5.7 lists what this check leaves out: a path under a valid `[unmanaged]` declaration, the
   legacy import staging area, a file the validator cannot read or parse, which the check that reads
   it grades, "except `init.toml`, which no other check reads, so an unreadable one cannot be
@@ -1366,8 +1368,9 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
 - A store whose backlog index carries a comment, with the views re-rendered, is a C-CONTAINMENT
   finding naming that index; one whose index differs from the canonical serialization only by
   holding U+2028 literally inside a basic string is not, and neither is one whose index differs
-  only by holding U+2029 (section 5.7). An `init.toml` that does not parse is a finding, and one
-  that cannot be read is cannot-evaluate (section 5.7).
+  only by holding U+2029, nor one whose index differs only by holding U+00AD (section 5.7). An
+  `init.toml` that does not parse is a finding, and one that cannot be read is cannot-evaluate
+  (section 5.7).
 - A file under `.working/imported/import/<run-id>/` that no inventory row claims, a bundle without
   `inventory.toml`, and a listed file whose bytes differ from its recorded digest are each a
   C-EVIDENCE-ENUM finding; a path claimed twice and an unreadable inventory are each
