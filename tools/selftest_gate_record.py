@@ -25,7 +25,7 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
          its flip, a tree-moved record whose check also exited 1, still refuses.
   V18    a commit that changes the required set's argv commits, because the recorder runs HEAD's set; its
          flip, the same commit with the check failing, refuses.
-  V19-V25 the binding class (QA findings 1, 3, 7, 8, 9, 10, 11): an orphan branch that lowers the bar is
+  V19-V25 the binding class: an orphan branch that lowers the bar is
          refused at commit and at push; the check's process group is killed before the record is written
          (the flip pins residual R3, a writer that leaves the group); pre-push reads every worktree's log;
          the stub's verifier copy lives in the git directory; the lock wait and the check run are bounded;
@@ -375,7 +375,7 @@ def rows_verify(base):
         else:
             check("V7/flip-no-stub-commits", done.returncode, 0)
     # V8: a commit that lowers the configuration is judged by HEAD's set. The recorder runs HEAD's set by default
-    # (QA finding 5), so its record is for "full"; a record of the lowered set (run --set suite-x) is refused.
+    # so its record is for "full"; a record of the lowered set (run --set suite-x) is refused.
     repo = fixture(base)
     stage(repo, ".aiqt/gate-record.toml", LOWERED)
     gate(repo, "run")
@@ -391,7 +391,7 @@ def rows_verify(base):
                   (True, True))
         else:
             check("V8/flip-no-stub-commits", done.returncode, 0)
-    # V18 (QA finding 5): a commit that changes the required set's argv records and commits by the documented
+    # V18:a commit that changes the required set's argv records and commits by the documented
     # workflow, because the recorder runs HEAD's argv; its flip, the same commit with the check failing, refuses.
     for failed in (False, True):
         repo = fixture(base)
@@ -569,7 +569,7 @@ def bare_remote(repo, name):
 
 
 def rows_class(base):
-    # V19 (QA finding 1): an orphan branch keeps the default branch's bar. Lowering the configuration in its index
+    # V19:an orphan branch keeps the default branch's bar. Lowering the configuration in its index
     # refuses the commit, and a root commit made past the hook with it refuses the push; the flip, an orphan
     # branch that keeps the bar, commits and pushes.
     for lowered in (True, False):
@@ -591,7 +591,7 @@ def rows_class(base):
         else:
             check("V19/flip-same-bar-orphan-commits", done.returncode, 0)
             check("V19/flip-same-bar-orphan-pushes", git(repo, "push", "-q", "origin", "v19").returncode, 0)
-    # V20 (QA finding 3): the check runs in its own session and its process group is killed before the record is
+    # V20:the check runs in its own session and its process group is killed before the record is
     # written, so a writer it leaves behind in its group cannot rewrite the log; the flip pins residual R3, a writer
     # that leaves the group (setsid) and rewrites the log after the recorder's line.
     for escape in (False, True):
@@ -610,7 +610,7 @@ def rows_class(base):
         else:
             check("V20/group-writer-killed", (done.returncode, records(repo)[-1]["result"],
                                               refused_commit(repo, before, result, "failed")), (1, "fail", (True, True)))
-    # V21 (QA finding 7): pre-push reads every worktree's log, so a branch recorded and committed in a linked
+    # V21:pre-push reads every worktree's log, so a branch recorded and committed in a linked
     # worktree pushes from the main worktree; the flip, a branch committed there with no record, refuses.
     repo = fixture(base)
     bare_remote(repo, "v21")
@@ -625,7 +625,7 @@ def rows_class(base):
     commit(linked, "v21 none", "--no-verify")
     done = git(repo, "push", "-q", "origin", "v21-none")
     check("V21/flip-unrecorded-refused", (done.returncode != 0, "missing" in done.stderr), (True, True))
-    # V22 (QA finding 8): the stub's verifier copy lives in the git directory, so an unusable TMPDIR does not
+    # V22:the stub's verifier copy lives in the git directory, so an unusable TMPDIR does not
     # refuse and no copy is left behind; the flip, a symbolic-link aiqt directory, cannot evaluate.
     repo = fixture(base)
     stage(repo, "b.txt", "b\n")
@@ -640,7 +640,7 @@ def rows_class(base):
     (repo / ".git" / "aiqt").rename(real)
     os.symlink(real, repo / ".git" / "aiqt")
     check("V22/flip-symlink-dir-stub-exit", stub_rc(repo), 2)
-    # V23 (QA finding 9): the recorder's lock wait and the check's run are bounded and cannot evaluate past the
+    # V23:the recorder's lock wait and the check's run are bounded and cannot evaluate past the
     # bound; the flips, the same runs inside the bound, pass.
     import fcntl
     repo = fixture(base)
@@ -659,7 +659,7 @@ def rows_class(base):
     check("V23/slow-check-cannot-evaluate", (done.returncode, records(repo)[-1]["result"]), (2, "cannot-evaluate"))
     done = gate(repo, "run", extra={"FIXTURE_SLEEP": "1", "AIQT_GATE_RECORD_CHECK_TIMEOUT": "30"})
     check("V23/flip-check-inside-bound-passes", (done.returncode, records(repo)[-1]["result"]), (0, "pass"))
-    # V24 (QA finding 10): the recorder opens the aiqt directory with O_NOFOLLOW and creates its files relative to
+    # V24:the recorder opens the aiqt directory with O_NOFOLLOW and creates its files relative to
     # it, so a symbolic-link aiqt directory cannot evaluate and nothing is written through it; the flip, a real
     # directory, records.
     repo = fixture(base)
@@ -671,7 +671,7 @@ def rows_class(base):
     check("V24/symlink-dir-not-followed", (done.returncode, sorted(path.name for path in outside.iterdir())), (2, []))
     os.unlink(repo / ".git" / "aiqt")
     check("V24/flip-real-dir-records", gate(repo, "run").returncode, 0)
-    # V25 (QA finding 11, the class): the record binds the parent commit it ran on. The same tree committed on
+    # V25 (the class):the record binds the parent commit it ran on. The same tree committed on
     # another parent refuses; a check that moves HEAD records tree-moved; the flip, the recorded parent, commits.
     for moved in (False, True):
         repo = fixture(base)
@@ -698,7 +698,7 @@ def rows_class(base):
     check("V25/flip-check-not-moving-passes", gate(repo, "run").returncode, 0)
     done = gate(repo, "run", extra={"FIXTURE_MOVE": "1"})
     check("V25/check-moving-head-tree-moved", (done.returncode, records(repo)[-1]["result"]), (1, "tree-moved"))
-    # V26 (QA qagitrecord2 finding 1): replace objects are off for every git read of the recorder, the verifiers
+    # V26:replace objects are off for every git read of the recorder, the verifiers
     # and the stubs. A git replace of HEAD's configuration blob with one whose argv is ["true"] does not lower the
     # set the recorder runs or the verifier judges; a replaced verifier blob is not what the stub runs; and a
     # commit replaced by a recorded one is judged as itself at push. The flips: with the replacement present, the
@@ -826,7 +826,7 @@ def rows_substituted_state(base):
 
 
 def rows_remote_has(base):
-    # V28 (QA qagitrecord2 finding 2): a new branch or a tag at a commit the remote already has (made elsewhere,
+    # V28:a new branch or a tag at a commit the remote already has (made elsewhere,
     # for example a hosted squash merge) pushes with no record in this clone; the proof is the remote's own refs
     # (git ls-remote of the push URL). The flips: a commit the remote lacks stays refused, also when this clone's
     # refs/remotes names it, an unreadable remote cannot evaluate, and with no URL the refusal stands.
@@ -863,7 +863,7 @@ def rows_remote_has(base):
 
 
 def rows_url_rewrite(base):
-    # V29 (QA qagitrecord3): git ls-remote reads the URL after the fetch rewrites, git push writes the URL after
+    # V29:git ls-remote reads the URL after the fetch rewrites, git push writes the URL after
     # the push rewrites. url.<this clone>.insteadOf=<remote> with url.<remote>.pushInsteadOf=<remote> (two
     # ordinary git config commands) made the remote proof read this clone, which has every commit, while the
     # push wrote the remote, so an unrecorded commit reached it; a remote named like the push URL did the same.
@@ -913,7 +913,7 @@ def rows_url_rewrite(base):
 
 
 def rows_reviewed_refs(base):
-    # V30 (QA qagitrecord3 finding 2): the remote proof read every ref the remote advertises, so an unrecorded
+    # V30:the remote proof read every ref the remote advertises, so an unrecorded
     # commit a pull-request ref holds (a hosted service makes refs/pull/<n>/head from any user's unreviewed
     # commits; simulated here with a --no-verify push) pushed to a branch with no record. Only the remote's branches
     # and tags count now: it stays refused and the remote never gets the branch. The flip: the same commit on a
@@ -936,7 +936,7 @@ def rows_reviewed_refs(base):
 
 
 def rows_shallow_remote(base):
-    # V31 (QA qagitrecord3 finding 3): in a depth-1 clone, a new branch at the shallow boundary commit (which the
+    # V31:in a depth-1 clone, a new branch at the shallow boundary commit (which the
     # remote has on its main branch) could not be evaluated, because the shallow error came before the remote
     # proof; the proof reads the commit objects, which a shallow cut can only make accept less, so it now pushes.
     # The flip: once the remote's branches no longer hold that commit (only a pull-request ref does), the same push
@@ -970,7 +970,7 @@ def rows_shallow_remote(base):
 
 
 def rows_transport(base):
-    # V32 (QA qagitrecord3 finding 4, then QA qagitrecord4): an ssh program the push names sees which service git
+    # V32:an ssh program the push names sees which service git
     # asks for, so it can send the proof's read and the push to different repositories (V33). The proof is not
     # read through one: through a GIT_SSH_COMMAND transport (a local stand-in for ssh), even a new branch at a
     # commit the remote has cannot evaluate, and the remote never gets the branch. The flip: over the remote's
@@ -1014,11 +1014,11 @@ esac
 
 
 def rows_delivery(base):
-    # V33 (QA qagitrecord4): git ls-remote of the push URL reads the repository upload-pack serves, while the push
+    # V33:git ls-remote of the push URL reads the repository upload-pack serves, while the push
     # goes where receive-pack runs, and a program or setting the push chose can make those differ: an ssh program
     # that picks the repository by service, remote.<name>.receivepack naming another repository's receive-pack,
     # GIT_EXEC_PATH holding another git-receive-pack, a transport helper. With each of the first four the proof read
-    # this clone, which has every commit, while the unrecorded commit reached the remote (QA saw it at ac5e2a42); a
+    # this clone, which has every commit, while the unrecorded commit reached the remote (observed); a
     # transport helper (ext:: here) is a program of the same kind. Each now cannot evaluate and the remote never
     # gets the branch. The flip: an unrelated setting (core.sshCommand on a local URL) leaves a commit the remote
     # has pushing.
@@ -1135,7 +1135,7 @@ esac
 
 
 def rows_programs(base, unrecorded, lacks):
-    # V34 (QA qagitrecord4 finding 2): the stubs ran python3, git, timeout and mktemp from the PATH git passes,
+    # V34:the stubs ran python3, git, timeout and mktemp from the PATH git passes,
     # where a PATH or GIT_EXEC_PATH the push named put a planted program first, so a planted python3 (or a planted
     # git that serves an accepting verifier) skipped the verifier and the unrecorded commit reached the remote. The
     # stubs now run the absolute paths install recorded, with PATH set to fixed directories, and the verifiers run
@@ -1194,7 +1194,7 @@ def rows_programs(base, unrecorded, lacks):
 
 
 def rows_symbolic_refs(base, unrecorded, lacks):
-    # V35 (QA qagitrecord4 finding 3): a branch on the remote that is a symbolic ref to a pull-request ref counted
+    # V35:a branch on the remote that is a symbolic ref to a pull-request ref counted
     # as proof, so an unrecorded commit only that pull-request ref holds pushed. The proof reads symbolic refs
     # (protocol v2 ls-remote --symref) and drops a branch or tag naming a ref outside refs/heads and refs/tags:
     # the push is refused and the remote never gets the branch. The flip: a symbolic branch naming a tag that
@@ -1299,7 +1299,7 @@ def run_checks():
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
         # The fixture HOME _git_fixture_env made for this process: its atexit removal never runs here, since
-        # the direct entry ends with os._exit (QA qagitrecord3 saw one aiqt-git-fixture-home-* left per run).
+        # the direct entry ends with os._exit (without this, one aiqt-git-fixture-home-* was left per run).
         import _git_fixture_env
         if _git_fixture_env._SCRATCH_HOME is not None:
             shutil.rmtree(_git_fixture_env._SCRATCH_HOME, ignore_errors=True)

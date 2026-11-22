@@ -66,7 +66,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
-from check_versions import _parse             # noqa: E402
+from check_versions import _parse, DEV_SUFFIX  # noqa: E402
 import gen_manifest                           # noqa: E402  the single shared release-row schema (QA #6)
 import _release_schema                        # noqa: E402  the ONE shared strict validator set
 from _release_schema import SchemaError       # noqa: E402  (round-2 findings 4)
@@ -476,6 +476,54 @@ def _regen_fixture_manifest(root, case, failures, env):
     return True
 
 
+def _strip_unreleased_table(text):
+    """Self-test setup: drop a top-level [unreleased] table (its header line through the line before the
+    next table header, or the end of the file) from changelog.toml text, leaving the cut-state source a
+    release candidate carries (RELEASING step 1 folds and deletes the table). Text-level, so the fixture
+    adds no TOML parse site; the caller checks that the regenerated VERSION is a bare X.Y.Z, so a table
+    this misses fails the fixture rather than passing silently."""
+    kept, skipping = [], False
+    for line in text.splitlines(keepends=True):
+        head = line.strip()
+        if head == "[unreleased]":
+            skipping = True
+            continue
+        if skipping and head.startswith("["):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return "".join(kept).rstrip("\n") + "\n"
+
+
+# The generators whose outputs carry the tree version, in dependency order: VERSION and CHANGELOG.md, the
+# site pages (control strip), then the manifest, ROOT and announce snippet, which hash the others.
+_FIXTURE_VERSION_GENERATORS = ("tools/gen_changelog.py", "tools/gen_draft_site.py", "tools/gen_manifest.py")
+
+
+def _regen_fixture_version_outputs(repo, case, failures, env):
+    """Self-test setup: regenerate every version-bearing output of an archive-extracted fixture that is
+    already git-init'd and staged (gen_manifest enumerates the tracked set), running the fixture's OWN
+    generator copies from inside it, as reproduce_gate runs them, so the fixture stays internally
+    self-consistent. Each runs isolated (python3 -I -B): no user site, no PYTHON* environment and no
+    bytecode written into the fixture. A nonzero generator exit is a fixture-setup failure: it appends a DISTINCT "fixture
+    setup" entry to `failures` (the child's stderr retained) and returns None, so the case never reaches
+    its verdict assertion. Returns the regenerated VERSION text on success."""
+    for script in _FIXTURE_VERSION_GENERATORS:
+        gen = subprocess.run(["python3", "-I", "-B", script], cwd=str(repo), capture_output=True, env=env)
+        if gen.returncode != 0:
+            failures.append("fixture setup ({}): {} exited {} while regenerating the version-bearing "
+                            "outputs; a fixture-setup failure FAILS the self-test rather than reaching the "
+                            "case's verdict (stderr: {})".format(
+                                case, script, gen.returncode,
+                                gen.stderr.decode("utf-8", "replace").strip()[-300:]))
+            return None
+    try:
+        return (repo / "VERSION").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        failures.append("fixture setup ({}): cannot read the regenerated VERSION ({})".format(case, exc))
+        return None
+
+
 def _materialized_check(root, sha, commands_fn, what):
     """Raw-materialize `sha` into a throwaway FRESH git repo and run each check command `commands_fn(co)`
     returns inside it. The tree is materialized from RAW blob bytes (git ls-tree + cat-file, round-4 finding
@@ -713,11 +761,16 @@ def load_build_rows(root):
     return _strict_releases(data, RELEASES_REL)
 
 
-def load_strict_manifest(root, ref=None, label=None):
+def load_strict_manifest(root, ref=None, label=None, development_ok=False):
     """Read the manifest from a git `ref` (or the WORKING TREE when ref is None) and strict-validate it
     through the single exhaustive validator (round-6 finding 1, THE INVARIANT): NO build mode reads a
     manifest field, or returns dormant, before this runs. Used by audit (working tree), pre-tag (candidate
-    ref), the tagged-row validation (tagged ref), and post-tag (attestation-commit ref)."""
+    ref), the tagged-row validation (tagged ref), and post-tag (attestation-commit ref).
+
+    release-version must be a plain X.Y.Z unless development_ok is True, which also admits X.Y.Z-dev. Only
+    the audit of main's working tree passes True: between release cuts main declares the planned next
+    version as X.Y.Z-dev. A candidate, tagged or attestation manifest keeps the default, so a -dev value
+    there is exit 2 with the shared validator's "is a development version" refusal."""
     if ref is None:
         try:
             data = load_toml(root / MANIFEST_REL)
@@ -726,9 +779,35 @@ def load_strict_manifest(root, ref=None, label=None):
     else:
         data = _show_toml(root, ref, MANIFEST_REL)
     try:
-        return _release_schema.strict_manifest(data, label or MANIFEST_REL)
+        return _release_schema.strict_manifest(data, label or MANIFEST_REL, development_ok=development_ok)
     except SchemaError as exc:
         raise GateError(str(exc))
+
+
+CHANGELOG_REL = "changelog.toml"
+
+
+def _candidate_unreleased_findings(root, candidate_sha):
+    """A candidate's changelog.toml must not carry the [unreleased] table. RELEASING step 1 folds
+    [unreleased] into a new [[release]] and deletes it, so a candidate tree declares the plain X.Y.Z. A
+    present table is a content finding (exit 1). An ABSENT changelog.toml cannot carry the table, so it adds
+    no finding here (the reproduce gate covers the file itself). A changelog.toml that is present but not
+    UTF-8 TOML, or a git failure reading it, is cannot-evaluate (GateError, exit 2)."""
+    raw = _show_bytes(root, candidate_sha, CHANGELOG_REL)
+    if raw is None:
+        return []
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    # The same parse-failure class as _show_toml (F-TOML-BARE-VALUEERROR-CLASS).
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise GateError("candidate {} at {} does not parse: {}".format(CHANGELOG_REL, candidate_sha, exc))
+    if "unreleased" not in data:
+        return []
+    table = data["unreleased"]
+    declared = table.get("version") if isinstance(table, dict) else None
+    return ["candidate {} still carries [unreleased]{}; RELEASING step 1 folds it into a new [[release]] "
+            "and deletes it before the cut, so a candidate tree declares the plain X.Y.Z".format(
+                CHANGELOG_REL, " (version {!r})".format(declared) if declared is not None else "")]
 
 
 def _already_tagged_findings(root, candidate_sha):
@@ -781,7 +860,8 @@ def _validate_tag_row(root, row, prior_rows):
                         "commit".format(version))
     # Read the tagged tree's manifest through the ALREADY-VALIDATED IMMUTABLE row["commit_sha"] (round-7
     # finding 5), not through the mutable `tag^{commit}` ref, so a moved ref cannot create a split view; the
-    # single invariant loader strict-validates it before any field is read.
+    # single invariant loader strict-validates it before any field is read. STRICT (no development_ok): a
+    # tagged tree carries the plain X.Y.Z, so a -dev tagged manifest is exit 2.
     tagged_manifest = load_strict_manifest(root, row["commit_sha"],
                                            "tagged manifest for release {}".format(version))
     if tagged_manifest.get("release-version") != version:
@@ -805,11 +885,16 @@ def _validate_tag_row(root, row, prior_rows):
 def run_audit(root):
     """Default AUDIT (2.6): validate whatever exists. Dormancy requires ZERO release TAGS AND ZERO rows
     (round-5 finding 2, spec 2.6/L324-329): each layer arms when its first tag OR row exists, so a zero-row
-    tree that already carries a v<SemVer> tag is armed, and a lightweight or unrecorded tag is caught."""
+    tree that already carries a v<SemVer> tag is armed, and a lightweight or unrecorded tag is caught.
+
+    The audited working tree is main between release cuts, so its manifest release-version may be the
+    development form X.Y.Z-dev as well as a plain X.Y.Z. Every TAGGED tree the audit reads (through
+    _validate_tag_row) stays strict: a tag never points at a -dev manifest."""
     try:
         # THE INVARIANT (round-6 finding 1): strict-validate the audited (working-tree) manifest BEFORE the
         # dormancy short-circuit, so a zero-row tree with a malformed manifest is exit 2, not a clean audit.
-        load_strict_manifest(root)
+        # development_ok=True for THIS working-tree read only (main declares X.Y.Z-dev between cuts).
+        load_strict_manifest(root, development_ok=True)
         rows = load_build_rows(root)
         tags = _all_release_tags(root)
         if not rows and not tags:
@@ -847,7 +932,11 @@ def run_audit(root):
 
 def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
     """--pre-tag CANDIDATE mode (2.6): reproduce against committed digests, QA retrieval/success/
-    family-set, genesis declaration, prior-row validation. Never chronology (no tag yet)."""
+    family-set, genesis declaration, prior-row validation. Never chronology (no tag yet).
+
+    The candidate is a cut tree, so its manifest release-version must be the plain X.Y.Z: a development
+    X.Y.Z-dev candidate manifest is exit 2 ("is a development version"), and a candidate changelog.toml
+    that still carries [unreleased] is a finding (RELEASING step 1 folds it)."""
     try:
         # THE candidate is an IMMUTABLE COMMIT (round-6 finding 5): --candidate-sha must be a full lowercase
         # 40/64-hex object id that resolves to a commit object equal to itself, so a symbolic ref (HEAD), an
@@ -861,13 +950,18 @@ def run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
                             "tag object or a non-commit is rejected)".format(candidate_sha))
         findings = []
         # STRICT-LOAD the candidate manifest AND releases record FIRST (round-7 close-out): no field is read,
-        # and reproduction and QA do not run, before the candidate's records are strict-validated.
+        # and reproduction and QA do not run, before the candidate's records are strict-validated. The
+        # candidate manifest is STRICT (no development_ok): a cut tree carries the plain X.Y.Z, so a -dev
+        # candidate is exit 2 here.
         cand_manifest = load_strict_manifest(root, candidate_sha, "candidate " + MANIFEST_REL)
         cand_rows = _strict_releases(_show_toml(root, candidate_sha, RELEASES_REL),
                                      "candidate " + RELEASES_REL)
         # (round-8 #5) --pre-tag is the before-tag stage: reject an already-tagged candidate BEFORE trusting
         # the rest of the pre-tag flow (a tag that already peels to the candidate is a stage violation).
         findings += _already_tagged_findings(root, candidate_sha)
+        # RELEASING step 1 folds changelog.toml [unreleased] into a new [[release]]; a candidate still
+        # carrying the table was not cut.
+        findings += _candidate_unreleased_findings(root, candidate_sha)
         findings += reproduce_gate(root, candidate_sha)
         qa_findings, _epochs = qa_layers(qa_path, qa_sha256, candidate_sha)
         findings += qa_findings
@@ -1128,7 +1222,8 @@ def run_post_tag(root, attestation_commit, qa_path):
         shape_findings = _attestation_shape_findings(root, commit_oid)
         if shape_findings:
             return _report(shape_findings, "post-tag")
-        # THE INVARIANT: strict-validate the attestation-commit manifest before any verdict.
+        # THE INVARIANT: strict-validate the attestation-commit manifest before any verdict. STRICT (no
+        # development_ok): the attestation commit carries the tagged plain X.Y.Z, never X.Y.Z-dev.
         load_strict_manifest(root, commit_oid, "attestation " + MANIFEST_REL)
         releases = _show_toml(root, commit_oid, RELEASES_REL)
         # Re-validate through the ONE shared strict validator, exactly as the working-tree loader: every
@@ -1232,6 +1327,15 @@ def _run_post_tag_quiet(root, attestation_commit, qa_path):
 def _run_pre_tag_quiet(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
     with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
         return run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence)
+
+
+def _run_pre_tag_captured(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence):
+    """run_pre_tag with its output captured: returns (exit code, stdout, stderr), so a case can require
+    the finding or refusal it tests rather than an exit code another rule could also produce."""
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = run_pre_tag(root, candidate_sha, qa_path, qa_sha256, first_pin, evidence)
+    return rc, out.getvalue(), err.getvalue()
 
 
 # Re-entrancy guard for the finding-2 archive fail-closed regression, which runs self_test_main recursively
@@ -1908,34 +2012,104 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     with tarfile.open(fileobj=io.BytesIO(arch.stdout), mode="r:") as tf:
                         tf.extractall(gcand)
                     # test-hermeticity: this candidate is GENESIS (zero-row releases, manifest genesis = true)
-                    # and asserts NO 1.0.0 release-order row, so its verdict (run_pre_tag auto-requiring first-
-                    # pin evidence, exit 1) is independent of the pack version: the committed archive tree is
-                    # internally self-consistent at whatever version it carries, so no version pin is needed
-                    # (and pinning it to 1.0.0 would leave a changelog release row against a zero-row releases
-                    # record, tripping the candidate's own reproduce checks to cannot-evaluate). It is version-
-                    # hermetic by construction; only fixtures that assert a fixed 1.0.0 row are pinned.
+                    # and asserts NO 1.0.0 release-order row, so no 1.0.0 pin is needed (pinning it to 1.0.0
+                    # would leave a changelog release row against a zero-row releases record, tripping the
+                    # candidate's own reproduce checks to cannot-evaluate); only fixtures that assert a fixed
+                    # 1.0.0 row are pinned. The verdict does depend on the tree STATE: between release cuts
+                    # HEAD is a development tree (VERSION and the manifest release-version X.Y.Z-dev, an open
+                    # changelog [unreleased]), and run_pre_tag's strict candidate-manifest read refuses that
+                    # exit 2 ("is a development version") before the first-pin auto-require this case tests.
+                    # So the archive is normalized to the cut state a real candidate carries (RELEASING step 1
+                    # leaves no [unreleased], so VERSION is the newest [[release]], a bare X.Y.Z): the table
+                    # is dropped and every version-bearing output is regenerated by the fixture's own
+                    # generators, keeping the tree internally self-consistent at whatever state HEAD is in.
+                    # The development refusal keeps its OWN case below, on a development tree derived from
+                    # this one, so each rule is tested by itself.
+                    gchangelog = gcand / "changelog.toml"
+                    gchangelog.write_text(_strip_unreleased_table(gchangelog.read_text(encoding="utf-8")),
+                                          encoding="utf-8")
+                    gcut = None
                     ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
                                             env=_fresh_git_env()).returncode == 0
                              for a in (["init", "-q"],
-                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
-                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-q",
-                                        "-m", "genesis", "--no-verify"]))
+                                       ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"]))
                     if ok:
+                        gver = _regen_fixture_version_outputs(gcand, "genesis cut candidate", failures,
+                                                              _fresh_git_env())
+                        if gver is not None:
+                            gcut = _parse(gver[:-1]) if gver.endswith("\n") else None
+                            if gcut is None:
+                                failures.append("fixture setup (genesis cut candidate): the normalized "
+                                                "archive's VERSION {!r} is not a bare X.Y.Z, so the case "
+                                                "would not test a cut candidate".format(gver))
+                    if ok and gcut is not None:
+                        ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                                env=_fresh_git_env()).returncode == 0
+                                 for a in (["init", "-q"],
+                                           ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
+                                           ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit",
+                                            "-q", "-m", "genesis", "--no-verify"]))
+                    if ok and gcut is not None:
                         gsha = subprocess.run(["git", "-C", str(gcand), "rev-parse", "HEAD"],
                                               capture_output=True, text=True).stdout.strip()
                         gqa_body = ('candidate-sha = "{}"\n\n'.format(gsha) + "".join(
                             '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
                             'unresolved-blockers = 0\ntimestamps-utc = [100]\n\n'.format(n)
                             for n in FAMILIES))
-                        gqa = gcand / "qa.toml"
+                        # The QA object lives outside the candidate tree, so the development commit below
+                        # does not pick it up.
+                        gqa = tmp / "genesis-qa.toml"
                         gqa.write_text(gqa_body, encoding="utf-8")
                         gqa_sha = hashlib.sha256(gqa_body.encode("utf-8")).hexdigest()
                         # no --first-pin, no evidence: the genesis auto-require makes it exit 1 (REQUIRED),
-                        # where the pre-round-4 gate returned exit 0.
-                        rc = _run_pre_tag_quiet(gcand, gsha, str(gqa), gqa_sha, False, None)
-                        if rc != 1:
+                        # never exit 0 without that evidence. The REQUIRED finding must be the ONLY
+                        # finding, so no other rule failing the candidate can stand in for it.
+                        rc, gout, gerr = _run_pre_tag_captured(gcand, gsha, str(gqa), gqa_sha, False, None)
+                        if (rc != 1 or "first-pin: --evidence is REQUIRED" not in gout
+                                or "FAIL: 1 release-build finding(s) [pre-tag]" not in gout):
                             failures.append("genesis run_pre_tag without --first-pin must AUTO-REQUIRE "
-                                            "evidence and fail exit 1 (finding 5), got {}".format(rc))
+                                            "evidence and fail exit 1 with that as its only "
+                                            "finding, on a cut candidate at {}; got {} (stdout: {!r}; "
+                                            "stderr: {!r})".format(gver.strip(), rc, gout.strip()[-600:],
+                                                                   gerr.strip()[-300:]))
+                        # The development refusal, by itself: the same tree reopened for development
+                        # (RELEASING step 8: [unreleased] one patch above the newest release, every
+                        # version-bearing output regenerated) is refused exit 2 at the strict
+                        # candidate-manifest read, naming the development version, before the evidence
+                        # requirement or reproduce runs.
+                        gnext = "{}.{}.{}".format(gcut[0], gcut[1], gcut[2] + 1)
+                        with gchangelog.open("a", encoding="utf-8") as fh:
+                            fh.write('\n[unreleased]\nversion = "{}"\n'.format(gnext))
+                        dver = _regen_fixture_version_outputs(gcand, "genesis development candidate",
+                                                              failures, _fresh_git_env())
+                        if dver is not None and dver != gnext + DEV_SUFFIX + "\n":
+                            failures.append("fixture setup (genesis development candidate): the reopened "
+                                            "tree's VERSION is {!r}, not {!r}".format(
+                                                dver, gnext + DEV_SUFFIX + "\n"))
+                        elif dver is not None:
+                            if not all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
+                                                      env=_fresh_git_env()).returncode == 0
+                                       for a in (["-c", "user.name=t", "-c", "user.email=t@e.invalid",
+                                                  "add", "-A"],
+                                                 ["-c", "user.name=t", "-c", "user.email=t@e.invalid",
+                                                  "commit", "-q", "-m", "development", "--no-verify"])):
+                                errors.append("the genesis development candidate could not be "
+                                              "committed; the archive-backed development case cannot be "
+                                              "verified, so the self-test is cannot-evaluate (exit 2)")
+                            else:
+                                dsha = subprocess.run(["git", "-C", str(gcand), "rev-parse", "HEAD"],
+                                                      capture_output=True, text=True).stdout.strip()
+                                dwant = "candidate {}: release-version '{}' is a development version".format(
+                                    MANIFEST_REL, gnext + DEV_SUFFIX)
+                                rc, dout, derr = _run_pre_tag_captured(gcand, dsha, str(gqa), gqa_sha,
+                                                                       False, None)
+                                if rc != 2 or dwant not in derr:
+                                    failures.append("genesis run_pre_tag on a development candidate must be "
+                                                    "refused exit 2 naming {!r}; got {} (stdout: {!r}; "
+                                                    "stderr: {!r})".format(dwant, rc, dout.strip()[-300:],
+                                                                           derr.strip()[-300:]))
+                    elif ok:
+                        pass  # a fixture-setup failure is already recorded in `failures`
                     else:
                         errors.append("(finding 2) the genesis archive candidate could not be built "
                                       "(git init/add/commit failed); the archive-backed case cannot be "
@@ -2289,6 +2463,181 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     failures.append("(finding 1) read_version must still accept a plain ASCII bare SemVer")
             except gen_manifest.GateError:
                 failures.append("(finding 1) read_version must still accept a plain ASCII bare SemVer")
+            # (development version) read_version admits exactly X.Y.Z-dev besides X.Y.Z (main between cuts)
+            # and still refuses every other suffix.
+            (rv / "VERSION").write_text("1.2.0-dev\n", encoding="utf-8")
+            try:
+                if gen_manifest.read_version(rv) != "1.2.0-dev":
+                    failures.append("(development version) read_version must accept X.Y.Z-dev unchanged")
+            except gen_manifest.GateError:
+                failures.append("(development version) read_version must accept X.Y.Z-dev")
+            for bad_suffix in ("1.2.0-rc1", "1.2.0-dev.0", "1.2.0-DEV", "1.2.0+dev", "1.2.0-dev-dev"):
+                (rv / "VERSION").write_text(bad_suffix + "\n", encoding="utf-8")
+                try:
+                    gen_manifest.read_version(rv)
+                    failures.append("(development version) read_version must refuse VERSION {!r} "
+                                    "(GateError)".format(bad_suffix))
+                except gen_manifest.GateError:
+                    pass
+
+            # === DEVELOPMENT-VERSION cases (test D) ==================================================
+            # Between release cuts main's working tree declares X.Y.Z-dev. ONLY the audit's working-tree
+            # manifest read admits it (development_ok=True); the candidate (pre-tag), tagged and attestation
+            # manifests stay strict and refuse it exit 2 with the shared "is a development version" message.
+            def _run_capture(fn, *args):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    rc = fn(*args)
+                return rc, out.getvalue(), err.getvalue()
+
+            dev_needle = "is a development version"
+            # (D1) the shared validator: strict by default, development_ok=True admits exactly X.Y.Z-dev.
+            dev_data = tomllib.loads(_valid_manifest(release_version="1.1.1-dev"))
+            try:
+                _release_schema.strict_manifest(dev_data, "dev manifest")
+                failures.append("(D1) strict_manifest must refuse a -dev release-version by default")
+            except SchemaError as exc:
+                if dev_needle not in str(exc):
+                    failures.append("(D1) strict_manifest refused a -dev release-version without the named "
+                                    "message ({})".format(exc))
+            try:
+                _release_schema.strict_manifest(dev_data, "dev manifest", development_ok=True)
+            except SchemaError as exc:
+                failures.append("(D1) strict_manifest(development_ok=True) must accept X.Y.Z-dev ({})".format(
+                    exc))
+            try:
+                _release_schema.strict_manifest(tomllib.loads(_valid_manifest(release_version="1.1.1-rc1")),
+                                                "rc manifest", development_ok=True)
+                failures.append("(D1) strict_manifest(development_ok=True) must still refuse -rc1")
+            except SchemaError:
+                pass
+
+            # (D2) a zero-row audit of a development working tree is exit 0 (dormant); the same tree with a
+            # -rc1 release-version stays exit 2 (development_ok admits only -dev).
+            dz = tmp / "dev-zero-row"
+            _init(dz)
+            _write_records(dz, "format-version = 1\n", _valid_manifest(release_version="1.1.1-dev"))
+            _commit(dz, "zero-row development tree")
+            dz_rc, _o, dz_err = _run_capture(run_audit, dz)
+            if dz_rc != 0:
+                failures.append("(D2) an audit of a zero-row development tree (release-version 1.1.1-dev) "
+                                "must be exit 0, got {} ({})".format(dz_rc, dz_err.strip()[-300:]))
+            (dz / MANIFEST_REL).write_text(_valid_manifest(release_version="1.1.1-rc1"), encoding="utf-8")
+            if _run_audit_quiet(dz) != 2:
+                failures.append("(D2) an audit of a working tree with release-version 1.1.1-rc1 must stay "
+                                "exit 2")
+
+            # (D3) an ARMED audit: a development working tree (1.0.1-dev) over a tagged plain 1.0.0 release
+            # is exit 0; the same audit where the TAGGED tree's manifest is 1.0.0-dev is exit 2 with the
+            # named message (the tagged-tree read stays strict).
+            for d3_tagged, d3_want in (("1.0.0", 0), ("1.0.0-dev", 2)):
+                d3 = tmp / "dev-armed-{}".format(d3_tagged)
+                _init(d3)
+                _write_records(d3, "format-version = 1\n", _valid_manifest(release_version=d3_tagged))
+                _commit(d3, "release tree")
+                subprocess.run(["git", "-C", str(d3), "tag", "-a", "v1.0.0", "-m", "release 1.0.0"],
+                               check=True, capture_output=True, text=True,
+                               env={"GIT_COMMITTER_DATE": "2000-01-01T00:00:00", **_env()})
+                d3_tag = subprocess.run(["git", "-C", str(d3), "rev-parse", "refs/tags/v1.0.0"],
+                                        check=True, capture_output=True, text=True).stdout.strip()
+                d3_commit = subprocess.run(["git", "-C", str(d3), "rev-parse", "refs/tags/v1.0.0^{commit}"],
+                                           check=True, capture_output=True, text=True).stdout.strip()
+                (d3 / RELEASES_REL).write_text(_full_row(d3_tag, d3_commit, _tagger_epoch(d3, "v1.0.0") - 100),
+                                               encoding="utf-8")
+                (d3 / MANIFEST_REL).write_text(_valid_manifest(genesis="false", release_version="1.0.1-dev"),
+                                               encoding="utf-8")
+                d3_rc, _o, d3_err = _run_capture(run_audit, d3)
+                # The refusal must come from the TAGGED-tree read (its label), not the working-tree read.
+                d3_named = "tagged manifest for release 1.0.0: release-version '1.0.0-dev' " + dev_needle
+                if d3_rc != d3_want or (d3_want == 2 and d3_named not in d3_err):
+                    failures.append("(D3) an audit of a 1.0.1-dev working tree over a tagged tree whose "
+                                    "manifest is {} must be exit {}{}, got {} ({})".format(
+                                        d3_tagged, d3_want,
+                                        " naming '{}'".format(d3_named) if d3_want == 2 else "",
+                                        d3_rc, d3_err.strip()[-300:]))
+
+            # (D4) a development pre-tag CANDIDATE (manifest 1.1.1-dev) is exit 2 with the named message,
+            # before reproduction or QA.
+            dc = tmp / "dev-candidate"
+            _init(dc)
+            _write_records(dc, "format-version = 1\n",
+                           _valid_manifest(genesis="false", release_version="1.1.1-dev"))
+            _commit(dc, "development candidate")
+            dc_sha = subprocess.run(["git", "-C", str(dc), "rev-parse", "HEAD"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            dc_qa = tmp / "dev-candidate-qa.toml"
+            dc_qa.write_text('candidate-sha = "{}"\n'.format(dc_sha), encoding="utf-8")
+            dc_rc, _o, dc_err = _run_capture(run_pre_tag, dc, dc_sha, str(dc_qa),
+                                             hashlib.sha256(dc_qa.read_bytes()).hexdigest(), False, None)
+            dc_named = "candidate {}: release-version '1.1.1-dev' {}".format(MANIFEST_REL, dev_needle)
+            if dc_rc != 2 or dc_named not in dc_err:
+                failures.append("(D4) a development pre-tag candidate (release-version 1.1.1-dev) must be "
+                                "exit 2 naming '{}', got {} ({})".format(dc_named, dc_rc,
+                                                                        dc_err.strip()[-300:]))
+
+            # (D5) a candidate whose changelog.toml still carries [unreleased] gives a finding. Direct helper
+            # legs: present -> finding; no table -> none; absent file -> none; unparseable -> GateError.
+            uc = tmp / "unreleased-candidate"
+            _init(uc)
+            _write_records(uc, "format-version = 1\n",
+                           _valid_manifest(genesis="false", release_version="1.1.1"))
+            (uc / CHANGELOG_REL).write_text('[unreleased]\nversion = "1.1.1"\n', encoding="utf-8")
+            _commit(uc, "candidate still carrying [unreleased]")
+            uc_sha = subprocess.run(["git", "-C", str(uc), "rev-parse", "HEAD"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            if not any("[unreleased]" in f for f in _candidate_unreleased_findings(uc, uc_sha)):
+                failures.append("(D5) a candidate changelog.toml carrying [unreleased] must give a finding")
+            if _candidate_unreleased_findings(dc, dc_sha):
+                failures.append("(D5) a candidate without changelog.toml must give no [unreleased] finding")
+            (uc / CHANGELOG_REL).write_text('[[release]]\nversion = "1.1.1"\n', encoding="utf-8")
+            _commit(uc, "candidate with [unreleased] folded")
+            uc_clean_sha = subprocess.run(["git", "-C", str(uc), "rev-parse", "HEAD"],
+                                          check=True, capture_output=True, text=True).stdout.strip()
+            if _candidate_unreleased_findings(uc, uc_clean_sha):
+                failures.append("(D5) a candidate changelog.toml without [unreleased] must give no finding")
+            (uc / CHANGELOG_REL).write_text("unreleased = = 1\n", encoding="utf-8")
+            _commit(uc, "candidate with an unparseable changelog")
+            uc_bad_sha = subprocess.run(["git", "-C", str(uc), "rev-parse", "HEAD"],
+                                        check=True, capture_output=True, text=True).stdout.strip()
+            try:
+                _candidate_unreleased_findings(uc, uc_bad_sha)
+                failures.append("(D5) an unparseable candidate changelog.toml must raise GateError (exit 2)")
+            except GateError:
+                pass
+            # (D5, through run_pre_tag) the finding reaches the pre-tag report. A synthetic tree cannot pass
+            # the reproduce gate (it needs the full pack registry, and `git archive HEAD` carries the
+            # committed tooling, not this tree's), so reproduce_gate is STUBBED to no findings for these two
+            # runs only. The QA object is a clean tri-family attestation bound to each candidate, and the
+            # candidate is non-genesis, so no first-pin evidence is required: the [unreleased] candidate is
+            # exit 1 naming [unreleased], and the folded control candidate is exit 0.
+            real_reproduce = globals()["reproduce_gate"]
+            globals()["reproduce_gate"] = lambda _root, _sha: []
+            try:
+                for u_sha, u_want in ((uc_sha, 1), (uc_clean_sha, 0)):
+                    u_qa_body = ('candidate-sha = "{}"\n\n'.format(u_sha) + "".join(
+                        '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
+                        'unresolved-blockers = 0\ntimestamps-utc = [100]\n\n'.format(n) for n in FAMILIES))
+                    u_qa = tmp / "unreleased-qa-{}.toml".format(u_want)
+                    u_qa.write_text(u_qa_body, encoding="utf-8")
+                    u_rc, u_out, u_err = _run_capture(
+                        run_pre_tag, uc, u_sha, str(u_qa),
+                        hashlib.sha256(u_qa_body.encode("utf-8")).hexdigest(), False, None)
+                    if u_rc != u_want or (u_want == 1 and "[unreleased]" not in u_out):
+                        failures.append("(D5) run_pre_tag on a candidate {} [unreleased] must be exit {}, got "
+                                        "{} ({})".format("carrying" if u_want else "without", u_want, u_rc,
+                                                         (u_out + u_err).strip()[-300:]))
+            finally:
+                globals()["reproduce_gate"] = real_reproduce
+
+            # (D6) the ATTESTATION-commit manifest stays strict: the pt attestation commit with a 1.0.0-dev
+            # manifest is post-tag exit 2 with the named message.
+            (pt / MANIFEST_REL).write_text(_valid_manifest(release_version="1.0.0-dev"), encoding="utf-8")
+            _commit(pt, "development attestation manifest")
+            pt_rc, _o, pt_err = _run_capture(run_post_tag, pt, None, str(qa_file))
+            pt_named = "attestation {}: release-version '1.0.0-dev' {}".format(MANIFEST_REL, dev_needle)
+            if pt_rc != 2 or pt_named not in pt_err:
+                failures.append("(D6) a post-tag attestation commit whose manifest is 1.0.0-dev must be exit 2 "
+                                "naming '{}', got {} ({})".format(pt_named, pt_rc, pt_err.strip()[-300:]))
 
             # (finding 4) a release tag whose ANNOTATED tag object targets a TREE (git tag -a v1.0.0 <tree>)
             # cannot peel to a commit. The pre-fix enumeration read only cat-file -t (still "tag") and the
@@ -2745,8 +3094,9 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "completeness on a real 3-tag repo (round-2 finding 7), the first-pin evidence bound to the "
               "candidate's AGENTS.md with a recomputed prefix-superset (round-3 finding 5), a strict-manifest "
               "check on every tagged/candidate manifest (round-4 finding 3), _show_bytes absent-vs-git-error "
-              "(round-4 finding 7), a genesis run_pre_tag auto-requiring first-pin evidence (round-4 finding "
-              "5), and a first-pin cannot-evaluate raising exit 2 (round-4 finding 4), all over "
+              "(None vs GateError), a genesis run_pre_tag on a cut candidate auto-requiring first-pin evidence "
+              "as its only finding and refusing the same tree reopened for development "
+              "exit 2, and a first-pin cannot-evaluate raising exit 2, all over "
               "RAW-materialized (no-worktree) candidate trees (round-4 finding 1); and the round-5 cases "
               "(dormancy needs zero tags AND zero rows with a lightweight/unrecorded tag flagged (finding "
               "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "
@@ -2769,7 +3119,12 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "order cases (RELEASING steps 6a/6b: a changelog tag-key commit before the attestation row "
               "makes post-tag exit 1 naming changelog.toml, the tag-key commit after the attestation commit "
               "passes check_version_monotonicity ARMED with one tagged release verified, and the same commit "
-              "with the referenced tag deleted is exit 2) hold".format(core))
+              "with the referenced tag deleted is exit 2); and the development-version cases (read_version "
+              "admits exactly X.Y.Z-dev, strict_manifest refuses -dev by default and admits it only with "
+              "development_ok, a zero-row and an armed audit of a -dev working tree are exit 0, while a -dev "
+              "tagged, pre-tag candidate or attestation manifest is exit 2 naming the development version, "
+              "and a candidate changelog.toml still carrying [unreleased] is a pre-tag finding) "
+              "hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))

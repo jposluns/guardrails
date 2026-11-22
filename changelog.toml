@@ -9,6 +9,18 @@ note = "The user-facing changes for each public release."
 #   [release.artifacts]
 #   "site/downloads/aiqt-skill-<skill version>.zip" = "sha256:<64 lowercase hex>"
 #   "site/downloads/aiqt-instructions.txt" = "sha256:<64 lowercase hex>"
+#
+# Reserved optional top-level table: between release cuts the file ends with an [unreleased] table that
+# declares the planned next release. Its `version` is a bare X.Y.Z strictly above the latest release; the
+# generators append the fixed "-dev" suffix (VERSION, the manifest, the announce snippet and the site then
+# say "1.1.1-dev", never a published version), so the suffix is never written here. Optional `title` (a
+# nonblank string) and `items` (an array of strings) collect the notes CHANGELOG.md shows under
+# "Unreleased". The release cut (RELEASING.md step 1) moves it into a new last [[release]] with that version
+# and deletes it; development reopens after step 6b (RELEASING.md step 8). [[release]] stays history only.
+#   [unreleased]
+#   version = "<X.Y.Z>"
+#   title = "<optional>"
+#   items = ["<optional>"]
 
 [[release]]
 title = "The chat-assistant skill"
@@ -28,3 +40,6 @@ tag = "v1.0.5"
 # Reserved optional key: a release MAY carry a `refs` array of TYPED references ("pr:17",
 # "decision:GD-110") consumed by tools/check_record_drift.py as a record-drift truth source. Inert to
 # gen_changelog and the version gates; narrative numbers in prose are never matched (GD-112 D9).
+
+[unreleased]
+version = "1.1.1"

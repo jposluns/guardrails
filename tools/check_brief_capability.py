@@ -16,7 +16,8 @@ or push when the family's row says git-write = "no" (W1). The signal is structur
 closed, so some text a human would pass refuses (see RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses; so is P8, a warning on a request that the
 worker write the harness's status line, and so is T1, a WARN on a task line that asks to remove a test or check,
-carried in the summary line. For a family that can execute (`yes` or
+carried in the summary line, and so is D1, a WARN on a sentence that seems to tell the worker to achieve a refused or
+denied step another way, carried in the same line. For a family that can execute (`yes` or
 `read-only-sandbox`) no execution rule applies; the PREFLIGHT rules and GIT WRITE (W1) below apply to every family.
 
 PREFLIGHT (the input paths, pins and residuals a brief names, and the attestation lines it asks for; read over the
@@ -614,6 +615,127 @@ CHECK REMOVAL (beside the preflight, for every family, before the execution rule
                        that describes this rule ("refusing a task line that asks to remove, delete or drop a test",
                        where delete is read as an imperative conjunct).
 
+DENIAL REROUTE (beside the preflight, for every family, before the execution rules' early return):
+
+  D1 denial reroute    ADVISORY (a WARN; its findings never refuse and take no part in the refusal or exit selection,
+                       though printing one can fail on an output encoding and end the run with exit 1: see below). A
+                       refused or denied step is reported, not routed around, so a brief should not tell the worker to
+                       achieve it another way. D1 reads the whole brief (scope and --unscoped do not change it; fences and quotations are
+                       read like prose) in PARAGRAPHS: a blank line (empty, or only spaces and tabs) ends one; a list
+                       item line (-, + or *, or one to nine digits then . or ), then a space or tab, at any
+                       indentation), a heading (at most three spaces, one to six #) and a column-zero upper-case label
+                       (TASK:) each open one, the marker not read, and a heading is a paragraph of its own; every
+                       other line continues the paragraph, so a wrapped sentence is read whole, and nothing is carried
+                       from one paragraph to the next but a LEAD's prohibition (below). Every . ! or ? ends a SENTENCE
+                       (no abbreviation, path or decimal
+                       exception); ; ends a SEGMENT; a segment end, a colon, a comma and the whole words and, or, but
+                       and then end a CLAUSE. A word is a run of ASCII letters (an apostrophe, ' or U+2019, between letters
+                       kept), lower-cased; a phrase of several words matches only when spaces, tabs or a joined line
+                       break alone separate them. A sentence draws one WARN when it holds an ELIGIBLE REFUSAL (denied,
+                       refused, blocked or rejected, with no negation word before it in its clause: "not denied" and
+                       "hasn't been denied" are not eligible) and an AFFIRMATIVE ACTION: a clause that opens, after any
+                       of please, instead and otherwise, an optional you with at most one of must, should, can and may,
+                       and any of those three words again, with an action verb (run, execute, do, perform, complete,
+                       accomplish, achieve, implement, retry, rerun, use, invoke, call, write, try); with no negation
+                       word (not, never, no, nor, neither, without, don't, mustn't, shouldn't, won't, cannot, can't,
+                       isn't, aren't, wasn't, weren't, hasn't, haven't, hadn't) from the start of its segment to the
+                       end of its clause, across colons as across commas and coordinators, except that a clause
+                       RESTARTS the prohibition, as an independent alternative, when it opens with instead or
+                       otherwise after a colon, with instead (instead of included) after a comma, or with then right
+                       after a comma ("If denied, do not wait, instead run it inline." and "If denied, do not wait,
+                       then run it inline." warn), unless the clause before it introduces the prohibited action
+                       itself: it ends with a negated verb phrase whose object is the introducer, a negation word,
+                       one action verb, any of the, any, all, of, as, anything and everything, then following or
+                       below as its last word ("If denied, do not do the following: instead, run it inline." and "If
+                       denied, never do as below: otherwise run it inline." are quiet); a following or below after
+                       any other word, such as a noun it modifies, introduces nothing ("If denied, do not wait for
+                       the instructions below: instead, run it inline." warns); a LEAD, a paragraph whose last line
+                       ends with a colon and whose last clause is negated by these rules ("Never do any of the
+                       following:"), a negation in an if or when condition not counting: from if or when to the
+                       end of its clause, and each clause after it in its segment opened by and or or ("If the tool
+                       is not available, do the following:" is no prohibition, and "If the tool is not available,
+                       never do any of the following:" is one), carries its negation into the first segment of
+                       each list item after it, up to
+                       a paragraph that is not a list item (under a lead that is itself a list item, only into items
+                       indented deeper than it), so "- run a denied step another way." under it is quiet; that
+                       negation is held apart from the item's own, so no restart inside the item ends it ("- If
+                       denied, instead run it inline." and "- If denied: instead, run it inline." under it are quiet
+                       too, and warn under "Do the following:"), and a lead that is not negated carries nothing; NOT
+                       EXCLUDED: no earlier clause of its segment holds instead of or rather than with every clause
+                       from there to it opened by a comma, a colon, and or or and none opening with instead or
+                       otherwise, where the exclusion from a clause that opens with instead of or rather than ends at
+                       the next clause whose opener is a bare comma, not at every comma: a comma followed by and or or
+                       opens its clause with that word, which carries the exclusion, and a bare comma between the
+                       items of a coordinated list, closed by a clause opened by and or or and then a clause opened
+                       by a bare comma, does not end it ("If denied, instead of waiting, run it inline." warns; "If
+                       denied, rather than retry, or run it inline, report the refusal." and "If denied, rather
+                       than retry, rerun, or run it inline, report the refusal." are quiet, and so is "If denied,
+                       instead of waiting, and run it inline.", a named miss); and
+                       MARKED, its clause holding
+                       instead, another way, inline, otherwise or by other means before any instead of or rather than,
+                       or the clause before it being only instead or otherwise, closed by a comma or colon. The
+                       refusal may stand before or after the action. The
+                       WARN names the line of the first such action verb and carries the sentence as its excerpt
+                       (whitespace runs as one space, cut after 200 characters with ..., each character that is not
+                       printable written as a backslash escape, in the path too), in the summary line after the T1
+                       text: "; WARN D1 <brief>:<line>: possible instruction to achieve a refused step another way;
+                       review the wording: <excerpt>". So "If denied, run it another way.", "Run it inline if the tool
+                       is refused.", "The tool might be rejected; otherwise you can use a script.", "If denied, do not
+                       wait; run it inline.", "If denied, do not wait: instead, run it inline." and "If denied, stop
+                       rather than wait, then run it inline." warn, and "If denied, do not run it another way.", "If
+                       denied, do not run it and execute it inline.", "If denied, do not do the following: run it
+                       inline.", "If denied, stop rather than retry or run it inline.", "If it has not been denied,
+                       run inline.", "If denied, report the refusal instead.", "If denied, stop. Run inline." and two
+                       list items "- If denied," and "- run inline." do not. RESIDUALS: it reads
+                       only its fixed words, so other refusal words (refuses, a permission error told another way),
+                       other alternatives (fallback, "a different approach"), third-person requests, and a request
+                       split across sentences, paragraphs or list items are missed, and a period inside a path or an
+                       abbreviation can cut a real request short; the negation and exclusion scopes are conservative,
+                       so a prohibition earlier in the segment silences a later real request ("If denied, do not stop
+                       early and run inline.", "If denied, do not stop: run it inline.", "If denied, do not wait then
+                       run it inline." with no comma, "If denied, do not retry, otherwise run it inline.", and a
+                       coordinator before instead or then or a comma after then, "If denied, do not wait and
+                       instead run it inline.", "If denied, do not wait but instead run it inline.", "If denied,
+                       do not wait, and instead run it inline.", "If denied, do not wait, and then run it
+                       inline.", "If denied, do not wait, then, run it inline." and "If denied, do not stop, but
+                       run it another way.", are quiet), and so does an instead of or rather than inside an earlier
+                       clause ("If denied, stop rather than wait, and run it inline." is quiet). A coordinated
+                       fronted list is read only by its openers, so a reroute after a fronted exclusion that an and
+                       or or clause and then a bare comma clause follow is quiet ("If denied, instead of waiting,
+                       run it inline or retry it, as you see fit."). A negated lead carries past a blank line into
+                       a separate later list, up to a paragraph that is not a list item ("Do not do any of the
+                       following:", the items "- push" and "- force", a blank line, then "1. Run the tests." and
+                       "2. If denied, run them another way." is quiet; a heading between ends the carry and the
+                       item warns): this is disclosed, not fixed, because telling a list that starts afresh from
+                       one that continues would be one more reading of layout. Only if and when open a condition,
+                       so a negation after unless still makes a lead a prohibition ("Unless the tool is not
+                       available, do the following:" carries). The introduction is read by those words
+                       alone, so one worded otherwise ("If denied, do not ever do the following: instead, run it
+                       inline.", "If denied, do not attempt the following: instead, run it inline.") is not
+                       recognized and warns, and an introducer whose object names later brief text rather than the
+                       clause after the colon is still read as introducing that clause, which keeps the negation
+                       ("If denied, never do anything below: instead, run it inline." and "If denied, do not retry
+                       anything below: instead, run it inline." are quiet). The excerpt keeps printable characters
+                       that are not ASCII, so on a standard output that cannot encode them the run ends in an
+                       encoding error and exit 1, so a D1 finding can end the run outside the refusal and exit
+                       selection; every rule's excerpt shares this, so it is not D1's alone and is left as it
+                       is. FALSE WARNINGS: a quoted or fenced example, a question, a past report, an
+                       unrelated action, blocked in a sense that is not a permission, a legitimate alternative and
+                       another leg's text can warn; so can a consequence after a prohibition ("If denied, do not
+                       retry: otherwise you may run it twice.": the colon and otherwise restart, and otherwise marks
+                       the clause) and a negation D1 does not read ("If denied, do nothing instead.":
+                       nothing is not a negation word, since reading it as one would quiet real requests such as "If
+                       denied, there is nothing to wait for, run it inline."), and so can a comma before instead
+                       with nothing as the alternative ("If denied, never run it another way, instead do
+                       nothing."), a fronted list with no bare comma clause after its and or or clause, or with no
+                       and or or ("If denied, rather than retry, rerun, or run it inline." and "If denied, rather
+                       than retry, rerun, run it inline, report the refusal."), and an item under a lead D1 does
+                       not recognise: a label ("NEVER:" is read as a label, so its text is dropped), a line ending
+                       in markup after the colon ("**Never do any of the following:**") and a lead with no colon
+                       ("Never do any of these things"); and D1 cannot tell whether the refusal
+                       and the action concern the same step. It reviews wording only: it never authorizes an
+                       alternative and does not observe what a worker does after a refusal.
+
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
 byte order mark, zero-width and bidirectional controls) outside a fenced code block, is CANNOT_EVALUATE
@@ -745,7 +867,8 @@ Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one su
                            completion lines and state the harness-owned attestation line as a prohibition) to the
                            OK or REFUSE line the other rules select, after that line's own advice. A T1 WARN never
                            sets the exit code either: each adds "; WARN T1 <brief>:<line>: <message>: <excerpt>" to
-                           that same line, after the P8 hint.
+                           that same line, after the P8 hint. A D1 WARN never sets it either: each adds "; WARN D1
+                           <brief>:<line>: <message>: <excerpt>" to that same line, after the T1 text.
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
@@ -4416,6 +4539,411 @@ def rule_t1(text):
     return sorted(findings, key=lambda finding: finding[2])
 
 
+# ---------- D1: denial reroute (ADVISORY: a WARN in the summary line, never in the exit selection) ----------
+
+# the refusal words, read as whole words only (refuses, denial, undenied and refusedness are not read)
+D1_REFUSALS = frozenset(("denied", "refused", "blocked", "rejected"))
+# the alternative expressions, each a run of whole words separated only by spaces, tabs or a joined line break
+D1_ALTERNATIVES = (("instead",), ("another", "way"), ("inline",), ("otherwise",), ("by", "other", "means"))
+# the verbs that may head an affirmative action clause
+D1_ACTIONS = frozenset(("run", "execute", "do", "perform", "complete", "accomplish", "achieve", "implement", "retry",
+                        "rerun", "use", "invoke", "call", "write", "try"))
+# the words an action clause may open with, before and after an optional `you` and modal
+D1_LEADS = frozenset(("please", "instead", "otherwise"))
+D1_MODALS = frozenset(("must", "should", "can", "may"))
+# a negation before a refusal in its clause makes the refusal ineligible; one anywhere from the start of an action's
+# segment to the end of the action's clause rejects the action (do not and must not are covered by not), across
+# commas, coordinators and colons, unless a clause between restarts it (D1_COMMA_RESTARTS, D1_RESTART_OPENERS, and a
+# D1_SCOPE_OPENERS word after a colon) and the clause before that one does not introduce the prohibited action
+# itself (d1_introduces); a negated list lead's negation is held apart and no restart ends it (d1_scopes)
+D1_NEGATIONS = frozenset(("not", "never", "no", "nor", "neither", "without", "don't", "mustn't", "shouldn't", "won't",
+                          "cannot", "can't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't"))
+# the whole words that close a clause and open the next
+D1_COORDINATORS = frozenset(("and", "or", "but", "then"))
+# a clause that is only one of these words lends it, as the marker, to the next clause after a comma or colon
+D1_SOLE_MARKERS = frozenset(("instead", "otherwise"))
+D1_SOLE_OPENERS = frozenset((",", ":"))
+# an alternative at or after the first of these phrases in an action clause names what is not to be done
+D1_CUTOFFS = (("instead", "of"), ("rather", "than"))
+# a clause after one holding a D1_CUTOFFS phrase, opened by one of these boundaries, is excluded too (stop rather than
+# retry or run it inline: both verbs are what is not to be done), and so is each later clause opened the same way
+D1_CARRIERS = frozenset((",", ":", "and", "or"))
+# an exclusion from a clause that opens with a D1_CUTOFFS phrase ends at a clause opened by one of these boundaries:
+# in "instead of waiting, run it inline" the clause after the comma is the alternative asked for; the opener is
+# compared, not the comma character, so a comma followed by and or or (whose clause opens with that word) does not
+# end it (D1_FRONTED_COORDINATED), and nor does a bare comma between the items of a coordinated list (d1_listed)
+D1_FRONTED_ENDS = frozenset((",",))
+# the openers that close the item list of a coordinated fronted exclusion (rather than retry, rerun, or run it
+# inline, report the refusal) and that continue an if or when condition into the next clause (d1_unconditioned)
+D1_LIST_JOINS = frozenset(("and", "or"))
+# a lead's prohibition is read from its main clause only: from one of these words to its clause's end, and each
+# clause after it in its segment opened by a D1_LIST_JOINS word, is a condition (d1_unconditioned)
+D1_CONDITIONS = frozenset(("if", "when"))
+# a clause that opens with one of these words names the alternative asked for: an exclusion does not carry into it,
+# and neither does a negation carried across a colon (do not wait: instead, run it inline), unless the clause the
+# colon closes introduces the prohibited action itself (d1_introduces)
+D1_SCOPE_OPENERS = frozenset(("instead", "otherwise"))
+# a negation carried across a comma ends, under the same introducer exception, at a clause that opens with one of
+# these words (do not wait, instead run it inline; instead of included) and at a clause opened by one of
+# D1_RESTART_OPENERS: a then right after a comma is the opener D1_COMMA_THEN (do not wait, then run it inline)
+D1_COMMA_RESTARTS = frozenset(("instead",))
+D1_COMMA_THEN = ", then"
+D1_RESTART_OPENERS = frozenset((D1_COMMA_THEN,))
+# a clause closed by a colon introduces the prohibited action itself only when it ends with a negated verb phrase
+# whose object is one of these words: a D1_NEGATIONS word, one D1_ACTIONS verb, any run of D1_INTRODUCER_FILLERS
+# words, then the introducer as the clause's last word (do not do the following, do not try any of the following,
+# never do as below); a clause after that colon continues what the clause introduces and keeps its negation even
+# when it opens with instead or otherwise (do not do the following: instead, run it inline), and so does a clause
+# after a comma that would restart it. An introducer after a noun modifies the noun and introduces nothing (do not
+# wait for the instructions below: instead, run it inline, and do not run the steps following: instead, run it
+# inline, both warn). The words alone decide: an object that names later brief text (never do anything below) is
+# read the same way, so a reroute after its colon is quiet (a named miss, D1_LATER_TEXT_KEPT)
+D1_INTRODUCERS = frozenset(("following", "below"))
+D1_INTRODUCER_FILLERS = frozenset(("the", "any", "all", "of", "as", "anything", "everything"))
+# a list item line (at any indentation) and a heading each open a paragraph, a heading standing alone; a column-zero
+# upper-case label opens one too; the matched marker is not read
+D1_LIST_RE = re.compile(r"[ \t]*+(?:[-+*]|[0-9]{1,9}[.)])[ \t]++")
+D1_HEADING_RE = re.compile(r" {0,3}#{1,6}(?:[ \t]++|\Z)")
+D1_LABEL_RE = re.compile(r"[A-Z][A-Z0-9-]*+:")
+# a lead is a paragraph whose last line ends with this text, and it carries into this many leading sentences of an
+# item (rule_d1)
+D1_LEAD_END = ":"
+D1_LEAD_SENTENCES = 1
+D1_LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+D1_APOSTROPHES = frozenset("'’")
+# the characters that end a sentence, a segment and a clause; and the only ones a multiword expression may hold
+D1_SENTENCE_STOPS, D1_SEGMENT_STOPS, D1_CLAUSE_STOPS, D1_GAP = ".!?", ";", ",:", " \t\n"
+D1_EXCERPT_CHARS = 200
+D1_MESSAGE = "possible instruction to achieve a refused step another way; review the wording"
+
+
+def d1_paragraphs(text):
+    """[[(line number, text)]]: the brief's paragraphs for D1, each a list of its lines with any opening marker
+    removed. A blank line (empty, or only spaces and tabs) ends a paragraph; a list item line (D1_LIST_RE, at any
+    indentation), a heading (D1_HEADING_RE, a paragraph of its own) and a column-zero upper-case label (D1_LABEL_RE:
+    TASK:) each open one. Every other line continues the paragraph, so a wrapped sentence is read whole. Fences and
+    quotations are read like any other text."""
+    paragraphs, current = [], []
+    for number, line in enumerate(text.split("\n"), 1):
+        if not line.strip(" \t"):
+            if current:
+                paragraphs.append(current)
+            current = []
+            continue
+        heading = D1_HEADING_RE.match(line)
+        opened = D1_LIST_RE.match(line) or heading or D1_LABEL_RE.match(line)
+        if opened is None:
+            current.append((number, line))
+            continue
+        if current:
+            paragraphs.append(current)
+        current = [(number, line[opened.end():])]
+        if heading is not None and opened is heading:
+            paragraphs.append(current)
+            current = []
+    if current:
+        paragraphs.append(current)
+    return paragraphs
+
+
+def d1_sentences(paragraph):
+    """[(sentence text, clauses)] for one paragraph, its lines joined by a line break read as a space. Every `.`, `!`
+    or `?` ends a sentence (no abbreviation, path or decimal exception), `;` ends a segment, and a segment
+    boundary, a colon, a comma and the whole words and, or, but and then end a clause. A clause is (segment, opener,
+    words):
+    its segment's number (counted over the paragraph), the boundary before it (None at a sentence start, a stop
+    character, or the coordinator word; D1_COMMA_THEN for then right after a comma, with no word between) and its
+    words, each (word, line, joined): a maximal run of ASCII letters,
+    with an apostrophe between letters kept (U+2019 read as '), lower-cased; its source line; and whether only
+    spaces, tabs or a joined line break stand between it and the clause's previous word. One forward pass."""
+    text = "\n".join(piece for _, piece in paragraph)
+    starts, offset = [], 0
+    for number, piece in paragraph:
+        starts.append((offset, number))
+        offset += len(piece) + 1
+    sentences, clauses, words = [], [], []
+    segment, opener, begun, joined, piece, index = 0, None, 0, False, 0, 0
+
+    def close(boundary):
+        nonlocal words, opener, joined
+        if words:
+            clauses.append((segment, opener, words))
+        elif opener == "," and boundary == "then":
+            boundary = D1_COMMA_THEN
+        words, opener, joined = [], boundary, False
+
+    while index < len(text):
+        char = text[index]
+        if char in D1_LETTERS:
+            end = index + 1
+            while end < len(text):
+                if text[end] in D1_LETTERS:
+                    end += 1
+                elif text[end] in D1_APOSTROPHES and end + 1 < len(text) and text[end + 1] in D1_LETTERS:
+                    end += 2
+                else:
+                    break
+            word = text[index:end].lower().replace("’", "'")
+            while piece + 1 < len(starts) and starts[piece + 1][0] <= index:
+                piece += 1
+            if word in D1_COORDINATORS:
+                close(word)
+            else:
+                words.append((word, starts[piece][1], joined and bool(words)))
+                joined = True
+            index = end
+            continue
+        if char in D1_SENTENCE_STOPS:
+            close(None)
+            if clauses:
+                sentences.append((text[begun:index + 1], clauses))
+            clauses, begun, segment = [], index + 1, segment + 1
+        elif char in D1_SEGMENT_STOPS:
+            close(char)
+            segment += 1
+        elif char in D1_CLAUSE_STOPS:
+            close(char)
+        elif char not in D1_GAP:
+            joined = False
+        index += 1
+    close(None)
+    if clauses:
+        sentences.append((text[begun:], clauses))
+    return sentences
+
+
+def d1_phrase_at(words, index, phrases):
+    """Whether one of `phrases` (tuples of words) opens at words[index], its later words joined (D1_GAP only)."""
+    return any(index + len(phrase) <= len(words) and all(
+        words[index + step][0] == part and (step == 0 or words[index + step][2]) for step, part in enumerate(phrase))
+        for phrase in phrases)
+
+
+def d1_marked(words):
+    """Whether a clause holds a D1_ALTERNATIVES expression before its first D1_CUTOFFS phrase (instead of, rather
+    than): in "run the safe operation instead of running it inline" the alternative is the one not asked for."""
+    for index in range(len(words)):
+        if d1_phrase_at(words, index, D1_CUTOFFS):
+            return False
+        if d1_phrase_at(words, index, D1_ALTERNATIVES):
+            return True
+    return False
+
+
+def d1_action(words):
+    """The index of the D1_ACTIONS verb that heads a clause, or None: at the clause start any D1_LEADS words, then
+    optionally you and at most one D1_MODALS word, then any D1_LEADS words, then the verb."""
+    index = 0
+    while index < len(words) and words[index][0] in D1_LEADS:
+        index += 1
+    if index < len(words) and words[index][0] == "you":
+        index += 1
+        if index < len(words) and words[index][0] in D1_MODALS:
+            index += 1
+    while index < len(words) and words[index][0] in D1_LEADS:
+        index += 1
+    return index if index < len(words) and words[index][0] in D1_ACTIONS else None
+
+
+def d1_refused(clauses):
+    """Whether a sentence holds an ELIGIBLE refusal: a D1_REFUSALS word with no D1_NEGATIONS word before it in its
+    clause ("not denied", "hasn't been denied" and "not actually denied" are not eligible)."""
+    for _, _, words in clauses:
+        negated = False
+        for word, _, _ in words:
+            if word in D1_NEGATIONS:
+                negated = True
+            elif word in D1_REFUSALS and not negated:
+                return True
+    return False
+
+
+def d1_introduces(words):
+    """Whether the clause before a restart (d1_scopes) introduces the prohibited action itself: it ends with a negated
+    verb phrase whose object is the introducer, read backwards from its last word: a D1_INTRODUCERS word (following,
+    below), then any run of D1_INTRODUCER_FILLERS words (the, any, all, of, as, anything, everything), then one
+    D1_ACTIONS verb, then a D1_NEGATIONS word ("do not do the following", "do not try any of the following", "never
+    do all of the following", "never do as below"). An introducer after any other word, such as a noun it modifies
+    ("do not wait for the instructions below", "do not run the steps following"), with any other word between the
+    negation and the verb ("do not ever do the following") or after a word that is not an action verb ("do not
+    attempt the following") introduces nothing. RESIDUAL: the words alone decide, so an object that names later
+    brief text ("never do anything below", "do not retry anything below") still counts as introducing the clause
+    after the colon, and a real reroute there ("never do anything below: instead, run it inline") is quiet."""
+    if not words or words[-1][0] not in D1_INTRODUCERS:
+        return False
+    index = len(words) - 2
+    while index >= 0 and words[index][0] in D1_INTRODUCER_FILLERS:
+        index -= 1
+    return index >= 1 and words[index][0] in D1_ACTIONS and words[index - 1][0] in D1_NEGATIONS
+
+
+def d1_scopes(clauses, carried=False):
+    """[(clause, negated, excluded)], one per clause of a sentence, in order: d1_local_scopes, with every clause of
+    the sentence's first segment also negated when `carried` (a negated list lead, rule_d1). The lead's negation is
+    held apart from the clause's own, so a restart inside the item clears only the item's own negation and the
+    lead's holds for the whole first segment ("Never do any of the following:" then "- If denied, instead run it
+    inline." or "- If denied: instead, run it inline." is quiet); a later segment starts afresh."""
+    first = clauses[0][0] if clauses else None
+    return [(clause, negated or (carried and clause[0] == first), excluded)
+            for clause, negated, excluded in d1_local_scopes(clauses)]
+
+
+def d1_local_scopes(clauses, negated=False):
+    """[(clause, negated, excluded)], one per clause of a sentence, in order, read from the sentence alone (d1_scopes
+    adds a lead's negation; `negated` true reads the first segment as negated from its start, a negation any restart
+    clears, which is how a lead's negation was read before it was held apart). NEGATED: a D1_NEGATIONS word stands
+    from the start of the clause's segment to the clause's own end, with no RESTART between. A prohibition carries
+    across commas, coordinators and colons ("do not run it and execute it inline" and "do not do the following: run it inline"
+    are negated throughout); a clause restarts it when it opens with instead or otherwise after a colon ("do not
+    wait: instead, run it inline"), with instead after a comma ("do not wait, instead run it inline", "do not wait,
+    instead of waiting, run it inline") or with then right after a comma ("do not wait, then run it inline"), unless
+    the clause before it introduces the prohibited action itself (d1_introduces: "do not do the following: instead,
+    run it inline" stays negated); a new segment starts afresh. EXCLUDED: an earlier clause of its segment holds
+    instead of or rather than, every clause from there to this one is opened by a comma, a colon, and or or, and
+    none opens with instead or otherwise ("stop rather than retry or run it inline"), except that an exclusion from
+    a clause that opens with instead of or rather than ends at the next clause whose opener is a bare comma
+    ("instead of waiting or retrying, run it inline": the clause after the comma is the alternative asked for). The
+    boundary is the clause opener, not the comma character: a comma followed by and or or gives its clause that
+    word as opener, which carries the exclusion, so a fronted list of excluded actions stays excluded ("rather than
+    retry, or run it inline, report the refusal") and so does "instead of waiting, and run it inline" (a named
+    miss, D1_FRONTED_COORDINATED); and a bare comma between the items of a coordinated list does not end it
+    (d1_listed: "rather than retry, rerun, or run it inline, report the refusal")."""
+    scopes, excluded, fronted, segment, previous = [], False, False, None, None
+    listed = d1_listed(clauses)
+    for position, clause in enumerate(clauses):
+        if clause[0] != segment:
+            if segment is not None:
+                negated = False
+            excluded, segment = False, clause[0]
+        opener, words = clause[1], clause[2]
+        fresh = words[0][0] in D1_SCOPE_OPENERS
+        restarts = ((fresh and opener == ":") or (opener == "," and words[0][0] in D1_COMMA_RESTARTS)
+                    or opener in D1_RESTART_OPENERS)
+        if restarts and not (previous is not None and d1_introduces(previous[2])):
+            negated = False
+        if fresh or opener not in D1_CARRIERS or (
+                fronted and opener in D1_FRONTED_ENDS and not listed[position]):
+            excluded = False
+        negated = negated or any(word in D1_NEGATIONS for word, _, _ in words)
+        scopes.append((clause, negated, excluded))
+        if any(d1_phrase_at(words, index, D1_CUTOFFS) for index in range(len(words))):
+            excluded, fronted = True, d1_phrase_at(words, 0, D1_CUTOFFS)
+        previous = clause
+    return scopes
+
+
+def d1_listed(clauses):
+    """[listed], one per clause of a sentence, in order: whether the clause, when opened by a bare comma inside a
+    fronted exclusion, is an item of a coordinated list: in its segment it and any clauses right after it opened by
+    a bare comma lead to a clause opened by and or or (D1_LIST_JOINS), and the clause right after that one is opened
+    by a bare comma ("rather than retry, rerun, or run it inline, report the refusal", with or without the comma
+    before or). A list not closed by a bare comma clause is not read as one ("instead of waiting, run it inline or
+    retry it." warns). One backward pass reading each clause a bounded number of times: a clause followed in its
+    segment by a bare comma clause has that clause's answer, so a long list costs work linear in its items."""
+    listed = [False] * len(clauses)
+    for index in range(len(clauses) - 1, -1, -1):
+        segment, later = clauses[index][0], index + 1
+        if later < len(clauses) and clauses[later][0] == segment and clauses[later][1] in D1_FRONTED_ENDS:
+            listed[index] = listed[later]
+        else:
+            listed[index] = (later + 1 < len(clauses) and clauses[later][0] == clauses[later + 1][0] == segment
+                             and clauses[later][1] in D1_LIST_JOINS and clauses[later + 1][1] in D1_FRONTED_ENDS)
+    return listed
+
+
+def d1_unconditioned(clauses):
+    """The clauses with every word of an if or when condition read as no word: from a D1_CONDITIONS word to its
+    clause's end, and each clause after it in its segment opened by and or or (D1_LIST_JOINS). Segments and
+    openers are kept, so only the condition's own negations go."""
+    blanked, condition, segment = [], False, None
+    for number, opener, words in clauses:
+        condition = condition and number == segment and opener in D1_LIST_JOINS
+        kept = []
+        for word in words:
+            condition = condition or word[0] in D1_CONDITIONS
+            kept.append(("", word[1], word[2]) if condition else word)
+        blanked.append((number, opener, kept))
+        segment = number
+    return blanked
+
+
+def d1_prohibits(clauses, carried=False):
+    """Whether a sentence's last clause is negated (d1_scopes) by a negation outside an if or when condition
+    (d1_unconditioned): a lead ending in a colon whose main clause is a prohibition ("Never do any of the
+    following:") carries its negation into its list items (rule_d1); one negated only in its condition ("If the
+    tool is not available, do the following:") carries nothing."""
+    scopes = d1_scopes(d1_unconditioned(clauses), carried)
+    return bool(scopes) and scopes[-1][1]
+
+
+def d1_nested(lead_depth, depth):
+    """Whether a paragraph at `depth` (the count of spaces and tabs before a list item's marker, -1 for a paragraph
+    that is not a list item) belongs to a lead at `lead_depth` (-1 for a lead that is not a list item): only a list
+    item, and under a lead item only one indented deeper than it."""
+    return depth > lead_depth
+
+
+def d1_hit(clauses, carried=False):
+    """The source line of the first affirmative action a sentence asks to do another way, or None: the sentence holds
+    an eligible refusal (d1_refused, before or after the action), and a clause is headed by an action verb
+    (d1_action), is neither negated nor excluded (d1_scopes, with `carried` from a negated list lead), and is
+    marked: it holds an alternative (d1_marked), or the clause before it is only instead or otherwise, closed by a
+    comma or colon."""
+    if not d1_refused(clauses):
+        return None
+    previous = None
+    for clause, negated, excluded in d1_scopes(clauses, carried):
+        opener, words = clause[1], clause[2]
+        verb = d1_action(words)
+        if verb is not None and not negated and not excluded and (d1_marked(words) or (
+                previous is not None and opener in D1_SOLE_OPENERS and len(previous[2]) == 1
+                and previous[2][0][0] in D1_SOLE_MARKERS)):
+            return words[verb][1]
+        previous = clause
+    return None
+
+
+def d1_escaped(text):
+    """The text with each character that is not printable written as a backslash escape."""
+    return "".join(char if char.isprintable() else char.encode("unicode_escape").decode("ascii") for char in text)
+
+
+def d1_excerpt(sentence):
+    """A sentence on one line: whitespace runs as one space, its first D1_EXCERPT_CHARS characters kept with each
+    character that is not printable escaped, and `...` after a cut."""
+    text = " ".join(sentence.split())
+    return d1_escaped(text[:D1_EXCERPT_CHARS]) + ("..." if len(text) > D1_EXCERPT_CHARS else "")
+
+
+def rule_d1(text):
+    """D1 (ADVISORY, every family): one WARN per sentence that seems to tell the worker to achieve a refused or
+    denied step another way (d1_hit), naming the line of its first matching action verb, with the sentence as its
+    excerpt. A WARN takes no part in the refusal or exit selection: run() carries each in the summary line the other
+    rules select (printing that line can still fail on an output encoding that cannot hold the excerpt, which ends
+    the run with exit 1, as for every rule's excerpt). Nothing is carried from one paragraph to the next but a
+    LEAD's prohibition: a paragraph whose last line ends with a colon is a lead, negated when its last sentence's
+    last clause is, by a negation outside an if or when condition (d1_prohibits); each list item paragraph after it, before any paragraph that is not a list item,
+    that d1_nested places under it reads its whole first segment as negated, whatever restarts inside it
+    (d1_scopes: "Never do any of the following:" then "- run a denied step another way." or "- If denied, instead
+    run it inline." is quiet), and a lead that is not negated carries nothing ("Do the following:" then either item
+    warns)."""
+    findings, lines, leads = [], text.split("\n"), []
+    for paragraph in d1_paragraphs(text):
+        item = D1_LIST_RE.match(lines[paragraph[0][0] - 1])
+        depth = -1 if item is None else len(item.group(0)) - len(item.group(0).lstrip(" \t"))
+        while leads and not d1_nested(leads[-1][0], depth):
+            leads.pop()
+        carried = bool(leads) and leads[-1][1]
+        sentences = d1_sentences(paragraph)
+        if sentences and paragraph[-1][1].rstrip(" \t").endswith(D1_LEAD_END):
+            leads.append((depth, d1_prohibits(sentences[-1][1], carried and len(sentences) == 1)))
+        for position, (sentence, clauses) in enumerate(sentences):
+            line = d1_hit(clauses, carried and position < D1_LEAD_SENTENCES)
+            if line is not None:
+                findings.append(("D1", "WARN", line, D1_MESSAGE, d1_excerpt(sentence)))
+    return findings
+
+
 def can_execute(row):
     """Whether a family's table row lets it run commands; the execution rules apply only to one that cannot."""
     return row["execute"] != "no"
@@ -4429,9 +4957,9 @@ def evaluate(data, family, table, scoped=True, repo=None):
         raise CannotEvaluate("family {!r} is not in the capability table (known: {})".format(
             family, ", ".join(sorted(table))))
     text = decode_brief(data)
-    # the preflight and W1 apply to every family, so they run before the return for a family that can execute
+    # the preflight, W1, T1 and D1 apply to every family, so they run before the return for a family that can execute
     early = preflight(text, table[family], repo, data.decode("utf-8")) + rule_w1(
-        text, table[family], family, set(table), scoped) + rule_t1(text)
+        text, table[family], family, set(table), scoped) + rule_t1(text) + rule_d1(text)
     if can_execute(table[family]):
         early.sort(key=lambda finding: finding[2])
         hard = any(severity == "HARD" for _, severity, _, _, _ in early)
@@ -4480,7 +5008,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
 
 PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"))
 # the rules that apply to every family, whether or not it can execute
-EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1", "T1"))
+EVERY_FAMILY_RULES = PREFLIGHT_RULES | frozenset(("W1", "T1", "D1"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 # added to the summary line (REFUSE or OK) when a P8 warning is among the findings; P8 never sets the exit code
@@ -4500,6 +5028,19 @@ def removal_warnings(brief_path, findings):
                    for rule, _, line, message, excerpt in findings if rule == "T1")
 
 
+# the WARN a D1 finding adds to the summary line (REFUSE or OK), after the T1 text; its findings never refuse and
+# take no part in the refusal or exit selection, though printing one can fail on an output encoding and end the run
+# with exit 1 (the module docstring's D1 entry)
+REROUTE_WARN = "; WARN D1 {}:{}: {}: {}"
+
+
+def reroute_warnings(brief_path, findings):
+    """The text each D1 finding adds to the summary line: one WARN per finding, naming the brief line, with each
+    character of the path that is not printable escaped (the excerpt is escaped by d1_excerpt)."""
+    return "".join(REROUTE_WARN.format(d1_escaped(str(brief_path)), line, message, excerpt)
+                   for rule, _, line, message, excerpt in findings if rule == "D1")
+
+
 def run(brief_path, family, table_path, scoped=True, repo=None):
     try:
         table = load_table(table_path)
@@ -4507,9 +5048,9 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     except CannotEvaluate as exc:
         print("CANNOT_EVALUATE: {}".format(exc))
         return EXIT_CANNOT_EVALUATE
-    # T1 is ADVISORY: each hit is one WARN carried in the summary line below, not a finding line of its own
-    removal = removal_warnings(brief_path, findings)
-    findings = [finding for finding in findings if finding[0] != "T1"]
+    # T1 and D1 are ADVISORY: each hit is one WARN carried in the summary line below, not a finding line of its own
+    removal = removal_warnings(brief_path, findings) + reroute_warnings(brief_path, findings)
+    findings = [finding for finding in findings if finding[0] not in ("T1", "D1")]
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
@@ -5047,6 +5588,260 @@ T1_OFFER_TWINS = ("TASK: review whether it is fine to remove the flaky test.\n",
                   "quoting and reviewing a removal stay quiet.\n")
 T1_UNCLOSED_FENCE = "Notes:\n```\nTASK: remove the flaky test.\n"
 T1_INDENTED_FENCE = "    ```\nTASK: remove the flaky test.\n    ```\n"
+# D1: sentences that each draw one WARN on line 1 (a refusal word, then an action clause marked as another way)
+D1_WARNED = ("If denied, run it another way.\n", "If refused, execute it inline.\n",
+             "If blocked, achieve it by other means.\n",
+             "The tool might be rejected; otherwise you can use a script.\n", "If denied, instead, run it.\n",
+             "Run it inline if the tool is refused.\n", "IF DENIED, YOU SHOULD COMPLETE IT ANOTHER WAY.\n",
+             "If denied, do not retry; run it inline instead.\n", "If denied, instead: run it.\n",
+             "If denied, please run it inline.\n")
+# prohibitions: a negation from the start of the action's segment to the end of its clause rejects the action
+D1_PROHIBITED = ("If denied, do not run it another way.\n", "If denied, do\nnot run it inline.\n",
+                 "If denied, don't run it inline.\n", "If denied, don’t run it inline.\n",
+                 "If denied, never run it inline.\n", "If denied, you must not run it inline.\n",
+                 "If denied, do not run it and execute it inline.\n", "If denied, never retry, run it inline.\n",
+                 "If denied, run it without using another way.\n")
+# a negated refusal is not eligible
+D1_NEGATED_REFUSAL = ("If it has not been denied, run inline.\n", "If it hasn't been denied, run inline.\n",
+                      "If it is not actually denied, run inline.\n")
+# no affirmative action marked as another way, or no refusal word
+D1_NOT_ASKED = ("If denied, report the refusal instead.\n", "If denied, stop without trying another way.\n",
+                "If denied, run the safe operation instead of running it inline.\n",
+                "The command was refused and the result was shown inline.\n", "Run it another way.\n",
+                "If denied, run the safe operation rather than running it inline.\n")
+# boundaries D1 never pairs a refusal across: a sentence stop (whatever follows it), a blank line (tabs and spaces
+# only included), a list item at any indentation, a list after a colon, a heading and a column-zero label
+D1_SEPARATED = ("If denied, stop. Run inline.\n", "If denied, stop! run inline.\n", "If denied, stop? run inline.\n",
+                "If denied,\n\nrun inline.\n", "If denied,\n \t\nrun inline.\n", "- If denied,\n- run inline.\n",
+                "    - If denied,\n    - run inline.\n", "1. If denied,\n2. run inline.\n",
+                "If denied:\n- run it another way.\n", "If denied,\n# Action\nrun inline.\n",
+                "If denied,\nTASK: run inline.\n", "The step was denied. In that case, run inline.\n")
+# whole words and joined phrases only: no stemming, and a phrase split by a comma is no phrase
+D1_NOT_WORDS = ("If undenied, run inline.\n", "If refusedness, run inline.\n", "If denied, run it inlined.\n",
+                "If denied, run it another, way.\n", "If denied, run it another-way.\n")
+# named misses, pinned: a vocabulary miss and the conservative negation and exclusion scopes
+D1_MISSES = ("If denied, find a different approach.\n", "If denied, do not stop early and run inline.\n",
+             "If denied, do not stop: run it inline.\n", "If denied, stop rather than wait, and run it inline.\n")
+# a prohibition carries across a colon into the list it introduces; with ; and : both segment stops (the previous
+# reading) the first four warned on the line given in D1_COLON_CARRIED_WAS; a list on its own lines after the colon
+# is separate paragraphs either way
+D1_COLON_CARRIED = ("If denied, do not do the following: run it inline.\n",
+                    "If denied, do not do the\nfollowing: run it\ninline.\n",
+                    "If denied, do not do the following: 1) retry, 2) run it inline.\n",
+                    "If denied, stop rather than do the following: retry or run it inline.\n",
+                    "If denied, do not do the following:\n1. retry\n2. run it inline.\n")
+D1_COLON_CARRIED_WAS = ([1], [2], [1], [1], [])
+# an instead of or rather than exclusion carries across coordinated clauses opened by or, and, a comma or a colon;
+# with no carry (the previous reading) each warned on the line given in D1_EXCLUSION_CARRIED_WAS
+D1_EXCLUSION_CARRIED = ("If denied, stop rather than retry or run it inline.\n",
+                        "If denied, stop rather than retry and run it inline.\n",
+                        "If denied, stop rather than retry, rerun or run it inline.\n",
+                        "If denied, stop rather than retry or\nrun it inline.\n",
+                        "If denied, stop instead of trying to retry or run it inline.\n",
+                        "If denied, stop instead of trying to retry and run it another way.\n",
+                        "If denied, stop rather than do the following: retry or run it inline.\n")
+D1_EXCLUSION_CARRIED_WAS = ([1], [1], [1], [2], [1], [1], [1])
+# a genuine reroute after a refusal still warns: a semicolon ends a prohibition or an exclusion, but and then end an
+# exclusion, a clause opening with instead or otherwise ends an exclusion and a prohibition carried across a colon,
+# and a colon with no prohibition before it carries nothing (each on the line given in D1_SCOPE_KEPT_LINES)
+D1_SCOPE_KEPT = ("If denied, do not wait; run it inline.\n", "If denied, stop rather than wait; run it inline.\n",
+                 "If denied, stop rather than wait;\nrun it inline.\n",
+                 "If denied, stop rather than wait, then run it inline.\n",
+                 "If denied, stop rather than wait, but run it inline.\n",
+                 "If denied, stop rather than wait, or instead run it inline.\n",
+                 "If denied, stop rather than wait, otherwise run it inline.\n",
+                 "If denied, do not wait: instead, run it inline.\n",
+                 "If denied, do not wait: otherwise run it inline.\n",
+                 "If denied, do the following: run it inline.\n")
+D1_SCOPE_KEPT_LINES = ([1], [1], [2], [1], [1], [1], [1], [1], [1], [1])
+# beside the kept warnings after do not wait: a colon closing a negated verb phrase whose object is following or
+# below (d1_introduces) introduces the prohibited action itself, so a clause after it that opens with instead or
+# otherwise keeps the negation; with the reset at every such colon (an earlier reading) each warned on the line
+# given in D1_INTRODUCED_LIST_WAS
+D1_INTRODUCED_LIST = ("If denied, do not do the following: instead, run it inline.\n",
+                      "If denied, do not do the\nfollowing:\ninstead, run it inline.\n",
+                      "If denied, do not do the following: otherwise run it inline.\n",
+                      "If denied, do not do the\nfollowing: otherwise run\nit inline.\n",
+                      "If denied, never do all of the following: instead, run it inline.\n",
+                      "If denied, do not try any of the following: instead, run it inline.\n",
+                      "If denied, never do as below: otherwise run it inline.\n")
+D1_INTRODUCED_LIST_WAS = ([1], [3], [1], [2], [1], [1], [1])
+# a named miss, pinned: an introducer whose object names later brief text (anything below, everything below) is
+# read like any other, so the negation is kept into the clause after the colon and the reroute there is quiet; with
+# the reset at every such colon (an earlier reading) each warned on line 1
+D1_LATER_TEXT_KEPT = ("If denied, never do anything below: instead, run it inline.\n",
+                      "If denied, do not retry anything below: instead, run it inline.\n",
+                      "If denied, never do everything below: instead, run it inline.\n")
+# an introduction worded otherwise introduces nothing, so the clause after the colon warns on line 1: a word between
+# the negation and the verb (with the negation check removed it is quiet) and a verb outside D1_ACTIONS (with the
+# action check removed it is quiet)
+D1_NOT_INTRODUCED = ("If denied, do not ever do the following: instead, run it inline.\n",
+                     "If denied, do not attempt the following: instead, run it inline.\n")
+# a prohibition carried across a comma ends at a clause opening with instead (instead of included) or at then right
+# after the comma, and an exclusion from a clause that opens with instead of or rather than ends at the next comma;
+# each warned on the line given in D1_RESTARTED_LINES and was quiet before (the first rests on a comma and instead,
+# the next two on a comma and then, the next three on the fronted exclusion, and the last on both a comma and
+# instead and the fronted exclusion)
+D1_RESTARTED = ("If denied, do not wait, instead run it inline.\n",
+                "If denied, do not wait, then run it inline.\n",
+                "If denied, do not wait,\nthen run it inline.\n",
+                "If denied, instead of waiting, run it inline.\n",
+                "If denied, instead of waiting or retrying, run it inline.\n",
+                "If denied, rather than waiting, run it inline.\n",
+                "If denied, do not wait, instead of waiting, run it inline.\n")
+D1_RESTARTED_LINES = ([1], [1], [2], [1], [1], [1], [1])
+# a lead ending in a colon whose clause is a prohibition carries its negation into its list items (a blank line
+# between, and a lead that is itself a list item with its items indented under it, included); with nothing carried
+# into an item (the previous reading) each warned on the line given in D1_LEAD_CARRIED_WAS
+D1_LEAD_CARRIED = ("Never do any of the following:\n- run a denied step another way.\n",
+                   "Never do any of the following:\n1. retry a refused command inline\n",
+                   "Never do any of the following:\n\n- run a denied step another way.\n",
+                   "- Never do any of the following:\n  - run a denied step another way.\n")
+D1_LEAD_CARRIED_WAS = ([2], [2], [3], [2])
+# a lead that is not a prohibition carries nothing, and nor does a negated lead item into a sibling item or one
+# past a paragraph that is not a list item: each warns on the line given in D1_LEAD_KEPT_LINES (the first is quiet
+# with every lead read as negated, the other two with every item read as under the last lead)
+D1_LEAD_KEPT = ("Do the following:\n- run a denied step another way.\n",
+                "- Never do any of the following:\n- run a denied step another way.\n",
+                "Never do any of the following:\n- wait.\n\nThen continue.\n- run a denied step another way.\n")
+D1_LEAD_KEPT_LINES = ([2], [2], [5])
+# a negated lead's negation is held apart from the item's own, so a comma or colon restart inside the item's first
+# segment does not end it: each is quiet, and with the lead's negation read as the item's own, cleared by a restart
+# (the previous reading), each warned on the line given in D1_LEAD_RESTART_CARRIED_WAS
+D1_LEAD_RESTART_CARRIED = ("Never do any of the following:\n- If denied, instead run it inline.\n",
+                           "Never do any of the following:\n- If denied, then run it inline.\n",
+                           "Never do any of the following:\n- If denied: instead, run it inline.\n",
+                           "Never do any of the following:\n- If denied: otherwise run it inline.\n",
+                           "Never do any of the following:\n- If denied, do not wait, instead run it inline.\n",
+                           "- Never do any of the following:\n  - If denied, instead run it inline.\n")
+D1_LEAD_RESTART_CARRIED_WAS = ([2], [2], [2], [2], [2], [2])
+# controls: the same restarts under a lead that is not negated, an item's own negation still cleared by its own
+# restart, and a restart in a later segment of an item under a negated lead (the lead's negation reaches only the
+# first segment) each warn on the line given in D1_LEAD_RESTART_KEPT_LINES
+D1_LEAD_RESTART_KEPT = ("Do the following:\n- If denied, instead run it inline.\n",
+                        "Do the following:\n- If denied, then run it inline.\n",
+                        "Do the following:\n- If denied: instead, run it inline.\n",
+                        "Do the following:\n- If denied: otherwise run it inline.\n",
+                        "Do the following:\n- If denied, do not wait, instead run it inline.\n",
+                        "Never do any of the following:\n- wait; if denied, instead run it inline.\n")
+D1_LEAD_RESTART_KEPT_LINES = ([2], [2], [2], [2], [2], [2])
+# the boundary of an exclusion from a clause that opens with instead of or rather than is the next clause whose
+# opener is a bare comma: a comma followed by and or or opens its clause with that word, which carries the
+# exclusion, so each is quiet (a fronted list of excluded actions, and a named miss); with and and or ending it as
+# a bare comma does (the reading that ends it at every comma) each warns on line 1
+D1_FRONTED_COORDINATED = ("If denied, rather than retry, or run it inline, report the refusal.\n",
+                          "If denied, instead of waiting, and run it inline.\n")
+# a bare comma between the items of a coordinated fronted list (closed by a clause opened by and or or, then a bare
+# comma clause) does not end the exclusion, so each is quiet as it was before the fronted boundary; with every bare
+# comma ending it (d1_listed always false) each warns on line 1
+D1_FRONTED_LIST = ("If denied, rather than retry, rerun, or run it inline, report the refusal.\n",
+                   "If denied, rather than retry, rerun or run it inline, report the refusal.\n",
+                   "If denied, rather than wait, retry, or run it another way, report the refusal and stop.\n")
+# controls: a fronted exclusion still ends at the bare comma before the alternative asked for when no bare comma
+# clause closes a coordinated list after it; each warns on line 1
+D1_FRONTED_LIST_KEPT = ("If denied, instead of waiting, run it inline or retry it.\n",
+                        "If denied, instead of waiting, run it inline and report it.\n")
+# a long coordinated fronted list (D1_GROWTH_ITEM repeated in D1_GROWTH_TEXT), read at the two D1_GROWTH_SIZES item
+# counts: rule_d1 reads each clause a bounded number of times, so its clause reads (by index or by iteration) at the
+# larger size are at most D1_GROWTH_SLACK times the size ratio times those at the smaller; reading the remaining
+# items afresh for every item grows them by about the square of the size ratio
+D1_GROWTH_TEXT = "If denied, rather than retry, {}or run it inline, report the refusal.\n"
+D1_GROWTH_ITEM = "retry, "
+D1_GROWTH_SIZES = (100, 400)
+D1_GROWTH_SLACK = 2
+# a negation only in a lead's if or when condition makes no prohibition, so the item under it warns on the line
+# given in D1_CONDITION_LEAD_LINES; with the condition's words read (d1_unconditioned the identity) each was quiet
+D1_CONDITION_LEAD = ("If the tool is not available, do the following:\n- run the denied step another way.\n",
+                     "If a check is not green, do this:\n1. If its command is denied, run it another way.\n",
+                     "Do the following when the tool is not available:\n- run the denied step another way.\n")
+D1_CONDITION_LEAD_LINES = ([2], [2], [2])
+# control: a negation in the lead's main clause, after a negated condition, is still a prohibition, so the item is
+# quiet; with every word of the lead read as a condition it warns on line 2
+D1_CONDITION_LEAD_PROHIBITED = ("If the tool is not available, never do any of the following:\n"
+                                "- run the denied step another way.\n")
+# named misses, pinned, each quiet: a reroute after a fronted exclusion that an or clause and a bare comma clause
+# follow (with d1_listed always false it warns on line 1), a negation after unless in a lead (with no lead
+# prohibition it warns on line 2), and a negated lead carried past a blank line into a separate later list until
+# a paragraph that is not a list item (with no lead prohibition it warns on line 6)
+D1_READING_MISSES = ("If denied, instead of waiting, run it inline or retry it, as you see fit.\n",
+                     "Unless the tool is not available, do the following:\n- run the denied step another way.\n",
+                     "Do not do any of the following:\n- push\n- force\n\n1. Run the tests.\n"
+                     "2. If denied, run them another way.\n")
+# one fixture per lead condition no other fixture pins, each with its outcome here: the colon that makes a lead (a
+# sentence without one carries nothing), the first sentence of an item as the only one carried into, a nested lead
+# inheriting the outer lead's negation, and otherwise after a comma not restarting a prohibition
+D1_LEAD_CONDITIONS = ("Never retry a denied step.\n- If denied, run it another way.\n",
+                      "Never do any of the following:\n- wait for approval. If denied, run it another way.\n",
+                      "Never do any of the following:\n- do these:\n  - run a denied step another way.\n",
+                      "If denied, do not retry, otherwise run it inline.\n")
+D1_LEAD_CONDITIONS_LINES = ([2], [2], [], [])
+# named shapes, pinned (no reading changed): a coordinator before instead or then, or a comma after then, keeps the
+# prohibition, so each is a quiet miss; and leads D1 does not recognise, a comma before instead with nothing as the
+# alternative, and a fronted list with no bare comma clause after it or with no and or or each warn on the line
+# given in D1_FALSE_WARNED_LINES
+D1_COORDINATED_MISSES = ("If denied, do not wait and instead run it inline.\n",
+                         "If denied, do not wait but instead run it inline.\n",
+                         "If denied, do not wait, and instead run it inline.\n",
+                         "If denied, do not wait, and then run it inline.\n",
+                         "If denied, do not wait, then, run it inline.\n",
+                         "If denied, do not stop, but run it another way.\n")
+D1_FALSE_WARNED = ("NEVER:\n- run a denied step another way.\n",
+                   "**Never do any of the following:**\n- run a denied step another way.\n",
+                   "Never do any of these things\n- run a denied step another way.\n",
+                   "If denied, never run it another way, instead do nothing.\n",
+                   "If denied, rather than retry, rerun, or run it inline.\n",
+                   "If denied, rather than retry, rerun, run it inline, report the refusal.\n")
+D1_FALSE_WARNED_LINES = ([2], [2], [2], [1], [1], [1])
+# the module docstring's D1 exit guarantee and fronted-exclusion boundary (whitespace runs read as one space), each
+# beside the earlier wording that overstated it (D1_DOC_*_WAS)
+D1_DOC_EXIT = r"D1 denial reroute ADVISORY \(([^)]*)\)"
+D1_DOC_EXIT_TEXT = ("a WARN; its findings never refuse and take no part in the refusal or exit selection, though "
+                    "printing one can fail on an output encoding and end the run with exit 1: see below")
+D1_DOC_EXIT_WAS = "a WARN; it never refuses and never changes the exit code"
+D1_DOC_FRONTED = r"that opens with instead of or rather than ends at ([^(]*?) \("
+D1_DOC_FRONTED_TEXT = ("the next clause whose opener is a bare comma, not at every comma: a comma followed by and "
+                       "or or opens its clause with that word, which carries the exclusion, and a bare comma between "
+                       "the items of a coordinated list, closed by a clause opened by and or or and then a clause "
+                       "opened by a bare comma, does not end it")
+D1_DOC_FRONTED_WAS = "the next clause opened by a comma"
+# the gates manifest's brief-capability residue (whitespace runs read as one space) states D1's exit guarantee and
+# fronted-exclusion boundary in the docstring's words, and every statement of D1_DOC_SHARED in both; the earlier
+# residue's exit wording and boundary are D1_MANIFEST_EXIT_WAS and D1_DOC_FRONTED_WAS
+D1_MANIFEST_EXIT = r"D1 \(ADVISORY, for every family, read over the whole brief before scope\) is advisory \(([^)]*)\)"
+D1_MANIFEST_EXIT_WAS = "is a WARN that never refuses and never changes the exit code"
+# the whole D1 entry: the docstring's after its label up to the next section, and the residue's after its label to
+# its end; the two must be the same text
+D1_DOC_ENTRY = r"D1 denial reroute ADVISORY \((.*?) TEXT\. A brief holding"
+D1_MANIFEST_ENTRY = r"D1 \(ADVISORY, for every family, read over the whole brief before scope\) is advisory \((.*)\Z"
+D1_DOC_SHARED = ("that negation is held apart from the item's own, so no restart inside the item ends it",
+                 "\"If denied, instead of waiting, and run it inline.\", a named miss",
+                 "a negation in an if or when condition not counting: from if or when to the end of its clause, and "
+                 "each clause after it in its segment opened by and or or")
+
+
+def d1_gate_residue():
+    """The brief-capability gate's residue in the gates manifest of this tree (MANIFEST_RELS), whitespace runs read
+    as one space, or None when the manifest or the gate cannot be read."""
+    try:
+        with open(ROOT / MANIFEST_RELS["gate"], "rb") as handle:
+            gates = tomllib.loads(handle.read().decode("utf-8")).get("gate", [])
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError):
+        return None
+    residue = next((gate.get("residue") for gate in gates if isinstance(gate, dict)
+                    and gate.get("id") == "brief-capability"), None)
+    return " ".join(residue.split()) if isinstance(residue, str) else None
+
+
+# a following or below that modifies a noun introduces nothing, so a clause after the colon that opens with instead
+# or otherwise still starts afresh and warns, on the line given in D1_MODIFIER_KEPT_LINES; with the negation kept
+# after every colon closing a clause that ends with following or below (the previous reading) each was quiet
+D1_MODIFIER_KEPT = ("If denied, do not wait for the instructions below: instead, run it inline.\n",
+                    "If denied, do not wait for the\ninstructions below:\ninstead, run it inline.\n",
+                    "If denied, do not wait for the instructions below: otherwise run it inline.\n",
+                    "If denied, do not wait for the\ninstructions below: otherwise run\nit inline.\n",
+                    "If denied, do not run the steps following: instead, run it inline.\n",
+                    "If denied, do not run the steps\nfollowing: otherwise run\nit inline.\n")
+D1_MODIFIER_KEPT_LINES = ([1], [3], [1], [2], [1], [2])
 W1_PROHIBITED = ("Do not run `git push`.\n", "Never run git commit -a.\n")
 W1_PROHIBITED_VOIDED = "Do not run `git push`. Run it anyway.\n"
 # the same prohibitions alone in a fence, read as in prose; and a fence whose other sentence asks
@@ -7242,8 +8037,94 @@ def self_test(report_path=None):
             # its whole lead (quadratic: 64 KiB took 48 s against 1.1 s on 8 KiB), and to copy the text before a
             # deictic word
             ("perf/p8-long-lead-linear", "print ", "WORKER_STATUS ", ""),
-            ("perf/p8-deictic-below-linear", "write the block below ", "WORKER_STATUS ", "")):
+            ("perf/p8-deictic-below-linear", "write the block below ", "WORKER_STATUS ", ""),
+            # D1: one sentence of many refusals and prohibited action clauses, and one of many wrapped lines, each
+            # read in one forward pass with no rescan of earlier refusals or clauses
+            ("perf/d1-long-sentence-linear", "if denied, do not run it inline and ", "", ""),
+            ("perf/d1-wrapped-lines-linear", "if refused, run it\n", "", "")):
         check(check_id, _linear(unit, prefix, suffix), True)
+    # D1: one long coordinated fronted list, whose list boundaries are found in one pass, not by reading the
+    # remaining items for each item (that rescan made the work quadratic in the items). The input repeats whole
+    # items, and whitespace before the closing or clause fills the bytes a whole item would not: the item's length
+    # divides the two sizes' difference, so one pad serves both. The row rebuilds both inputs as LINEAR_CHILD does
+    # and requires each to keep the closing or clause and to read every item as listed (a last item cut short and
+    # joined to the suffix leaves no coordinated list to time)
+    linear_lead, linear_sizes = "Input notes.\n\n", (1 << 13, 1 << 16)
+    linear_builder = ("lead = {!r}\n".format(linear_lead), "for size in (1 << 13, 1 << 16):\n",
+                      "    body = size - len(lead) - len(prefix) - len(suffix)\n",
+                      "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n")
+
+    def linear_texts(unit, prefix, suffix):
+        """The briefs LINEAR_CHILD times for `unit`, `prefix` and `suffix`, built as its loop builds them."""
+        return [linear_lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix for body in (
+            size - len(linear_lead) - len(prefix) - len(suffix) for size in linear_sizes)]
+
+    def d1_list_answers(text):
+        """The distinct (opener, words, listed) of the D1 clauses of `text`, in first-seen order."""
+        return list(dict.fromkeys((clause[1], tuple(word for word, _, _ in clause[2]), answer)
+                                  for paragraph in d1_paragraphs(text) for _, clauses in d1_sentences(paragraph)
+                                  for clause, answer in zip(clauses, d1_listed(clauses))))
+
+    class D1ReadsExceeded(Exception):
+        """Raised by D1CountedClauses once the clause reads pass the tally's limit."""
+
+    class D1CountedClauses(list):
+        """A sentence's clauses that add one to tally[0] for each clause read, by index or by iteration, and raise
+        D1ReadsExceeded once tally[0] passes tally[1]."""
+
+        def __init__(self, clauses, tally):
+            list.__init__(self, clauses)
+            self.tally = tally
+
+        def tally_read(self):
+            self.tally[0] += 1
+            if self.tally[0] > self.tally[1]:
+                raise D1ReadsExceeded(self.tally[1])
+
+        def __getitem__(self, key):
+            self.tally_read()
+            return list.__getitem__(self, key)
+
+        def __iter__(self):
+            for clause in list.__iter__(self):
+                self.tally_read()
+                yield clause
+
+    def d1_text_reads(text, limit=float("inf")):
+        """(clause reads, D1 lines) of rule_d1 on `text`; D1ReadsExceeded once the reads pass `limit`."""
+        tally = [0, limit]
+        with _patched(d1_sentences=lambda paragraph, real=d1_sentences: [
+                (sentence, D1CountedClauses(clauses, tally)) for sentence, clauses in real(paragraph)]):
+            lines = [line for _, _, line, _, _ in rule_d1(text)]
+        return tally[0], lines
+
+    def d1_timed_reads(texts):
+        """"linear" when rule_d1's clause reads on the larger of the two timed `texts` are within D1_GROWTH_SLACK
+        times the size ratio of those on the smaller and both are quiet, else "superlinear" (or "warned") with the
+        counts. Counting stops at that bound, so a rescan fails here in bounded time whatever the host's load."""
+        small, small_lines = d1_text_reads(texts[0])
+        bound = D1_GROWTH_SLACK * small * linear_sizes[1] // linear_sizes[0]
+        try:
+            large, large_lines = d1_text_reads(texts[1], bound)
+        except D1ReadsExceeded:
+            return "superlinear ({} clause reads at 8 KiB, over {} at 64 KiB)".format(small, bound)
+        if small_lines or large_lines:
+            return "warned ({!r} at 8 KiB, {!r} at 64 KiB)".format(small_lines, large_lines)
+        return "linear"
+
+    d1_prefix, d1_tail = D1_GROWTH_TEXT.split("{}")
+    d1_pad = (linear_sizes[0] - len(linear_lead) - len(d1_prefix) - len(d1_tail)) % len(D1_GROWTH_ITEM)
+    d1_suffix = " " * d1_pad + d1_tail
+    d1_timed_texts = linear_texts(D1_GROWTH_ITEM, d1_prefix, d1_suffix)
+    d1_listed_answers = [(None, ("input", "notes"), False), (None, ("if", "denied"), True),
+                         (",", ("rather", "than", "retry"), True), (",", ("retry",), True),
+                         ("or", ("run", "it", "inline"), False), (",", ("report", "the", "refusal"), False)]
+    # the counted reads on the timed briefs discriminate deterministically; the timing beside them is the end-to-end
+    # bound every perf row shares (with the rescan restored it measured near its 16x bound, so it can pass alone)
+    check("perf/d1-fronted-list-linear", (
+        all(line in LINEAR_CHILD for line in linear_builder),
+        [d1_list_answers(text) for text in d1_timed_texts], d1_timed_reads(d1_timed_texts),
+        _linear(D1_GROWTH_ITEM, d1_prefix, d1_suffix)), (True, [d1_listed_answers] * len(linear_sizes), "linear", True))
     # ---------- the advisory rules: printed, never refusing ----------
     check("r1/run-prose-advisory", _outcome(RUN_PROSE), (0, [("R1", "ADVISORY")]))
     check("r1/negated-ok", _outcome(NEGATED), (0, []))
@@ -7927,6 +8808,234 @@ def self_test(report_path=None):
               (EXIT_OK, 1, True, True, 1, EXIT_REFUSE, True, True, False))
     finally:
         shutil.rmtree(t1_tmp, ignore_errors=True)
+    # ---------- D1: a sentence that asks to achieve a refused step another way (ADVISORY: a WARN) ----------
+    def d1_lines(text):
+        """The line of each D1 finding rule_d1 gives for a synthetic brief, in order."""
+        return [line for _, _, line, _, _ in rule_d1(text)]
+
+    def d1_evaluated(text, family="alpha", scoped=True):
+        """The line of each D1 finding evaluate() gives for a synthetic brief, in order."""
+        return [line for rule, _, line, _, _ in evaluate(text.encode("utf-8"), family, t1_table, scoped)[1]
+                if rule == "D1"]
+
+    d1_warned = (0, [("D1", "WARN")])
+    d1_write = "If denied, write it another way.\n"
+    check("d1/warn-forms", [d1_lines(text) for text in D1_WARNED], [[1]] * len(D1_WARNED))
+    check("d1/prohibited-quiet", [d1_lines(text) for text in D1_PROHIBITED], [[]] * len(D1_PROHIBITED))
+    check("d1/negated-refusal-quiet", [d1_lines(text) for text in D1_NEGATED_REFUSAL], [[]] * len(D1_NEGATED_REFUSAL))
+    check("d1/not-asked-quiet", [d1_lines(text) for text in D1_NOT_ASKED], [[]] * len(D1_NOT_ASKED))
+    check("d1/separated-quiet", [d1_lines(text) for text in D1_SEPARATED], [[]] * len(D1_SEPARATED))
+    check("d1/whole-words-quiet", [d1_lines(text) for text in D1_NOT_WORDS], [[]] * len(D1_NOT_WORDS))
+    check("d1/named-misses-quiet", [d1_lines(text) for text in D1_MISSES], [[]] * len(D1_MISSES))
+    check("d1/colon-carries-prohibition-quiet", [d1_lines(text) for text in D1_COLON_CARRIED],
+          [[]] * len(D1_COLON_CARRIED))
+    check("d1/coordination-carries-exclusion-quiet", [d1_lines(text) for text in D1_EXCLUSION_CARRIED],
+          [[]] * len(D1_EXCLUSION_CARRIED))
+    check("d1/scope-boundaries-warned", [d1_lines(text) for text in D1_SCOPE_KEPT], list(D1_SCOPE_KEPT_LINES))
+    check("d1/introduced-list-keeps-prohibition-quiet", [d1_lines(text) for text in D1_INTRODUCED_LIST],
+          [[]] * len(D1_INTRODUCED_LIST))
+    check("d1/modified-introducer-warned", [d1_lines(text) for text in D1_MODIFIER_KEPT],
+          list(D1_MODIFIER_KEPT_LINES))
+    check("d1/later-text-introducer-quiet", [d1_lines(text) for text in D1_LATER_TEXT_KEPT],
+          [[]] * len(D1_LATER_TEXT_KEPT))
+    check("d1/unintroduced-warned", [d1_lines(text) for text in D1_NOT_INTRODUCED], [[1]] * len(D1_NOT_INTRODUCED))
+    check("d1/comma-restart-warned", [d1_lines(text) for text in D1_RESTARTED], list(D1_RESTARTED_LINES))
+    check("d1/negated-lead-carries-quiet", [d1_lines(text) for text in D1_LEAD_CARRIED], [[]] * len(D1_LEAD_CARRIED))
+    check("d1/lead-scope-warned", [d1_lines(text) for text in D1_LEAD_KEPT], list(D1_LEAD_KEPT_LINES))
+    check("d1/negated-lead-restart-quiet", [d1_lines(text) for text in D1_LEAD_RESTART_CARRIED],
+          [[]] * len(D1_LEAD_RESTART_CARRIED))
+    check("d1/lead-restart-scope-warned", [d1_lines(text) for text in D1_LEAD_RESTART_KEPT],
+          list(D1_LEAD_RESTART_KEPT_LINES))
+    check("d1/fronted-coordinated-quiet", [d1_lines(text) for text in D1_FRONTED_COORDINATED],
+          [[]] * len(D1_FRONTED_COORDINATED))
+    check("d1/fronted-list-quiet", [d1_lines(text) for text in D1_FRONTED_LIST], [[]] * len(D1_FRONTED_LIST))
+    check("d1/fronted-list-scope-warned", [d1_lines(text) for text in D1_FRONTED_LIST_KEPT],
+          [[1]] * len(D1_FRONTED_LIST_KEPT))
+    check("d1/condition-lead-warned", [d1_lines(text) for text in D1_CONDITION_LEAD], list(D1_CONDITION_LEAD_LINES))
+    check("d1/condition-lead-prohibition-quiet", d1_lines(D1_CONDITION_LEAD_PROHIBITED), [])
+    check("d1/reading-misses-quiet", [d1_lines(text) for text in D1_READING_MISSES], [[]] * len(D1_READING_MISSES))
+    check("d1/lead-conditions", [d1_lines(text) for text in D1_LEAD_CONDITIONS], list(D1_LEAD_CONDITIONS_LINES))
+    check("d1/coordinated-misses-quiet", [d1_lines(text) for text in D1_COORDINATED_MISSES],
+          [[]] * len(D1_COORDINATED_MISSES))
+    check("d1/false-warnings-warned", [d1_lines(text) for text in D1_FALSE_WARNED], list(D1_FALSE_WARNED_LINES))
+
+    def d1_clause_reads(items):
+        """(clause reads, D1 lines) of rule_d1 on D1_GROWTH_TEXT with `items` list items."""
+        return d1_text_reads(D1_GROWTH_TEXT.format(D1_GROWTH_ITEM * items))
+
+    def d1_growth():
+        """"linear" when the clause reads at the larger D1_GROWTH_SIZES size are within D1_GROWTH_SLACK times the
+        size ratio of those at the smaller and both sizes are quiet, else "superlinear" (or "warned") with the
+        counts."""
+        (small, small_lines), (large, large_lines) = (d1_clause_reads(items) for items in D1_GROWTH_SIZES)
+        if small_lines or large_lines:
+            return "warned ({!r} at {} items, {!r} at {})".format(small_lines, D1_GROWTH_SIZES[0], large_lines,
+                                                                 D1_GROWTH_SIZES[1])
+        if large * D1_GROWTH_SIZES[0] <= D1_GROWTH_SLACK * D1_GROWTH_SIZES[1] * small:
+            return "linear"
+        return "superlinear ({} clause reads at {} items, {} at {})".format(small, D1_GROWTH_SIZES[0], large,
+                                                                            D1_GROWTH_SIZES[1])
+
+    # a long coordinated fronted list costs D1 work linear in its items, judged by counted clause reads
+    check("d1/fronted-list-growth-linear", d1_growth(), "linear")
+
+    def d1_doc(pattern):
+        """An outcome: the first group of `pattern` in the module docstring with whitespace runs as one space, or
+        None."""
+        def outcome():
+            found = re.search(pattern, " ".join(__doc__.split()))
+            return found.group(1) if found else None
+        return outcome
+
+    # the D1 entry states its exit guarantee with the encoding failure it discloses below, and the boundary of a
+    # fronted exclusion as the clause opener the code compares
+    check("d1/doc-exit-guarantee", d1_doc(D1_DOC_EXIT)(), D1_DOC_EXIT_TEXT)
+    check("d1/doc-fronted-boundary", d1_doc(D1_DOC_FRONTED)(), D1_DOC_FRONTED_TEXT)
+
+    def d1_manifest(pattern):
+        """An outcome: the first group of `pattern` in the gate residue (d1_gate_residue), or None."""
+        def outcome():
+            found = re.search(pattern, d1_gate_residue() or "")
+            return found.group(1) if found else None
+        return outcome
+
+    def d1_shared(read):
+        """An outcome: whether each D1_DOC_SHARED statement is in the text `read` gives, in order."""
+        return lambda: [statement in (read() or "") for statement in D1_DOC_SHARED]
+
+    # the gates manifest residue says what the docstring says: the same exit guarantee, fronted boundary and shared
+    # statements, each read from the manifest file
+    check("d1/manifest-exit-guarantee", d1_manifest(D1_MANIFEST_EXIT)(), D1_DOC_EXIT_TEXT)
+    check("d1/manifest-fronted-boundary", d1_manifest(D1_DOC_FRONTED)(), D1_DOC_FRONTED_TEXT)
+    check("d1/doc-shared-statements", d1_shared(lambda: " ".join(__doc__.split()))(), [True] * len(D1_DOC_SHARED))
+    check("d1/manifest-shared-statements", d1_shared(lambda: d1_gate_residue())(), [True] * len(D1_DOC_SHARED))
+
+    def d1_same_entry():
+        """Whether the residue's D1 entry is the docstring's D1 entry, word for word (both found)."""
+        doc_entry, manifest_entry = d1_doc(D1_DOC_ENTRY)(), d1_manifest(D1_MANIFEST_ENTRY)()
+        return doc_entry is not None and doc_entry == manifest_entry
+
+    check("d1/manifest-entry-matches-doc", d1_same_entry(), True)
+
+    def d1_residue_on(body):
+        """d1_gate_residue on a tree whose gates manifest holds `body`, or the class of a parse failure that escaped
+        its handler."""
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-d1-residue-"))
+        try:
+            os.makedirs(tmp / Path(MANIFEST_RELS["gate"]).parent)
+            with open(tmp / MANIFEST_RELS["gate"], "w", encoding="utf-8") as handle:
+                handle.write(body)
+            with _patched(ROOT=tmp):
+                return d1_gate_residue()
+        except (ValueError, RecursionError, MemoryError) as exc:
+            return "escaped " + type(exc).__name__
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # the residue reader gives None, never a traceback, on a gates manifest that fails to parse outside
+    # TOMLDecodeError (deep nesting recurses; an over-long integer exceeds the int conversion limit; memory
+    # exhaustion is injected at the parse call), and still reads a residue that parses
+    with _injected_memory_exhaustion():
+        check("d1/manifest-parse-failure-none",
+              [d1_residue_on(body) for body in (
+                  "x = " + "[" * 8000 + "]" * 8000, "x = " + "1" * 5000, "x = 1  # " + INJECTED_EXHAUSTION_MARK + "\n",
+                  "[[gate]]\nid = \"brief-capability\"\nresidue = \"a  b\"\n")],
+              [None, None, None, "a b"])
+    # a wrapped sentence is read whole and named by the line of its first matching action verb; a semicolon keeps
+    # the sentence, so the refusal before it pairs with the action after it
+    check("d1/wrapped-line-warned",
+          [d1_lines(text) for text in ("If denied,\nrun it another\nway.\n", "- If denied,\n    run it inline.\n",
+                                       "If denied, stop;\nrun inline.\n", "If denied, run it by\nother\nmeans.\n")],
+          [[2], [2], [2], [1]])
+    check("d1/one-warning-per-sentence",
+          [d1_lines(text) for text in ("If denied, run it inline and execute it another way.\n",
+                                       "If denied, run it inline inline instead another way; execute it inline.\n")],
+          [[1], [1]])
+    check("d1/source-order",
+          [d1_lines(text) for text in ("If denied, run inline. If refused, execute inline.\n",
+                                       "If denied, run inline. Text.\nIf refused,\nexecute inline.\n")],
+          [[1, 1], [1, 3]])
+    # quotations and fences are read: an accepted false warning, so no formatting exempts an instruction
+    check("d1/quotation-and-fence-warned",
+          [d1_lines(text) for text in ("\"If denied, run inline.\"\n", "```text\nIf denied, run inline.\n```\n")],
+          [[1], [2]])
+    check("d1/every-refusal-word",
+          [d1_lines("If {}, run it inline.\n".format(word)) for word in ("denied", "refused", "blocked", "rejected")],
+          [[1]] * 4)
+    d1_verbs = ("run", "execute", "do", "perform", "complete", "accomplish", "achieve", "implement", "retry", "rerun",
+                "use", "invoke", "call", "write", "try")
+    check("d1/every-action-verb", [d1_lines("If denied, {} it inline.\n".format(verb)) for verb in d1_verbs],
+          [[1]] * len(d1_verbs))
+    d1_alternatives = ("instead", "another way", "inline", "otherwise", "by other means")
+    check("d1/every-alternative",
+          [d1_lines("If denied, run it {}.\n".format(phrase)) for phrase in d1_alternatives]
+          + [d1_lines("If denied, run it {}.\n".format(phrase.replace(" ", ", "))) for phrase in d1_alternatives
+             if " " in phrase],
+          [[1]] * len(d1_alternatives) + [[]] * 2)
+    d1_negations = ("not", "never", "no", "nor", "neither", "without", "don't", "mustn't", "shouldn't", "won't",
+                    "cannot", "can't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't")
+    # each negation word both rejects the action whose clause holds it and makes a refusal after it ineligible
+    check("d1/every-negation",
+          [(d1_lines("If denied, run it {} inline.\n".format(word)), d1_lines("If {} denied, run it inline.\n".format(
+              word))) for word in d1_negations], [([], [])] * len(d1_negations))
+    # a numbered item marker holds at most nine digits, a heading at most three spaces of indentation and six #
+    check("d1/structure-bounds",
+          [d1_lines(text) for text in ("If denied,\n123456789) run inline.\n", "If denied,\n1234567890) run inline.\n",
+                                       "If denied,\n   # run inline.\n", "If denied,\n    # run inline.\n",
+                                       "If denied,\n####### run inline.\n", "If denied,\n\t\t- run inline.\n",
+                                       "If denied,\n        * run inline.\n", "If denied,\nTask: run inline.\n")],
+          [[], [2], [], [2], [2], [], [], [2]])
+    check("d1/excerpt-and-message",
+          [rule_d1("Context first. If denied,\n  run it\n inline. Then stop.\n"),
+           d1_excerpt("a" * D1_EXCERPT_CHARS), d1_excerpt("a" * (D1_EXCERPT_CHARS + 1)),
+           d1_excerpt("If denied,\n\trun it\x01 inline."),
+           reroute_warnings("a\x07b.md", [("D1", "WARN", 3, "m", "e"), ("T1", "WARN", 4, "n", "f")])],
+          [[("D1", "WARN", 2, D1_MESSAGE, "If denied, run it inline.")], "a" * 200, "a" * 200 + "...",
+           "If denied, run it\\x01 inline.", "; WARN D1 a\\x07b.md:3: m: e"])
+    # the same WARN for every family, with scope on and off; D1 alone exits 0, a HARD hit from another rule keeps
+    # exit 1 beside it, a brief that cannot be evaluated still exits 2, and family gamma reads its own R1 advisory
+    check("d1/every-family-and-scope",
+          [(_outcome(d1_write, family, scoped), d1_evaluated(d1_write, family, scoped))
+           for family in ("alpha", "beta", "gamma") for scoped in (True, False)], [(d1_warned, [1])] * 6)
+    check("d1/advisory-beside-other-rules",
+          [_outcome("If denied, run it another way.\n", "gamma"),
+           _outcome(d1_write + "\nRead only `git show HEAD:x.py`.\n", "gamma"),
+           _outcome(b"If denied,\r\nrun it inline.\r\n", "alpha"),
+           _outcome(b"If denied, run it inline.\xff\n", "alpha")],
+          [(0, [("D1", "WARN"), ("R1", "ADVISORY")]), (1, [("D1", "WARN"), ("S3", "HARD")]), "CannotEvaluate",
+           "CannotEvaluate"])
+    d1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-d1-"))
+    try:
+        with open(d1_tmp / "table.toml", "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        d1_printed = []
+        d1_brief = "Context.\nIf denied, run it\nanother way.\n"
+        for text, family in ((d1_brief, "alpha"), (d1_brief + "\nRead only `git show HEAD:x.py`.\n", "gamma"),
+                             ("TASK: remove the flaky test.\nIf denied, run it\nanother way.\n", "alpha"),
+                             ("TASK: remove the flaky test.\n", "alpha")):
+            with open(d1_tmp / "brief.md", "w", encoding="utf-8") as handle:
+                handle.write(text)
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                code = run(str(d1_tmp / "brief.md"), family, str(d1_tmp / "table.toml"))
+            d1_printed.append((code, printed.getvalue().splitlines()))
+        d1_warn_text = REROUTE_WARN.format(d1_tmp / "brief.md", 2, D1_MESSAGE, "If denied, run it another way.")
+        d1_t1_text = REMOVAL_WARN.format(
+            d1_tmp / "brief.md", 1, "task line asks to remove a test and the brief has no COVERAGE-ACCOUNTING: line "
+            "or no AUTHORIZATION: line with text after it", "TASK: remove the flaky test.")
+        (ok_code, ok_lines), (refuse_code, refuse_lines), (both_code, both_lines), (only_code, t1_only) = d1_printed
+        # D1 is ADVISORY: exit 0, no finding line of its own, one WARN at the end of the OK summary line; with a
+        # refusal from another rule the exit code is that rule's and the WARN ends the REFUSE line; after a T1 WARN
+        # it comes last; and a brief with no D1 hit prints no D1 text
+        check("d1/main-summary-line",
+              (ok_code, len(ok_lines), ok_lines[-1].startswith("OK: family alpha"), ok_lines[-1].endswith(d1_warn_text),
+               ok_lines[-1].count("WARN D1"), refuse_code, refuse_lines[-1].startswith("REFUSE: family gamma"),
+               refuse_lines[-1].endswith(d1_warn_text), any("D1" in line for line in refuse_lines[:-1]),
+               both_code, len(both_lines), both_lines[-1].endswith(d1_t1_text + d1_warn_text),
+               only_code, any("D1" in line for line in t1_only), t1_only[-1].endswith(d1_t1_text)),
+              (EXIT_OK, 1, True, True, 1, EXIT_REFUSE, True, True, False, EXIT_OK, 1, True, EXIT_OK, False, True))
+    finally:
+        shutil.rmtree(d1_tmp, ignore_errors=True)
     w1_tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-w1-"))
     try:
         with open(w1_tmp / "brief.md", "w", encoding="utf-8") as handle:
@@ -9919,7 +11028,176 @@ def self_test(report_path=None):
     check("revert/t1-unclosed-fence-red", *flip([lambda: _outcome(T1_UNCLOSED_FENCE, "alpha")], [(0, [])],
                                                 t1_unclosed=lambda hidden: False))
     check("revert/t1-fence-indent-red", *flip([warned(T1_INDENTED_FENCE)], [False], T1_FENCE_INDENT=8))
-    check("revert/every-flip-ran", len(flipped), 291)
+
+    def reroutes(text):
+        """The lines of the D1 WARNs evaluate() gives a brief (D1 is advisory, so its flips are read from its WARNs,
+        not the exit code), or "CannotEvaluate"."""
+        def outcome():
+            try:
+                return d1_evaluated(text)
+            except CannotEvaluate:
+                return "CannotEvaluate"
+        return outcome
+
+    def d1_one_sentence(paragraph, real=d1_sentences):
+        """d1_sentences with every sentence of the paragraph joined into one, each clause boundary kept."""
+        found = real(paragraph)
+        return [(" ".join(text for text, _ in found), [clause for _, clauses in found for clause in clauses])
+                ] if found else []
+
+    check("revert/d1-red", *flip([reroutes(D1_WARNED[0])], [[]], rule_d1=nothing))
+    check("revert/d1-refusals-red", *flip([reroutes(D1_WARNED[0]), reroutes(D1_WARNED[2])], [[], []],
+                                          D1_REFUSALS=frozenset()))
+    check("revert/d1-actions-red", *flip([reroutes(D1_WARNED[0]), reroutes(D1_WARNED[3])], [[], []],
+                                         D1_ACTIONS=frozenset()))
+    check("revert/d1-alternatives-red", *flip([reroutes(D1_WARNED[0]), reroutes(D1_WARNED[2])], [[], []],
+                                              D1_ALTERNATIVES=()))
+    check("revert/d1-negation-red", *flip([reroutes(D1_PROHIBITED[0]), reroutes(D1_NEGATED_REFUSAL[0])], [[1], [1]],
+                                          D1_NEGATIONS=frozenset()))
+    check("revert/d1-wrap-red", *flip([reroutes("If denied,\nrun it another\nway.\n")], [[]],
+                                      d1_paragraphs=lambda text, real=d1_paragraphs: [
+                                          [piece] for paragraph in real(text) for piece in paragraph]))
+    check("revert/d1-sentence-red", *flip([reroutes(D1_SEPARATED[0])], [[1]], d1_sentences=d1_one_sentence))
+    check("revert/d1-list-red", *flip([reroutes(D1_SEPARATED[5])], [[2]], D1_LIST_RE=never))
+    # the earlier scope fixes, each reverted: a colon as a segment stop again, no exclusion carry, no fresh start at
+    # instead or otherwise (the kept warnings that rest on it go quiet)
+    check("revert/d1-colon-carry-red", *flip([reroutes(text) for text in D1_COLON_CARRIED + D1_MISSES[2:3]],
+                                             list(D1_COLON_CARRIED_WAS) + [[1]], D1_SEGMENT_STOPS=";:",
+                                             D1_CLAUSE_STOPS=","))
+    check("revert/d1-exclusion-carry-red", *flip([reroutes(text) for text in D1_EXCLUSION_CARRIED + D1_MISSES[3:4]],
+                                                 list(D1_EXCLUSION_CARRIED_WAS) + [[1]], D1_CARRIERS=frozenset()))
+    check("revert/d1-scope-opener-red", *flip([reroutes(D1_SCOPE_KEPT[index]) for index in (5, 6, 7, 8)],
+                                              [[], [], [], []], D1_SCOPE_OPENERS=frozenset()))
+    # the introducer fix reverted: with no introducer word, instead or otherwise after every colon resets the negation
+    check("revert/d1-introducer-red", *flip([reroutes(text) for text in D1_INTRODUCED_LIST + D1_LATER_TEXT_KEPT],
+                                            list(D1_INTRODUCED_LIST_WAS) + [[1]] * len(D1_LATER_TEXT_KEPT),
+                                            D1_INTRODUCERS=frozenset()))
+    # the narrowing reverted: a clause ending with following or below keeps the negation whatever precedes the word,
+    # so the warnings past a noun the word modifies go quiet
+    check("revert/d1-introducer-object-red", *flip([reroutes(text) for text in D1_MODIFIER_KEPT],
+                                                   [[]] * len(D1_MODIFIER_KEPT),
+                                                   d1_introduces=lambda words: words[-1][0] in D1_INTRODUCERS))
+
+    def d1_introduces_without(negation=True, action=True):
+        """d1_introduces with its negation check (negation=False) or its action check (action=False) removed."""
+        def introduces(words):
+            if not words or words[-1][0] not in D1_INTRODUCERS:
+                return False
+            index = len(words) - 2
+            while index >= 0 and words[index][0] in D1_INTRODUCER_FILLERS:
+                index -= 1
+            return index >= 1 and (not action or words[index][0] in D1_ACTIONS) and (
+                not negation or words[index - 1][0] in D1_NEGATIONS)
+        return introduces
+
+    # each condition of the introducer reading removed in turn: the introduction worded otherwise goes quiet, and the
+    # filler all or everything gone, its fixture warns
+    check("revert/d1-introducer-negation-red", *flip([reroutes(D1_NOT_INTRODUCED[0])], [[]],
+                                                     d1_introduces=d1_introduces_without(negation=False)))
+    check("revert/d1-introducer-action-red", *flip([reroutes(D1_NOT_INTRODUCED[1])], [[]],
+                                                   d1_introduces=d1_introduces_without(action=False)))
+    check("revert/d1-introducer-all-red", *flip([reroutes(D1_INTRODUCED_LIST[4])], [[1]],
+                                                D1_INTRODUCER_FILLERS=D1_INTRODUCER_FILLERS - {"all"}))
+    check("revert/d1-introducer-everything-red", *flip([reroutes(D1_LATER_TEXT_KEPT[2])], [[1]],
+                                                       D1_INTRODUCER_FILLERS=D1_INTRODUCER_FILLERS - {"everything"}))
+    # the comma restarts and the fronted exclusion reverted: each restarted warning they rest on goes quiet
+    check("revert/d1-comma-instead-red", *flip([reroutes(D1_RESTARTED[index]) for index in (0, 6)], [[], []],
+                                               D1_COMMA_RESTARTS=frozenset()))
+    check("revert/d1-comma-then-red", *flip([reroutes(D1_RESTARTED[index]) for index in (1, 2)], [[], []],
+                                            D1_RESTART_OPENERS=frozenset()))
+    check("revert/d1-fronted-cutoff-red", *flip([reroutes(D1_RESTARTED[index]) for index in (3, 4, 5, 6)],
+                                                [[], [], [], []], D1_FRONTED_ENDS=frozenset()))
+    # the lead carry reverted (nothing carried into an item), widened to every lead, and with every later item, and
+    # every later paragraph, read as under the last lead
+    check("revert/d1-lead-carry-red", *flip([reroutes(text) for text in D1_LEAD_CARRIED], list(D1_LEAD_CARRIED_WAS),
+                                            d1_prohibits=lambda clauses, carried=False: False))
+    check("revert/d1-lead-negated-only-red", *flip([reroutes(D1_LEAD_KEPT[0])], [[]],
+                                                   d1_prohibits=lambda clauses, carried=False: True))
+    check("revert/d1-lead-nesting-red", *flip([reroutes(D1_LEAD_KEPT[index]) for index in (1, 2)], [[], []],
+                                              d1_nested=lambda lead_depth, depth: True))
+    # the lead's negation held apart reverted: read as the item's own negation, a restart in the item clears it and
+    # each restarted item warns again; widened past the first segment, the later-segment control goes quiet; and
+    # with every lead read as negated, the controls under an unnegated lead go quiet
+    check("revert/d1-lead-restart-red", *flip(
+        [reroutes(text) for text in D1_LEAD_RESTART_CARRIED], list(D1_LEAD_RESTART_CARRIED_WAS),
+        d1_scopes=lambda clauses, carried=False: d1_local_scopes(clauses, carried)))
+    check("revert/d1-lead-restart-segment-red", *flip(
+        [reroutes(D1_LEAD_RESTART_KEPT[5])], [[]],
+        d1_scopes=lambda clauses, carried=False: [(clause, negated or carried, excluded)
+                                                  for clause, negated, excluded in d1_local_scopes(clauses)]))
+    check("revert/d1-lead-restart-negated-only-red", *flip(
+        [reroutes(D1_LEAD_RESTART_KEPT[index]) for index in range(5)], [[]] * 5,
+        d1_prohibits=lambda clauses, carried=False: True))
+    # and or or after a comma ending a fronted exclusion as a bare comma does: each pinned case warns
+    check("revert/d1-fronted-coordinated-red", *flip([reroutes(text) for text in D1_FRONTED_COORDINATED], [[1], [1]],
+                                                     D1_FRONTED_ENDS=frozenset((",", "and", "or"))))
+    # the earlier docstring wording restored: each documentation check reads it back
+    d1_doc_was = " ".join(__doc__.split())
+    check("revert/d1-doc-exit-guarantee-red", *flip(
+        [d1_doc(D1_DOC_EXIT)], [D1_DOC_EXIT_WAS], __doc__=d1_doc_was.replace(D1_DOC_EXIT_TEXT, D1_DOC_EXIT_WAS)))
+    check("revert/d1-doc-fronted-boundary-red", *flip(
+        [d1_doc(D1_DOC_FRONTED)], [D1_DOC_FRONTED_WAS],
+        __doc__=d1_doc_was.replace(D1_DOC_FRONTED_TEXT, D1_DOC_FRONTED_WAS)))
+
+    def d1_without_shared(text):
+        """The text with each D1_DOC_SHARED statement removed."""
+        for statement in D1_DOC_SHARED:
+            text = text.replace(statement, "")
+        return text
+
+    check("revert/d1-doc-shared-red", *flip([d1_shared(lambda: " ".join(__doc__.split()))],
+                                            [[False] * len(D1_DOC_SHARED)], __doc__=d1_without_shared(d1_doc_was)))
+    # the gates manifest residue as it was: the unqualified exit wording, the boundary at every comma, and none of the
+    # shared statements; each manifest check reads it back
+    check("revert/d1-manifest-red", *flip(
+        [d1_manifest(D1_MANIFEST_EXIT), d1_manifest(D1_DOC_FRONTED), d1_shared(lambda: d1_gate_residue()),
+         d1_same_entry], [None, D1_DOC_FRONTED_WAS, [False] * len(D1_DOC_SHARED), False],
+        d1_gate_residue=lambda real=d1_gate_residue: d1_without_shared((real() or "").replace(
+            "is advisory (" + D1_DOC_EXIT_TEXT + ")", D1_MANIFEST_EXIT_WAS).replace(
+            D1_DOC_FRONTED_TEXT, D1_DOC_FRONTED_WAS))))
+    # the coordinated fronted list reverted (every bare comma ends a fronted exclusion): the three list sentences
+    # warn again, and so does the pinned miss that rests on the list reading
+    check("revert/d1-fronted-list-red", *flip(
+        [reroutes(text) for text in D1_FRONTED_LIST + D1_READING_MISSES[:1]], [[1]] * (len(D1_FRONTED_LIST) + 1),
+        d1_listed=lambda clauses: [False] * len(clauses)))
+
+    def d1_listed_rescanned(clauses):
+        """d1_listed as it was: the remaining clauses of the segment read afresh for every clause."""
+        listed = []
+        for index in range(len(clauses)):
+            segment, later = clauses[index][0], index + 1
+            while later < len(clauses) and clauses[later][0] == segment and clauses[later][1] in D1_FRONTED_ENDS:
+                later += 1
+            listed.append(later + 1 < len(clauses) and clauses[later][0] == clauses[later + 1][0] == segment
+                          and clauses[later][1] in D1_LIST_JOINS and clauses[later + 1][1] in D1_FRONTED_ENDS)
+        return listed
+
+    # the per-clause rescan restored: the same outcomes, but the growth row reads superlinear work
+    check("revert/d1-listed-growth-red", *flip(
+        [lambda: d1_growth().split(" ")[0]] + [reroutes(text) for text in D1_FRONTED_LIST],
+        ["superlinear"] + [[]] * len(D1_FRONTED_LIST), d1_listed=d1_listed_rescanned))
+    # the condition reading reverted (a condition's negation counts): each conditional lead is quiet again; widened
+    # (every word of a lead read as a condition): the true prohibition control warns
+    check("revert/d1-condition-lead-red", *flip([reroutes(text) for text in D1_CONDITION_LEAD],
+                                                [[]] * len(D1_CONDITION_LEAD),
+                                                d1_unconditioned=lambda clauses: clauses))
+    check("revert/d1-condition-lead-main-red", *flip(
+        [reroutes(D1_CONDITION_LEAD_PROHIBITED)], [[2]],
+        d1_unconditioned=lambda clauses: [(number, opener, [("", word[1], word[2]) for word in words])
+                                          for number, opener, words in clauses]))
+    # each lead condition no earlier fixture pinned, mutated in turn: any paragraph a lead, every sentence of an item
+    # carried into, a nested lead that does not inherit, and otherwise restarting after a comma
+    check("revert/d1-lead-colon-red", *flip([reroutes(D1_LEAD_CONDITIONS[0])], [[]], D1_LEAD_END=""))
+    check("revert/d1-lead-first-sentence-red", *flip([reroutes(D1_LEAD_CONDITIONS[1])], [[]], D1_LEAD_SENTENCES=2))
+    check("revert/d1-lead-nested-inherit-red", *flip(
+        [reroutes(D1_LEAD_CONDITIONS[2])], [[3]],
+        d1_prohibits=lambda clauses, carried=False, real=d1_prohibits: real(clauses, False)))
+    check("revert/d1-comma-otherwise-red", *flip([reroutes(D1_LEAD_CONDITIONS[3])], [[1]],
+                                                 D1_COMMA_RESTARTS=D1_COMMA_RESTARTS | {"otherwise"}))
+    # the named lead misses rest on the lead carry: with no lead prohibition each warns
+    check("revert/d1-reading-misses-lead-red", *flip([reroutes(D1_READING_MISSES[index]) for index in (1, 2)],
+                                                     [[2], [6]], d1_prohibits=lambda clauses, carried=False: False))
+    check("revert/every-flip-ran", len(flipped), 331)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -9994,10 +11272,27 @@ def self_test(report_path=None):
           "caps, and is quiet on prohibitions, application fields, the token as a modifier, descriptions of what "
           "the harness prints, analysis of quoted status output, code fences and the verdict and completion "
           "lines (P8), and "
-          "each preflight rule and guard patched out flips its fixture; "
+          "each preflight rule and guard patched out flips its fixture; D1 warns, for every family and never "
+          "refusing, once per sentence that pairs an eligible refused, denied, blocked or rejected with an action "
+          "clause marked as another way, across wrapped lines and semicolons but never across a sentence stop, "
+          "blank line, list item, heading or label, is quiet on negated refusals, on prohibitions (carried across "
+          "commas, and, or, but, then and colons up to a semicolon, and from a lead ending in a colon whose last "
+          "clause is negated outside an if or when condition into the whole first segment of each list item under "
+          "it, past any restart there) and "
+          "on actions an instead of or "
+          "rather than excludes (carried across clauses opened by a comma, a colon, and or or, up to a semicolon, "
+          "but, then or a clause opening with instead or otherwise, and from a clause that opens with instead of or "
+          "rather than only up to the next clause whose opener is a bare comma, so a comma followed by and or or "
+          "keeps it, and so does a bare comma between the items of a coordinated list closed by an and or or "
+          "clause and a bare comma clause), warns again where a clause restarts the sentence's own prohibition, never a lead's (one opening "
+          "with instead or otherwise after a colon, with instead after a comma, or with then right after a comma, "
+          "unless the clause before it is a negated verb phrase whose object is following or below, never one "
+          "where the word modifies a noun), "
+          "and each part "
+          "patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
-          "detects the previous revisions' and loses its canary with each guard patched out; 39 repeated shapes "
+          "detects the previous revisions' and loses its canary with each guard patched out; 42 repeated shapes "
           "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "

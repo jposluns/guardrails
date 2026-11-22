@@ -85,6 +85,10 @@ path = ".aiqt/review-labels.toml"
 reason = "Repository-local configuration of the label shapes and the allow-marker read by tools/check_review_labels.py, which judges the lines a branch adds against its merge base; tracked, not shipped, like .aiqt/newtab.toml. The gate fails closed (exit 2) where the file is absent; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
+path = ".aiqt/review-label-baseline.toml"
+reason = "Repository-local shrink-only finding baseline read by tools/check_review_labels.py (printed by its --write-baseline mode, committed empty), which grandfathers imported label lines by path, line digest and shape; tracked, not shipped, like .aiqt/review-labels.toml. An absent file is the empty baseline; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
+
+[[exclusion]]
 path = ".aiqt/opf-consumer-switch.toml"
 reason = "Repository-local switch list of this repository's own record readers under tools/, read by tools/check_record_readers.py; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such tools; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 

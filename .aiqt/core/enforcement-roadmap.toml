@@ -85,8 +85,8 @@ mechanisms = ["gate:record-drift"]
 
 [[rule]]
 corpus-id = "citint"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:citation-read-check", "hook:citation-read-ledger"]
 
 [[rule]]
 corpus-id = "clmobs"
@@ -310,8 +310,8 @@ mechanisms = ["gate:record-drift", "gate:record-sections", "hook:orch-lease-hear
 
 [[rule]]
 corpus-id = "refcap"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:citation-read-check", "hook:citation-read-ledger"]
 
 [[rule]]
 corpus-id = "reprod"

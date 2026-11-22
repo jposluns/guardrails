@@ -50,8 +50,10 @@ what is particular to this repo (and has no source rule) lives here.
 
 ## Versioning and publication discipline
 
-The pack uses SemVer, single-sourced in `changelog.toml` (the `version` on the latest `[[release]]`); the
-root `VERSION` file is generated from it and drift-gated. The release-delta gate
+The pack uses SemVer, single-sourced in `changelog.toml`; the root `VERSION` file is generated from it and
+drift-gated. At a release it is the `version` on the latest `[[release]]`; between release cuts main
+declares the planned next release in an `[unreleased]` table and `VERSION` is that version plus `-dev`
+(`X.Y.Z-dev`), which the cut folds back to the plain release version (`RELEASING.md`). The release-delta gate
 (`tools/check_release_delta.py`) computes the minimum required bump over the governance surface. Releases
 ship with a per-file manifest and a published ROOT digest, and those hashes are also published
 independently on posluns.dev. By validating them you can identify whether the file you downloaded is the

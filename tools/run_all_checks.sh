@@ -243,6 +243,7 @@ run_gate "opf-standalone-closure-f" python3 -I -B tools/check_opf_standalone_clo
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
+run_gate "versions-selftest" python3 -I -B tools/check_versions.py --self-test
 run_gate "versions"        python3 -I -B tools/check_versions.py
 run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
@@ -323,6 +324,7 @@ run_gate "hook-coverage-behaviour-selftest" python3 -I -B tools/check_selftest_e
 run_gate "hook-coverage-selftest" python3 -I -B tools/check_hook_coverage.py --self-test  # no launch directory in the repository to judge
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
+run_gate "dispatch-marker-selftest" python3 -I -B tools/check_selftest_execution.py --suite dispatch-marker-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 run_gate "ci-site-scope-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 run_gate "gate-record-selftest" python3 -I -B tools/check_selftest_execution.py --suite gate-record-selftest

@@ -139,7 +139,9 @@ AUTHORING_ONLY_REL = (AUTHORING_MARKER_REL, PROJECT_SETTINGS_REL)
 # The pack version file (generated from changelog.toml by tools/gen_changelog.py). From pack
 # PACK_ALIGN_FIRST_VERSION (gen_skill) on, the [plugin] version must equal the pack version
 # (check_plugin_version), in the authoring tree only, where this file is the pack version
-# (gen_skill.resolve_pack_version, which reads and bounds it); an adopter tree is not re-checked.
+# (gen_skill.resolve_pack_version, which reads and bounds it); an adopter tree is not re-checked. Between
+# release cuts it reads X.Y.Z-dev, which the release-time rule does not judge (gen_skill.pack_alignment_problem).
+# This generator never parses it itself.
 PACK_VERSION_REL = "VERSION"
 # The licence copies (Apache License 2.0 section 4(a) and 4(d)): a recipient of either vendored set, the nested
 # plugin an adopter installs alone or the .aiqt/ set an adopter install creates, must receive a copy of the
@@ -331,7 +333,7 @@ def load_manifest(path):
             raise ValueError("{}: [[hook]] unknown key(s): {}".format(path.name, ", ".join(sorted(extra))))
         hid = _req_str(hook, "id", "{}: [[hook]]".format(path.name))
         where = "{}: [[hook]] {}".format(path.name, hid)
-        if not ID_RE.match(hid):
+        if not ID_RE.fullmatch(hid):
             raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
         if hid in seen_ids:
             raise ValueError("{}: duplicate hook id".format(where))
@@ -340,7 +342,7 @@ def load_manifest(path):
         if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and r for r in rules):
             raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
         for rule in rules:
-            if not CID_RE.match(rule):
+            if not CID_RE.fullmatch(rule):
                 raise ValueError("{}: rules entry '{}' is not a corpus-id shape (^[a-z0-9]{{6,}}$)"
                                  .format(where, rule))
         if _req_str(hook, "platform", where) not in PLATFORMS:
@@ -357,7 +359,7 @@ def load_manifest(path):
         elif "matcher" in hook:
             raise ValueError("{}: matcher is forbidden on the non-tool event {}".format(where, event))
         handler = _req_str(hook, "handler", where)
-        if not HANDLER_RE.match(handler):
+        if not HANDLER_RE.fullmatch(handler):
             raise ValueError("{}: handler must be a python identifier".format(where))
         if handler in seen_handlers:
             raise ValueError("{}: duplicate handler '{}' (each control has its own)".format(where, handler))
@@ -669,7 +671,11 @@ def check_plugin_version(root, plugin, name):
     untracked, a deleted marker reads as an adopter tree (the residual resolve_pack_version discloses). The
     comparison is against the SOURCE value, before render_plugin_json, so a plugin.json that faithfully mirrors
     a wrong manifest version still fails --check. Below the first version the plugin stays independently
-    versioned (0.5.0 under pack 1.0.5 builds)."""
+    versioned (0.5.0 under pack 1.0.5 builds). Between release cuts the authoring VERSION is the planned next
+    version with the fixed development suffix (X.Y.Z-dev, which gen_skill.parse_pack_version admits and no
+    other suffix): the release-time rule does not judge it, so the plugin stays independently versioned on main,
+    and the rule re-arms when the cut makes VERSION a bare X.Y.Z. The [plugin] version, and so plugin.json, stays
+    a bare MAJOR.MINOR.PATCH (load_manifest)."""
     resolved = resolve_pack_version(root)
     if resolved is None:
         return
@@ -1020,7 +1026,10 @@ def main():
 #      in authoring trees. 37b: an adopter tree (no marker) is not re-checked: with or without an installed
 #      .aiqt/manifest.toml (at 1.0.5, 1.1.1 or unparseable) and whatever its own VERSION, it generates and checks
 #      clean; an authoring repository whose git-tracked marker was deleted is exit 2, its never-tracked twin
-#      passes. 37c: no GENSRC_OUTPUTS entry declares the pack version source.
+#      passes. 37c: no GENSRC_OUTPUTS entry declares the pack version source. 37d: a development VERSION
+#      (1.2.0-dev) in an authoring tree leaves the plugin at 0.1.0 independent (generate and --check clean, plugin.json
+#      at 0.1.0); the same tree at 1.2.0 (the cut) is exit 2 naming both versions; at 1.2.0-rc1, or any other
+#      suffix, it is exit 2 naming the grammar; nothing is written by a refused run.
 # Every vector that removes the entries its own faults caused (cases 20b, 21b, 27 and 28)
 # does so by PROVENANCE, never by message text: each named entry from the staged cleanup,
 # the removal and absence helpers and the launch diagnostic carries its stage and the
@@ -1949,6 +1958,15 @@ def self_test_main(_nested=False):
         _mutate(badhandler, 'handler = "test_handler"', 'handler = "missing_handler"')
         if run_quiet(badhandler, check=True) != 2:
             failures.append("missing handler expected exit 2 (fail-closed)")
+
+        # 8b. A hook id with a trailing newline (the TOML \n escape) fails closed: ID_RE ends in $,
+        #     which also matches just before a final newline, so only fullmatch refuses it.
+        nlid = tmp / "nlid"
+        nlid.mkdir()
+        _build_tree(nlid)
+        _mutate(nlid, 'id = "selftest-control"', 'id = "selftest-control\\n"')
+        if run_quiet(nlid, check=True) != 2:
+            failures.append("hook id with a trailing newline expected exit 2 (fail-closed)")
 
         # 9. A missing handler SCRIPT (the dispatcher file absent) fails closed.
         noscript = tmp / "noscript"
@@ -4428,6 +4446,49 @@ def self_test_main(_nested=False):
                 failures.append("pack alignment: a {} VERSION expected exit 2 naming {!r}, got {}: {!r}".format(
                     label, needle, rc, out.strip()))
 
+        # 37d. The development VERSION (test H). Between release cuts main's VERSION is the planned next version
+        #      with the fixed -dev suffix and the alignment rule is a release-time rule, so an authoring tree at
+        #      VERSION 1.2.0-dev with the plugin at its own 0.1.0 generates and checks clean, with plugin.json still
+        #      at the bare 0.1.0; the same tree at 1.2.0 (the cut) is exit 2 in both modes naming both versions; at
+        #      1.2.0-rc1 (or another suffix: -dev.0, -DEV, +dev) it is exit 2 naming the grammar; a refused run
+        #      writes nothing. Rejecting the development form turns the first leg red; accepting any suffix turns
+        #      the 1.2.0-rc1 and other-suffix legs red.
+        dev = pack_tree("pack-dev")
+        (dev / "VERSION").write_bytes(b"1.2.0-dev\n")
+        for check in (False, True):
+            rc, out = pack_run(dev, check)
+            if rc != 0:
+                failures.append("pack alignment: a plugin at 0.1.0 under the development VERSION 1.2.0-dev expected "
+                                "exit 0 ({}; the rule is release-time), got {}: {!r}".format(
+                                    "--check" if check else "generate", rc, out.strip()))
+        try:
+            build_desired(dev, dev / ".aiqt" / "core" / "hooks")
+        except (ValueError, OSError) as exc:
+            failures.append("pack alignment: build_desired must accept the development VERSION 1.2.0-dev, got: "
+                            "{}".format(exc))
+        def dev_plugin_bytes():
+            # None when the 1.2.0-dev generate was refused (no plugin.json): a named failure, never a traceback.
+            return (dev / PLUGIN_JSON_REL).read_bytes() if (dev / PLUGIN_JSON_REL).is_file() else None
+
+        dev_plugin = dev_plugin_bytes()
+        if dev_plugin is None or json.loads(dev_plugin).get("version") != "0.1.0":
+            failures.append("pack alignment: plugin.json under VERSION 1.2.0-dev must carry the bare manifest "
+                            "version 0.1.0")
+        for raw, needle in ((b"1.2.0\n", "'0.1.0' differs from the pack version '1.2.0'"),
+                            (b"1.2.0-rc1\n", "not a bare MAJOR.MINOR.PATCH"),
+                            (b"1.2.0-dev.0\n", "not a bare MAJOR.MINOR.PATCH"),
+                            (b"1.2.0-DEV\n", "not a bare MAJOR.MINOR.PATCH"),
+                            (b"1.2.0+dev\n", "not a bare MAJOR.MINOR.PATCH")):
+            (dev / "VERSION").write_bytes(raw)
+            for check in (True, False):
+                rc, out = pack_run(dev, check)
+                if rc != 2 or needle not in out:
+                    failures.append("pack alignment: a plugin at 0.1.0 under VERSION {!r} expected exit 2 naming {!r} "
+                                    "({}), got {}: {!r}".format(raw, needle, "--check" if check else "generate", rc,
+                                                                out.strip()))
+            if dev_plugin_bytes() != dev_plugin:
+                failures.append("pack alignment: a run refused under VERSION {!r} must write nothing".format(raw))
+
         # 37b. The rule is a release-time rule of the authoring repository (gen_skill.resolve_pack_version), so a
         #      tree WITHOUT the authoring marker (an adopter's) is not re-checked and is judged as before the rule
         #      existed: a plugin at 0.1.0 with no installed .aiqt/manifest.toml, with one at 1.0.5 or at 1.1.1, or
@@ -4686,7 +4747,9 @@ def self_test_main(_nested=False):
           "build_desired() never carries them, and an adopter-shaped tree never gets, loses or changes them; "
           "from pack 1.1.1 on a plugin version that differs from VERSION fails closed (exit 2, nothing "
           "written) even when plugin.json mirrors the manifest, while the equal twins generate clean, pack "
-          "1.0.5 leaves the plugin independent, an absent VERSION cannot be evaluated (exit 2), and a "
+          "1.0.5 leaves the plugin independent, a development VERSION (1.2.0-dev) leaves it independent while "
+          "its cut (1.2.0) fails closed and any other suffix (1.2.0-rc1, -dev.0, -DEV, +dev) is malformed "
+          "(exit 2), an absent VERSION cannot be evaluated (exit 2), and a "
           "malformed, oversized, symlinked, hard-linked, directory or FIFO VERSION fails closed (a non-regular "
           "one refused as an input, never git rm); the rule applies only in the authoring tree: an adopter "
           "tree is not re-checked (no manifest, a manifest at 1.0.5, 1.1.1, unparseable, symlinked or "

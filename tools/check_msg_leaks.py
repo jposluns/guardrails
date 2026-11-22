@@ -123,7 +123,7 @@ def _require_sha(event, *path):
     """Fetch a required field and fail closed unless it is a canonical 40-hex SHA (so a value like 'HEAD',
     '', or a non-string can never be interpolated into git revision syntax and read as a clean empty range)."""
     value = _require(event, *path)
-    if not isinstance(value, str) or not _SHA_RE.match(value):
+    if not isinstance(value, str) or not _SHA_RE.fullmatch(value):
         raise FailClosed("event JSON field {} is not a 40-hex SHA".format(".".join(path)))
     return value
 
@@ -274,6 +274,7 @@ def self_test():
                                                         "title": "t", "body": None}}),
                      ("push", {"before": "HEAD", "after": forty}),
                      ("push", {"before": forty, "after": []}),
+                     ("push", {"before": forty + "\n", "after": _ZERO_SHA}),  # SHA plus a trailing newline
                      ("push", {"before": _ZERO_SHA, "after": forty})):     # branch creation -> fail closed
         try:
             gather_channels(name, ev)

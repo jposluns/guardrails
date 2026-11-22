@@ -192,7 +192,7 @@ def parse_declared(raw, label):
             raise DemoError("{}: each [[rule]] row must carry exactly the keys {}, found {!r}".format(
                 label, sorted(ROW_KEYS), row))
         rid, reason = row["id"], row["reason"]
-        if not isinstance(rid, str) or not CID_RE.match(rid):
+        if not isinstance(rid, str) or not CID_RE.fullmatch(rid):
             raise DemoError("{}: id {!r} is not a well-formed corpus-id".format(label, rid))
         if not isinstance(reason, str) or not reason.strip():
             raise DemoError("{}: rule {} must carry a non-empty reason string".format(label, rid))
@@ -210,7 +210,7 @@ def parse_declared(raw, label):
                 raise DemoError("{}: each [[removal]] row must carry exactly the keys {}, found {!r}".format(
                     label, sorted(REMOVAL_KEYS), row))
             rid, reason = row["id"], row["reason"]
-            if not isinstance(rid, str) or not CID_RE.match(rid):
+            if not isinstance(rid, str) or not CID_RE.fullmatch(rid):
                 raise DemoError("{}: removal id {!r} is not a well-formed corpus-id".format(label, rid))
             if not isinstance(reason, str) or not reason.strip():
                 raise DemoError("{}: removal {} must carry a non-empty reason string".format(label, rid))
@@ -660,7 +660,9 @@ def main():
 #       1.0, 0, 2 and "1", and warn-margin-bytes 0 and -1, are each exit 2 naming the key, while
 #       warn-margin-bytes 1 passes (a mutant comparing format-version by value alone passes 1.0, one
 #       coercing it with int() passes "1" and 1.0, one without the value check passes 0 and 2, one
-#       without the lower bound on warn-margin-bytes passes 0 and -1, and one testing warn < 2 fails 1);
+#       without the lower bound on warn-margin-bytes passes 0 and -1, and one testing warn < 2 fails 1).
+#       An id written "prjint1\n" is exit 2 naming it not a well-formed corpus-id (a mutant testing
+#       CID_RE with match, whose $ accepts one trailing newline, reaches the missing-span check instead);
 #   T10 a symlinked list, a directory, invalid UTF-8, bad TOML, an injected PermissionError at the
 #       declaration read, and a mode-000 list are each exit 2 (a catch-all returning 0 passes them all;
 #       a read error not reported as unreadable fails the last two). The symlink case asserts the
@@ -1029,6 +1031,13 @@ def _self_test_main_isolated():
             code, out = capture(t9)
             if code != 2 or want not in out:
                 failures.append("T9 {}: expected exit 2 with {!r}, got {}\n{}".format(label, want, code, out))
+        # An id with one trailing newline (the TOML escape \n) fails the corpus-id shape check itself.
+        _decl(t9, [], raw='format-version = 1\nwarn-margin-bytes = 512\n[[rule]]\nid = "prjint1\\n"\n'
+                          'reason = "x"\n')
+        code, out = capture(t9)
+        if code != 2 or "not a well-formed corpus-id" not in out:
+            failures.append("T9 id with a trailing newline: expected exit 2 naming it not a well-formed "
+                            "corpus-id, got {}\n{}".format(code, out))
         _decl(t9, both, warn=1)  # the smallest positive margin is accepted
         code, out = capture(t9)
         if code != 0:

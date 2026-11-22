@@ -342,7 +342,7 @@ def load_roadmap(path, ledger_cids, linkage):
             raise ValueError("{}: every [[rule]] must be a table".format(name))
         cid = _req_str(row, "corpus-id", "{}: [[rule]]".format(name))
         where = "{}: [[rule]] {}".format(name, cid)
-        if not CID_RE.match(cid):
+        if not CID_RE.fullmatch(cid):
             raise ValueError("{}: corpus-id must match ^[a-z0-9]{{6,}}$".format(where))
         if cid in out:
             raise ValueError("{}: duplicate corpus-id".format(where))
@@ -360,7 +360,7 @@ def load_roadmap(path, ledger_cids, linkage):
         if not isinstance(mechanisms, list) or not all(isinstance(m, str) for m in mechanisms):
             raise ValueError("{}: mechanisms must be a list of strings (it may be empty)".format(where))
         for mech in mechanisms:
-            if not MECH_RE.match(mech):
+            if not MECH_RE.fullmatch(mech):
                 raise ValueError("{}: mechanism {!r} is not a supported gate:/githook:/hook: reference (a "
                                  "lint: or other axis is unsupported: the ledger exposes no lint axis)".format(
                                      where, mech))
@@ -1465,6 +1465,19 @@ def self_test_main():
         expect2("roadmap-lint-ref",
                 lambda t: replace_in(t / ROADMAP, 'mechanisms = ["hook:hook-one"]',
                                      'mechanisms = ["lint:hook-one"]'))
+        # (m2) A mechanism with a trailing newline (the TOML \n escape) is refused by the shape check itself:
+        #      MECH_RE ends in $, which also matches just before a final newline, so only fullmatch refuses it
+        #      (with .match the row got past the shape check to the ledger-linkage comparison).
+        nl_tree = _build(tmp / "roadmap-mech-newline")
+        replace_in(nl_tree / ROADMAP, 'mechanisms = ["hook:hook-one"]', 'mechanisms = ["hook:hook-one\\n"]')
+        nl_by_cid, _nl_controls, nl_linkage = ledger_index(load_ledger(nl_tree))
+        try:
+            load_roadmap(nl_tree / ROADMAP_REL, set(nl_by_cid), nl_linkage)
+            failures.append("roadmap-mech-newline: a trailing-newline mechanism must fail closed (ValueError)")
+        except ValueError as exc:
+            if "is not a supported gate:/githook:/hook: reference" not in str(exc):
+                failures.append("roadmap-mech-newline: expected the mechanism shape refusal, got {!r}".format(
+                    str(exc)))
         # (q) A stale committed ledger (mutate it so it no longer matches a fresh build).
         expect2("stale-ledger",
                 lambda t: (t / ".aiqt" / "enforceability.json").write_text(

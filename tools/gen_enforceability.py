@@ -255,13 +255,13 @@ def load_gates_manifest(path, root):
             raise ValueError("{}: [[gate]] unknown key(s): {}".format(name, ", ".join(sorted(extra))))
         gid = _req_str(gate, "id", "{}: [[gate]]".format(name))
         where = "{}: [[gate]] {}".format(name, gid)
-        if not ID_RE.match(gid):
+        if not ID_RE.fullmatch(gid):
             raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
         if gid in seen_ids:
             raise ValueError("{}: duplicate gate id".format(where))
         seen_ids.add(gid)
         script = _req_str(gate, "script", where)
-        if not SCRIPT_RE.match(script):
+        if not SCRIPT_RE.fullmatch(script):
             raise ValueError("{}: script must be a repo-relative tools/<name>.py".format(where))
         if script in seen_scripts:
             raise ValueError("{}: duplicate script '{}' (one entry per gate script)".format(where, script))
@@ -272,7 +272,7 @@ def load_gates_manifest(path, root):
         if not isinstance(rules, list) or not all(isinstance(r, str) and r for r in rules):
             raise ValueError("{}: rules must be a list of corpus-id strings (it may be empty)".format(where))
         for rule in rules:
-            if not CID_RE.match(rule):
+            if not CID_RE.fullmatch(rule):
                 raise ValueError("{}: rules entry '{}' is not a corpus-id shape (^[a-z0-9]{{6,}}$)"
                                  .format(where, rule))
         if _req_str(gate, "platform", where) not in PLATFORMS:
@@ -393,7 +393,7 @@ def load_previews(root, slugs):
     channel = data.get("hook", [])
     linked = set()
     for hook in channel if isinstance(channel, list) else []:
-        if isinstance(hook, dict) and isinstance(hook.get("file"), str) and PREVIEW_FILE_RE.match(hook["file"]):
+        if isinstance(hook, dict) and isinstance(hook.get("file"), str) and PREVIEW_FILE_RE.fullmatch(hook["file"]):
             linked.add(hook["file"][len(PREVIEW_DIR_REL) + 1:-len(".py")])
     out = []
     for entry in entries:
@@ -402,7 +402,7 @@ def load_previews(root, slugs):
                 PREVIEW_DECL_REL, ", ".join(sorted(PREVIEW_DECL_KEYS))))
         pid = _req_str(entry, "id", "{}: [[preview]]".format(PREVIEW_DECL_REL))
         where = "{}: [[preview]] {}".format(PREVIEW_DECL_REL, pid)
-        if not ID_RE.match(pid):
+        if not ID_RE.fullmatch(pid):
             raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$".format(where))
         if any(p["id"] == pid for p in out):
             raise ValueError("{}: duplicate preview id".format(where))
@@ -468,16 +468,16 @@ def load_preview_manifest(path, root, plugin_ids):
             raise ValueError("{}: [[hook]] unknown key(s): {}".format(path.name, ", ".join(sorted(unknown))))
         hid = _req_str(hook, "id", "{}: [[hook]]".format(path.name))
         where = "{}: [[hook]] {}".format(path.name, hid)
-        if not ID_RE.match(hid):
+        if not ID_RE.fullmatch(hid):
             raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
         if hid in seen or hid in plugin_ids:
             raise ValueError("{}: duplicate hook id (unique across both hooks manifests)".format(where))
         seen.add(hid)
         rel = _req_str(hook, "file", where)
-        if not PREVIEW_FILE_RE.match(rel) or not _readable_regular(root / rel):
+        if not PREVIEW_FILE_RE.fullmatch(rel) or not _readable_regular(root / rel):
             raise ValueError("{}: file must name a readable regular .preview/<name>.py".format(where))
         rules = hook.get("rules")
-        if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and CID_RE.match(r)
+        if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and CID_RE.fullmatch(r)
                                                                 for r in rules):
             raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
         if _req_str(hook, "platform", where) != "claude-code":
@@ -1017,11 +1017,11 @@ def self_test_main():
     # accept an opf/tools/*.py path as well as the current tools/*.py, while staying anchored so a
     # path under any other parent is still rejected. These module-level assertions fail without the
     # widening and are independent of the synthetic-tree cases below.
-    if not SCRIPT_RE.match("tools/g_alpha.py"):
+    if not SCRIPT_RE.fullmatch("tools/g_alpha.py"):
         failures.append("opf: SCRIPT_RE must still accept a current tools/*.py script")
-    if not SCRIPT_RE.match("opf/tools/g_alpha.py"):
+    if not SCRIPT_RE.fullmatch("opf/tools/g_alpha.py"):
         failures.append("opf: SCRIPT_RE must accept an opf/tools/*.py script (grammar-widening)")
-    if SCRIPT_RE.match("evil/tools/g_alpha.py"):
+    if SCRIPT_RE.fullmatch("evil/tools/g_alpha.py"):
         failures.append("opf: SCRIPT_RE must stay anchored (no parent prefix other than opf/)")
     if ROSTER_RE.findall("python3 -I -B tools/g_alpha.py --check") != ["tools/g_alpha.py"]:
         failures.append("opf: ROSTER_RE must still extract a current tools/*.py roster step")
@@ -1149,6 +1149,12 @@ def self_test_main():
                    'script = "tools/g_alpha.py"')
         if run_quiet(kscript, check=True) != 2:
             failures.append("a duplicate gate script expected exit 2 (fail-closed)")
+        # (k2) A gate id with a trailing newline (the TOML \n escape) fails closed (exit 2): ID_RE ends in $,
+        #      which also matches just before a final newline, so only fullmatch refuses it.
+        knl = _build(tmp / "id-newline")
+        replace_in(knl / GATES_MANIFEST_REL, 'id = "gate-alpha"', 'id = "gate-alpha\\n"')
+        if run_quiet(knl, check=True) != 2:
+            failures.append("a gate id with a trailing newline expected exit 2 (fail-closed)")
 
         # (l) A gates manifest absent entirely fails closed (exit 2): absence is never an empty roster.
         lab = _build(tmp / "no-gates-manifest")

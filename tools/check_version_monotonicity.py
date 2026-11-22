@@ -18,8 +18,19 @@ read from the working tree once, through check_release_cut.working_blob (see _He
      finding that names the decrease, not only a prefix mismatch.
   M3 (well-formedness): both sides parse as bare SemVer via the imported helpers; a malformed version on
      either side is fail-closed (exit 2), since the comparison cannot answer its question on bad input.
+     The optional top-level [unreleased] table (the planned next version between cuts: version, a bare
+     X.Y.Z, plus optional title and items) is shape-checked on both sides by the shared
+     check_versions.unreleased_problem; a present but malformed table, an authored -dev version
+     included, is fail-closed (exit 2), never read as absent.
+  M5 (tree-version no decrease): the TREE VERSION is [unreleased].version + "-dev" when the side carries
+     [unreleased], otherwise its latest release; its precedence (check_versions.tree_precedence, where
+     X.Y.Z-dev sorts below X.Y.Z) must not decrease from base to head. This refuses lowering [unreleased]
+     and removing it without a cut (a cut folds it into an appended release, X.Y.Z-dev -> X.Y.Z). On the
+     HEAD side only, a present [unreleased] version must also be strictly above the head latest release
+     (a cut deletes the table it folds), a finding (exit 1); a base that breaks this is compared as
+     written, which only makes the comparison stricter, so it never blocks its own repair.
 Pre-release genesis exemption: when the base snapshot carries no changelog release tag AND its releases.toml
-is present with zero rows, Layer A reports NOT APPLICABLE and suspends M1/M2 (drafts may be relabeled),
+is present with zero rows, Layer A reports NOT APPLICABLE and suspends M1/M2/M5 (drafts may be relabeled),
 reactivating fully once the first release is recorded (a tag key or a ledger row). The tag-created-but-
 unrecorded first-release window is a disclosed residual documented at _base_is_genesis.
 Soundness: the protected branch forbids force-push and every change to main passes through this gate at its
@@ -37,7 +48,10 @@ gen_changelog.render_md and check_versions, both of which read neither). Behavio
     T2 the tag resolves locally (a recorded-but-unresolvable tag is exit 2: unfetched and deleted are
        indistinguishable and neither may pass);
     T3 the tagged commit's changelog has that version as its latest release;
-    T4 the maximum recorded tag version is not above the head latest version.
+    T4 the maximum recorded tag version is not above the head latest version;
+    T5 the tagged commit's changelog carries no [unreleased] table (a tagged tree is a cut: its tree
+       version is the bare release, never a -dev development tree). Judged on the key's presence, so a
+       malformed [unreleased] at the tagged commit is the same finding.
 
 Layers C and D (release-order and id-history append-only) are full-row prefix checks over
 .aiqt/core/releases.toml and .aiqt/core/id-history.toml (see layer_c and layer_d). Both records are
@@ -74,7 +88,7 @@ Three distinguishable NON-error states are each printed explicitly and contribut
     a HEAD^ that fails for any reason other than a genuine root (a shallow clone, a broken-parent history)
     is a fail-closed error, never a silent root.
   - the base snapshot is pre-release genesis (no changelog release tag AND a releases.toml present with zero
-    rows): Layer A reports NOT APPLICABLE and suspends M1/M2, per the genesis exemption above.
+    rows): Layer A reports NOT APPLICABLE and suspends M1/M2/M5, per the genesis exemption above.
 Everything else that prevents the comparison (an unresolvable ref, a git failure, unparseable TOML on either
 side) is exit 2; every git return code is checked and a nonzero exit is never treated as an empty result.
 
@@ -123,6 +137,10 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
 from check_versions import _parse  # noqa: E402  reuse the shipped bare-SemVer parser (M3 well-formedness)
+# The tree-version grammar (X.Y.Z or X.Y.Z-dev), its precedence key and the [unreleased] shape check, from
+# the same single source (_semver, re-exported by check_versions), never a local copy (M3, M5).
+from check_versions import (  # noqa: E402
+    DEV_SUFFIX, parse_tree_version, tree_precedence, unreleased_problem)
 # Reuse the release-cut declaration parser and transition evaluator (one reading of the declaration,
 # one schema): the relabel exception grants nothing without a declaration that evaluator accepts.
 # Every working-tree input is read through that gate's own no-follow reader (see _HeadInputs).
@@ -242,6 +260,53 @@ def check_no_decrease(base_versions, head_versions):
     return []
 
 
+def tree_version(releases, unreleased):
+    """The tree version of one changelog side: the [unreleased] version plus DEV_SUFFIX when the side
+    carries an [unreleased] table, otherwise the latest release version, otherwise None (a base with
+    release = [] and no [unreleased] has no tree version). releases is the validated release list and
+    unreleased the validated [unreleased] table or None (M3)."""
+    if unreleased is not None:
+        return unreleased["version"] + DEV_SUFFIX
+    if releases:
+        return releases[-1]["version"]
+    return None
+
+
+def check_tree_no_decrease(base_tree, head_tree):
+    """M5. The tree-version precedence must not decrease from base to head, with X.Y.Z-dev below X.Y.Z
+    (tree_precedence). Lowering [unreleased], or removing it without folding it into an appended release,
+    lowers the tree version and is a finding. Returns a list of finding strings; a side without a tree
+    version compares nothing. Callers guarantee both sides are well-formed (M3); a tree version that
+    still does not parse is fail-closed (GateError), never a pass."""
+    if base_tree is None or head_tree is None:
+        return []
+    base_parsed, head_parsed = parse_tree_version(base_tree), parse_tree_version(head_tree)
+    if base_parsed is None or head_parsed is None:
+        raise GateError("tree version {!r} (base) or {!r} (head) does not parse as X.Y.Z or X.Y.Z{}".format(
+            base_tree, head_tree, DEV_SUFFIX))
+    if tree_precedence(head_parsed) < tree_precedence(base_parsed):
+        return ["the head tree version {} is lower than the base tree version {} (tree-version "
+                "no-decrease violation, M5: an [unreleased] version may not be lowered, and [unreleased] "
+                "may be removed only by folding it into an appended release)".format(head_tree, base_tree)]
+    return []
+
+
+def check_unreleased_above_latest(releases, unreleased):
+    """M5 (head side). A head [unreleased] version must be strictly above the head latest release: a
+    stale [unreleased] left beside the release it was folded into (or one at or below a recorded release)
+    would otherwise keep a tree version below what the changelog already records. Returns a list of
+    finding strings. HEAD only: a base that breaks this is still compared as written (its tree version
+    is then lower, so the comparison only gets stricter), so a bad base never blocks its own repair."""
+    if unreleased is None or not releases:
+        return []
+    latest = releases[-1]["version"]
+    if _parse(unreleased["version"]) <= _parse(latest):
+        return ["the head [unreleased] version {} is not above the head latest release {} (a cut must "
+                "delete the [unreleased] table it folds into the release, and the planned next version "
+                "must be above every recorded release)".format(unreleased["version"], latest)]
+    return []
+
+
 def _genesis_from_signals(base_release_tags, base_ledger_present, base_ledger_rows):
     """Pure genesis predicate. base_release_tags: the `tag` values (None where absent) of the base
     changelog releases. base_ledger_present: whether the base releases.toml exists. base_ledger_rows:
@@ -324,6 +389,21 @@ def _releases_from_data(data, side):
     return out
 
 
+def _unreleased_from_data(data, side):
+    """M3 for the optional top-level [unreleased] table of parsed changelog data: None when the key is
+    absent, else the table after its shape is validated by the shared unreleased_problem (keys a subset of
+    version, title and items; version a bare X.Y.Z, never an authored -dev). A present but malformed
+    table, a non-table value included, is GateError (fail-closed, exit 2): a malformed [unreleased] must
+    never read as an absent one."""
+    if "unreleased" not in data:
+        return None
+    table = data["unreleased"]
+    problem = unreleased_problem(table)
+    if problem is not None:
+        raise GateError("{} changelog.toml: {}".format(side, problem))
+    return table
+
+
 class _HeadInputs:
     """The working-tree (HEAD) inputs of one run: changelog.toml, .aiqt/core/releases.toml,
     .aiqt/core/id-history.toml and .aiqt/release-cut.toml. Each is read AT MOST ONCE, at its first
@@ -375,20 +455,33 @@ class _HeadInputs:
 
 
 def _load_head_releases(head):
+    """(releases, unreleased) of the HEAD changelog, each validated (M3): the release list and the
+    [unreleased] table, or None when HEAD carries none."""
     data = head.toml("changelog.toml")
     if data is None:
         raise GateError("cannot read changelog.toml at HEAD: it is absent")
-    return _releases_from_data(data, "head")
+    return _releases_from_data(data, "head"), _unreleased_from_data(data, "head")
 
 
-def _parse_base_releases(text):
+def _parse_base_data(text):
     try:
-        data = tomllib.loads(text)
+        return tomllib.loads(text)
     # RecursionError too: tomllib raises it (a RuntimeError, not a ValueError) on a deeply
     # nested array or inline table (F-TOML-BARE-VALUEERROR-CLASS).
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("baseline changelog.toml does not parse: {}".format(exc))
-    return _releases_from_data(data, "base")
+
+
+def _parse_base_changelog(text):
+    """(releases, unreleased) of a baseline changelog text, each validated (M3, fail-closed)."""
+    data = _parse_base_data(text)
+    return _releases_from_data(data, "base"), _unreleased_from_data(data, "base")
+
+
+def _parse_base_releases(text):
+    """The validated release list of a baseline changelog text; its [unreleased] table is validated too
+    (M3), so a malformed one fails closed on every base-side read."""
+    return _parse_base_changelog(text)[0]
 
 
 # --- the two layers ---------------------------------------------------------------------------------
@@ -434,9 +527,10 @@ def _base_is_genesis(root, base_commit, base_releases):
     return _genesis_from_signals([r.get("tag") for r in base_releases], present, rows)
 
 
-def layer_a(root, base, head_releases):
-    """Changelog-history append-only. Prints its own status; returns a list of finding strings. Raises
-    GateError on any fail-closed condition."""
+def layer_a(root, base, head_releases, head_unreleased=None):
+    """Changelog-history append-only (M1, M2, tag preservation) and tree-version no-decrease (M5).
+    head_unreleased is the validated HEAD [unreleased] table, or None. Prints its own status; returns a
+    list of finding strings. Raises GateError on any fail-closed condition."""
     if base is None:
         # No explicit base: a genuine root HEAD has nothing to compare against (the honest NOT APPLICABLE);
         # otherwise resolve the default merge-base. An explicit --base is always resolved below, even on a
@@ -450,7 +544,7 @@ def layer_a(root, base, head_releases):
         print("changelog-history: NOT APPLICABLE (changelog.toml is absent at base {}; introduced since "
               "base)".format(base))
         return []
-    base_releases = _parse_base_releases(_show_file(root, base_commit, "changelog.toml"))
+    base_releases, base_unreleased = _parse_base_changelog(_show_file(root, base_commit, "changelog.toml"))
     if _base_is_genesis(root, base_commit, base_releases):
         print("changelog-history: NOT APPLICABLE (base {} is pre-release: no changelog release carries a "
               "tag and {} has zero release rows; append-only release identity is enforced from the first "
@@ -461,9 +555,14 @@ def layer_a(root, base, head_releases):
     head_versions = [r["version"] for r in head_releases]
     findings = check_prefix(base_versions, head_versions) + check_no_decrease(base_versions, head_versions)
     findings += check_tag_preservation(base_releases, head_releases)
+    base_tree = tree_version(base_releases, base_unreleased)
+    head_tree = tree_version(head_releases, head_unreleased)
+    findings += check_tree_no_decrease(base_tree, head_tree)
+    findings += check_unreleased_above_latest(head_releases, head_unreleased)
     if not findings:
         print("changelog-history: PASS (base {}: {} base release(s) prefix-preserved into {} head "
-              "release(s), no decrease)".format(base, len(base_versions), len(head_versions)))
+              "release(s), no decrease; tree version {} -> {})".format(
+                  base, len(base_versions), len(head_versions), base_tree, head_tree))
     return findings
 
 
@@ -484,7 +583,14 @@ def layer_b(root, head_releases):
         if not _resolve_tag(root, tag):
             raise GateError("release {} records tag {} but no such tag object is visible (fetch tags, "
                             "or the tag was deleted)".format(version, tag))
-        tagged_versions = [r["version"] for r in _parse_base_releases(_show_file(root, tag, "changelog.toml"))]
+        tag_data = _parse_base_data(_show_file(root, tag, "changelog.toml"))
+        # T5 is judged on the key's PRESENCE, whatever its shape: a tagged tree is a cut, so its
+        # changelog carries no [unreleased] at all (a malformed one is the same finding, not a pass).
+        if "unreleased" in tag_data:
+            findings.append("tag {} points at a commit whose changelog.toml carries an [unreleased] "
+                            "table (T5: a tagged tree is a cut, so its version is the bare release, never "
+                            "a {} development tree)".format(tag, DEV_SUFFIX))
+        tagged_versions = [r["version"] for r in _releases_from_data(tag_data, "base")]
         if not tagged_versions or tagged_versions[-1] != version:
             findings.append("tag {} points at a commit whose latest release is {}, not {}".format(
                 tag, tagged_versions[-1] if tagged_versions else "(none)", version))
@@ -831,8 +937,8 @@ def run(root, base):
     through one _HeadInputs."""
     try:
         head = _HeadInputs(root)
-        head_releases = _load_head_releases(head)
-        findings = layer_a(root, base, head_releases) + layer_b(root, head_releases)
+        head_releases, head_unreleased = _load_head_releases(head)
+        findings = layer_a(root, base, head_releases, head_unreleased) + layer_b(root, head_releases)
         base_commit = _resolve_base_commit(root, base)
         findings += layer_c(root, base_commit, _load_head_toml(head, RELEASES_REL))
         findings += layer_d(root, base_commit, _load_head_toml(head, IDHISTORY_REL), head_releases,
@@ -856,7 +962,9 @@ def run(root, base):
 # are a NAMED NOT RUN failure (never a skip beside a PASS); CI always has both. No wall clock, no
 # randomness.
 
-def _changelog_text(versions, tag_on=None):
+def _changelog_text(versions, tag_on=None, unreleased=None):
+    """A self-test changelog. unreleased, when given, is the raw body of a top-level [unreleased] table
+    placed after the [[release]] array (a bare version string becomes `version = "..."`)."""
     tag_on = tag_on or {}
     lines = ['title = "Changelog: self-test"', 'note = "self-test"', ""]
     for v in versions:
@@ -864,6 +972,9 @@ def _changelog_text(versions, tag_on=None):
         if v in tag_on:
             lines.append('tag = "{}"'.format(tag_on[v]))
         lines += ['items = ["x"]', ""]
+    if unreleased is not None:
+        body = unreleased if "=" in unreleased else 'version = "{}"'.format(unreleased)
+        lines += ["[unreleased]", body, ""]
     return "\n".join(lines)
 
 
@@ -2554,6 +2665,46 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
             failures.append("check_no_decrease({}, {}) finding={}; expected {}".format(
                 base, head, got, expect))
 
+    # M5 (tree-version no decrease, pure): (base tree, head tree, expect_a_finding). X.Y.Z-dev sorts below
+    # X.Y.Z; a side without a tree version compares nothing.
+    tree_cases = [
+        ("1.0.5", "1.1.0-dev", False),       # open the next cycle above a release
+        ("1.2.0-dev", "1.1.0-dev", True),    # lower [unreleased]
+        ("1.1.0-dev", "1.0.5", True),        # remove [unreleased] without a cut
+        ("1.1.0-dev", "1.1.0", False),       # the cut folds it into the release
+        ("1.1.0-dev", "1.1.0-dev", False),   # unchanged
+        ("1.1.0", "1.1.0-dev", True),        # a release back down to its own dev tree
+        (None, "1.0.0", False),              # base without a tree version
+    ]
+    for base, head, expect in tree_cases:
+        got = bool(check_tree_no_decrease(base, head))
+        if got != expect:
+            failures.append("check_tree_no_decrease({!r}, {!r}) finding={}; expected {}".format(
+                base, head, got, expect))
+    rel105 = [{"version": "1.0.5", "tag": "v1.0.5"}]
+    if (tree_version(rel105, {"version": "1.1.1"}) != "1.1.1" + DEV_SUFFIX
+            or tree_version(rel105, None) != "1.0.5"):
+        failures.append("tree_version: [unreleased] 1.1.1 must read 1.1.1-dev, and no [unreleased] the "
+                        "latest release")
+    if check_unreleased_above_latest(rel105, {"version": "1.1.0"}):
+        failures.append("check_unreleased_above_latest: [unreleased] above the latest expected no finding")
+    for stale in ("1.0.5", "1.0.4"):
+        if not check_unreleased_above_latest(rel105, {"version": stale}):
+            failures.append("check_unreleased_above_latest: [unreleased] {} at or below the latest 1.0.5 "
+                            "expected a finding".format(stale))
+    # M3 for [unreleased] (pure): an absent table reads None; a malformed one, an authored -dev version
+    # and a non-table value included, is GateError, never read as absent.
+    if _unreleased_from_data({"release": []}, "base") is not None:
+        failures.append("_unreleased_from_data: an absent [unreleased] must read None")
+    for bad in ({"version": "1.1.0-dev"}, {"title": "t"}, {"version": "1.1.0", "notes": []}, 5):
+        try:
+            _unreleased_from_data({"unreleased": bad}, "base")
+            failures.append("_unreleased_from_data: a malformed [unreleased] {!r} must fail closed".format(bad))
+        except GateError as exc:
+            if "[unreleased]" not in str(exc):
+                failures.append("_unreleased_from_data: refusal of {!r} must name [unreleased] "
+                                "({})".format(bad, exc))
+
     # Tag logic (pure): name match/mismatch, ceiling equal/above.
     if check_tag_names([("1.0.0", "v1.0.0")]):
         failures.append("check_tag_names expected no finding for a matching tag")
@@ -4166,6 +4317,85 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
                     failures.append("git case R37: a MemoryError reading the head {} expected "
                                     "fail-closed exit 2 naming it (got exit {}, stderr {!r})".format(
                                         rel37, rc37, err37))
+
+            # F cases: the optional changelog [unreleased] table and the tree version (M3, M5, T5).
+            # Shared shape: the _relabel_repo base (changelog [1.0.5] carrying tag = "v1.0.5" with a
+            # real tag object, so the base is NOT genesis; a header-only ledger and an id-history
+            # register the head leaves unchanged, so layers C and D pass and the relabel path is never
+            # entered). Where the base carries [unreleased] it is a SECOND commit above the tagged one,
+            # so the tag still points at a cut tree and T5 stays quiet; F5 alone tags a tree that
+            # carries [unreleased]. Each case asserts the line that names its own rule.
+            tags105 = {"1.0.5": "v1.0.5"}
+            log105 = _changelog_text(["1.0.5"], tag_on=tags105)
+
+            def _dev_base(name, unreleased):
+                repo = _relabel_repo(name, base_text=log105)
+                _write(repo, _changelog_text(["1.0.5"], tag_on=tags105, unreleased=unreleased))
+                _commit(repo, "open the next development cycle: [unreleased]")
+                return repo
+
+            def _f_check(case, repo, want_rc, want_text, want_count=None):
+                rc_f, out_f, err_f = _run_streams(repo, "HEAD")
+                ok = rc_f == want_rc and want_text in (err_f if want_rc == 2 else out_f)
+                if want_count is not None:
+                    ok = ok and "FAIL: {} version-monotonicity finding(s)".format(want_count) in out_f
+                if not ok:
+                    failures.append("git case {}: expected exit {} with {!r}{} (got exit {}, stdout {!r}, "
+                                    "stderr {!r})".format(
+                                        case, want_rc, want_text,
+                                        "" if want_count is None else " and {} finding(s)".format(want_count),
+                                        rc_f, out_f, err_f))
+
+            # F1 a tagged release 1.0.5 -> [unreleased] 1.1.0 (the next cycle opens): exit 0.
+            rf1 = _relabel_repo("unreleased-open", base_text=log105)
+            _write(rf1, _changelog_text(["1.0.5"], tag_on=tags105, unreleased="1.1.0"))
+            _f_check("F1 (1.0.5 -> [unreleased] 1.1.0)", rf1, 0,
+                     "tree version 1.0.5 -> 1.1.0{}".format(DEV_SUFFIX))
+            # F1b (M3, head side) a malformed HEAD [unreleased] (an unsupported key) is fail-closed.
+            _write(rf1, _changelog_text(["1.0.5"], tag_on=tags105,
+                                        unreleased='version = "1.1.0"\nstatus = "planned"'))
+            _f_check("F1b (malformed head [unreleased])", rf1, 2,
+                     "head changelog.toml: [unreleased] carries unsupported key(s) status")
+            # F2 (M5) [unreleased] lowered, 1.2.0-dev -> 1.1.0-dev: a finding.
+            rf2 = _dev_base("unreleased-lowered", "1.2.0")
+            _write(rf2, _changelog_text(["1.0.5"], tag_on=tags105, unreleased="1.1.0"))
+            _f_check("F2 (1.2.0-dev -> 1.1.0-dev)", rf2, 1,
+                     "the head tree version 1.1.0-dev is lower than the base tree version 1.2.0-dev", 1)
+            # F3 (M5) [unreleased] removed with no appended release, 1.1.0-dev -> 1.0.5: a finding.
+            rf3 = _dev_base("unreleased-dropped", "1.1.0")
+            _write(rf3, log105)
+            _f_check("F3 (1.1.0-dev -> no [unreleased], no append)", rf3, 1,
+                     "the head tree version 1.0.5 is lower than the base tree version 1.1.0-dev", 1)
+            # F4 the cut: [unreleased] 1.1.0 folded into an appended release 1.1.0, 1.1.0-dev -> 1.1.0.
+            rf4 = _dev_base("unreleased-cut", "1.1.0")
+            _write(rf4, _changelog_text(["1.0.5", "1.1.0"], tag_on=tags105))
+            _f_check("F4 (1.1.0-dev -> appended 1.1.0)", rf4, 0,
+                     "tree version 1.1.0-dev -> 1.1.0")
+            # F5 (T5) a tagged commit whose changelog carries [unreleased]: the head is unchanged from
+            # that base, so layer_a and T3 pass and T5 is the one finding.
+            rf5 = _relabel_repo("unreleased-tagged",
+                                base_text=_changelog_text(["1.0.5"], tag_on=tags105, unreleased="1.1.0"))
+            _f_check("F5 (tagged tree carrying [unreleased])", rf5, 1,
+                     "tag v1.0.5 points at a commit whose changelog.toml carries an [unreleased] table", 1)
+            # F6 (M3, base side) a malformed BASE [unreleased] (an authored -dev version) is fail-closed.
+            rf6 = _dev_base("unreleased-malformed-base", 'version = "1.1.0-dev"')
+            _write(rf6, _changelog_text(["1.0.5"], tag_on=tags105, unreleased="1.1.0"))
+            _f_check("F6 (malformed base [unreleased])", rf6, 2,
+                     "base changelog.toml: [unreleased] version '1.1.0-dev' is not a bare SemVer")
+            # F7 (M5, head side) a stale head [unreleased] left beside the release it was folded into:
+            # the tree version does not decrease (1.1.0-dev both sides), so only the above-latest rule
+            # refuses it.
+            rf7 = _dev_base("unreleased-stale", "1.1.0")
+            _write(rf7, _changelog_text(["1.0.5", "1.1.0"], tag_on=tags105, unreleased="1.1.0"))
+            _f_check("F7 (stale head [unreleased] beside its release)", rf7, 1,
+                     "the head [unreleased] version 1.1.0 is not above the head latest release 1.1.0", 1)
+            # F8 (M5) a lower fold: [unreleased] 1.2.0 folded into an appended release 1.1.5, below the
+            # declared version, 1.2.0-dev -> 1.1.5: the tree version decreases, so M5 alone refuses it
+            # (the appended 1.1.5 is above 1.0.5, so M2 and the head-side rule stay quiet).
+            rf8 = _dev_base("unreleased-lower-fold", "1.2.0")
+            _write(rf8, _changelog_text(["1.0.5", "1.1.5"], tag_on=tags105))
+            _f_check("F8 (1.2.0-dev -> appended 1.1.5, a lower fold)", rf8, 1,
+                     "the head tree version 1.1.5 is lower than the base tree version 1.2.0-dev", 1)
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -4197,9 +4427,11 @@ def self_test_main(_git_probe=None, _mkdtemp=None, _vectors=True):
     pass_head = "SELF-TEST PASS:" if _vectors else _NO_VECTORS_PASS_NOTE + ":"
     print("{} prefix identity (M1), no-decrease (M2), tag name/ceiling logic, the "
           "genesis predicate and tag-preservation logic, the _parse fullmatch regression (4e), the "
+          "[unreleased] shape (M3) and tree-version no-decrease (M5) logic, the "
           "full-row register prefix logic (append/edit/delete/empty/identical), and the git-level "
           "history, tag, release-order/id-history append-only, genesis-exemption, "
-          "tag-preservation, and one-time born-release relabel cases all hold; an unavailable git or "
+          "tag-preservation, one-time born-release relabel, and [unreleased] tree-version and "
+          "tagged-tree (T5) cases all hold; an unavailable git or "
           "temp directory is a NOT RUN failure "
           "(nonzero exit), never a PASS (PARTIAL)".format(pass_head))
     return 0

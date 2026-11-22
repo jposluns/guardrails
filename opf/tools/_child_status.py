@@ -34,7 +34,8 @@ reads it as 0. That is why every Python launcher carries its own copy.
                                  sets the disposition, its status read by a bash parent where it is the
                                  refusal under test
 
-Exit: 0 observable (or a passing self-test); 1 a failing self-test; 2 the refusal (cannot evaluate) or usage.
+Exit: 0 observable (or a passing self-test); 1 a failing self-test; 2 the refusal (cannot evaluate), usage, or a
+self-test with no failed row and at least one whose launch reached its measured CHILD_TIMEOUT bound (no verdict).
 
 Disclosed residuals: an ignore or SA_NOCLDWAIT set below Python after interpreter start (a native extension,
 ctypes or an embedding host) is not seen by the disposition read, and the fork probe runs only where a guard
@@ -117,7 +118,15 @@ def _child_status_refusal_exit(name):
 # ---------------------------------------------------------------------------------------------- self-test
 
 NAME = "_child_status.py"
-CHILD_TIMEOUT = 60
+# The launch bound of run_child and through_bash, sized from measurement: the heaviest route the coverage gate's
+# rows launch (opf.py --help at SIG_DFL, which compiles opf.py under -B) measured 2.4 s alone and 61.67 s with 24
+# busy loops on each of the 4 CPUs it shared (2026-11-20), over the old flat 60 s; the bound is 5x that worst,
+# rounded up. A launch that still reaches it is no verdict on its row, never a pass and never a failure.
+CHILD_TIMEOUT_MEASURED_WORST = 61.67
+CHILD_TIMEOUT_MARGIN = 5
+CHILD_TIMEOUT = 310
+# What run_child and through_bash put in a launch result when subprocess.TimeoutExpired ended the launch.
+LAUNCH_TIMED_OUT = "launch failed (TimeoutExpired)"
 # The exec trampoline: set SIGCHLD to the named disposition, then exec the rest of argv, so the target starts
 # with that disposition inherited across exec, exactly as from an ignoring launcher.
 TRAMPOLINE = ("import os, signal, sys; "
@@ -219,15 +228,30 @@ def self_test_results(path=None):
     return out
 
 
+def launch_timed_out(got):
+    """Whether got, one launch result, is exactly what run_child or through_bash returns for a launch that
+    reached CHILD_TIMEOUT. Any other launch failure (an OSError) is not."""
+    return isinstance(got, tuple) and got in ((LAUNCH_TIMED_OUT, "", ""), (None, LAUNCH_TIMED_OUT, ""))
+
+
 def self_test():
     _child_status_refusal_exit(NAME)
     results = self_test_results()
     failed = [(check_id, detail) for check_id, ok, detail in results if not ok]
-    if failed or [check_id for check_id, _ok, _detail in results] != list(PROBE_CHECK_IDS):
-        print("SELF-TEST FAIL: child-status {} of {} check(s) failed".format(len(failed), len(results)))
-        for check_id, detail in failed:
+    # A row whose one launch reached CHILD_TIMEOUT said nothing about the probe (host load): no verdict, never a
+    # pass; any row that finished and failed keeps the self-test a failure.
+    definite = [(check_id, detail) for check_id, detail in failed if not launch_timed_out(detail)]
+    if definite or [check_id for check_id, _ok, _detail in results] != list(PROBE_CHECK_IDS):
+        print("SELF-TEST FAIL: child-status {} of {} check(s) failed".format(len(definite), len(results)))
+        for check_id, detail in definite:
             print("  {}: {!r}".format(check_id, detail))
         return 1
+    if failed:
+        print("SELF-TEST CANNOT EVALUATE: child-status {} of {} check(s) no verdict, a launch reaching its {} s "
+              "bound (host load)".format(len(failed), len(results), CHILD_TIMEOUT))
+        for check_id, detail in failed:
+            print("  {}: {!r}".format(check_id, detail))
+        return 2
     print("SELF-TEST PASS: child-status {} checks (an ignoring Python reader reads a failed child as 0 and a "
           "default one reads its status; the probe passes at SIG_DFL and, under an inherited SIG_IGN read by a "
           "bash parent, refuses by name with exit 2; the disposition layer sees a Python-level handler the fork "
