@@ -2451,13 +2451,14 @@ def _ansi_c_static_reading(command):
     run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
     unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
     decoded: the disclosed run-time-word residual. GATE G comes first (_ansi_c_static_relevant): when the command
-    holds no locale quote and no ANSI-C quote with an escape that can change a value a guard tests, the reading is
-    command itself, so there is no extra reading and no refusal and each guard takes the decision of its path
-    without the static reading (an escape that decodes to one blank or control character, as in printf $'done\\n',
-    in a command whose text names neither git nor an AI identity). A '$' followed by a line continuation before a
-    quote ($<backslash-newline>'\\x67'it), which bash joins into an ANSI-C or locale quote, makes the command
-    relevant and is refused (_StaticReadingUncertain), since the scan reads the quote after the continuation as a
-    plain one. An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
+    holds no locale quote, no '$' and line continuation before a quote, and no ANSI-C quote with an escape that can
+    change a value a guard tests, the reading is command itself, so there is no extra reading and no refusal and
+    each guard takes the decision of its path without the static reading (an escape that decodes to one blank or
+    control character, as in printf $'done\\n', in a command whose text names neither git nor an AI identity). A '$'
+    followed by one or more line continuations before a quote (_ANSI_C_CONTINUED_QUOTE_RE, matched on the command as
+    written), which bash joins into an ANSI-C or locale quote, makes the command relevant whatever the quote holds
+    ($<backslash-newline>'\\x67'it, and gi$<backslash-newline>'t' with no escape) and is refused
+    (_StaticReadingUncertain), since the scan reads the quote after the continuation as a plain one. An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
     escape, as this reading does, but the escape table before the one shared table read it as \\c\\ and an escape
     after it ($'\\c\\\\x20Claude' as a control character, a blank and Claude), so a command that reading denied is
     still denied (the no-reduction rule). An ANSI-C quote holding a \\U code past U+10FFFF (_ansi_c_beyond_index) is
@@ -2537,7 +2538,8 @@ _ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - 
 # the static decoded reading refuses, _ansi_c_beyond_index) and any other text.
 _ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
 # A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
-# the quote (_ansi_c_static_reading refuses it).
+# the quote. Gate G reads a match as relevant whatever the quote holds (_ansi_c_static_relevant), and
+# _ansi_c_static_reading refuses it.
 _ANSI_C_CONTINUED_QUOTE_RE = re.compile(r"\$(?:\\\n)+['\"]")
 # The SUBJECT of an inert escape (_ansi_c_static_relevant): every value the four guards that read the static decoded
 # reading test needs one of these names in the text bash assembles. commit_msg_subst, git_explicit_binding and
@@ -2592,10 +2594,13 @@ def _ansi_c_static_relevant(command):
     (the no-reduction rule). An inert escape there can split, end or join the value around it: a blank
     or control character makes a word boundary AI_IDENTITY_RE needs ($'\\x20Claude'), a newline starts a trailer's
     line, and a blank or newline splits words in a body eval or sh -c reads again (eval $'git\\x20log -p'), where
-    a newline after a backslash is a line continuation. False otherwise, and then the guards read no static decoded
-    reading and refuse nothing on its account. The command is read as written and with every backslash-newline
-    removed, so a '$', a line continuation and a quote (refused in _ansi_c_static_reading) read as the quote bash
-    joins them into; each reading can only add a quote. The quote is matched on its own (_ANSI_C_QUOTE_RE, which
+    a newline after a backslash is a line continuation. True too, before any quote is read, whenever
+    _ANSI_C_CONTINUED_QUOTE_RE matches the command as written: a '$' and one or more line continuations before a
+    quote, which bash joins into an ANSI-C or locale quote and _ansi_c_static_reading refuses whatever the quote
+    holds, an escape or none (gi$<backslash-newline>'t' is git to bash). False otherwise, and then the guards read
+    no static decoded reading and refuse nothing on its account. The command is read as written and with every
+    backslash-newline removed, so a '$', a line continuation and a quote read as the quote bash joins them into;
+    each reading can only add a quote. The quote is matched on its own (_ANSI_C_QUOTE_RE, which
     ends it at the same unescaped single quote bash does) from EVERY index that holds $', with no tracking of the
     quoting around it, so a spurious match that starts earlier (inside single quotes, a comment or a here-document
     body) and swallows a real quote's opening cannot hide that quote: its own index is matched again. A $' or $"
@@ -2605,6 +2610,8 @@ def _ansi_c_static_relevant(command):
     '$', not a backslash, so no escape holds it), so the matches together read each character a bounded number of
     times, and the subject is read at most once for the command as written and once for its joined text. Never
     raises."""
+    if _ANSI_C_CONTINUED_QUOTE_RE.search(command) is not None:
+        return True  # a '$' and a line continuation before a quote, refused whatever the quote holds
     joined = command.replace("\\\n", "")
     return _ansi_c_static_relevant_text(command, joined) or (
         joined != command and _ansi_c_static_relevant_text(joined, joined))
@@ -33554,8 +33561,10 @@ def _rwh_static_git_word(command):
     quotes or a comment cannot swallow a later quote's opening, as in echo '$'; gi$'\\x74' checkout x),
     with a refusal of that reading (_StaticReadingUncertain: a '$' and a line continuation before a
     quote, a \\c\\\\ pair, a \\U code past U+10FFFF, a construct the scan cannot read with certainty)
-    read as a git word. Each reading can only add a match to the raw-text test, never clear one, so a
-    command it matches is judged against the hold set as the plain word is. A git word built at RUN
+    read as a git word, so such a command, even one that names no git, fails closed wherever a git-word
+    command outside the read-only grammar does (a missing or relative cwd included, with no hold live):
+    the disclosed over-refusal. Each reading can only add a match to the raw-text test, never clear one,
+    so a command it matches is judged against the hold set as the plain word is. A git word built at RUN
     TIME (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes,
     an unquoted glob character or brace, or that uses a value assigned earlier in the same command) is
     not read: the disclosed run-time-word residual, tied to the open design question on a git-side

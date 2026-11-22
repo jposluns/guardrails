@@ -6535,7 +6535,8 @@ def _test_static_decoded_braced(failures):
             aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = split
 
 
-# (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, or an ANSI-C quote
+# (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, a '$' and a line
+# continuation before a quote (_ANSI_C_CONTINUED_QUOTE_RE, whatever the quote holds), or an ANSI-C quote
 # with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, to anything but one inert
 # character (a blank or a control character from U+0002), or to an inert character in a command that names git or
 # an AI identity, makes the reading run; otherwise there is no extra reading and no refusal. _STATIC_GATE_PREFIX is a
@@ -6602,13 +6603,31 @@ _STATIC_GATE_REPARSED = (
 )
 # A '$' and a line continuation before a quote (F2 of the review of 72e8287b): each guard denies (the scan's refusal),
 # and takes the parent's decision under the flips that refuse no continued quote and that read the gate on the
-# command as written only (no backslash-newline removed).
+# command as written only (no backslash-newline removed, and no continued-quote clause). Each still denies under the
+# flip that drops only the continued-quote clause: its joined text holds an escape or a locale quote G reads.
 _STATIC_GATE_CONTINUED = (
     ("sdr-gate-continued-sectvl", "commit_msg_subst", "$\\\n'\\x67'it commit -m \"$(hostname)\"", "allow"),
     ("sdr-gate-continued-cmtidn", "commit_identity", "git $\\\n'\\x63'ommit --author=Claude -m y", "allow"),
     ("sdr-gate-continued-expbnd", "git_explicit_binding", "git add -A; git $\\\n'\\x70'ush", "allow"),
     ("sdr-gate-continued-cnsdif", "diff_source_pretool", "git $\\\n'\\x6c'og -p", "allow"),
     ("sdr-gate-continued-locale", "diff_source_pretool", "git $\\\n\"log\" -p", "allow-note"),
+)
+# A '$' and one or more line continuations before an ANSI-C quote with no escape inside (F1 of the review of
+# 957e3494): bash joins them into $'...', so gi$<backslash-newline>'t' is git and git $<backslash-newline>'push' is
+# git push (bash 5.3.9). Gate G reads the command as relevant whenever _ANSI_C_CONTINUED_QUOTE_RE matches it as
+# written, so each guard denies (the scan's refusal), and each takes its decision at 957e3494 (the last field) under
+# the flip that drops that clause, where the joined text holds a quote with no escape and G read nothing relevant.
+_STATIC_GATE_CONTINUED_PLAIN = (
+    ("sdr-gate-continued-plain-sectvl", "commit_msg_subst", "git c$\\\n'ommit' -m \"$(id)\"", "allow"),
+    ("sdr-gate-continued-plain-sectvl-git", "commit_msg_subst", "gi$\\\n't' commit -m \"`hostname`\"", "allow"),
+    ("sdr-gate-continued-plain-cmtidn", "commit_identity", "git commit --author=Cl$\\\n'aude' -m x", "allow"),
+    ("sdr-gate-continued-plain-cmtidn-sub", "commit_identity",
+     "git $\\\n'commit' --author \"" + _AI_TRAILER_VALUE + "\" -m y", "allow"),
+    ("sdr-gate-continued-plain-expbnd", "git_explicit_binding", "git add --all && git $\\\n'push'", "allow"),
+    ("sdr-gate-continued-plain-expbnd-twice", "git_explicit_binding", "git add --all && git $\\\n\\\n'push'",
+     "allow"),
+    ("sdr-gate-continued-plain-cnsdif", "diff_source_pretool", "git $\\\n'log' -p", "allow-note"),
+    ("sdr-gate-continued-plain-cnsdif-git", "diff_source_pretool", "gi$\\\n't' log -p", "allow-note"),
 )
 # Relevant escapes: (label, handler name, command, decision under the flip that reads nothing as relevant). Each
 # denies, through the refusal after the construct or through the decoded word.
@@ -6643,8 +6662,9 @@ def _test_static_decoded_gate(failures):
     matched once without overlap, where they must allow. The rows the review of 72e8287b added (F1 to F4) run under
     their own flips as well: the gate of 72e8287b (every escape that decodes to no printable, non-blank ASCII other
     than a quote or backslash read as irrelevant), no subject found, a subject text that keeps its quoting, no
-    continued quote refused, and the gate read on the command as written only. So each row is red without the
-    gate's part it names."""
+    continued quote refused, and the gate read on the command as written only. The continued rows with no escape
+    (F1 of the review of 957e3494) run under the flip that drops only the continued-quote clause, the gate of
+    957e3494, where they must take that gate's decision. So each row is red without the gate's part it names."""
     gate = aiqt_hooks._ansi_c_static_relevant
     irrelevant = [("sdr-gate-f6-{}-{}".format(name, rule), handler, command)
                   for name, command in _STATIC_GATE_F6 for rule, handler in _STATIC_GATE_GUARDS]
@@ -6652,7 +6672,8 @@ def _test_static_decoded_gate(failures):
     relevant = (list(_STATIC_GATE_RELEVANT) + list(_STATIC_GATE_NOT_INERT)
                 + [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]
                 + [(label, "commit_identity", command, "allow") for label, command, _inert in _STATIC_GATE_IDENTITY]
-                + [(label, name, command, "deny") for label, name, command, _flip in _STATIC_GATE_CONTINUED])
+                + [(label, name, command, "deny") for label, name, command, _flip in _STATIC_GATE_CONTINUED]
+                + [(label, name, command, "deny") for label, name, command, _flip in _STATIC_GATE_CONTINUED_PLAIN])
     reparsed = [(label, "diff_source_pretool", command) for label, command in _STATIC_GATE_REPARSED]
     for label, name, command in irrelevant:
         if gate(command):
@@ -6693,6 +6714,13 @@ def _test_static_decoded_gate(failures):
     def as_written(command):
         return aiqt_hooks._ansi_c_static_relevant_text(command, command.replace("\\\n", ""))
 
+    def no_continued_clause(command):
+        # The gate of 957e3494: the command read as written and with every backslash-newline removed, with no
+        # clause that reads a continued quote (_ANSI_C_CONTINUED_QUOTE_RE) as relevant whatever it holds.
+        joined = command.replace("\\\n", "")
+        return aiqt_hooks._ansi_c_static_relevant_text(command, joined) or (
+            joined != command and aiqt_hooks._ansi_c_static_relevant_text(joined, joined))
+
     identity = [(label, "commit_identity", command) for label, command, _inert in _STATIC_GATE_IDENTITY]
     inert_subject = [(label, "commit_identity", command) for label, command, inert in _STATIC_GATE_IDENTITY if inert]
     not_inert = [(label, "commit_identity", command) for label, command, inert in _STATIC_GATE_IDENTITY if not inert]
@@ -6712,9 +6740,12 @@ def _test_static_decoded_gate(failures):
         ("_ANSI_C_SUBJECT_STRIP_RE", "a subject text that keeps its quoting", re.compile(r"[^\s\S]"),
          [row + ("allow",) for row in stripped]),
         ("_ANSI_C_CONTINUED_QUOTE_RE", "no continued quote refused", re.compile(r"[^\s\S]"),
-         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED]),
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED + _STATIC_GATE_CONTINUED_PLAIN]),
         ("_ansi_c_static_relevant", "the command as written only", as_written,
-         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED]),
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED + _STATIC_GATE_CONTINUED_PLAIN]),
+        ("_ansi_c_static_relevant", "with no continued-quote clause", no_continued_clause,
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED_PLAIN]
+         + [row[:3] + ("deny",) for row in _STATIC_GATE_CONTINUED]),
     )
     for how_attr, how, flip, rows in flips:
         saved = getattr(aiqt_hooks, how_attr)
@@ -6742,6 +6773,32 @@ def _test_static_decoded_gate(failures):
                             "be found in {!r}, so the row pins the removal".format(command))
     finally:
         aiqt_hooks._ansi_c_inert_dropped = dropped
+    # (sdr-rwh-refusal-no-hold) rwh reads a refusal of the static decoded reading as a git word
+    # (_rwh_static_git_word), so a command that names no git, whose reading the scan refuses, is withheld as
+    # UNVERIFIABLE where every git-word command is, with no hold live: here a relative cwd (F2 of the review of
+    # 957e3494, the over-refusal the rvwpin residue discloses). Under the flip that reads no static decoded reading
+    # each is allowed, so the row pins the refusal read as a git word.
+    refused_no_git = ("printf $'\\U110000'", _STATIC_GATE_PREFIX + "printf $'\\x41'", "printf $\\\n'x'")
+
+    def rwh_relative(command):
+        return aiqt_hooks._rwh_decide({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                       "tool_input": {"command": command}, "cwd": "relative/dir"})[0]
+    for command in refused_no_git:
+        got = rwh_relative(command)
+        if got != "unverifiable":
+            failures.append("(sdr-rwh-refusal-no-hold) _rwh_decide on {!r} with a relative cwd: expected "
+                            "unverifiable, got {}".format(command, got))
+    reading = aiqt_hooks._ansi_c_static_reading
+    aiqt_hooks._ansi_c_static_reading = lambda command: command
+    try:
+        for command in refused_no_git:
+            got = rwh_relative(command)
+            if got != "allow":
+                failures.append("(sdr-rwh-refusal-no-hold-flip) with no static decoded reading _rwh_decide on {!r} "
+                                "with a relative cwd must allow, so the row pins the refusal read as a git word; "
+                                "got {}".format(command, got))
+    finally:
+        aiqt_hooks._ansi_c_static_reading = reading
     # Every name AI_IDENTITY_RE matches is a subject (_ANSI_C_SUBJECT_RE), so the subject check keeps step with it: the
     # letters each alternative of its first group starts with, and its two address forms.
     group = re.search(r"\\b\(([^()]*(?:\([^()]*\)[^()]*)*)\)\\b", aiqt_hooks.AI_IDENTITY_RE.pattern)
