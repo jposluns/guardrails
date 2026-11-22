@@ -25,8 +25,9 @@ unreadable, oversized, non-regular or non-UTF-8 input file, a missing or ambiguo
 with no numbered question, an unresolvable SHA or one that names no commit, a delivery outside the
 closed shape below, a construct that can hide text from rendered view, a line that reads as an answer
 marker without being one, an unclosed fenced block, an indented code block, an inline straight or
-left curly double quote with no closer after it on its line (unless a quote or an answer fails: then
-FAIL wins, see Output), more than MAX_QUOTES quotes,
+left curly double quote with no closer after it on its line, a line whose double quote marks the
+scan cannot pair exactly as a reader would (both unless a quote or an answer fails: then FAIL wins,
+see Output), more than MAX_QUOTES quotes,
 a blob that does not hash to its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
 
 THE CLOSED DELIVERY SHAPE. Answer and finding boundaries are never inferred from free text; the
@@ -207,10 +208,13 @@ Output: one JSON object on stdout (verdict PASS, FAIL, NO_VOTE or CANNOT_EVALUAT
 results with every quote, each answer's state and its absent file references; coverage) and a one-line
 human summary on stderr. Exit 0 PASS; 1 FAIL or NO_VOTE (FAIL wins when both apply); 2 CANNOT_EVALUATE
 or a usage error. Every refusal of the delivery's text is raised as the delivery is read, before any
-quote is checked, except the unclosed inline quote refusal: the delivery's quotes and answers are
-checked first, and when one fails the result is FAIL (exit 1), its reasons listing the failures, then
-up to MAX_LISTED unclosed quote refusals, so both are reported; when none fails it is CANNOT_EVALUATE
-naming the first such line.
+quote is checked, except the two inline quote refusals (an unclosed opener, and a line whose quote
+marks pair ambiguously; at most one per line, the unclosed one first): the delivery's quotes and
+answers are checked first, and when one fails the result is FAIL (exit 1), its reasons listing the
+failures, then up to MAX_LISTED inline quote refusals, so both are reported; when none fails it is
+CANNOT_EVALUATE naming the first such line (_raised_refusal). FAIL wins because a quote shown absent
+from the reviewed tree fails the delivery whatever else it holds; a refusal in its place would hide
+that failure behind "cannot evaluate". Neither result is a pass.
 
 The grammar read (a declared subset of Markdown, not a general parser; every scanner is linear in its
 line, with no backtracking pattern):
@@ -236,7 +240,13 @@ line, with no backtracking pattern):
     then text with no whitespace, "<" or ">" holding a backtick, then ">"); no code span is masked,
     when hidden constructs or inline quotes are sought, from a line holding an escaped backtick or a
     backtick in an autolink shape, or from the line after one whose backtick run does not close on it,
-    to the next blank or blockquote line.
+    to the next blank or blockquote line. Where the pairing is uncertain a quote mark may be code or
+    prose, so a straight or left curly double quote mark on a line holding a backtick, from where
+    the uncertainty starts (_uncertain_from: the line's start when the paragraph's pairing was
+    already uncertain or the line holds an escaped backtick or a backtick in an autolink shape;
+    otherwise the line's first backtick run that does not close on it), refuses the line as
+    ambiguous (below). A line with no backtick in such a paragraph is code or prose as a whole, and
+    is read as prose.
   * An inline quote is the text between a straight double quote and the next one on the same line,
     or between a left and a right curly double quote, outside the inline code spans masked above and
     outside a parenthetical example: "(e.g." or "(for example"
@@ -246,9 +256,28 @@ line, with no backtracking pattern):
     superscript or another script's digit it is read like any other. A quote must close on its own
     line: an opener (a straight double quote, or a left curly one) with no closer after it on its
     line, read after those masks, is CANNOT_EVALUATE naming the line (unless a quote or an answer
-    fails, see Output), so a double-quoted span that breaks across lines is refused at its first line,
-    never dropped unread (put a multi-line excerpt in a fenced block or a blockquote). A mark the masks
-    hide (inside a masked code span or an example, or an inch mark) refuses nothing.
+    fails, see Output), so a double-quoted span that breaks across lines is refused at its first
+    line (put a multi-line excerpt in a fenced block or a blockquote). A mark the masks hide (inside
+    a masked code span or an example, or an inch mark) refuses nothing.
+  * The scan reads one pairing of a line's quote marks. Where a reader may pair them otherwise, a
+    quote that reading shows could fall between the scan's pairs and never be read, so the line is
+    CANNOT_EVALUATE naming it (unless a quote or an answer fails, see Output; the line's quotes are
+    still checked as the scan pairs them): refused, not read every way, since a reader may pair
+    marks in ways no finite list covers, and checking the text between pairs would fail ordinary
+    prose between two quotes as a fabricated quote. Ambiguous: a straight or left curly quote mark
+    where the code-span pairing is uncertain (above; read on the raw line, so a mark inside an
+    example counts too); and, read after the masks above, a straight mark after a numeric character that is no
+    ASCII digit 0-9 (a superscript, a fraction, another script's digit), in a pair the scan makes;
+    an inch mark followed by a letter, a digit or a masked character (no whitespace, punctuation,
+    symbol or line end), which may open a quote ('4"text', '5"5"'; so '4"text' whose pair is on
+    the next line is refused at its first line); on a line holding three or more unmasked
+    straight marks, a pair whose opener is closing-shaped only or whose closer is opening-shaped
+    only, or whose two marks are each shaped for both roles or neither (shape: _flanks,
+    CommonMark's flanking read of the mark's two neighbours); a straight pair holding left and
+    right curly marks in unequal numbers; and a curly pair holding a left curly mark (a nested
+    quote) or an odd number of straight marks.
+    The first such mark of a line is named, and an unclosed opener on the same line is named
+    instead.
   * The brief's questions are its first run of column-0 numbered lines counting 1, 2, 3 and so on
     ("1.", "Q1:", "**2.**", "### 3)" and "Item 4." forms; after a line reading QUESTIONS: when the
     brief has one); a number out of sequence ends the run, so a later numbered list that restarts at 1
@@ -295,9 +324,12 @@ text and text in other quotation marks (guillemets, a low-9 quote closed by a ri
 low-9 mark as in '„text”', a right curly double quote used as an opener as in '”text”', a fullwidth
 or other double-quote-like character) are not read as quotes, so a fabricated quote presented only
 that way passes unseen; so is text in a parenthetical example ("(e.g. "...")"), and a straight double
-quote right after an ASCII digit 0-9 is an inch mark, so text between two such marks ('4"text 5"') is
-not read (in 'line 4"text"' the second mark opens a quote with no closer, so that line is refused,
-below); a quote cut at a line edge passes
+quote right after an ASCII digit 0-9 and before whitespace, punctuation, a symbol or the line end is
+an inch mark, so text between two such marks ('4" text 5"') is not read ('4"text 5"', and the
+same pair split across lines, are refused as ambiguous, below); the ambiguity refusal reads each
+straight mark's role from its two neighbours only (_flanks) and only on a line holding three or more
+straight marks, so a reader's pairing that takes a mark shaped for one role as no quote mark at
+all is not considered; a quote cut at a line edge passes
 (above); a marker shaped as an inline code
 span ("`Q4.`") or as the text of an inline link ("[Q4.](x)") at the start of a line is not read as a
 marker candidate, its first source character being a backtick or a bracket (the code-span and
@@ -324,10 +356,11 @@ skeleton residual; the link-stripped reading of the skeleton reads one line at a
 definition, code span, autolink or raw HTML, with the limits _without_link_targets lists. False FAIL: a
 double-quoted word used as a scare quote ("belt and braces"), not an example in "(e.g. ...)", is held to
 the tree; so is text between two straight double quotes that each follow a superscript or another
-script's digit ('x²"text x²"'), which are no inch marks; text inside a code span the grammar does not
-mask (where the backtick pairing is uncertain) is read as prose, so a double-quoted span inside it is
-held to the tree; a quote of the brief's own text is held to the tree like any other; an answer that names a
-file absent from the tree its question does not name (a placeholder path without a placeholder
+script's digit ('x²"text x²"'), which are no inch marks (the line is refused as ambiguous when no
+quote or answer fails); text inside a code span the grammar does not mask (where the backtick
+pairing is uncertain) is read as prose, so a double-quoted span inside it is held to the tree (the
+line is refused as ambiguous when no quote or answer fails); a quote of the brief's own text is
+held to the tree like any other; an answer that names a file absent from the tree its question does not name (a placeholder path without a placeholder
 character, a file outside the repository, or a product name such as "Node.js" when some blob carries a
 .js extension) fails. Fail closed: a delivery outside the closed shape (answers numbered "1." or
 "**Q1.**", answers in a table, a leading blank line, a byte-order mark or a "REVIEWED: <sha>" line
@@ -343,7 +376,16 @@ another script's digit rather than an ASCII digit 0-9, a German-style low-9 quot
 left curly closing mark reads as an opener with no closer, and a double quote inside a code span the
 masks do not hide, since no code span is masked where the backtick pairing is uncertain (the grammar
 above): an accepted over-refusal, the unclosed inline quote refusal; a lone right
-curly or low-9 mark opens nothing and refuses nothing), and
+curly or low-9 mark opens nothing and refuses nothing), a line whose double quote marks the scan
+cannot pair exactly as a reader would (the grammar above), which also refuses lines a reader pairs
+one way (an accepted over-refusal, the ambiguous inline quote refusal: a quote mark after a stray
+backtick that does not close on its line ('a ` key, then "x"'), on a line holding an escaped
+backtick, or on a backtick line of a paragraph whose code span ran across lines, even a quote mark
+inside a code span there; an inch or seconds mark before a letter or digit ('12"x', '5"5"'); a
+pair holding a straight mark after a superscript, fraction or another script's digit; on a line
+of three or more straight marks, a mark between two letters or two spaces in a pair whose other
+mark is no better shaped ('" a " and " b "'); a nested curly quote; a curly quote holding one
+straight mark ('“a 5" screen”')), and
 a line whose legacy html.unescape reading (the whole line decoded, semicolonless references
 included) or whose escape-aware legacy reading (escapes honoured, each tokenized reference
 decoded through html.unescape) scans as a marker even where CommonMark renders it literal (the
@@ -385,11 +427,20 @@ parser seam, whose removal reads a look-alike label past as the legacy per-tool 
 list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
 paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files,
-the unclosed inline quote refusal, straight and curly, with code-span, example, inch-mark and fenced
-multi-line controls that keep their outcome, the quote scan's code masks (one flip/ check over five
-fixtures: a quote after a code span run across lines and one breaking across lines there, a quote
-between backslash-escaped backticks and one breaking across lines there, and a quote after a backtick
-in an autolink shape, with a masked code-span control), and the ASCII-digit inch mark),
+the unclosed inline quote refusal, straight and curly (one flip/ check over both fixtures), with
+code-span, example, inch-mark and fenced multi-line controls that keep their outcome, the quote
+scan's code masks (one flip/ check over five fixtures: a quote after a code span run across lines
+and one breaking across lines there, a quote between backslash-escaped backticks and one breaking
+across lines there, and a quote after a backtick in an autolink shape, with a masked code-span
+control), the ambiguous inline quote refusal (one flip/ check over seven fixtures: quote marks on a
+line holding an escaped backtick and on a line after a code span run across lines, a straight mark
+after a superscript digit, an inch mark opening a quote whose pair is on the next line, four
+straight marks paired against their shape, four spaced straight marks, and a nested curly quote,
+each passing with the refusal removed; with controls of two closed quotes and of two indented code
+quotes on one line), the FAIL that wins over a deferred inline quote refusal (a flip/ check that
+raises the refusal in its place, so the curly-aside fixture's failed quote is hidden), and the
+ASCII-digit inch mark (its flip/ check now ends CANNOT_EVALUATE, the ambiguous refusal also
+refusing that line)),
 the closed shape (a heading inside a fence, the fence-close length and indentation, the harness's
 first and last lines, a WORKER_STATUS-prefixed line read as content), hidden text (raw HTML, inline
 code spans read across lines, the content of a fence indented four or more columns, link reference
@@ -435,9 +486,9 @@ marks, blank glyphs, whitespace and non-whitespace control characters (literal a
 and format runs of any length before the marker, emphasis and format runs inside it, a lookalike in
 a fence), a "QN." line right after a quote,
 the exemption of an absent reference its question names, the unmatched-opener rule of the inline
-scanner and the FAIL that wins over the unclosed inline quote refusal (both held by one fixture, a
-curly opener with no closer before a fabricated straight quote, which FAILs and lists the refusal,
-and the opener rule also by the static-table check), the non-regular-file check and
+scanner (it sits inside the scanner's loop; held by a fixture, a curly opener with no closer before
+a fabricated straight quote, which FAILs and lists the refusal, and by the static-table check; the
+same fixture carries the FAIL-wins flip/ check above), the non-regular-file check and
 O_NONBLOCK (a FIFO or directory also yields an empty or unopenable input), git exit status (the type
 and listing checks also refuse), the --batch truncation check (blob re-hashing also refuses), the
 backtick info-string rule and the stop of the question run. The --no-replace-objects option and
@@ -1264,7 +1315,60 @@ def _inch_mark(text, at):
     return at > 0 and text[at - 1] in ASCII_DIGITS
 
 
-def _inline_quote_spans(line, code, unclosed=None):
+def _flank_kind(char):
+    """0 for a line edge ("") or whitespace, 1 for punctuation or a symbol (Unicode P or S), 2 for any
+    other character (a letter, a digit, a masked character)."""
+    if not char or char.isspace():
+        return 0
+    return 1 if unicodedata.category(char)[0] in "PS" else 2
+
+
+def _flanks(text, at):
+    """(opening-shaped, closing-shaped) of the straight double quote at index at of text, read from its
+    two neighbours as CommonMark reads an emphasis mark's flanking: opening-shaped when the next
+    character is no whitespace or line edge, and is no punctuation unless the previous one is a line
+    edge, whitespace or punctuation; closing-shaped likewise with previous and next swapped. A mark
+    between a letter and a letter ('it"s') is both; one between two spaces is neither."""
+    before = _flank_kind(text[at - 1] if at > 0 else "")
+    after = _flank_kind(text[at + 1:at + 2])
+    return after != 0 and (after != 1 or before != 2), before != 0 and (before != 1 or after != 2)
+
+
+def _foreign_digit_mark(text, at):
+    """Whether the straight double quote at index at of text follows a numeric character that is no
+    ASCII digit 0-9 (a superscript, a fraction, another script's digit): it reads as an inch mark or
+    as a quote mark, and the scan cannot tell which."""
+    before = text[at - 1] if at > 0 else ""
+    return bool(before) and before not in ASCII_DIGITS and before.isnumeric()
+
+
+def _pair_ambiguity(text, start, end, crowded):
+    """Why the double-quoted span text[start:end + 1] the scan paired may pair otherwise to a reader,
+    or None. A straight pair: either mark follows a non-ASCII digit (_foreign_digit_mark); or, when the
+    line holds three or more unmasked straight marks (crowded), its opener is closing-shaped only or
+    its closer opening-shaped only (_flanks), or neither mark has its role's shape alone (both may
+    open, close or be no quote mark); or the span holds left and right curly marks in unequal
+    numbers. A curly pair: the span holds a left curly mark (a nested quote, which the scan closes at
+    the first right curly) or an odd number of straight marks."""
+    if text[start] == '"':
+        if _foreign_digit_mark(text, start) or _foreign_digit_mark(text, end):
+            return "a straight double quote mark after a non-ASCII digit, an inch mark or a quote mark"
+        if crowded:
+            open_opens, open_closes = _flanks(text, start)
+            close_opens, close_closes = _flanks(text, end)
+            if (open_closes and not open_opens) or (close_opens and not close_closes):
+                return "three or more straight double quote marks, one paired against its shape"
+            if not ((open_opens and not open_closes) or (close_closes and not close_opens)):
+                return "three or more straight double quote marks, a pair with neither mark shaped for its role"
+        if text.count("\u201c", start + 1, end) != text.count("\u201d", start + 1, end):
+            return "a straight double-quoted span holding an unmatched curly double quote mark"
+        return None
+    if text.count("\u201c", start + 1, end) or text.count('"', start + 1, end) % 2:
+        return "a curly double-quoted span holding a nested or unmatched double quote mark"
+    return None
+
+
+def _inline_quote_spans(line, code, unclosed=None, ambiguous=None):
     """(start, end) of each double-quoted span of one line, its quote marks included, read outside the
     code spans given (code: the (start, end) spans _code_masks returns for the line, none where the
     paragraph's backtick pairing is uncertain, so a quote a reader sees as prose is never masked as
@@ -1273,12 +1377,17 @@ def _inline_quote_spans(line, code, unclosed=None):
     _inch_mark) opens nothing. An opener (a straight or a left curly double quote) with no closer
     after it drops out of the scan without hiding a later complete quote of the other kind; when
     unclosed is a list, that opener's index is appended to it, so the parser can refuse the line
-    (_unclosed_quote_refusal) instead of leaving the quote unread. Linear: each search moves forward."""
+    (_unclosed_quote_refusal) instead of leaving the quote unread. When ambiguous is a list, the first
+    mark whose pairing a reader may read otherwise is appended to it as (index, why): a skipped inch
+    mark that is opening-shaped (_flanks: '4"text'), or a pair _pair_ambiguity names; the spans are
+    still the scan's one reading, and the parser refuses the line (_ambiguous_quote_refusal). Linear:
+    each search moves forward."""
     if '"' not in line and "\u201c" not in line:
         return []
     masked = _blanked(line, list(code) + _example_spans(line))
     closers = dict(INLINE_QUOTE_PAIRS)
     following = {opener: -1 for opener in closers}
+    crowded = ambiguous is not None and masked.count('"') >= 3
     spans = []
     index = 0
     while True:
@@ -1292,6 +1401,11 @@ def _inline_quote_spans(line, code, unclosed=None):
             break
         start = min(starts)
         if masked[start] == '"' and _inch_mark(masked, start):
+            # A cheap test of the next character first: an inch mark run costs one comparison a mark.
+            if ambiguous is not None and not ambiguous and start + 1 < len(masked) \
+                    and not masked[start + 1].isspace() and _flanks(masked, start)[0]:
+                ambiguous.append((start, "an inch mark followed by a letter, a digit or a masked character, "
+                                         "which may open a quote"))
             index = start + 1
             continue
         end = masked.find(closers[masked[start]], start + 1)
@@ -1302,6 +1416,10 @@ def _inline_quote_spans(line, code, unclosed=None):
                 unclosed.append(start)
             following[masked[start]] = None
             continue
+        if ambiguous is not None and not ambiguous:
+            why = _pair_ambiguity(masked, start, end, crowded)
+            if why:
+                ambiguous.append((start, why))
         spans.append((start, end + 1))
         index = end + 1
     return spans
@@ -1320,6 +1438,52 @@ def _unclosed_quote_refusal(line, unclosed):
     return ("an inline double quote mark with no closer after it on its line ({!r} at column {}; an inline "
             "quote must close on its own line, so put a multi-line excerpt in a fenced block or a "
             "blockquote)".format(line[at], at + 1))
+
+
+def _uncertain_from(line, carried):
+    """The index of line from which its code spans are uncertain, or None, for a line that _code_masks
+    read with carried (whether the paragraph's backtick pairing was already uncertain): 0 when it was,
+    or when the line holds a backslash-escaped backtick or a backtick in an autolink shape; otherwise
+    the start of the line's first backtick run that does not close on it (text after it is code if a
+    later line closes it, prose if none does). None when the line holds no backtick, or every run
+    closes on it: the per-line pairing is then the paragraph's own."""
+    if "`" not in line:
+        return None
+    if carried or "\\`" in line or AUTOLINK_TICK_RE.search(line):
+        return 0
+    spans = _code_spans(line)
+    inside = 0
+    for match in BACKTICK_RUN_RE.finditer(line):
+        while inside < len(spans) and spans[inside][1] <= match.start():
+            inside += 1
+        if inside == len(spans) or match.start() < spans[inside][0]:
+            return match.start()
+    return None
+
+
+def _ambiguous_quote_refusal(line, ambiguous, uncertain):
+    """The refusal for a line whose double quote marks the scan cannot pair exactly as a reader
+    would, or None: a straight or left curly double quote mark at or after uncertain (the index
+    _uncertain_from gives, where a mark may be code or prose), else the first mark ambiguous holds
+    (the (index, why) _inline_quote_spans recorded). The scan reads one pairing; another pairing a
+    reader may see could hold a quote that pairing leaves unread, so the line is refused (C2 fail
+    closed) rather than passed on one reading; evaluate raises the refusal unless a quote or an
+    answer failed, and then lists it among the FAIL reasons."""
+    if uncertain is not None:
+        marks = [at for at in (line.find('"', uncertain), line.find("“", uncertain)) if at >= 0]
+        if marks:
+            at = min(marks)
+            return ("a line whose double quote marks the scan cannot pair exactly as a reader would ({!r} at "
+                    "column {} may be code or prose: the line's backtick pairing is uncertain, from a "
+                    "backslash-escaped backtick, a backtick in an autolink shape or a backtick run that does "
+                    "not close on its line, here or earlier in the paragraph; put an excerpt holding quote "
+                    "marks or backticks in a fenced block or a blockquote)".format(line[at], at + 1))
+    if not ambiguous:
+        return None
+    at, why = min(ambiguous)
+    return ("a line whose double quote marks the scan cannot pair exactly as a reader would ({!r} at column "
+            "{}: {}; write each quote so its marks pair one way, or put the excerpt in a fenced block or a "
+            "blockquote)".format(line[at], at + 1, why))
 
 
 def _verdict_of(line):
@@ -1698,10 +1862,12 @@ def _parse_delivery(lines, question_count):
     strings included; the letter-skeleton boundary sweep (_boundary_shown) then runs over every
     raw body line, still before any block is segmented, exempting only the two canonical
     boundary lines found by position (_boundary_exempt), so a smuggled boundary is refused at
-    its own line even where the closed shape would refuse a later one. The one refusal not raised
-    here is a line's inline double quote opener with no closer after it on the line: its text is
-    recorded in the fourth value, in line order, and evaluate raises the first unless a quote or
-    an answer failed."""
+    its own line even where the closed shape would refuse a later one. The two refusals not raised
+    here are a line's inline double quote opener with no closer after it on the line
+    (_unclosed_quote_refusal) and a line whose quote marks the scan cannot pair exactly as a reader
+    would (_ambiguous_quote_refusal, read when the first finds nothing on the line): their text is
+    recorded in the fourth value, at most one per line, in line order, and evaluate raises the
+    first unless a quote or an answer failed (_raised_refusal)."""
     last = next((number for number, text in reversed(lines) if text.strip()), None)
     answers, sections = [], []
     current = None
@@ -1802,12 +1968,15 @@ def _parse_delivery(lines, question_count):
             carried = False
             continue
         flush()
-        masks = []
+        masks, uncertain = [], None
         if not payload.strip():
             carried = False
         else:
-            # The code spans masked here are the ones the inline quote scan below masks too.
+            # The code spans masked here are the ones the inline quote scan below masks too; where
+            # _code_masks is unsure, the quote marks from where that starts are refused below.
+            was_carried = carried
             masks, carried = _code_masks(payload, carried)
+            uncertain = _uncertain_from(payload, was_carried) if carried else None
             hidden = _hidden_construct(_blanked(payload, masks))
             if hidden:
                 refuse(number, "{} outside a fenced block, code span or blockquote, which can hide text from "
@@ -1823,8 +1992,8 @@ def _parse_delivery(lines, question_count):
             continue
         head = ANSWER_HEAD_RE.match(payload) if payload.startswith("Q") else None
         value = _verdict_of(payload)
-        unclosed = []
-        spans = _inline_quote_spans(payload, masks, unclosed)
+        unclosed, ambiguous = [], []
+        spans = _inline_quote_spans(payload, masks, unclosed, ambiguous)
         if head:
             if phase == "findings":
                 refuse(number, "an answer heading inside the findings section")
@@ -1863,11 +2032,13 @@ def _parse_delivery(lines, question_count):
         else:
             current["body"].append(payload)
             current["names_text"].append(_names_text(payload, spans))
-        # A double quote opener that does not close on its line is a quote this grammar cannot read:
-        # refused at its line (fail closed), never dropped unread. The refusal is recorded, not raised
-        # here, so the quotes the delivery does carry are still checked: evaluate raises it unless a
-        # quote or an answer failed, and then lists it among the FAIL reasons.
-        unread = _unclosed_quote_refusal(payload, unclosed)
+        # A double quote opener that does not close on its line, and a line whose quote marks the
+        # scan cannot pair exactly as a reader would, hold a quote this grammar cannot read: refused
+        # at the line (fail closed), never dropped unread. The refusal is recorded, not raised here,
+        # so the quotes the delivery does carry are still checked: evaluate raises it unless a quote
+        # or an answer failed, and then lists it among the FAIL reasons.
+        unread = _unclosed_quote_refusal(payload, unclosed) \
+            or _ambiguous_quote_refusal(payload, ambiguous, uncertain)
         if unread:
             unread_lines.append(refusal(number, unread))
         for text in _inline_quotes(payload, spans):
@@ -2262,6 +2433,16 @@ def _rule_unread_input(verdict, answers, inputs):
 # Evaluation
 # ---------------------------------------------------------------------------------------------------
 
+def _raised_refusal(unread_lines, failures):
+    """The deferred inline quote refusal evaluate raises as CANNOT_EVALUATE (the first of unread_lines,
+    which _parse_delivery recorded), or None: None whenever a quote or an answer failed (failures), so
+    a FAIL wins and lists the refusals among its reasons. Either result keeps the delivery from
+    passing; FAIL wins because it is the stronger finding: a quote shown absent from the reviewed tree
+    is a failed delivery whatever else the delivery holds, and a refusal raised in its place would
+    report the delivery as unreadable and hide that failure."""
+    return unread_lines[0] if unread_lines and not failures else None
+
+
 def evaluate(brief_path, delivery_path, repo):
     """(report, exit code) for one delivery against one brief and repository."""
     report = {"tool": "check_verifier_delivery", "verdict": None, "reasons": [], "pin": None,
@@ -2310,10 +2491,11 @@ def evaluate(brief_path, delivery_path, repo):
                                         "answer": state, "absent_references": stray[:MAX_LISTED], "quotes": results})
             report["quotes_checked"] += len(results)
             report["quotes_failed"] += sum(1 for result in results if not result["ok"])
-        # An unclosed inline quote opener is CANNOT_EVALUATE unless a quote or answer failed: a FAIL
-        # wins, and the refusal is listed among its reasons, so both are reported.
-        if unread_lines and not failures:
-            raise CannotEvaluate(unread_lines[0])
+        # An unclosed or ambiguous inline quote line is CANNOT_EVALUATE unless a quote or answer
+        # failed: a FAIL wins, and the refusal is listed among its reasons, so both are reported.
+        raised = _raised_refusal(unread_lines, failures)
+        if raised:
+            raise CannotEvaluate(raised)
     except CannotEvaluate as exc:
         report["verdict"] = "CANNOT_EVALUATE"
         report["reasons"].append(str(exc))
@@ -2363,6 +2545,8 @@ FIXTURE_FILES = {
     "README.md": "Only the root readme carries this line.\n",
     ".preview/README.md": "| Tool | Role |\n| pattern-self-match.py | matches its own pattern |\n",
     "docs/crlf.md": "Stored with CRLF line ends.\r\nSecond stored line.\r\n",
+    # Quote-mark pairing fixtures: backticks, superscripts and nested curly marks a gap text can match.
+    "docs/marks.md": "Use `a` or `b` or `c`.\nPlot x² or y².\nNest “ a “ b ” c ” here.\n",
     "docs/encoded.md": "QA&#45;COMPLETE\nfinal = verdict(x)\n[QA-COMPLETE]: https://example.invalid\n"
                        "[VERDICT: HOLD]: https://example.invalid\n[VE<y>R<DICT]:z>\n",
     "VERSION": "0.0.1-fixture\n",
@@ -3271,19 +3455,63 @@ def _self_test_cases(fx):
                                                              autolink_tick)), ("PASS",) * 5)
     check("c2/code-span-quote-masked-passes", verdict(fx.run(
         _mixed(sha, {4: A4 + '\nThe guard `if` reads `"return FABRICATED` when not ready.'}))), "PASS")
+    # A line whose quote marks the scan cannot pair exactly as a reader would is refused at the line,
+    # never passed on the one pairing the scan reads. In each fixture below a reader may pair the
+    # marks so that "return FABRICATED" is quoted, while the scan's own pairs (gap texts of
+    # docs/marks.md or src/beta.py) verify and the fabricated text is never read.
+    ambiguous_words = "a line whose double quote marks the scan cannot pair exactly as a reader would"
+    ambiguous_deliveries = []
+
+    def ambiguous_row(vector, lead=None, after=None):
+        """refused_at for answer 4 as A4, then lead, vector and after (each its own line when given);
+        the delivery is kept for the flip/ check below."""
+        text = "\n".join(part for part in (A4, lead, vector, after) if part)
+        ambiguous_deliveries.append(_mixed(sha, {4: text}))
+        return refused_at(ambiguous_deliveries[-1], vector, ambiguous_words)
+    # backtick pairing uncertain (an escaped backtick): unmasked, the code-span marks pair with the quote's
+    check("c2/quote-marks-escaped-backtick-line-cannot-evaluate", ambiguous_row(
+        'In src/beta.py and docs/marks.md: `"` or "return FABRICATED" or `"` and \\` here.'), refused)
+    # backtick pairing uncertain (a code span run across lines)
+    check("c2/quote-marks-after-multiline-code-span-cannot-evaluate", ambiguous_row(
+        'ready:` `"` or "return FABRICATED" or `"` in src/beta.py and docs/marks.md.', lead='The guard `if'), refused)
+    # a straight mark after a superscript digit: an inch mark or a quote mark
+    check("c2/quote-mark-after-superscript-digit-cannot-evaluate", ambiguous_row(
+        'In src/beta.py and docs/marks.md x²" or "return FABRICATED" or y²" here.'), refused)
+    # an inch mark followed by a letter, its pair on the next line
+    check("c2/inch-mark-opening-a-quote-cannot-evaluate", ambiguous_row(
+        'It holds 4"return FABRICATED', after='when not ready 5" in src/beta.py.'), refused)
+    # four straight marks: the scan pairs 1-2 and 3-4, a reader sees 2-3
+    check("c2/straight-marks-paired-against-shape-cannot-evaluate", ambiguous_row(
+        'src/beta.py reads: " if "return FABRICATED" return " here.'), refused)
+    # four spaced straight marks: no mark is shaped for one role
+    check("c2/spaced-straight-marks-cannot-evaluate", ambiguous_row(
+        'src/beta.py reads: " if " return FABRICATED " return " here.'), refused)
+    # a nested curly quote: the scan closes the outer quote at the inner closer
+    check("c2/nested-curly-quote-cannot-evaluate", ambiguous_row(
+        'In src/beta.py and docs/marks.md: “ a “ b ” return FABRICATED ” here.'), refused)
+    check("flip/c2-ambiguous-quote-refusal", tuple(verdict(_patched(
+        "_ambiguous_quote_refusal", lambda *a: None, lambda: fx.run(delivery))) for delivery in ambiguous_deliveries),
+        ("PASS",) * len(ambiguous_deliveries))
+    # Controls: lines with three or more straight marks the scan pairs one way keep their outcome.
+    check("c2/two-closed-quotes-one-line-passes", verdict(fx.run(_mixed(sha, {
+        1: 'Q1. docs/alpha.md reads "The first rule is plain." and "The second rule follows it."'}))), "PASS")
+    check("c2/two-indented-quotes-one-line-passes", verdict(fx.run(_mixed(sha, {
+        4: 'Q4. Yes: "    return 0" ends beta(), after "        return 1" in src/beta.py.'}))), "PASS")
     # An inch mark follows an ASCII digit 0-9 only: after a superscript or another script's digit, the
-    # mark opens a quote that is read.
+    # mark opens a quote that is read (and the line is refused as ambiguous; the failed quote wins).
     superscript_inch = _mixed(sha, {4: A4 + '\nA plot of x²"return FABRICATED x²" holds.'})
     check("c2/inch-mark-needs-ascii-digit-fails", verdict(fx.run(superscript_inch)), "FAIL")
     check("flip/c2-inch-mark-ascii-digit", verdict(_patched(
-        "_inch_mark", lambda text, at: at > 0 and text[at - 1].isdigit(), lambda: fx.run(superscript_inch))), "PASS")
+        "_inch_mark", lambda text, at: at > 0 and text[at - 1].isdigit(), lambda: fx.run(superscript_inch))),
+        "CANNOT_EVALUATE")
     straight_open = 'Q4. Yes: "    return 0" ends beta(); src/beta.py also reads "return FABRICATED when'
     unclosed_straight = _mixed(sha, {4: straight_open + '\nnot ready" in the guard.'})
     check("c2/inline-quote-unclosed-straight-cannot-evaluate",
           refused_at(unclosed_straight, straight_open, unclosed_words), refused)
     curly_open = 'Q4. Yes: "    return 0" ends beta(); src/beta.py also reads “return FABRICATED when not ready'
+    unclosed_curly = _mixed(sha, {4: curly_open})
     check("c2/inline-quote-unclosed-curly-cannot-evaluate",
-          refused_at(_mixed(sha, {4: curly_open}), curly_open, unclosed_words), refused)
+          refused_at(unclosed_curly, curly_open, unclosed_words), refused)
     check("c2/inch-mark-unpaired-passes",
           verdict(fx.run(_mixed(sha, {4: A4 + '\nIt reads well on a 12" screen.'}))), "PASS")
     check("c2/unclosed-in-code-span-passes", verdict(fx.run(
@@ -3292,8 +3520,14 @@ def _self_test_cases(fx):
         _mixed(sha, {1: 'Q1. docs/alpha.md (e.g. a stray " mark) reads "The first rule is plain."'}))), "PASS")
     check("c2/multiline-excerpt-in-fence-passes", verdict(fx.run(
         _mixed(sha, {1: "Q1. docs/alpha.md:\n```\nThe first rule is plain.\nThe second rule follows it.\n```"}))), "PASS")
-    check("flip/c2-unclosed-inline-refusal", verdict(_patched(
-        "_unclosed_quote_refusal", lambda *a: None, lambda: fx.run(unclosed_straight))), "PASS")
+    check("flip/c2-unclosed-inline-refusal", tuple(verdict(_patched(
+        "_unclosed_quote_refusal", lambda *a: None, lambda: fx.run(delivery)))
+        for delivery in (unclosed_straight, unclosed_curly)), ("PASS", "PASS"))
+    # FAIL wins over a deferred inline quote refusal: with the refusal raised in its place, the
+    # curly-aside fixture's failed quote is hidden behind CANNOT_EVALUATE.
+    check("flip/c2-fail-wins-over-quote-refusal", verdict(_patched(
+        "_raised_refusal", lambda unread, failures: unread[0] if unread else None,
+        lambda: fx.run(aside_delivery))), "CANNOT_EVALUATE")
     indented = _mixed(sha, {2: "Q2. src/beta.py:\n\n        TIMEOUT = 999"})
     check("items/indented-code-block-cannot-evaluate", verdict(fx.run(indented)), "CANNOT_EVALUATE")
     check("flip/items-indented-code-block",
@@ -3318,8 +3552,10 @@ def _self_test_cases(fx):
         "MAX_TREE_BYTES", 8, lambda: fx.run(_mixed(sha, findings="> The first rule is plain.")))), "CANNOT_EVALUATE")
 
     # Runtime: adversarial deliveries at the 16 MiB cap, each in a capped child
+    # Each inch mark is followed by a space: one followed by a digit may open a quote ('5"5"' reads
+    # as a quote of 5), which refuses the line as ambiguous.
     check("runtime/inch-mark-run-at-cap-bounded",
-          _capped_run(fx, _padded(_mixed(sha), "text 5", '5"', "\nVERDICT:"), "linear"), (0, "PASS"))
+          _capped_run(fx, _padded(_mixed(sha), "text 5", '5" ', "\nVERDICT:"), "linear"), (0, "PASS"))
     # The line holds a quote, so its code spans are scanned (a line with no double quote skips that scan).
     backticks = _padded(_mixed(sha), 'text "ready" ', "`", "\nVERDICT:")
     check("runtime/backtick-run-at-cap-bounded",
@@ -3893,7 +4129,10 @@ CHILD_ADDRESS_LIMIT = 2 * 1024 * 1024 * 1024
 # at 8 MiB, so linear in its size, on a slower core), over the earlier bound of 10, and every
 # backtracking form was still running when a 91-second kernel CPU stop ended it. The bound below
 # sits about 2.5 times above the slowest linear run measured and under a third of the CPU time
-# every backtracking form was seen to exceed there. The wall clock is only a guard against waiting
+# every backtracking form was seen to exceed there. Those inch-mark figures were taken with a '5"'
+# fill; the fill is now '5" ' (a '5"' run opens a quote, so the line is refused as ambiguous), with
+# a third fewer marks and one more comparison a mark, not re-measured on those hosts. The wall
+# clock is only a guard against waiting
 # without end on a child that is hung or too slow to finish (it sits well above the child's own
 # kernel CPU stop, one second past the bound, hard limit five more); when it fires the run is
 # refused (CannotEvaluate, its text starting WALL_GUARD_REFUSAL), never passed.
