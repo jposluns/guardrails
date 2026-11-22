@@ -24,7 +24,8 @@ the tree lists, so a rewritten object file is CANNOT_EVALUATE, never read as the
 unreadable, oversized, non-regular or non-UTF-8 input file, a missing or ambiguous BRIEF-PIN, a brief
 with no numbered question, an unresolvable SHA or one that names no commit, a delivery outside the
 closed shape below, a construct that can hide text from rendered view, a line that reads as an answer
-marker without being one, an unclosed fenced block, an indented code block, more than MAX_QUOTES quotes,
+marker without being one, an unclosed fenced block, an indented code block, an inline double quote
+mark with no closer after it on its line, more than MAX_QUOTES quotes,
 a blob that does not hash to its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
 
 THE CLOSED DELIVERY SHAPE. Answer and finding boundaries are never inferred from free text; the
@@ -233,9 +234,12 @@ line, with no backtracking pattern):
     parenthetical example: "(e.g." or "(for example"
     up to and including the next ")" (an example word is not a quote of the tree). An example opener
     with no ")" after it masks nothing, and "(i.e." opens no example (a restatement is a claim). A
-    straight double quote right after a digit (an inch mark) opens nothing. A quote that does not close
-    on its line is not read, and an opener with no closer drops out of the scan without hiding a later
-    complete quote of the other kind.
+    straight double quote right after a digit (an inch mark) opens nothing. A quote must close on its
+    own line: an opener (a straight double quote, or a left curly one) with no closer after it on its
+    line, read after those masks, is CANNOT_EVALUATE naming the line, so a double-quoted span that
+    breaks across lines is refused at its first line, never dropped unread (put a multi-line excerpt
+    in a fenced block or a blockquote). A mark the masks hide (inside a code span or an example, or an
+    inch mark) refuses nothing.
   * The brief's questions are its first run of column-0 numbered lines counting 1, 2, 3 and so on
     ("1.", "Q1:", "**2.**", "### 3)" and "Item 4." forms; after a line reading QUESTIONS: when the
     brief has one); a number out of sequence ends the run, so a later numbered list that restarts at 1
@@ -277,11 +281,13 @@ names at the pinned SHA, not that it supports the grade the verifier gave; a gra
 answer is not linked to that answer; runtime claims (that a name exists, or does not, at runtime) are out
 of scope here (a later rule). A Gemini-family verifier's actual read path is undeclared, so a verbatim
 quote proves the text is in the tree, not that the verifier read it there. False PASS: inline code
-spans, single-quoted text and text in other quotation marks (guillemets, low-9 quotes) are not read as
-quotes, so a fabricated quote presented only that way passes unseen; so is text in a parenthetical
-example ("(e.g. "...")"), and a straight double quote right after a digit is an inch mark, so in
-'line 4"text"' no quote is read; a double-quoted span that breaks across lines or does not close on
-its line is not read; a quote cut at a line edge passes (above); a marker shaped as an inline code
+spans, single-quoted text and text in other quotation marks (guillemets, low-9 quotes, a right curly
+double quote used as an opener as in '”text”', a fullwidth or other double-quote-like
+character) are not read as quotes, so a fabricated quote presented only that way passes unseen; so is
+text in a parenthetical example ("(e.g. "...")"), and a straight double quote right after a digit is
+an inch mark, so text between two such marks ('4"text 5"') is not read (in 'line 4"text"' the second
+mark opens a quote with no closer, so that line is refused, below); a quote cut at a line edge passes
+(above); a marker shaped as an inline code
 span ("`Q4.`") or as the text of an inline link ("[Q4.](x)") at the start of a line is not read as a
 marker candidate, its first source character being a backtick or a bracket (the code-span and
 link-text marker residual: the scan models escapes, character references, emphasis, list marks and
@@ -315,7 +321,12 @@ before the SHA, a harness status line in another form) is CANNOT_EVALUATE, and s
 rendered view is safe but whose text this grammar cannot prove safe: a "<" then a letter in prose
 ("List<String>", "a<b c"), a "]:" in prose ("items[0]: x"), a line beginning with a question
 reference in marker form ("- Q2. missed"), a fence right after a blockquote line, a closing fence
-indented otherwise than its opening fence, a raw-HTML-shaped text inside a multi-line code span, and
+indented otherwise than its opening fence, a raw-HTML-shaped text inside a multi-line code span, a
+double quote mark with no closer after it on its line, read outside the code-span, example and
+inch-mark masks (a quote that breaks across lines; also a lone scare quote opened in prose and never
+closed, a ditto mark, a seconds or inch mark after a letter or a space rather than a digit, and a
+double quote inside an inline code span that runs across lines, since the quote scan masks code spans
+one line at a time: an accepted over-refusal, the unclosed inline quote refusal), and
 a line whose legacy html.unescape reading (the whole line decoded, semicolonless references
 included) or whose escape-aware legacy reading (escapes honoured, each tokenized reference
 decoded through html.unescape) scans as a marker even where CommonMark renders it literal (the
@@ -356,7 +367,9 @@ parser seam, whose removal reads a look-alike label past as the legacy per-tool 
 (verbatim, inline, fenced,
 list-item fences, blockquotes, the answer's names, absent references in an answer and in a question,
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
-paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files),
+paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files,
+the unclosed inline quote refusal, straight and curly, with code-span, example, inch-mark and fenced
+multi-line controls that keep their outcome),
 the closed shape (a heading inside a fence, the fence-close length and indentation, the harness's
 first and last lines, a WORKER_STATUS-prefixed line read as content), hidden text (raw HTML, inline
 code spans read across lines, the content of a fence indented four or more columns, link reference
@@ -402,7 +415,8 @@ marks, blank glyphs, whitespace and non-whitespace control characters (literal a
 and format runs of any length before the marker, emphasis and format runs inside it, a lookalike in
 a fence), a "QN." line right after a quote,
 the exemption of an absent reference its question names, the unmatched-opener rule of the inline
-scanner, the non-regular-file check and
+scanner (held by the static-table check, since a delivery line holding an unmatched opener is refused
+before its quotes are read), the non-regular-file check and
 O_NONBLOCK (a FIFO or directory also yields an empty or unopenable input), git exit status (the type
 and listing checks also refuse), the --batch truncation check (blob re-hashing also refuses), the
 backtick info-string rule and the stop of the question run. The --no-replace-objects option and
@@ -1212,12 +1226,14 @@ def _fence_may_be_text(indent):
     return indent >= 4
 
 
-def _inline_quote_spans(line):
+def _inline_quote_spans(line, unclosed=None):
     """(start, end) of each double-quoted span of one line, its quote marks included, read outside its
     inline code spans and outside a parenthetical example opened by "(e.g." or "(for example" and closed
     by the next ")"; a straight double quote right after a digit (an inch or seconds mark) opens
     nothing. An opener with no closer after it drops out of the scan without hiding a later complete
-    quote of the other kind. Linear: each search moves forward."""
+    quote of the other kind; when unclosed is a list, that opener's index is appended to it, so the
+    parser can refuse the line (_unclosed_quote_refusal) instead of leaving the quote unread. Linear:
+    each search moves forward."""
     if '"' not in line and "\u201c" not in line:
         return []
     masked = _blanked(line, _code_spans(line) + _example_spans(line))
@@ -1240,12 +1256,29 @@ def _inline_quote_spans(line):
             continue
         end = masked.find(closers[masked[start]], start + 1)
         if end < 0:
-            # No closer follows this opener, nor any later one of its kind: that kind drops out.
+            # No closer follows this opener, nor any later one of its kind: that kind drops out of the
+            # scan, and the opener is recorded for the parser's refusal.
+            if unclosed is not None:
+                unclosed.append(start)
             following[masked[start]] = None
             continue
         spans.append((start, end + 1))
         index = end + 1
     return spans
+
+
+def _unclosed_quote_refusal(line, unclosed):
+    """The refusal for a line holding an inline double quote opener with no closer after it on the line
+    (unclosed: the opener indexes _inline_quote_spans recorded), or None. Such a quote is not read, so
+    a span that breaks across lines or never closes would pass unchecked: it is refused (C2 fail-closed),
+    naming the first such opener. The code-span, example and inch-mark masks apply before this, so a
+    mark they hide refuses nothing."""
+    if not unclosed:
+        return None
+    at = min(unclosed)
+    return ("an inline double quote mark with no closer after it on its line ({!r} at column {}; an inline "
+            "quote must close on its own line, so put a multi-line excerpt in a fenced block or a "
+            "blockquote)".format(line[at], at + 1))
 
 
 def _verdict_of(line):
@@ -1740,7 +1773,8 @@ def _parse_delivery(lines, question_count):
             continue
         head = ANSWER_HEAD_RE.match(payload) if payload.startswith("Q") else None
         value = _verdict_of(payload)
-        spans = _inline_quote_spans(payload)
+        unclosed = []
+        spans = _inline_quote_spans(payload, unclosed)
         if head:
             if phase == "findings":
                 refuse(number, "an answer heading inside the findings section")
@@ -1779,6 +1813,11 @@ def _parse_delivery(lines, question_count):
         else:
             current["body"].append(payload)
             current["names_text"].append(_names_text(payload, spans))
+        # A double quote opener that does not close on its line is a quote this grammar cannot read:
+        # refused at its line (fail closed), never dropped unread.
+        unread = _unclosed_quote_refusal(payload, unclosed)
+        if unread:
+            refuse(number, unread)
         for text in _inline_quotes(payload, spans):
             add({"kind": "inline", "line": number, "text": text})
     flush()
@@ -3139,8 +3178,30 @@ def _self_test_cases(fx):
     check("c2/i-e-restatement-is-read-fails", verdict(fx.run(restatement)), "FAIL")
     check("flip/c2-example-openers", verdict(_patched(
         "EXAMPLE_OPEN_RE", re.compile(r"\((?:e\.g\.|i\.e\.|for example)", re.I), lambda: fx.run(restatement))), "PASS")
-    check("c2/unmatched-curly-opener-hides-nothing-fails", verdict(fx.run(
-        _mixed(sha, {4: 'Q4. src/beta.py: “ aside; "return FABRICATED"'}))), "FAIL")
+    # An inline double quote mark that does not close on its line is refused, naming the line (a
+    # multi-line excerpt belongs in a fenced block or a blockquote); the code-span, example and
+    # inch-mark masks still apply first, so a mark they hide refuses nothing.
+    unclosed_words = "an inline double quote mark with no closer after it on its line"
+    curly_aside = 'Q4. src/beta.py: “ aside; "return FABRICATED"'
+    check("c2/unmatched-curly-opener-before-quote-cannot-evaluate",
+          refused_at(_mixed(sha, {4: curly_aside}), curly_aside, unclosed_words), refused)
+    straight_open = 'Q4. Yes: "    return 0" ends beta(); src/beta.py also reads "return FABRICATED when'
+    unclosed_straight = _mixed(sha, {4: straight_open + '\nnot ready" in the guard.'})
+    check("c2/inline-quote-unclosed-straight-cannot-evaluate",
+          refused_at(unclosed_straight, straight_open, unclosed_words), refused)
+    curly_open = 'Q4. Yes: "    return 0" ends beta(); src/beta.py also reads “return FABRICATED when not ready'
+    check("c2/inline-quote-unclosed-curly-cannot-evaluate",
+          refused_at(_mixed(sha, {4: curly_open}), curly_open, unclosed_words), refused)
+    check("c2/inch-mark-unpaired-passes",
+          verdict(fx.run(_mixed(sha, {4: A4 + '\nIt reads well on a 12" screen.'}))), "PASS")
+    check("c2/unclosed-in-code-span-passes", verdict(fx.run(
+        _mixed(sha, {1: 'Q1. docs/alpha.md: a lone `"` opens a string; "The first rule is plain."'}))), "PASS")
+    check("c2/unclosed-in-example-passes", verdict(fx.run(
+        _mixed(sha, {1: 'Q1. docs/alpha.md (e.g. a stray " mark) reads "The first rule is plain."'}))), "PASS")
+    check("c2/multiline-excerpt-in-fence-passes", verdict(fx.run(
+        _mixed(sha, {1: "Q1. docs/alpha.md:\n```\nThe first rule is plain.\nThe second rule follows it.\n```"}))), "PASS")
+    check("flip/c2-unclosed-inline-refusal", verdict(_patched(
+        "_unclosed_quote_refusal", lambda *a: None, lambda: fx.run(unclosed_straight))), "PASS")
     indented = _mixed(sha, {2: "Q2. src/beta.py:\n\n        TIMEOUT = 999"})
     check("items/indented-code-block-cannot-evaluate", verdict(fx.run(indented)), "CANNOT_EVALUATE")
     check("flip/items-indented-code-block",
