@@ -599,6 +599,38 @@ def c_source_control(d, bad):
                 "fam-a report, entry three")
 
 
+# One character of each other refused category inside otherwise visible text: a line separator (Zl), a
+# paragraph separator (Zp), a zero-width space and a right-to-left override (format, Cf), and a lone
+# surrogate (Cs, written as a JSON escape). The flip puts a plain space in its place.
+LINE_SEPARATOR, PARAGRAPH_SEPARATOR = chr(0x2028), chr(0x2029)
+ZERO_WIDTH_SPACE, RTL_OVERRIDE, LONE_SURROGATE = chr(0x200B), chr(0x202E), chr(0xD800)
+
+
+def _source_with(ch, d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE), "fam-a report," + ch + "entry three",
+                "fam-a report, entry three")
+
+
+def c_source_line_separator(d, bad):
+    return _source_with(LINE_SEPARATOR, d, bad)
+
+
+def c_source_paragraph_separator(d, bad):
+    return _source_with(PARAGRAPH_SEPARATOR, d, bad)
+
+
+def c_source_zero_width_space(d, bad):
+    return _source_with(ZERO_WIDTH_SPACE, d, bad)
+
+
+def c_source_rtl_override(d, bad):
+    return _source_with(RTL_OVERRIDE, d, bad)
+
+
+def c_source_lone_surrogate(d, bad):
+    return _source_with(LONE_SURROGATE, d, bad)
+
+
 def c_impact_type(d, bad):
     return _obj(d, bad, (3, org.F_GRADES, 1, org.F_IMPACT, "verdict_change"), "false", False)
 
@@ -1529,6 +1561,16 @@ def _self_test():
                  "at least one not whitespace"),
                 ("fc/source-ref-control", "flip/source-ref-control", c_source_control,
                  "characters of text"),
+                ("fc/source-ref-line-separator", "flip/source-ref-line-separator", c_source_line_separator,
+                 "characters of text"),
+                ("fc/source-ref-paragraph-separator", "flip/source-ref-paragraph-separator",
+                 c_source_paragraph_separator, "characters of text"),
+                ("fc/source-ref-zero-width-space", "flip/source-ref-zero-width-space",
+                 c_source_zero_width_space, "characters of text"),
+                ("fc/source-ref-rtl-override", "flip/source-ref-rtl-override", c_source_rtl_override,
+                 "characters of text"),
+                ("fc/source-ref-lone-surrogate", "flip/source-ref-lone-surrogate", c_source_lone_surrogate,
+                 "characters of text"),
                 ("fc/withdraw-ungraded", "flip/withdraw-ungraded", c_withdraw_ungraded, "never graded"),
                 ("fc/withdraw-basis", "flip/withdraw-basis", c_withdraw_basis, "characters of text"),
                 ("fc/withdraw-basis-whitespace", "flip/withdraw-basis-whitespace",
@@ -1539,7 +1581,7 @@ def _self_test():
                 ("fc/dispatch-id-replayed-across-rounds", "flip/dispatch-id-replayed-across-rounds",
                  c_dispatch_replayed, "already carried by another leg"),
                 ("fc/permit-reused-across-rounds", "flip/permit-reused-across-rounds", c_permit_reused,
-                 "is bound to round 1 already"),
+                 "is bound to round {} already".format(1)),
                 ("fc/leg-verdict-absent", "flip/leg-verdict-absent", c_verdict_absent, "missing field"),
                 ("fc/leg-verdict-vocabulary", "flip/leg-verdict-vocabulary", c_verdict_vocabulary,
                  "is not one of"),
@@ -1552,7 +1594,7 @@ def _self_test():
                 ("fc/missing-leg-verdict", "flip/missing-leg-verdict", c_verdict_missing_leg,
                  "state missing states no verdict"),
                 ("fc/withdrawn-reported-again", "flip/withdrawn-reported-again",
-                 c_withdrawn_reported_again, "was withdrawn in round 2"),
+                 c_withdrawn_reported_again, "was withdrawn in round {}".format(2)),
                 ("fc/source-ref-hangul-filler", "flip/source-ref-hangul-filler", c_source_hangul_filler,
                  "visible"),
                 ("fc/source-ref-combining-mark-alone", "flip/source-ref-combining-mark-alone",
@@ -1575,13 +1617,13 @@ def _self_test():
                 ("fc/carried-leg-findings-changed", "flip/carried-leg-findings-changed",
                  c_carried_leg_findings_changed, "this leg differs from it"),
                 ("fc/carried-leg-in-next-round", "flip/carried-leg-in-next-round", c_carried_leg_next_round,
-                 "already carried by another leg, in round 2"),
+                 "already carried by another leg, in round {}".format(2)),
                 ("fc/withdrawn-reported-in-next-round", "flip/withdrawn-reported-in-next-round",
-                 c_withdrawn_reported_next_round, "was withdrawn in round 3"),
+                 c_withdrawn_reported_next_round, "was withdrawn in round {}".format(3)),
                 ("fc/permit-not-record-prefix", "flip/permit-not-record-prefix", c_permit_not_prefix,
                  "is not the sha256 of the record bytes before this line"),
                 ("fc/retry-permit-changed", "flip/retry-permit-changed", c_retry_permit_changed,
-                 "is not the digest round 3 attempt 1 carries"),
+                 "is not the digest round {} attempt 1 carries".format(3)),
                 ("fc/replaces-withdrawn-id", "flip/replaces-withdrawn-id", c_replaces_withdrawn,
                  "a withdrawn id is never replaced"),
                 ("fc/withdraw-replaced-id", "flip/withdraw-replaced-id", c_withdraw_replaced,
@@ -1593,20 +1635,21 @@ def _self_test():
                 ("fc/retry-moves-head", "flip/retry-moves-head", c_retry_moves_head,
                  "a retry keeps its round's head"),
                 ("fc/baseline-retry-moves-head", "flip/baseline-retry-moves-head",
-                 c_baseline_retry_moves_head, "the head of round 0 attempt 1"),
+                 c_baseline_retry_moves_head, "the head of round {} attempt 1".format(0)),
                 ("fc/carried-leg-after-newer-dispatch", "flip/carried-leg-after-newer-dispatch",
-                 c_carried_leg_after_newer_dispatch, "was dispatched again later in round 3"),
+                 c_carried_leg_after_newer_dispatch, "was dispatched again later in round {}".format(3)),
                 ("fc/carried-leg-past-dispatch-not-missing", "flip/carried-leg-past-dispatch-not-missing",
-                 c_carried_leg_past_dispatch_not_missing, "was dispatched again later in round 3"),
+                 c_carried_leg_past_dispatch_not_missing,
+                 "was dispatched again later in round {}".format(3)),
                 ("fc/carried-leg-past-missing-leg-with-dispatch",
                  "flip/carried-leg-past-missing-leg-with-dispatch", c_carried_leg_past_missing_dispatch,
-                 "was dispatched again later in round 3"),
+                 "was dispatched again later in round {}".format(3)),
                 ("fc/report-digest-repeat-with-shared-dispatch", "flip/report-digest-repeats-on-one-line",
                  c_report_digest_repeats_on_one_line, "already carried by another leg, on this line"),
                 ("fc/report-digest-repeat-with-other-family-dispatch", "flip/report-digest-repeats-on-retry",
                  c_report_digest_repeats_on_retry, "this leg differs from it"),
                 ("fc/report-digest-repeat-with-replayed-dispatch", "flip/report-digest-repeats-next-round",
-                 c_report_digest_repeats_next_round, "already carried by another leg, in round 2"),
+                 c_report_digest_repeats_next_round, "already carried by another leg, in round {}".format(2)),
                 ("fc/replaces-list-repeats-id", "flip/replaces-list-repeats-id", c_replaces_list_repeats,
                  "is listed twice"),
                 ("fc/replaces-list-unknown-id", "flip/replaces-list-unknown-id", c_replaces_list_unknown,

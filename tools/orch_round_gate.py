@@ -53,7 +53,7 @@ integer 9) and policy_sha256 (64 lowercase hex, the pinned policy's digest).
 Every later line, one round attempt: seq, prev, kind ("round"), item (equal to the header's), round (the
 round number: zero is the baseline review, and fix rounds count up from one), attempt (from one), head
 (40 lowercase hex, the head the round was dispatched to review), permit_sha256 (null on the baseline
-round; on a fix round 64 lowercase hex, the record bytes the gate permitted the round on: on attempt
+round; on a fix round it is 64 lowercase hex, the record bytes the gate permitted the round on: on attempt
 one, the sha256 of the record's bytes before that line, every earlier line with its LF; on a retry,
 exactly the digest attempt one of its round carries. So a permit digest names one round, and any other
 round line that carries it is cannot-evaluate), legs, grades and withdrawn. The first round line is the
