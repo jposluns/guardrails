@@ -56,9 +56,10 @@ declared output or at one of those four inputs is refused, never read and accept
 checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
 moving the copy over it, never to git rm it). The rule corpus is NOT read
 that way: it is read by gen_rules.load_corpus, a shared loader this generator does not change, and then this
-generator's own _rule_body rereads each included rule by plain path (for the source-corpus hash), with no link
-or type check. tools/check_manifest.py refuses a symlinked corpus source (exit 2), but neither it, the loader
-nor _rule_body refuses a FIFO at a corpus path (each blocks on it; load_corpus reaches it first): a disclosed
+generator's own _rule_body rereads each included rule by plain path (for the source-corpus hash, over the rule's
+full render, gen_rules.full_body, so a source using the `## Detail` split hashes as its unsplit original), with
+no link or type check. tools/check_manifest.py refuses a symlinked corpus source (exit 2), but neither it, the
+loader nor _rule_body refuses a FIFO at a corpus path (each blocks on it; load_corpus reaches it first): a disclosed
 gap in the corpus reads, outside the descriptor reader. It does NOT claim defence against a CONCURRENT writer racing the run inside the
 checkout: whoever can write the checkout during the run can rewrite this generator itself. Disclosed
 residual: a held descriptor pins a directory's inode, not its ancestry, so a directory renamed out of the
@@ -112,7 +113,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile, unknown_args_refused  # noqa: E402
 from _standards import dir_or_absent, dir_present  # noqa: E402
-from gen_rules import load_corpus  # noqa: E402
+from gen_rules import full_body, load_corpus, read_rule_source  # noqa: E402
 
 # The canonical apex ordering. It MUST appear verbatim in the apex rule body (prjint1), so the skill's
 # top-line ordering is tied to the corpus and cannot silently drift from it.
@@ -520,11 +521,13 @@ def parse_source_text(text):
 
 
 def _rule_body(path):
-    """The rule body with its YAML frontmatter stripped (same extraction as gen_agents.body_of, without
-    the H1 demotion). Used only for the deterministic source-corpus hash, never rendered into the body. Read
-    by plain path, with no link or type check (a FIFO here blocks, as it already does in load_corpus): the
-    disclosed corpus gap in the module threat model."""
-    text = path.read_text(encoding="utf-8")
+    """The body of the rule's full render (gen_rules.full_body, the text gen_rules writes to the .claude/rules/
+    read tree, so a source using the `## Detail` split reads as its unsplit original) with its YAML
+    frontmatter stripped (same extraction as gen_agents.body_of, without the H1 demotion). Used only for the
+    deterministic source-corpus hash and the apex ordering check, never rendered into the body. Read by plain
+    path, with no link or type check (a FIFO here blocks, as it already does in load_corpus): the disclosed
+    corpus gap in the module threat model."""
+    text = full_body(read_rule_source(path), path.name)
     end = text.find("\n---\n", 4)
     return text[end + 5:].strip()
 
@@ -1429,6 +1432,7 @@ def main():
 # --- self-test ------------------------------------------------------------------------------------
 # Proves the gate fails on the things it must catch, against synthetic temp trees, never the real tree:
 #   1. a well-formed source renders and round-trips (regenerate, then --check is clean),
+#   1c. rule sources using the `## Detail` split generate every output byte-equal to their unsplit originals',
 #   2. a source citing an unknown corpus-id fails closed (exit 2), the anti-fabrication gate,
 #   3. a hand-edited (drifted) SKILL.md makes --check report drift (exit 1),
 #   4. an orphan file in the reserved output subtree is detected (exit 1),
@@ -2055,6 +2059,38 @@ def self_test_main():
             failures.append("header expected exactly four two-space hard breaks, got {}".format(breaks))
         if any(ln.startswith("Licence:") and _two(ln) for ln in hdr_lines):
             failures.append("the Licence header line must not carry a two-space hard break")
+
+        # 1c. A rule source using the `## Detail` split is read as its full render (gen_rules.full_body): with
+        # every non-apex fixture rule split (a detail-trigger key, a core layer and the split line added, the
+        # rule's text moved below the split unchanged), every generated file (SKILL.md, the zips, manifest.json
+        # and provenance.md, which carry the source-corpus hash) is byte-equal to the well-formed tree's, and
+        # --check is clean. Red when _rule_body hashes the source text instead of its full render.
+        split = tmp / "split"
+        split.mkdir()
+        _write_fixture(split, good_src)
+        corpus_dir = split.joinpath(*CORPUS_PARTS)
+        for rel, text in (("security/untrusted-content.md", _SEC), ("security/resource-bounds.md", _SEC2),
+                          ("aiqt/no-fabrication.md", _CONDUCT1), ("aiqt/confirm-execution-target.md", _CONDUCT2)):
+            head, sep, rest = text.partition("\n---\n")
+            title, _nl, body = rest.partition("\n")
+            corpus_dir.joinpath(rel).write_bytes(
+                (head + "\ndetail-trigger: writing a self-test fixture" + sep + title
+                 + "\n\nA self-test core layer.\n\n## Detail\n" + body).encode("utf-8"))
+        split_codes = (capture(split, False)[0], capture(split, True)[0])
+        if split_codes != (0, 0):
+            failures.append("1c: a corpus of split sources expected generate then --check exits (0, 0), got {!r}"
+                            .format(split_codes))
+
+        def generated(root):
+            return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*"))
+                    if p.is_file() and not p.is_relative_to(root.joinpath(*CORPUS_PARTS))}
+
+        split_files, good_files = generated(split), generated(good)
+        if not good_files or split_files != good_files:
+            failures.append("1c: the outputs from split sources are not byte-equal to the ones from their unsplit "
+                            "originals; differing: {}".format(sorted(
+                                rel for rel in set(split_files) | set(good_files)
+                                if split_files.get(rel) != good_files.get(rel))))
 
         # 2. Unknown corpus-id fails closed (exit 2): the anti-fabrication gate.
         badid = tmp / "badid"
@@ -3449,7 +3485,8 @@ def self_test_main():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: an unknown option is exit 2 with the usage line and runs nothing; well-formed "
-          "source round-trips clean (SKILL.md and the zips); an unknown "
+          "source round-trips clean (SKILL.md and the zips); rule sources using the `## Detail` split "
+          "generate every output byte-equal to their unsplit originals'; an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "from pack 1.1.1 on a skill version that differs from VERSION fails closed (exit 2, writing nothing) "
           "while the equal twin builds clean and a pack below 1.1.1 leaves the skill independent; a development "
