@@ -20,7 +20,10 @@ and outranks any predicted one, but counts only when recorded in an artefact the
 assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
 unclear, the ASK goes ahead.
 Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or
-open, across every durable store, notes logs included, by at least the subject's key terms, and, in the ASK
-or in the statement calling the matter undecided or open, cite each hit or dismiss it with a reason; a hit
-showing a maintainer ruling in a store the assistant can write, such as the assistant's own notes log, is
-cited as unconfirmed.
+open, across every durable store, notes logs included, by at least the subject's key terms; in the ASK or the
+statement calling the matter undecided or open, or, when neither is made, in the recorded classification, name
+the stores and terms searched and cite each hit or dismiss it with a reason. Whether the assistant can write a
+store decides whether a ruling in it can count, for a notes log as for any other store, and is judged when the
+store is read, from its actual permissions, not its name or usual role. A hit showing a maintainer ruling
+anywhere but an artefact the maintainer controls and the assistant cannot write is cited as unconfirmed: a
+lead to confirm in such an artefact before the matter is treated as decided, never silently ignored.
