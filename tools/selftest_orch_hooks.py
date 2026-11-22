@@ -1391,6 +1391,7 @@ def _rdp_cases(tmp):
     _rdp_label_screen_cases(base)
     _rdp_draft_cases(base)
     _rdp_export_cases(base)
+    _rdp_export_bytes_cases(base)
     _rdp_scope_cases(base, bare)
 
 
@@ -5142,10 +5143,25 @@ def _rdp_blob(root, rev, path):
     return p.stdout if p.returncode == 0 else None
 
 
+def _rdp_export_diff(root, old, new, *paths, swap=None):
+    """The diff of new from old in the fixture repository root as the review export check takes it: the
+    hook's documented fixed options (_RDP_EXPORT_DIFF_ARGS), no ambient GIT_* and replacement objects
+    disabled, as the bytes git writes. swap replaces one option, (old option, new option), to take the
+    diff another way."""
+    args = list(aiqt_hooks._RDP_EXPORT_DIFF_ARGS)
+    if swap is not None:
+        args[args.index(swap[0])] = swap[1]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    p = subprocess.run(["git", "-C", str(root)] + args + [old, new, "--"] + list(paths), check=True,
+                       capture_output=True, timeout=30, env=env)
+    return p.stdout
+
+
 def _rdp_export_cases(base):
     """The review export vectors (rdp/export-*): where the binding declares the export labels, a revision
-    brief naming a review export has the export's diff headers name exactly the pin's changed set from its
-    derived base (P1), and every changed path exported, each head copy byte-identical to the pin's blob and
+    brief naming a review export has the export's diff file byte-identical to the hook's own diff of the pin
+    from its derived base (P1), and every changed path exported, each head copy byte-identical to the pin's blob and
     each base copy byte-identical to the derived base's blob, with no base copy for a root commit (P2). The
     fixture is a series of three fixes on top of the RdpFixture change commit, pinned at the third: a diff of
     the third fix with base copies from the series base is refused, the same with base copies from the third
@@ -5171,14 +5187,13 @@ def _rdp_export_cases(base):
     touched = ("seed.txt", "src/a.py", "src/b.py", "src/c.py")
 
     def diff_of(old, new, *paths):
-        return _rdp_git(ex.root, "diff", "--no-color", "--no-ext-diff", "--no-renames", "--src-prefix=a/",
-                        "--dst-prefix=b/", old, new, "--", *paths) + "\n"
+        return _rdp_export_diff(ex.root, old, new, *paths)
 
     def export(name, base_rev, diff_text, paths=touched, fixture=None, head_rev=None):
         fixture = fixture or ex
         root = fixture.briefs / name
         (root / "base").mkdir(parents=True)
-        (root / "CHANGE.diff").write_text(diff_text, encoding="utf-8")
+        (root / "CHANGE.diff").write_bytes(diff_text)
         for path in paths:
             for rev, top in ((head_rev or f3, root), (base_rev, root / "base")):
                 blob = _rdp_blob(fixture.root, rev, path) if rev else None
@@ -5268,8 +5283,7 @@ def _rdp_export_cases(base):
     rc.authority(rc.seed + "\n")
     empty_tree = _rdp_git(rc.root, "hash-object", "-t", "tree", "/dev/null")
     root_files = ("old.txt", "seed.txt", "src/a.py")
-    root_diff = _rdp_git(rc.root, "diff", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/",
-                         empty_tree, rc.seed) + "\n"
+    root_diff = _rdp_export_diff(rc.root, empty_tree, rc.seed)
     root_ok = export("root-ok", None, root_diff, root_files, rc, rc.seed)
     root_bad = export("root-bad", None, root_diff, root_files, rc, rc.seed)
     (root_bad / "base" / "seed.txt").write_text("seed\n", encoding="utf-8")
@@ -5318,9 +5332,9 @@ def _rdp_export_cases(base):
     (dir_diff / "CHANGE.diff").unlink()
     (dir_diff / "CHANGE.diff").mkdir()
     latin = copy(good, "latin-diff")
-    (latin / "CHANGE.diff").write_bytes(last.encode("utf-8") + b"caf\xe9\n")
+    (latin / "CHANGE.diff").write_bytes(last + b"caf\xe9\n")
     mangled = copy(good, "mangled-diff")
-    (mangled / "CHANGE.diff").write_text(last + "@@ -1 +1 @@\n", encoding="utf-8")
+    (mangled / "CHANGE.diff").write_bytes(last + b"@@ -1 +1 @@\n")
     check("rdp/export-diff-unreadable-unverifiable", [named(run(r), w) for r, w in (
         (good, ""), (no_diff, "is not a regular file under"), (dir_diff, "is not a regular file under"),
         (latin, "is not valid UTF-8"), (mangled, "cannot be read as a git diff"))],
@@ -5349,6 +5363,169 @@ def _rdp_export_cases(base):
     # reconciled as before.
     check("rdp/export-unnamed-brief-unchanged", [_rdp_kind(ex.dispatch(ex.good(pin=f3, paths=p))) for p in (
         ("src/a.py", "src/c.py"), ("src/a.py",))], ["allow", "deny"])
+
+
+def _rdp_export_bytes_cases(base):
+    """The review export byte vectors (rdp/export-bytes-*, rdp/export-shape-*): P1 holds the export's diff
+    file to the hook's own diff of the pin from its derived base, byte for byte, so a diff naming the same
+    paths from another base (a series base, a merge's second parent) or with a section that is only a binary
+    marker, mode lines or an empty hunk is refused, and the bytes are compared as they are, so a genuine diff
+    of a CRLF file passes. The shape rows hold a genuine export of a rename, a deletion, a mode-only change,
+    quoted path names, a merge and a CRLF file allowed, and a wrong one refused."""
+    labels = dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                  repo="Review-repo:", branch="Review-branch:", export="Review-export:",
+                  export_diff="Review-export-diff:", export_base="Review-export-base:")
+    ez = RdpFixture(base, "exportbytes")
+    ez.binding = dict(ez.binding, labels=labels)
+    ez.write_registry(ez.binding)
+
+    def commit(message, files=(), removed=(), modes=(), moved=()):
+        for path, data in files:
+            (ez.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (ez.root / path).write_bytes(data)
+        for path in removed:
+            _rdp_git(ez.root, "rm", "-q", "--", path)
+        for old, new in moved:
+            _rdp_git(ez.root, "mv", "--", old, new)
+        for path, mode in modes:
+            os.chmod(str(ez.root / path), mode)
+        touched = [p for p, _d in files] + [p for p, _m in modes]
+        if touched:
+            _rdp_git(ez.root, "add", "--", *touched)
+        _rdp_git(ez.root, "commit", "-q", "-m", message)
+        return _rdp_git(ez.root, "rev-parse", "HEAD")
+
+    def export(name, pin, base_rev, diff_bytes, paths):
+        root = ez.briefs / name
+        (root / "base").mkdir(parents=True)
+        (root / "CHANGE.diff").write_bytes(diff_bytes)
+        for path in paths:
+            for rev, top in ((pin, root), (base_rev, root / "base")):
+                blob = _rdp_blob(ez.root, rev, path)
+                if blob is not None:
+                    (top / path).parent.mkdir(parents=True, exist_ok=True)
+                    (top / path).write_bytes(blob)
+        return root
+
+    def copy(src, name):
+        dst = ez.briefs / name
+        shutil.copytree(str(src), str(dst), symlinks=True)
+        return dst
+
+    def run(root, pin, paths):
+        _rdp_git(ez.root, "checkout", "-q", "--detach", pin)
+        ez.authority(pin + "\n")
+        return ez.dispatch(ez.good(pin=pin, paths=paths, extra=[
+            "Review-export: " + str(root), "Review-export-diff: CHANGE.diff", "Review-export-base: base"]))
+
+    def named(result, *needles):
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        return (_rdp_kind(result), all(needle in reason for needle in needles))
+
+    differs = "is not byte-identical to the diff of"
+    # A series of three fixes to Z.txt, pinned at the third, and a merge whose first parent changes the last
+    # line of M.txt and whose second parent changes the first.
+    z0 = commit("z 0", [("Z.txt", b"z\n0\n")])
+    commit("z 1", [("Z.txt", b"z\n1\n")])
+    z2 = commit("z 2", [("Z.txt", b"z\n2\n")])
+    z3 = commit("z 3", [("Z.txt", b"z\n3\n")])
+    middle = b"x1\nx2\nx3\nx4\nx5\nx6\n"
+    commit("m 0", [("M.txt", b"a\n" + middle + b"i\n")])
+    _rdp_git(ez.root, "checkout", "-q", "-b", "side")
+    side = commit("side", [("M.txt", b"a SIDE\n" + middle + b"i\n")])
+    _rdp_git(ez.root, "checkout", "-q", "main")
+    main = commit("main", [("M.txt", b"a\n" + middle + b"i MAIN\n")])
+    _rdp_git(ez.root, "merge", "-q", "--no-edit", "side")
+    merge = _rdp_git(ez.root, "rev-parse", "HEAD")
+    # The shape commits: a rename, a deletion, a mode-only change, paths a diff quotes, a CRLF file.
+    cafe = "caf" + chr(0xE9) + ".txt"
+    shapes = commit("shapes", [("R.txt", b"r\nr\nr\n"), ("D.txt", b"d\n"), ("X.sh", b"echo x\n"),
+                               ("with space.txt", b"s\n"), (cafe, b"c\n"), ("C.txt", b"c\r\nd\r\n")])
+    renamed = commit("rename", moved=[("R.txt", "R2.txt")])
+    deleted = commit("delete", removed=["D.txt"])
+    moded = commit("mode", modes=[("X.sh", 0o755)])
+    quoted = commit("quoted", [("with space.txt", b"t\n"), (cafe, b"d\n")])
+    crlf = commit("crlf", [("C.txt", b"c\r\ne\r\n")])
+    # L1, L2 and B: each names exactly the pin's changed set and carries the right head and base copies.
+    good_z = _rdp_export_diff(ez.root, z2, z3)
+    head_z = good_z.split(b"\n--- ")[0]
+    z_cases = [("z-good", good_z), ("l1-series-base", _rdp_export_diff(ez.root, z0, z3)),
+               ("b-binary", head_z + b"\nBinary files a/Z.txt and b/Z.txt differ\n"),
+               ("b-mode", b"diff --git a/Z.txt b/Z.txt\nold mode 100644\nnew mode 100755\n"),
+               ("b-empty-hunk", head_z + b"\n--- a/Z.txt\n+++ b/Z.txt\n@@ -1,2 +1,2 @@\n z\n-2\n+2\n")]
+    z_roots = [export(name, z3, z2, text, ["Z.txt"]) for name, text in z_cases]
+    m_good = export("m-first-parent", merge, main, _rdp_export_diff(ez.root, main, merge), ["M.txt"])
+    m_second = export("l2-second-parent", merge, main, _rdp_export_diff(ez.root, side, merge), ["M.txt"])
+    m_side_copies = export("m-second-parent-copies", merge, side, _rdp_export_diff(ez.root, main, merge),
+                           ["M.txt"])
+
+    def bytes_rows():
+        return ([named(run(r, z3, ["Z.txt"]), differs) for r in z_roots[1:]]
+                + [named(run(m_second, merge, ["M.txt"]), differs)])
+    check("rdp/export-bytes-same-paths-denies", [named(run(z_roots[0], z3, ["Z.txt"])),
+                                                 named(run(m_good, merge, ["M.txt"]))] + bytes_rows(),
+          [("allow", True)] * 2 + [("deny", True)] * 5)
+    # P1 is load bearing: with the byte comparison patched out, the same five exports are allowed (the
+    # passing rows of the header-path check P1 replaced).
+    check("rdp/export-bytes-revert-allows", _rdp_mutant([("_rdp_export_diff_differs", lambda blob, own: False)],
+                                                        bytes_rows), [("allow", False)] * 5)
+    # The hook's own diff is a git read: one that fails (here an option git rejects) is a cannot-evaluate.
+    check("rdp/export-bytes-own-diff-unreadable-unverifiable", [named(run(z_roots[0], z3, ["Z.txt"])), _rdp_mutant(
+        [("_RDP_EXPORT_DIFF_ARGS", aiqt_hooks._RDP_EXPORT_DIFF_ARGS + ("--no-such-option",))],
+        lambda: named(run(z_roots[0], z3, ["Z.txt"]), "from its derived base", "cannot be read"))],
+        [("allow", True), ("unverifiable", True)])
+    check("rdp/export-shape-merge-pins", [named(run(r, merge, ["M.txt"]), w) for r, w in (
+        (m_good, ""), (m_side_copies, "export's base copies 'M.txt' are not byte-identical"),
+        (m_second, differs))], [("allow", True), ("deny", True), ("deny", True)])
+    # A rename is a deletion and an addition (no rename detection): a -M diff is refused, and so is an
+    # export missing the old path's base copy.
+    rn_paths = ["R.txt", "R2.txt"]
+    rn_good = export("rename-good", renamed, shapes, _rdp_export_diff(ez.root, shapes, renamed), rn_paths)
+    rn_m = export("rename-m", renamed, shapes, _rdp_export_diff(ez.root, shapes, renamed,
+                                                                swap=("--no-renames", "-M")), rn_paths)
+    rn_nobase = copy(rn_good, "rename-no-base")
+    (rn_nobase / "base" / "R.txt").unlink()
+    check("rdp/export-shape-rename", [named(run(r, renamed, rn_paths), w) for r, w in (
+        (rn_good, ""), (rn_m, differs), (rn_nobase, "does not hold every path"))],
+        [("allow", True), ("deny", True), ("deny", True)])
+    # A deletion: a base copy and no head copy; a head copy left in place, or no base copy, is refused.
+    dl_good = export("delete-good", deleted, renamed, _rdp_export_diff(ez.root, renamed, deleted), ["D.txt"])
+    dl_head = copy(dl_good, "delete-head-left")
+    (dl_head / "D.txt").write_bytes(b"d\n")
+    dl_nobase = copy(dl_good, "delete-no-base")
+    (dl_nobase / "base" / "D.txt").unlink()
+    check("rdp/export-shape-deletion", [named(run(r, deleted, ["D.txt"]), w) for r, w in (
+        (dl_good, ""), (dl_head, "head copies 'D.txt' are not byte-identical"),
+        (dl_nobase, "does not hold every path"))], [("allow", True), ("deny", True), ("deny", True)])
+    # A mode-only change: its diff is the mode lines, and it still needs both copies.
+    md_diff = _rdp_export_diff(ez.root, deleted, moded)
+    md_good = export("mode-good", moded, deleted, md_diff, ["X.sh"])
+    md_nohead = copy(md_good, "mode-no-head")
+    (md_nohead / "X.sh").unlink()
+    md_nobase = copy(md_good, "mode-no-base")
+    (md_nobase / "base" / "X.sh").unlink()
+    check("rdp/export-shape-mode-only", [b"\nold mode 100644\nnew mode 100755\n" in md_diff] + [
+        named(run(r, moded, ["X.sh"]), w) for r, w in (
+            (md_good, ""), (md_nohead, "does not hold every path"), (md_nobase, "does not hold every path"))],
+        [True, ("allow", True), ("deny", True), ("deny", True)])
+    # Paths with a space and a non-ASCII name: the quoted diff passes; one taken with core.quotePath=false,
+    # or an export missing a head copy, is refused.
+    q_paths = [cafe, "with space.txt"]
+    q_good = export("quoted-good", quoted, moded, _rdp_export_diff(ez.root, moded, quoted), q_paths)
+    q_raw = export("quoted-raw", quoted, moded, _rdp_export_diff(
+        ez.root, moded, quoted, swap=("core.quotePath=true", "core.quotePath=false")), q_paths)
+    q_nohead = copy(q_good, "quoted-no-head")
+    (q_nohead / "with space.txt").unlink()
+    check("rdp/export-shape-quoted-paths", [named(run(r, quoted, q_paths), w) for r, w in (
+        (q_good, ""), (q_raw, differs), (q_nohead, "does not hold every path"))],
+        [("allow", True), ("deny", True), ("deny", True)])
+    # A CRLF file: its genuine diff carries a carriage return before each LF and is allowed as its bytes; the
+    # same diff with its line endings normalized is refused.
+    cr_diff = _rdp_export_diff(ez.root, quoted, crlf)
+    cr_good = export("crlf-good", crlf, quoted, cr_diff, ["C.txt"])
+    cr_lf = export("crlf-normalized", crlf, quoted, cr_diff.replace(b"\r\n", b"\n"), ["C.txt"])
+    check("rdp/export-shape-crlf", [b"+e\r\n" in cr_diff] + [named(run(r, crlf, ["C.txt"]), w) for r, w in (
+        (cr_good, ""), (cr_lf, differs))], [True, ("allow", True), ("deny", True)])
 
 
 def _rdp_ls(cwd, background):

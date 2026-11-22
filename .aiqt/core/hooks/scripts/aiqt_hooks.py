@@ -34900,8 +34900,16 @@ def _rdp_draft_census(cfg, found, changed, pin):
 # outside the diff are unchanged takes all of them from the one derived base, so where the binding declares
 # the export labels and a revision brief names an export, the export is checked against the pin and the base
 # the hook derives (never a base the export or the brief names), after the changed-set equality:
-# - P1: the paths the export's diff headers name (read by the draft census parser, _rdp_draft_paths) equal
-#   the pin's changed set from its derived base;
+# - P1: the export's diff file is byte-identical to the hook's own diff of the derived base against the pin,
+#   taken by _review_git (every ambient GIT_* scrubbed, replacement objects and grafts disabled) with the
+#   fixed options of _RDP_EXPORT_DIFF_ARGS: plumbing diff-tree, recursive, a full patch with binary content
+#   and full object ids, no rename or copy detection, three context lines and no inter-hunk merging, the
+#   myers algorithm with the indent heuristic, no relative root or order file, a/ and b/ prefixes, quoted
+#   path names, no colour, no external diff, no textconv and every submodule change shown. So a diff of
+#   another base, a merge's second parent, a series, or a section that is only a binary marker, mode lines
+#   or an empty hunk differs and is refused even where it names the same paths; the bytes are compared as
+#   they are, so a commit changing a CRLF file passes with its genuine diff. A diff that differs is then
+#   read by the draft census parser (_rdp_draft_paths) only to report why (_rdp_export_p1);
 # - P2: every changed path is exported (a head copy where the pin has the path, a base copy where the base
 #   has it); every head copy, a regular file under the root outside the diff file and the base-copy
 #   directory, is byte-identical to the pin's blob at its path; every base copy, a regular file under the
@@ -34913,6 +34921,12 @@ def _rdp_draft_census(cfg, found, changed, pin):
 # and a walk past _RDP_EXPORT_MAX_ENTRIES entries or the decision's deadline are each a cannot-evaluate. Every
 # directory under the root is opened without following a symlink and read by its descriptor, so no path the
 # walk reads escapes the root.
+_RDP_EXPORT_DIFF_ARGS = ("-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false", "diff-tree", "-r",
+                         "-p", "--binary", "--full-index", "--no-renames", "-U3", "--inter-hunk-context=0",
+                         "--diff-algorithm=myers", "--indent-heuristic", "--no-relative", "-O" + os.devnull,
+                         "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--no-ext-diff", "--no-textconv",
+                         "--ignore-submodules=none", "--submodule=short")
+_RDP_EXPORT_DIFF_SHOWN = "GIT_NO_REPLACE_OBJECTS=1 git {} <base> <pin>".format(" ".join(_RDP_EXPORT_DIFF_ARGS))
 
 
 def _rdp_export_rel(value):
@@ -35080,6 +35094,46 @@ def _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, 
     return None
 
 
+def _rdp_export_diff_differs(blob, own):
+    """P1 of the export check: True unless the export's diff file bytes blob are the hook's own diff bytes
+    own, byte for byte (no decoding, line-ending, byte-order-mark or trailing-whitespace normalization)."""
+    return blob != own
+
+
+def _rdp_export_p1(blob, changed, pin, base):
+    """The (kind, message) refusal for an export diff whose bytes are not the hook's own diff of the pin from
+    its derived base: a cannot-evaluate where the bytes are not a git diff the draft census reads (not UTF-8,
+    a NUL, a malformed section), naming the paths that differ where its headers name another path set, and
+    otherwise a refusal of the same paths with other content (another base, a merge's other parent, a
+    binary-only, mode-only or empty section, other options)."""
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return ("unverifiable", "the export's diff file is not valid UTF-8 ({})".format(exc))
+    if text[:1] == chr(0xFEFF):  # one leading byte-order mark is dropped for the census, never for P1
+        text = text[1:]
+    if "\x00" in text:
+        return ("unverifiable", "the export's diff file contains a NUL")
+    named, why = _rdp_draft_paths(text)
+    if named is None:
+        return ("unverifiable", "the export's diff file cannot be read as a git diff: {}".format(why))
+    named = set(p.encode("utf-8", "surrogateescape") for p in named)
+    if named != changed:
+        parts = []
+        missing = sorted(c.decode("utf-8", "replace") for c in changed - named)
+        extra = sorted(d.decode("utf-8", "replace") for d in named - changed)
+        if missing:
+            parts.append("changed by {} but not in the export's diff: {}".format(pin, _rdp_listing(missing)))
+        if extra:
+            parts.append("in the export's diff but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        return ("deny", "the export's diff does not name the commit's changed set from its derived base {} "
+                "({})".format(base, "; ".join(parts)))
+    return ("deny", "the export's diff names the changed set of {} but is not byte-identical to the diff of "
+            "{} from its derived base {} that the hook takes with {} (a diff from another base or a merge's "
+            "other parent, a binary-only, mode-only or empty section, or other options)".format(
+                pin, pin, base, _RDP_EXPORT_DIFF_SHOWN))
+
+
 def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
     """None when the revision brief names no review export (or the binding declares no export labels), or
     when the export it names passes P1 and P2 against the pin and its derived base; otherwise (kind,
@@ -35107,28 +35161,14 @@ def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
     if base_dir not in dirs:
         return ("unverifiable", "the export's base-copy directory {!r} is not a directory under {}".format(
             base_dir.decode("utf-8", "replace"), root))
-    try:
-        text = blob.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        return ("unverifiable", "the export's diff file is not valid UTF-8 ({})".format(exc))
-    if text[:1] == chr(0xFEFF):  # one leading byte-order mark is dropped, as _rdp_read_text drops it
-        text = text[1:]
-    if "\x00" in text:
-        return ("unverifiable", "the export's diff file contains a NUL")
-    named, why = _rdp_draft_paths(text)
-    if named is None:
-        return ("unverifiable", "the export's diff file cannot be read as a git diff: {}".format(why))
-    named = set(p.encode("utf-8", "surrogateescape") for p in named)
-    if named != changed:
-        parts = []
-        missing = sorted(c.decode("utf-8", "replace") for c in changed - named)
-        extra = sorted(d.decode("utf-8", "replace") for d in named - changed)
-        if missing:
-            parts.append("changed by {} but not in the export's diff: {}".format(pin, _rdp_listing(missing)))
-        if extra:
-            parts.append("in the export's diff but not changed by {}: {}".format(pin, _rdp_listing(extra)))
-        return ("deny", "the export's diff does not name the commit's changed set from its derived base {} "
-                "({})".format(base, "; ".join(parts)))
+    own = _review_git(repo, *_RDP_EXPORT_DIFF_ARGS, base, pin)
+    if own is None or own.returncode != 0:
+        return ("unverifiable", "the diff of {} from its derived base {} cannot be read".format(pin, base))
+    if len(own.stdout) > cfg["max_brief_bytes"]:
+        return ("unverifiable", "the diff of {} from its derived base {} is larger than max_brief_bytes "
+                "({})".format(pin, base, cfg["max_brief_bytes"]))
+    if _rdp_export_diff_differs(blob, own.stdout):
+        return _rdp_export_p1(blob, changed, pin, base)
     pin_entries = _rdp_export_tree(repo, pin)
     base_entries = {} if root_commit else _rdp_export_tree(repo, base)
     if pin_entries is None or base_entries is None:
@@ -35253,7 +35293,8 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
         return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
             "; ".join(parts)))
     # A brief naming a review export has that export checked against the pin and the derived base: its diff
-    # names the changed set, and its head and base copies are the blobs of the pin and that base.
+    # is the hook's own diff of the pin from that base, byte for byte, and its head and base copies are the
+    # blobs of the pin and that base.
     failed = _rdp_export_check(cfg, found, repo, fmt, pin, base, not parents, changed_b)
     if failed is not None:
         return failed

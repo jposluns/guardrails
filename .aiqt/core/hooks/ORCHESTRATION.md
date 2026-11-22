@@ -1144,9 +1144,25 @@ present a file an earlier commit changed as unchanged. Where the binding declare
 after the changed-set equality, against the pin and the base it derives itself (never a base the
 export or the brief names):
 
-- P1: the paths the export's diff headers name, read by the draft census parser above, equal the
-  pin's changed set from its derived base. A path the diff names that the pin does not change, and a
-  changed path the diff leaves out, are refused.
+- P1: the export's diff file is byte-identical to the hook's own diff of the derived base against the
+  pin, so it names exactly the changed set with each path's real change. The hook takes that diff with
+  replacement objects and grafts disabled and every ambient `GIT_` variable removed, with these fixed
+  options, which a worker uses to build the export:
+
+  ```
+  GIT_NO_REPLACE_OBJECTS=1 git -c core.quotePath=true -c diff.suppressBlankEmpty=false diff-tree -r -p
+    --binary --full-index --no-renames -U3 --inter-hunk-context=0 --diff-algorithm=myers
+    --indent-heuristic --no-relative -O/dev/null --src-prefix=a/ --dst-prefix=b/ --no-color
+    --no-ext-diff --no-textconv --ignore-submodules=none --submodule=short <base> <pin>
+  ```
+
+  That is no external diff, no textconv, no colour, three context lines, no rename or copy detection
+  (a rename is a deletion and an addition), binary content in full, and quoted path names. The bytes
+  are compared as they are, with no line-ending, byte-order-mark or whitespace change, so the genuine
+  diff of a commit that changes a CRLF file passes. A diff from another base, a merge's second parent
+  or a series base, a diff with a section that is only a `Binary files` line, mode lines or an empty
+  hunk, and a diff taken with other options are refused, even where they name the same paths; a
+  refusal names the paths that differ where the headers name another path set.
 - P2: every changed path is exported (a head copy where the pin has the path, a base copy where the
   base has it); every head copy, a regular file under the root outside the diff file and the
   base-copy directory, is byte-identical to the pin's blob at its path; every base copy, a regular
@@ -1158,13 +1174,17 @@ The hook walks the root itself, opening each directory and file by name from its
 without following a symlink, so no path it reads escapes the root. Withheld as `UNVERIFIABLE:`: a
 brief naming the export only in part or twice, a relative root, a diff or base path that is absolute
 or holds an empty, `.` or `..` component, a diff file inside the base-copy directory, a root, diff
-file or base-copy directory that is missing or cannot be read, a diff over `max_brief_bytes` or one
-the census cannot read, a symlink, FIFO, device or socket anywhere under the root, a changed path that
-is a symlink or submodule entry or that the diff file or base-copy directory stands in place of, a
-failed git read, more than 50000 entries under the root, and the 8 second budget.
+file or base-copy directory that is missing or cannot be read, a diff file or a derived-base diff over
+`max_brief_bytes`, a diff file that differs from the hook's diff and that the census cannot read (not
+UTF-8, a NUL, a malformed section), a symlink, FIFO, device or socket anywhere under the root, a
+changed path that is a symlink or submodule entry or that the diff file or base-copy directory stands
+in place of, a failed git read (the hook's own diff included), more than 50000 entries under the
+root, and the 8 second budget.
 
 The check applies to a `revision` target only, and a brief that names no export is reconciled as
-before. Its residual: edits between the check and the reviewers' reads are not caught. The brief's
+before. Its residual: edits between the check and the reviewers' reads are not caught. The hook's
+diff reads the repository's diff attributes as git does (a driver's hunk-header pattern, a `-diff`
+marking), so an export built where those differ is refused, not passed. The brief's
 "unchanged" prose is not parsed. A series whose pin's first-parent diff is not the whole task still
 passes (the self-test row `rdp/export-first-parent-base-copies-allows`). Only the adopter's authority
 command and the rule text decide the pin. Context files and sealers that never call the preflight or

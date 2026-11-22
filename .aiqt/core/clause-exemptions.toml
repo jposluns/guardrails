@@ -150,7 +150,7 @@ reason = "Scope bound restating vfxcmt.9, whose cleanliness check runs over each
 [[exempt]]
 corpus-id = "vfxcmt"
 text = "This reconciliation answers only what the declaration and the repository can answer."
-reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no obligation of its own."
+reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11 and vfxcmt.13; no obligation of its own."
 
 [[exempt]]
 corpus-id = "vfxcmt"
