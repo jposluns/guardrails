@@ -194,11 +194,13 @@ import collections
 import contextlib
 import datetime
 import dis
+import errno
 import hashlib
 import importlib.util
 import io
 import itertools
 import json
+import math
 import os
 import random
 import re
@@ -1386,11 +1388,11 @@ def _test_note_literal_sites(failures, tmp):
     _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
     so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
     site both fail. The PreToolUse sites are orch_yield_tool's two note returns, orch_resume_barrier's two
-    (an armed barrier, and one that is unreadable or malformed, which reads as armed) and
-    review_dispatch_pin's;
+    (an armed barrier, and one that is unreadable or malformed, which reads as armed),
+    review_dispatch_pin's and citation_read_check's;
     the UserPromptSubmit stamp's unwritten-stamp note and its timer-path _context_note (judged by its own
     shape: model context plus an operator systemMessage, no permissionDecision), the PostToolUse ledger
-    returns, the Stop loop-bound
+    returns and the citation recorder's failed-write note, the Stop loop-bound
     _stop_warn and the dispatcher's bad-argv fail-open note are pinned the same way (the other Stop and
     dispatcher sites: (ns-*)). The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
@@ -1488,6 +1490,22 @@ def _test_note_literal_sites(failures, tmp):
              "recording that fail-open could not be written")
     finally:
         aiqt_hooks._orch_append_jsonl = saved_append
+    saved_cite = aiqt_hooks._cite_append
+    try:
+        aiqt_hooks._cite_append = lambda state_dir, session, rows: "QA write fault"
+        seed = str(r.root / "seed.txt")
+        note("(nl-citeledger-write) a failed citation-ledger write is surfaced with a note naming the failure",
+             aiqt_hooks.citation_read_recorder(r.payload("PostToolUse", "Read", dict(file_path=seed), extra=dict(
+                 tool_response=dict(type="text", file=dict(filePath=seed, content="seed", numLines=1,
+                                                           startLine=1))))),
+             "citation-ledger write failed (QA write fault)")
+    finally:
+        aiqt_hooks._cite_append = saved_cite
+    note("(nl-citecheck-unread) a commit message citing a line no recorded read covers allows with a note naming "
+         "the range (the citation check's bake posture)",
+         aiqt_hooks.citation_read_check(r.payload("PreToolUse", "Bash", dict(command="git commit -m 'see seed.txt:1'"),
+                                                  extra=dict(session_id="nl-citecheck"))),
+         "seed.txt:1 (no read or write recorded this session covers these lines)")
     saved_save = aiqt_hooks._orch_save_turn_state
     try:
         aiqt_hooks._orch_save_turn_state = lambda root, state: "PermissionError"
@@ -1812,6 +1830,459 @@ def _test_stream_failure_exits(failures):
           err_needle="could not be written to stdout")
     child("stream-note-stdout-closed", ["bash_absolute_paths"], note_payload, "closed", "pipe", 2,
           err_needle="could not be written to stdout")
+
+
+# (stdin-loc-*) The locales the hook input decoding is proved under: the two required ones, and C.UTF-8,
+# covered where the host has it.
+_STDIN_REQUIRED_LOCALES = ("C", "en_US.UTF-8")
+_STDIN_OPTIONAL_LOCALES = ("C.UTF-8",)
+# The locales the same rows also run under with the shipped command line (python3 -I, no -X option), where
+# the interpreter turns UTF-8 mode on; both are required.
+_STDIN_SHIPPED_LOCALES = ("C", "POSIX")
+# One child per locale names what that locale gives the interpreter: whether the C library accepts it,
+# its codeset, and the standard input's encoding and error handler, so a missing locale (which the C
+# library replaces with C without a word) is never read as evaluated coverage.
+_STDIN_LOCALE_PROBE = (
+    "import locale, sys\n"
+    "try:\n"
+    "    locale.setlocale(locale.LC_ALL, '')\n"
+    "except locale.Error as exc:\n"
+    "    print('unavailable', exc)\n"
+    "    raise SystemExit(0)\n"
+    "print('available', locale.nl_langinfo(locale.CODESET), sys.stdin.encoding, sys.stdin.errors,\n"
+    "      sys.flags.utf8_mode)\n"
+)
+# The marker a fixture carries where its raw bytes go: the raw form puts the bytes there, the escaped
+# form the ASCII JSON escapes of the text those bytes decode to.
+_STDIN_MARK = "QAMARK"
+
+
+def _stdin_fixture(obj, raw, escaped):
+    """(raw bytes, ASCII bytes) of one JSON fixture: obj's json.dumps with _STDIN_MARK replaced by raw in
+    the first and by the JSON escape text escaped in the second."""
+    text = json.dumps(obj).encode("ascii")
+    if _STDIN_MARK.encode("ascii") not in text:
+        raise ValueError("a stdin fixture carries no " + _STDIN_MARK)
+    return (text.replace(_STDIN_MARK.encode("ascii"), raw),
+            text.replace(_STDIN_MARK.encode("ascii"), escaped.encode("ascii")))
+
+
+def _stdin_mode_fixture(mode, cwd):
+    """A controlled payload for one registered mode, shaped by its event, with _STDIN_MARK in a field no
+    handler reads; the tool is a plain Bash true, so no fixture reaches a probe or a state write that the
+    stripped environment and the plain cwd do not keep inert."""
+    event = aiqt_hooks.HANDLER_EVENT[mode]
+    obj = dict(hook_event_name=event, session_id="qa-stdin-locale", cwd=cwd, aiqt_qa_ignored=_STDIN_MARK)
+    if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        obj.update(tool_name="Bash", tool_input=dict(command="true"))
+        if event == "PostToolUse":
+            obj["tool_response"] = dict(stdout="", stderr="", interrupted=False)
+        elif event == "PostToolUseFailure":
+            obj["error"] = "exit 1"
+    elif event in ("Stop", "SubagentStop"):
+        obj.update(last_assistant_message="Done.", stop_hook_active=False)
+    elif event == "UserPromptSubmit":
+        obj["prompt"] = "hello"
+    elif event == "SessionStart":
+        obj["source"] = "startup"
+    return obj
+
+
+def _stdin_outcome(proc):
+    """The decision category of one hook child, never its clock-dependent text: the exit status, the
+    stdout object's keys with its permission decision (or a marker for no stdout or an unparsed one), and
+    the diagnostic category (an unreadable payload, a fail-closed note, other text, or none)."""
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    err = (proc.stderr or b"").decode("utf-8", "replace")
+    if not out.strip():
+        shape = ("no-stdout",)
+    else:
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            shape = ("unparsed-stdout",)
+        else:
+            if isinstance(obj, dict):
+                specific = obj.get("hookSpecificOutput")
+                decision = specific.get("permissionDecision") if isinstance(specific, dict) else None
+                shape = tuple(sorted(obj)) + ("decision=" + str(decision),)
+            else:
+                shape = ("non-object-stdout",)
+    if "unreadable payload" in out or "unreadable hook payload" in err:
+        diagnostic = "unreadable-payload"
+    elif "failing closed" in err:
+        diagnostic = "failing-closed"
+    elif err.strip():
+        diagnostic = "other-stderr"
+    else:
+        diagnostic = "no-stderr"
+    return (proc.returncode, shape, diagnostic)
+
+
+def _test_stdin_locale_decoding(failures, tmp):
+    """(stdin-loc-*) Real-subprocess vectors: the dispatcher decodes the hook payload the same way under
+    every locale. Each child runs the LIVE hook file under [sys.executable, "-I", "-B", "-X", "utf8=0"]
+    (isolated, and with UTF-8 mode off, so the interpreter's own UTF-8 mode cannot mask a locale-encoded
+    read) with LC_ALL set to C, to en_US.UTF-8 and, where the host has it, to C.UTF-8, sends real bytes on
+    its standard input and asserts the exit status, the parsed decision and the diagnostic category. The
+    same rows run again under the shipped command line, [sys.executable, "-I", "-B"] with no -X option
+    (the hooks.json command is python3 -I; -B only stops bytecode writes), with LC_ALL set to C and to
+    POSIX, where the interpreter turns UTF-8 mode on; their labels start stdin-loc-shipped-, and their
+    probe must report UTF-8 mode 1 and a utf-8/surrogateescape standard input, or the rows under that
+    locale are reported as unevaluated coverage, a failure.
+
+    A raw 0xff inside an otherwise valid JSON string, first in a field no handler reads and then in the
+    consumed path, command or message, must give the same decision as an ASCII fixture carrying the
+    equivalent \\udcff escape, on a benign allow, a structured deny, an allow-note and a Stop warning;
+    valid non-ASCII UTF-8 and truncated and overlong sequences must match their escaped equivalents too;
+    an invalid byte outside a string, empty input, malformed JSON, non-object JSON and a payload that
+    starts with a UTF-8 byte order mark keep each mode's error posture (fail-closed exit 2, fail-open warn
+    on exit 0); CRLF and lone-CR line ends between JSON tokens decide as LF does (no line end is
+    translated, and translating one would not change that decision; _test_stdin_read_once pins that line
+    ends come through unchanged). Every registered mode is then run on a controlled fixture holding a raw
+    0xff in an ignored field, which must decide as its escaped twin does and never as an unreadable
+    payload.
+
+    These vectors fail on the locale-encoded reader (sys.stdin.read()): under en_US.UTF-8 a raw 0xff
+    raised UnicodeDecodeError, so a fail-closed mode exited 2 on an unreadable payload and a fail-open one
+    warned, where the C locale judged the same payload; and under C with UTF-8 mode off, as the utf8=0
+    children run, the ASCII codec turned valid UTF-8 into surrogates, so the deny reason echoing a
+    non-ASCII path differed from its escaped twin. The stdin-loc-shipped- rows pass on that reader: under
+    the shipped command line the C and POSIX locales read standard input as utf-8 with surrogateescape,
+    as this reader does. They pin that the shipped configuration decides as the utf8=0 rows do, and fail
+    on a reader whose decoding depends on UTF-8 mode. A required locale the host lacks is reported as
+    unevaluated coverage, a failure; a missing C.UTF-8 is reported as unevaluated and skipped."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    home = tmp / "stdin-locale-home"
+    cwd = tmp / "stdin-locale-cwd"
+    for path in (home, cwd, home / "state", home / "config", home / "cache"):
+        path.mkdir(parents=True, exist_ok=True)
+    base_env = dict((k, v) for k, v in os.environ.items()
+                    if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_", "LC_", "PYTHON", "GIT_"))
+                    and k not in ("LANG", "LANGUAGE"))
+    base_env.update(HOME=str(home), XDG_STATE_HOME=str(home / "state"),
+                    XDG_CONFIG_HOME=str(home / "config"), XDG_CACHE_HOME=str(home / "cache"))
+
+    def run(label, args, payload, env):
+        # Every child is the interpreter, spelled here as the literal launch head, so the repo-wide
+        # maintenance pin scan can see it is not git; args holds only what follows -I -B.
+        try:
+            return subprocess.run([sys.executable, "-I", "-B", *args], input=payload, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, cwd=str(cwd), timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(" + label + ") could not run the child: " + repr(exc))
+            return None
+
+    # (tag, LC_ALL, interpreter options before the hook, UTF-8 mode the probe must report, required)
+    configs = [(name, name, ["-X", "utf8=0"], "0", name in _STDIN_REQUIRED_LOCALES)
+               for name in _STDIN_REQUIRED_LOCALES + _STDIN_OPTIONAL_LOCALES]
+    configs += [("shipped-" + name, name, [], "1", True) for name in _STDIN_SHIPPED_LOCALES]
+    locales = []
+    for tag, name, flags, want_mode, required in configs:
+        env = dict(base_env, LC_ALL=name)
+        label = "stdin-loc-probe-" + tag
+        proc = run(label, flags + ["-c", _STDIN_LOCALE_PROBE], b"", env)
+        if proc is None:
+            continue
+        words = proc.stdout.decode("utf-8", "replace").split()
+        utf8_name = "utf-8" in name.lower()
+        reason = None
+        if proc.returncode != 0 or not words:
+            reason = "the probe exited {} with {!r}".format(proc.returncode, proc.stdout + proc.stderr)
+        elif words[0] != "available":
+            reason = "the C library refused it ({})".format(" ".join(words[1:]))
+        elif len(words) != 5 or words[4] != want_mode:
+            reason = "the probe reported {!r}, not UTF-8 mode {}".format(" ".join(words), want_mode)
+        elif utf8_name and words[1].upper().replace("-", "") != "UTF8":
+            reason = "its codeset is {}, not UTF-8".format(words[1])
+        elif want_mode == "1" and (words[2].lower().replace("-", "") != "utf8"
+                                   or words[3] != "surrogateescape"):
+            reason = "its standard input is {}/{}, not utf-8/surrogateescape".format(words[2], words[3])
+        if reason is not None:
+            note = ("(stdin-loc-unevaluated-{}) LC_ALL={} under {} is not usable on this host ({}), so the "
+                    "stdin decoding rows under it are unevaluated".format(
+                        tag, name, " ".join(["python3", "-I"] + flags), reason))
+            if required:
+                failures.append(note)
+            else:
+                print(note)
+            continue
+        locales.append((tag, name, flags, env, "{}, codeset {}, stdin {}/{}, UTF-8 mode {}".format(
+            " ".join(["-I"] + flags), words[1], words[2], words[3], words[4])))
+
+    deny_obj = dict(hook_event_name="PreToolUse", tool_name="Write", tool_input=dict(file_path="relative.txt"))
+    allow_obj = dict(hook_event_name="PreToolUse", tool_name="Read", tool_input=dict(file_path="/abs/x.txt"))
+    note_obj = dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command="cd sub"))
+    wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    stop_obj = dict(hook_event_name="Stop", last_assistant_message=wall)
+
+    def with_ignored(obj):
+        return dict(obj, aiqt_qa_ignored="x" + _STDIN_MARK + "y")
+
+    def consumed(obj, key, value):
+        copy = json.loads(json.dumps(obj))
+        if key == "last_assistant_message":
+            copy[key] = value
+        else:
+            copy["tool_input"][key] = value
+        return copy
+
+    # (label, mode, fixture object, raw bytes, escaped text, the decision both must give: shape_ok's kind)
+    paired = [
+        ("allow-ignored", "absolute_paths", with_ignored(allow_obj), b"\xff", "\\udcff", "allow"),
+        ("allow-consumed", "absolute_paths", consumed(allow_obj, "file_path", "/abs/" + _STDIN_MARK + ".txt"),
+         b"\xff", "\\udcff", "allow"),
+        ("deny-ignored", "absolute_paths", with_ignored(deny_obj), b"\xff", "\\udcff", "deny"),
+        ("deny-consumed", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xff", "\\udcff", "deny"),
+        ("note-ignored", "bash_absolute_paths", with_ignored(note_obj), b"\xff", "\\udcff", "note"),
+        ("note-consumed", "bash_absolute_paths", consumed(note_obj, "command", "cd sub" + _STDIN_MARK),
+         b"\xff", "\\udcff", "note"),
+        ("stopwarn-ignored", "diff_wall_stop", with_ignored(stop_obj), b"\xff", "\\udcff", "warn"),
+        ("stopwarn-consumed", "diff_wall_stop",
+         consumed(stop_obj, "last_assistant_message", wall.replace("+b", "+b" + _STDIN_MARK)),
+         b"\xff", "\\udcff", "warn"),
+        ("deny-utf8", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         "é→\U0001f600".encode("utf-8"), "\\u00e9\\u2192\\ud83d\\ude00", "deny"),
+        ("deny-truncated", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK),
+         b"\xe2\x86", "\\udce2\\udc86", "deny"),
+        ("deny-truncated-mid", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xc3", "\\udcc3", "deny"),
+        ("deny-overlong", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xc0\xaf", "\\udcc0\\udcaf", "deny"),
+        ("note-utf8", "bash_absolute_paths", consumed(note_obj, "command", "cd sub" + _STDIN_MARK),
+         "é".encode("utf-8"), "\\u00e9", "note"),
+        # The heredoc-terminator residue names these: a here-document body or delimiter holding a byte that
+        # is not valid UTF-8 is judged on its termination, as its escaped twin is.
+        ("heredoc-body-closed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<EOF\nab " + _STDIN_MARK + " cd\nEOF\n"), b"\xff", "\\udcff", "allow"),
+        ("heredoc-delim-closed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<E" + _STDIN_MARK + "\nbody\nE" + _STDIN_MARK + "\n"),
+         b"\xff", "\\udcff", "allow"),
+        ("heredoc-delim-mistyped", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<E" + _STDIN_MARK + "\nbody\nEOF\n"), b"\xff", "\\udcff", "deny"),
+        ("heredoc-body-unclosed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<EOF\nab " + _STDIN_MARK + "\nEOFX\n"), b"\xff", "\\udcff", "deny"),
+    ]
+
+    def shape_ok(kind, proc):
+        out = proc.stdout.decode("utf-8", "replace")
+        if kind == "allow":
+            return proc.returncode == 0 and not out.strip() and not proc.stderr
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            return False
+        if proc.returncode != 0 or not isinstance(obj, dict) or proc.stderr:
+            return False
+        specific = obj.get("hookSpecificOutput")
+        if kind == "deny":
+            return isinstance(specific, dict) and specific.get("permissionDecision") == "deny"
+        if kind == "note":
+            return specific is None and isinstance(obj.get("systemMessage"), str)
+        return specific is None and "WARNING" in str(obj.get("systemMessage"))
+
+    deny_text = json.dumps(deny_obj, indent=1).encode("ascii")
+    stop_text = json.dumps(stop_obj).encode("ascii")
+    allow_text = json.dumps(allow_obj).encode("ascii")
+    bom = b"\xef\xbb\xbf"
+    # (label, mode, payload, expected exit, stderr needle or None, fail-open stdout needle or None)
+    # The bom rows: a payload that starts with a UTF-8 byte order mark is not stripped. The mark decodes to
+    # U+FEFF, which json.loads refuses ("Unexpected UTF-8 BOM"), so the payload reads as unreadable: a
+    # fail-closed mode exits 2 even on an allow-shaped payload, and a fail-open one warns on exit 0. A
+    # reader that stripped the mark (a utf-8-sig decode) would judge the payload instead and allow it.
+    postured = [
+        ("fc-bom", "absolute_paths", bom + allow_text, 2, "Unexpected UTF-8 BOM", None),
+        ("fo-bom", "diff_wall_stop", bom + stop_text, 0, None, "Unexpected UTF-8 BOM"),
+        ("fc-outside-string", "absolute_paths", b"{\xff" + json.dumps(deny_obj).encode("ascii")[1:], 2,
+         "JSONDecodeError", None),
+        ("fc-empty", "absolute_paths", b"", 2, "unreadable hook payload", None),
+        ("fc-malformed", "absolute_paths", b"not json", 2, "unreadable hook payload", None),
+        ("fc-nonobject", "absolute_paths", b"[\"\xff\"]", 2, "payload is not a JSON object", None),
+        ("fc-cr-in-string", "absolute_paths", deny_text.replace(b"relative.txt", b"rel\r.txt"), 2,
+         "unreadable hook payload", None),
+        ("fo-outside-string", "diff_wall_stop", b"{\xff" + stop_text[1:], 0, None, "JSONDecodeError"),
+        ("fo-empty", "diff_wall_stop", b"", 0, None, "unreadable payload"),
+        ("fo-malformed", "diff_wall_stop", b"not json", 0, None, "unreadable payload"),
+        ("fo-nonobject", "diff_wall_stop", b"[\"\xff\"]", 0, None, "payload is not a JSON object"),
+    ]
+    # These rows pin that CRLF and lone-CR line ends between JSON tokens still parse and decide as LF does.
+    # They cannot pin whether a line end is translated: strict json.loads reads a CR between tokens as
+    # whitespace and refuses a raw CR or LF inside a string alike, so translating would change no decision,
+    # and these rows pass either way. The stdin-once-line-ends row pins that line ends come through
+    # unchanged.
+    line_ends = [
+        ("deny-crlf", "absolute_paths", deny_text.replace(b"\n", b"\r\n")),
+        ("deny-lone-cr", "absolute_paths", deny_text.replace(b"\n", b"\r")),
+    ]
+    modes = sorted(aiqt_hooks.HANDLERS)
+
+    for name, lc_all, flags, env, effective in locales:
+        hook_args = flags + [hook]
+        where = " under LC_ALL={} ({})".format(lc_all, effective)
+        for label, mode, obj, raw, escaped, kind in paired:
+            row = "stdin-loc-" + name + "-" + label
+            raw_payload, escaped_payload = _stdin_fixture(obj, raw, escaped)
+            got = run(row, hook_args + [mode], raw_payload, env)
+            want = run(row + "-escaped", hook_args + [mode], escaped_payload, env)
+            if got is None or want is None:
+                continue
+            if not shape_ok(kind, want):
+                failures.append("({}-escaped) the ASCII \\u-escaped control did not give the expected {}{}: "
+                                "exit {}, stdout {!r}, stderr {!r}".format(row, kind, where, want.returncode,
+                                                                           want.stdout, want.stderr))
+            if not shape_ok(kind, got):
+                failures.append("({}) the raw-byte fixture did not give the expected {}{}: exit {}, stdout "
+                                "{!r}, stderr {!r}".format(row, kind, where, got.returncode, got.stdout,
+                                                           got.stderr))
+            elif (got.returncode, got.stdout, got.stderr) != (want.returncode, want.stdout, want.stderr):
+                failures.append("({}) the raw-byte fixture decided differently from its \\u-escaped twin{}: "
+                                "{!r} against {!r}".format(row, where, got.stdout, want.stdout))
+        for label, mode, payload, want_rc, err_needle, out_needle in postured:
+            row = "stdin-loc-" + name + "-" + label
+            got = run(row, hook_args + [mode], payload, env)
+            if got is None:
+                continue
+            out = got.stdout.decode("utf-8", "replace")
+            err = got.stderr.decode("utf-8", "replace")
+            if got.returncode != want_rc:
+                failures.append("({}) expected exit {}{}, got {} (stdout {!r}, stderr {!r})".format(
+                    row, want_rc, where, got.returncode, out, err))
+            if want_rc == 2 and out:
+                failures.append("({}) a fail-closed payload error wrote to stdout, the decision "
+                                "channel{}: {!r}".format(row, where, out))
+            if err_needle is not None and err_needle not in err:
+                failures.append("({}) stderr does not name {!r}{}: {!r}".format(row, err_needle, where, err))
+            if out_needle is not None and (out_needle not in out or "systemMessage" not in out):
+                failures.append("({}) the fail-open warning does not name {!r}{}: {!r}".format(
+                    row, out_needle, where, out))
+        lf = run("stdin-loc-" + name + "-deny-lf", hook_args + ["absolute_paths"], deny_text, env)
+        for label, mode, payload in line_ends:
+            row = "stdin-loc-" + name + "-" + label
+            got = run(row, hook_args + [mode], payload, env)
+            if got is None or lf is None:
+                continue
+            if not shape_ok("deny", got) or got.stdout != lf.stdout:
+                failures.append("({}) a payload with {} line ends did not decide as its LF twin{}: {!r} "
+                                "against {!r}".format(row, label.split("-", 1)[1], where, got.stdout, lf.stdout))
+        for mode in modes:
+            row = "stdin-loc-" + name + "-mode-" + mode
+            raw_payload, escaped_payload = _stdin_fixture(_stdin_mode_fixture(mode, str(cwd)), b"\xff",
+                                                          "\\udcff")
+            got = run(row, hook_args + [mode], raw_payload, env)
+            want = run(row + "-escaped", hook_args + [mode], escaped_payload, env)
+            if got is None or want is None:
+                continue
+            got_outcome, want_outcome = _stdin_outcome(got), _stdin_outcome(want)
+            if want_outcome[2] == "unreadable-payload":
+                failures.append("({}-escaped) the ASCII control fixture read as an unreadable payload{}: "
+                                "{!r}".format(row, where, want_outcome))
+            if got_outcome[2] == "unreadable-payload" or got_outcome != want_outcome:
+                failures.append("({}) a raw 0xff in an ignored field decided {!r}, its \\u-escaped twin "
+                                "{!r}{}".format(row, got_outcome, want_outcome, where))
+    print("(stdin-loc) hook stdin decoding evaluated under: " + (
+        "; ".join("LC_ALL={} ({})".format(lc_all, effective)
+                  for _tag, lc_all, _flags, _env, effective in locales) or "none"))
+
+
+# (stdin-once-*) The payload a stand-in stdin's own text read() returns: allow-shaped, so a reader that
+# fell back to a second read through the text layer would turn a payload failure into an allow.
+_STDIN_ONCE_ALLOW = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Read",
+                                    tool_input=dict(file_path="/abs/x.txt")))
+
+
+class _StdinOnceStream:
+    """A stand-in sys.stdin with a binary buffer that records every read in calls. buffer.read() raises
+    result when it is an exception and returns it otherwise; the stream's own read() returns
+    _STDIN_ONCE_ALLOW."""
+
+    def __init__(self, result):
+        self.calls = []
+        calls = self.calls
+
+        class _Buffer:
+            def read(self, *args):
+                calls.append("buffer.read")
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+        self.buffer = _Buffer()
+
+    def read(self, *args):
+        self.calls.append("text.read")
+        return _STDIN_ONCE_ALLOW
+
+
+def _test_stdin_read_once(failures):
+    """(stdin-once-*) In-process vectors: main() reads a real standard input once, through its binary
+    buffer, and a failure of that read or of the payload it returns reaches the existing unreadable-payload
+    handling with no second read. Each row installs a _StdinOnceStream as sys.stdin and asserts the exit
+    status, the diagnostic and that the only read was one buffer.read: a buffer.read that raises EIO fails
+    a fail-closed mode with exit 2 and warns on exit 0 for a fail-open one; a buffer.read that returns a
+    0xff the decoder must surrogate-escape, outside a JSON string, fails as unreadable JSON, and inside a
+    string reaches the handler, which denies the relative path; a buffer.read that returns None (a
+    non-blocking standard input with no data ready) is a read failure named as BlockingIOError, exit 2
+    for a fail-closed mode and a warning on exit 0 for a fail-open one.
+
+    Each fallback shape fails its own rows, not every row: that fallback read is a second call, and its
+    allow-shaped payload is allowed. A reader that falls back to the stream's own read() after a raising
+    binary read fails the two raise-* rows only. A reader that falls back after a strict decode that
+    refuses the 0xff fails the two escape-* rows and the line-ends row only. The two none-* rows fail on a
+    reader that lets the None reach the decoder (its note names AttributeError instead), and on one that
+    falls back on a None read.
+
+    The stdin-once-line-ends row calls _read_hook_input directly and pins that line ends are not
+    translated: a CRLF and a lone CR come through unchanged, as the text stream this replaced gave them on
+    POSIX. No decision row can pin that (strict json.loads reads a CR between tokens as whitespace and
+    refuses a raw CR or LF inside a string alike, so translating would change no decision); this row
+    fails on a reader that translates a CRLF or a lone CR to LF."""
+    deny_bytes = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Write",
+                                 tool_input=dict(file_path="relative.txt"))).encode("ascii")
+    eio = OSError(errno.EIO, "injected EIO")
+    # (label, mode, buffer.read result, expected exit, stderr needle or None, stdout needle or None)
+    rows = [
+        ("raise-fail-closed", "absolute_paths", eio, 2, "unreadable hook payload (OSError", None),
+        ("raise-fail-open", "diff_wall_stop", eio, 0, None, "unreadable payload: OSError"),
+        ("escape-outside-string", "absolute_paths", b"{\xff" + deny_bytes[1:], 2,
+         "unreadable hook payload (JSONDecodeError", None),
+        ("escape-in-string", "absolute_paths", deny_bytes.replace(b"relative", b"rel\xffative"), 0, None,
+         '"permissionDecision": "deny"'),
+        ("none-fail-closed", "absolute_paths", None, 2,
+         "unreadable hook payload (BlockingIOError: standard input is non-blocking", None),
+        ("none-fail-open", "diff_wall_stop", None, 0, None,
+         "unreadable payload: BlockingIOError: standard input is non-blocking"),
+    ]
+    for label, mode, result, want_rc, err_needle, out_needle in rows:
+        row = "stdin-once-" + label
+        stream = _StdinOnceStream(result)
+        out = io.StringIO()
+        try:
+            code, err, _seconds = _main_run(mode, stdin=stream, stdout=out)
+        except Exception as exc:
+            failures.append("({}) main() raised {!r}".format(row, exc))
+            continue
+        if stream.calls != ["buffer.read"]:
+            failures.append("({}) expected exactly one read, buffer.read, got {!r}".format(row, stream.calls))
+        if code != want_rc:
+            failures.append("({}) expected exit {}, got {} (stdout {!r}, stderr {!r})".format(
+                row, want_rc, code, out.getvalue(), err))
+        if want_rc == 2 and out.getvalue():
+            failures.append("({}) a fail-closed payload error wrote to stdout, the decision channel: "
+                            "{!r}".format(row, out.getvalue()))
+        if err_needle is not None and err_needle not in err:
+            failures.append("({}) stderr does not name {!r}: {!r}".format(row, err_needle, err))
+        if out_needle is not None and out_needle not in out.getvalue():
+            failures.append("({}) stdout does not name {!r}: {!r}".format(row, out_needle, out.getvalue()))
+    stream = _StdinOnceStream(b"a\r\nb\rc\nd\xff\r\r\n")
+    try:
+        text = aiqt_hooks._read_hook_input(stream)
+    except Exception as exc:
+        failures.append("(stdin-once-line-ends-raised) _read_hook_input raised {!r}".format(exc))
+    else:
+        if text != "a\r\nb\rc\nd\udcff\r\r\n" or stream.calls != ["buffer.read"]:
+            failures.append("(stdin-once-line-ends) expected 'a\\r\\nb\\rc\\nd\\udcff\\r\\r\\n', line ends "
+                            "unchanged, from one buffer.read, got {!r} from {!r}".format(text, stream.calls))
 
 
 def _test_note_shape_pins(failures, tmp):
@@ -3373,9 +3844,9 @@ _IE_MUTANTS = {
                      "quoted = command"),),
     "unquoted-body": ((r"""quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub(r"<<\1\2'\3'", command)""",
                        'quoted = _ERREXIT_UNQUOTED_HEREDOC_RE.sub("", command)'),),
-    "quoted-body": (("i = _skip_heredoc_bodies(command, i, n, pending_heredocs)", "i = i"),),
-    "quoted-body-end": (("if cand == delim:\n                break\n    return i\n",
-                         "if False:\n                break\n    return i\n"),),
+    "quoted-body": (("i = _skip_heredoc_bodies(command, i, n, pending_heredocs, bodies)", "i = i"),),
+    "quoted-body-end": (("if cand == delim:\n                break\n            if bodies is not None:\n",
+                         "if False:\n                break\n            if bodies is not None:\n"),),
     "raw-text": (("segments, exact, in_progress = _lex_command(command, partial=True)",
                   "segments, exact, in_progress = _lex_command(_dequoted_text(command), partial=True)"),
                  ("effect, pipefail_effect = _errexit_set_effect(words)",
@@ -4337,10 +4808,20 @@ def _test_console_prefix(failures, tmp):
         failures.append("(cp-oversized-unbounded) with the bound removed the read must take the whole {}-byte file, "
                         "got {!r}".format(size, unbounded))
     # (cp-oversized-cost) the handler's own CPU time on the oversized transcript stays far inside the budget.
-    _result, spent = _hook_cpu_timed(lambda: outcome(oversized), bound=1.0)
-    if spent >= 1.0:
-        failures.append("(cp-oversized-cost) console_prefix_pretool used {:.2f}s of CPU on a {}-byte transcript; "
-                        "the bound is 1 s".format(spent, size))
+    # Judged by the shared judge (_timed_case): the median of three runs, a fresh-process replay for a lone
+    # excursion; a run that raises fails, as outcome() reports such a run as 'error'. Disclosed blind spot
+    # (cold work before measurement, see THE SHARED TIMING JUDGE): the cp-* rows above call
+    # console_prefix_pretool untimed in this process, the oversized transcript itself included
+    # (cp-oversized-bound, cp-oversized-unbounded), so work the handler does only on its first call in a
+    # process (a lazily compiled pattern, a first-use cache) is spent before the first timed run; a slowdown
+    # confined to that first call shows on no timed run, triggers no replay, and passes this row. No
+    # unconditional cold measurement is taken.
+    cost = _timed_case({"id": "cp-oversized-cost", "handler": "console_prefix_pretool",
+                        "payload": payload(oversized), "console_prefix": [_CP_PATTERN, None, str(config)]},
+                       1.0, True, lambda sample: None if sample.get("error") is None else "raised " + sample["error"])
+    if cost.failed:
+        failures.append("(cp-oversized-cost) console_prefix_pretool on a {}-byte transcript, against a 1 s CPU "
+                        "bound: {}".format(size, cost.text))
     # (cp-settings) a pattern that does not compile, an overlong pattern and an unknown posture each note.
     for label, settings, want_text in (
             ("(cp-bad-pattern)", {"pattern": "(["}, "does not compile"),
@@ -4781,7 +5262,7 @@ _PSM_IDIOM_ROWS = (
     ("(psm-i8) pidwait -f with the bracket idiom", "pidwait -f '[j]ob7'"))
 # Long bracket idioms, each one scan of the command: (label, command, decision). A test that searched the
 # whole command once per class letter used about 104 s of CPU on the first at 400 KB; each row must stay
-# under _PSM_TIMED_BOUND CPU seconds of the calling thread's own work (_hook_cpu_timed; about 0.01 to
+# under _PSM_TIMED_BOUND CPU seconds of the calling thread's own work (_timed_case; about 0.01 to
 # 0.06 s in-process on an 80-core host with Python 3.14.4, 2026-10-29). The last is a literal whose
 # period letter is the class letter, which is not judged and denies.
 _PSM_TIMED_ROWS = (
@@ -5897,11 +6378,11 @@ def _test_pgrep_self_match(failures):
     this hook's decision, and each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
     for label, command, want in _PSM_TIMED_ROWS:
-        got, spent = _hook_cpu_timed(lambda command=command: _decision(handler, command),
-                                     bound=_PSM_TIMED_BOUND)
-        if got != want or spent > _PSM_TIMED_BOUND:
-            failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
-                label, want, _PSM_TIMED_BOUND, got, spent))
+        case = _timed_case({"id": label, "handler": "pgrep_self_match", "payload": _timing_bash(command)},
+                           _PSM_TIMED_BOUND, False, _timing_decision_check(want))
+        if case.failed:
+            failures.append("{}: expected {} within {} s of CPU, got {}: {}".format(
+                label, want, _PSM_TIMED_BOUND, ", ".join(case.decisions), case.text))
     _psm_oracle(failures, handler)
     for label, command in _PSM_DENY_ROWS:
         got = _decision(handler, command)
@@ -7725,12 +8206,43 @@ def _gate_runtime_cost_failures(cost_inputs):
     return out
 
 
-_GW_FLOOR = 0.1
-_GW_SIZES = 9
-# The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
-# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio).
-_GW_RATIO = 3.0
-_GW_TIMINGS = 3
+# The smaller input of a gw-lin row repeats its unit _GW_REPS times; the doubled input repeats it twice as often.
+_GW_REPS = 4000
+# The most a gw-lin row's work count may grow when its input doubles: count(2n) <= 2 * count(n) + _GW_COUNT_SLACK,
+# the count being what the hook's work-count seam (aiqt_hooks._GATE_SCAN_COUNTER, _gate_scan_count) adds over one
+# scan. On these inputs (prefix + unit * n + suffix) each counted pass reads a stretch that is a fixed multiple of
+# n plus a fixed part, and a fixed part adds to count(2n) - 2 * count(n) only when it is negative. The slack covers
+# the two ways the code makes a pass's stretch shorter than whole units, or grow by a step instead of a multiple:
+# - the dequoted-word walk (_gate_novrf_dequoted_bypass) finds a terminator over slices of 16, 32, 64, ... words.
+#   A walk over L words that finds no terminator counts _gw_walk_count(L) = 16 * (2 ** k - 1) + 2 * L, where
+#   16 * 2 ** k is the least slice size not under L (k = 0 when L <= 16): the full slices of 16 to 8 * 2 ** k
+#   words, the last slice, truncated to L, and the slice of L words read for the spelling. The rows' words give
+#   L(2n) = 2 * L(n) + 1 (L = 2n - 1 for gw-lin-dq-roster and 3n - 1 for gw-lin-dq-roster-m). When the doubled
+#   walk's truncated last slice crosses one more slice size than the smaller walk's (16 * 2 ** k < L(2n) <=
+#   32 * 2 ** k), the full slices add 16 over twice and the two truncated reads add 2 * 1, so 18 (_GW_WALK_SLACK).
+#   When it crosses two, which happens only when L(n) is a slice size itself (L(2n) = 32 * 2 ** k + 1), the next
+#   full slice of 16 * 2 ** k words is added too: 32 * 2 ** k + 18, about twice L(n), which no fixed slack can
+#   cover. At n = 11 roster-m's L(n) = 32 is such a size: its walk counts 80 then 242, and the linear row grows
+#   from 149 to 377, 79 over twice. So the bound is derived for the pinned sizes, not for every n: at _GW_REPS
+#   L(n) is 7999 and 11999, not over the slice sizes 8192 and 16384, and L(2n) is 15999 and 23999, not over the
+#   next sizes 16384 and 32768; at _GW_MUT_REPS (the mutated-copy rows) L(n) is 599 and 899, not over 1024, and
+#   L(2n) is 1199 and 1799, not over 2048. gw-lin-slice-count pins _gw_walk_count to the hook's own count at
+#   those sizes and at the boundary size n = 11 (gw-lin-slice-boundary checks the crossing there),
+#   gw-lin-slice-pinned fails when a size the rows use crosses two slice sizes, and gw-lin-slice-slack when the
+#   two parts below exceed the slack. A walk that finds no bypass covers every later git word of its verb, so a
+#   row takes at most one such walk for each roster verb its words hold, and none holds more than one;
+# - a pass that stops at the next unit (the grammar lexer's off-roster stop at the next ambiguous quote) reads the
+#   last unit only to the end of the text, at most one unit short: no unit here is longer than 18 characters, and
+#   the lexer counts a character at most twice (its main pass and its read of a quote's interior), so at most 36
+#   (_GW_LEX_SLACK).
+# 18 + 36 = 54, rounded up to 64. A walk restarted at each unit, or a copy of the suffix after each unit, adds
+# about n * n / 2 counted items, millions at these sizes, so the slack cannot hide one.
+_GW_COUNT_SLACK = 64
+_GW_WALK_SLACK = 18
+_GW_LEX_SLACK = 36
+# The smaller input of a row run on a mutated copy of the hook (gw-lin-mut-*): a quadratic mutant is already
+# hundreds of thousands of counted items over the bound at 300 units, and each such row stays near a second.
+_GW_MUT_REPS = 300
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -7770,145 +8282,564 @@ def _gw_usage_text(use_n, use_2n):
     return ", ".join(parts)
 
 
-def _gw_scan_once(cmd, scan):
-    """(CPU seconds, decision, usage) for one scan of cmd; usage is what _gw_usage grew by across the call,
-    read outside the timed region, with None for a reading unavailable before or after it."""
+def _gw_count_once(cmd, scan, hooks=None):
+    """(work count, CPU seconds, decision, usage) for one scan of cmd with the hook's work-count seam on: the
+    seam (aiqt_hooks._GATE_SCAN_COUNTER, or that of hooks, a mutated copy of the hook module, when given) holds a
+    fresh counter for the call and is None again after it, whether the scan returns or raises. usage is what
+    _gw_usage grew by across the call, read outside the timed region, with None for a reading unavailable before
+    or after it. The CPU time and the usage are diagnostics that a failing row reports; no verdict reads them."""
+    hooks = aiqt_hooks if hooks is None else hooks
+    counter = [0]
     u0 = _gw_usage()
-    t0 = time.process_time()
-    decision = scan(cmd)
-    t = time.process_time() - t0
-    return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
+    hooks._GATE_SCAN_COUNTER = counter
+    try:
+        t0 = time.process_time()
+        decision = scan(cmd)
+        t = time.process_time() - t0
+    finally:
+        hooks._GATE_SCAN_COUNTER = None
+    return counter[0], t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
-    """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
-    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
-    each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
-    while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
-    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
-    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
-    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
-    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
-    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
-    reps = 4000
-    decisions = []
-    for _ in range(_GW_SIZES):
-        cmd_n = prefix + unit * reps + suffix
-        t_n, decision, use_n = once(cmd_n, scan)
-        decisions.append(decision)
-        if t_n > _GW_FLOOR:
-            cmd_2n = prefix + unit * (reps * 2) + suffix
-            t_2n, decision, use_2n = once(cmd_2n, scan)
-            decisions.append(decision)
-            timings = 1
-            while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
-                timings += 1
-                again_n, decision, again_use_n = once(cmd_n, scan)
-                decisions.append(decision)
-                again_2n, decision, again_use_2n = once(cmd_2n, scan)
-                decisions.append(decision)
-                if again_n < t_n:
-                    t_n, use_n = again_n, again_use_n
-                if again_2n < t_2n:
-                    t_2n, use_2n = again_2n, again_use_2n
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
-        reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
+def _gw_count_growth(unit, prefix, suffix, scan, once=_gw_count_once, size=_GW_REPS):
+    """One scan of prefix + unit * size + suffix (size is _GW_REPS but on a mutated copy) and one of the input with
+    twice as many units, each through once (a check stands in scripted readings through it). Returns (count_n,
+    count_2n, length_n, length_2n, decisions, (t_n, t_2n), (usage_n, usage_2n)): the work counts, the input
+    lengths, both decisions in order, and the CPU times and usages, diagnostics only. The input is a command
+    string for the text scans or a word list for the dequoted-word scan, so a length counts characters or words."""
+    readings = []
+    for reps in (size, 2 * size):
+        cmd = prefix + unit * reps + suffix
+        count, t, decision, use = once(cmd, scan)
+        readings.append((count, len(cmd), decision, t, use))
+    (count_n, length_n, decision_n, t_n, use_n), (count_2n, length_2n, decision_2n, t_2n, use_2n) = readings
+    return count_n, count_2n, length_n, length_2n, [decision_n, decision_2n], (t_n, t_2n), (use_n, use_2n)
 
 
-def _gw_lin_failures(cases):
-    """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
-    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
-    least timings came from)."""
+def _gw_lin_failures(cases, once=_gw_count_once, size=_GW_REPS):
+    """What the gw-lin growth rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each read
+    by _gw_count_growth through once at size units. A row fails on a decision other than want (with the seam on, at
+    both sizes, and, for a row with a scan, with the seam off at the smaller size, so the seam changes no decision),
+    on a smaller input whose work count is under its length (the seam did not count the scan's own pass over its
+    input, so growth was not evaluated), on a seam left on after the row, or on a doubled input whose work count
+    is over twice the smaller one's plus _GW_COUNT_SLACK. The CPU times and the usage of both calls are reported
+    with a growth failure as diagnostics; no verdict reads them, so a loaded host cannot change one."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
+        count_n, count_2n, length_n, length_2n, got, (t_n, t_2n), use = _gw_count_growth(
+            unit, prefix, suffix, scan, once, size)
+        if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+            out.append("({}) the work-count seam was left on after the row: {!r}".format(
+                label, aiqt_hooks._GATE_SCAN_COUNTER))
+            aiqt_hooks._GATE_SCAN_COUNTER = None
+        if scan is not None:
+            got.append(scan(prefix + unit * size + suffix))
         wrong = [decision for decision in got if decision != want]
         if wrong:
-            out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
+            out.append("({}) the counted scan decided {!r} on {} of its {} inputs, expected {!r}"
                        .format(label, wrong[0], len(wrong), len(got), want))
-        if ratio is None:
-            out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
-                       "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
-        elif ratio > _GW_RATIO:
-            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
-                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+        if count_n < length_n:
+            out.append("({}) growth not evaluated: the work count on an input of length {} was {}, under that "
+                       "length, so the seam did not count the scan's pass over its input".format(
+                           label, length_n, count_n))
+        elif count_2n > 2 * count_n + _GW_COUNT_SLACK:
+            out.append("({}) doubling the input grew the scan's work count from {} to {}, over twice that plus {} "
+                       "(super-linear), for inputs of length {} then {}; diagnostics only, not judged: CPU {:.3f}s "
+                       "then {:.3f}s, {}".format(label, count_n, count_2n, _GW_COUNT_SLACK, length_n, length_2n,
+                                                t_n, t_2n, _gw_usage_text(*use)))
     return out
 
 
-def _gw_retime_failures():
-    """(gw-lin-retime-edge) _gw_scan_ratio over scripted times (no scan runs): the first size's time clears the
-    floor, then each pair is (t_n, t_2n) for one timing of both sizes. A first ratio just under or exactly at
-    _GW_RATIO is final with one timing; one just over it retimes, and a retimed pair at the bound ends the
-    retiming. One slow timing of either size is outvoted by the least of the others (the CI shape: 0.109 s then
-    0.328 s, then 0.115 s then 0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound
-    in all but the last allowed timing passes on that last one, and a ratio over the bound in every timing stops
-    at _GW_TIMINGS timings of each and stays over it."""
+def _gw_count_edge_failures():
+    """(gw-lin-count-edge) _gw_lin_failures over scripted readings (no scan runs): each case is (count_n, count_2n,
+    t_n, t_2n, decision) for the smaller input (4000 characters) and the doubled one, and the failure kinds the row
+    must give. A doubled count exactly at twice plus _GW_COUNT_SLACK passes and one over it fails; a smaller
+    count under the input's length fails 'growth not evaluated'; a linear count passes whatever the CPU times
+    (a doubled input charged 50 times the CPU time of the smaller, the shape of a call on a loaded host) and a
+    quadratic count fails with CPU times in proportion to the input; a decision other than the row's fails."""
     out = []
-    for name, pairs, want_ratio, want_timings in (
-            ("under", [(0.25, 0.7499)], 0.7499 / 0.25, 1),
-            ("at", [(0.25, 0.75)], 0.75 / 0.25, 1),
-            ("over-then-at", [(0.25, 0.7501), (0.25, 0.75)], 0.75 / 0.25, 2),
-            ("slow-2n", [(0.109, 0.328), (0.115, 0.230)], 0.230 / 0.109, 2),
-            ("slow-n-retimed", [(0.109, 0.33), (0.3, 0.22), (0.11, 0.44)], 0.22 / 0.109, 2),
-            ("over-until-last", [(0.25, 0.7501), (0.25, 0.7502), (0.25, 0.5)], 0.5 / 0.25, _GW_TIMINGS),
-            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45), (0.1, 0.1)], 0.44 / 0.11, _GW_TIMINGS)):
-        times = [t for pair in pairs for t in pair]
+    slack = _GW_COUNT_SLACK
+    for name, readings, want in (
+            ("at", (5000, 10000 + slack, 0.1, 0.2, None), ()),
+            ("over", (5000, 10001 + slack, 0.1, 0.2, None), ("doubling the input grew",)),
+            ("length", (4000, 8000, 0.1, 0.2, None), ()),
+            ("under-length", (3999, 7998, 0.1, 0.2, None), ("growth not evaluated",)),
+            ("loaded-linear", (5000, 10000, 0.01, 0.5, None), ()),
+            ("quadratic", (5000, 20000, 0.1, 0.2, None), ("doubling the input grew",)),
+            ("decision", (5000, 10000, 0.1, 0.2, "deny"), ("the counted scan decided 'deny' on 2 of its 2",))):
+        count_n, count_2n, t_n, t_2n, decision = readings
         taken = []
 
         def once(cmd, _scan):
             taken.append(len(cmd))
-            return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
+            first = len(taken) == 1
+            return (count_n if first else count_2n), (t_n if first else t_2n), decision, \
+                (len(taken),) * len(_GW_USAGE_LABELS)
 
-        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
-        if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
-                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
-            out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
-                       "{}, want {!r} over {} timings of 4000 then 8000".format(
-                           name, pairs, ratio, timings, taken, want_ratio, want_timings))
+        got = _gw_lin_failures((("gw-lin-count-edge-" + name, "x", "", "", None, None),), once)
+        if taken != [_GW_REPS, 2 * _GW_REPS] or len(got) != len(want) \
+                or any(part not in line for part, line in zip(want, got)):
+            out.append("(gw-lin-count-edge) {}: the scripted readings {} over inputs of lengths {} gave {!r}, want "
+                       "one failure holding each of {!r}".format(name, readings, taken, got, want))
     return out
 
 
-def _gw_spin_scan(power):
-    """A stand-in scan that spends CPU time growing with the input's length to the given power: 0.12 s at
-    4000 characters, so the first size clears the floor and the ratio is about 2 ** power."""
+def _gw_count_scan(power, spin_doubled=0.0):
+    """A stand-in scan that adds len(cmd) ** power // 4000 ** (power - 1) to the hook's work count through its seam
+    (aiqt_hooks._gate_scan_count), so its count grows in proportion to the input (power 1) or to its square (power
+    2), and decides None. With spin_doubled, a call on the doubled input (over 4000 characters) also spends that
+    many seconds of CPU time, standing in for a call charged for stray work on a loaded host."""
     def scan(cmd):
-        until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power
-        while time.process_time() < until:
-            pass
+        aiqt_hooks._gate_scan_count(len(cmd) ** power // _GW_REPS ** (power - 1))
+        if spin_doubled and len(cmd) > _GW_REPS:
+            until = time.process_time() + spin_doubled
+            while time.process_time() < until:
+                pass
         return None
     return scan
 
 
-def _gw_slow_once_scan(power):
-    """_gw_spin_scan(power) whose second call (the first timing of the doubled input) also spends 2 * _GW_FLOOR
-    more CPU time, standing in for one timed call charged for stray work."""
-    spin = _gw_spin_scan(power)
-    calls = []
-
-    def scan(cmd):
-        calls.append(None)
-        if len(calls) == 2:
-            until = time.process_time() + 2 * _GW_FLOOR
-            while time.process_time() < until:
-                pass
-        return spin(cmd)
-    return scan
-
-
-def _gw_retime_cpu_failures():
-    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
-    charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
-    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
+def _gw_count_seam_failures():
+    """(gw-lin-count-linear, gw-lin-count-super, gw-lin-count-off-default, gw-lin-count-off-inert,
+    gw-lin-count-raise-propagates, gw-lin-count-raise-restores) The count verdict through the hook's real seam. A
+    linear stand-in passes even when its doubled call is charged 0.2 s more CPU time (a time ratio far over 2), and
+    a quadratic one fails, with nothing else reported. The seam is None before the rows, _gate_scan_count with it
+    None leaves it None and returns None, and a scan that raises propagates its exception and leaves the seam None."""
     out = []
-    got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
-                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
-    if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
-            or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
-        out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
-                   "{} timings of each".format(got, _GW_TIMINGS))
+    if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-off-default) the hook's work-count seam is {!r} before any row, want None (off)".format(
+            aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    got = aiqt_hooks._gate_scan_count(5)
+    if got is not None or aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-off-inert) _gate_scan_count with the seam off returned {!r} and left the seam {!r}, "
+                   "want None and None".format(got, aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    got = _gw_lin_failures((("gw-lin-count-linear", "x", "", "", _gw_count_scan(1, 0.2), None),
+                            ("gw-lin-count-super", "x", "", "", _gw_count_scan(2), None)))
+    if len(got) != 1 or not got[0].startswith("(gw-lin-count-super) doubling the input grew the scan's work count "
+                                              "from 4000 to 16000, over twice that plus "):
+        out.append("(gw-lin-count-linear/super) the rows gave {!r}, want only the quadratic row's failure".format(got))
+
+    def raising(_cmd):
+        aiqt_hooks._gate_scan_count(1)
+        raise ValueError("stand-in")
+
+    try:
+        _gw_count_once("x", raising)
+        out.append("(gw-lin-count-raise-propagates) a scan that raised returned through _gw_count_once")
+    except ValueError:
+        pass
+    if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-raise-restores) a scan that raised left the seam {!r}, want None".format(
+            aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    return out
+
+
+def _gw_walk_count(length):
+    """What one dequoted-word walk over length words that finds no terminator adds to the work count
+    (_gate_novrf_dequoted_bypass; derivation at _GW_COUNT_SLACK): the slices of 16, 32, ... words it copies to find
+    the terminator, the last one truncated to length, then the slice of length words it reads for the spelling."""
+    total, size = 0, 16
+    while size < length:
+        total += size
+        size *= 2
+    return total + 2 * length
+
+
+# The dequoted-word growth rows whose words hold one roster verb's walk: (label, unit, prefix, suffix). Their words
+# are echo, the units, then a -n, so the walk starts after the first verb (index 2) and reads to the -n, the last
+# word the spelling test can read: it reads len(words) - 3 words.
+_GW_WALK_ROWS = (
+    ("gw-lin-dq-roster", ["git", "push"], ["echo"], ["-n"]),
+    ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"]),
+)
+
+
+def _gw_slice_failures():
+    """(gw-lin-slice-count, gw-lin-slice-pinned, gw-lin-slice-slack, gw-lin-slice-boundary) The slack's derivation
+    for the dequoted-word walk, its truncated last slice included (_GW_COUNT_SLACK). gw-lin-slice-count: on each
+    _GW_WALK_ROWS row at 11 and 22 units (11 puts roster-m's walk on the slice size 32, so its doubled walk crosses
+    two sizes), at _GW_REPS, at _GW_MUT_REPS and at twice each, the hook's count is the table fill (one per word),
+    the git-word pass (one per word before the -n) and one walk (_gw_walk_count), and the scan decides None.
+    gw-lin-slice-pinned: at _GW_REPS and at _GW_MUT_REPS each row's walk grows at most _GW_WALK_SLACK over twice.
+    gw-lin-slice-slack: that with _GW_LEX_SLACK is within _GW_COUNT_SLACK. gw-lin-slice-boundary: at 11 units
+    roster-m's walk grows more than _GW_COUNT_SLACK over twice, the boundary the pinned sizes keep off."""
+    out = []
+    for label, unit, prefix, suffix in _GW_WALK_ROWS:
+        for reps in (11, 22, _GW_REPS, 2 * _GW_REPS, _GW_MUT_REPS, 2 * _GW_MUT_REPS):
+            words = prefix + unit * reps + suffix
+            want = len(words) + (len(words) - 1) + _gw_walk_count(len(words) - 3)
+            got, _t, decision, _use = _gw_count_once(words, aiqt_hooks._gate_novrf_dequoted_bypass)
+            if got != want or decision is not None:
+                out.append("(gw-lin-slice-count) {} at {} units counted {} and decided {!r}, want {} (the table fill, "
+                           "the git-word pass and one walk over {} words) and None".format(
+                               label, reps, got, decision, want, len(words) - 3))
+        for reps in (_GW_REPS, _GW_MUT_REPS):
+            small = len(prefix + unit * reps + suffix) - 3
+            large = len(prefix + unit * (2 * reps) + suffix) - 3
+            grew = _gw_walk_count(large) - 2 * _gw_walk_count(small)
+            if grew > _GW_WALK_SLACK:
+                out.append("(gw-lin-slice-pinned) {} at {} units: the walk over {} then {} words grows {} over twice, "
+                           "past {}: the doubled walk's last slice crosses two slice sizes".format(
+                               label, reps, small, large, grew, _GW_WALK_SLACK))
+    if _GW_WALK_SLACK + _GW_LEX_SLACK > _GW_COUNT_SLACK:
+        out.append("(gw-lin-slice-slack) _GW_WALK_SLACK {} plus _GW_LEX_SLACK {} is over _GW_COUNT_SLACK {}".format(
+            _GW_WALK_SLACK, _GW_LEX_SLACK, _GW_COUNT_SLACK))
+    boundary = _gw_walk_count(3 * 22 - 1) - 2 * _gw_walk_count(3 * 11 - 1)
+    if boundary <= _GW_COUNT_SLACK:
+        out.append("(gw-lin-slice-boundary) roster-m's walk at the boundary size 11 grows {} over twice, want over "
+                   "{}: the derivation's two-size crossing is not where it says".format(boundary, _GW_COUNT_SLACK))
+    return out
+
+
+def _gw_counted(hooks, name, *args):
+    """(count, result) of hooks.<name>(*args), one call with the seam on (_gw_count_once)."""
+    count, _t, result, _use = _gw_count_once(args, lambda call_args: getattr(hooks, name)(*call_args), hooks)
+    return count, result
+
+
+def _gw_work_failures(hooks=None):
+    """(gw-cnt-split-cache, gw-cnt-walked, gw-cnt-git-skip, gw-cnt-runtime-skip, gw-cnt-piece-skip,
+    gw-cnt-masked-reuse, gw-cnt-assembly-skip, gw-cnt-heredoc-skip, gw-cnt-heredoc-split, gw-cnt-span-dedup,
+    gw-cnt-walk-first,
+    gw-cnt-verb-search, gw-cnt-dq-git-pass, gw-cnt-dq-git-hit, gw-cnt-sub-skip, gw-cnt-sub-unresolved,
+    gw-cnt-assembled-first, gw-cnt-doubt-first, gw-cnt-span-first, gw-cnt-scan-first) The work count of one call
+    on an input where a cache, a reuse, a skip, a start past the first word or an early stop of a counted scan
+    applies, against the passes the call makes there. The rows from gw-cnt-dq-git-pass on pin walks that stop
+    early or skip words: the dequoted scan's git-word pass reads only the words before the last one the spelling
+    test can read, and stops at its first bypass; the grammar's subcommand walk skips each separated option value
+    and copies only the words after the subcommand; the assembled-git walk stops at its first hit; the split's
+    doubt test stops at its first doubting piece; and the git-word regex passes over a quoted span's interior and
+    over a command stop at their first hit and first deny. Losing one of these costs a
+    fixed multiple of the input, not a growth the gw-lin rows can see, so each row pins the count itself: the
+    reading split once for the three bash-model readings that share one plain text, one walk for the four readings
+    with the same words, the translate alone where no reading can name git, the run-time test alone where no walk
+    can hit (for a whole text and for one piece), the readings of a piece with no standalone git serving the masked
+    walk too, no masked readings where the masked piece holds no quote, backslash or git, one split where there is
+    no here-document body to mask, one more split and one more doubt test where there is one, each distinct span of
+    the two splits read once, the any-word walk reading only the words after the word it is given, and the
+    run-time walk's verb search starting after that word too. hooks is the hook module (aiqt_hooks, or a mutated
+    copy run as a child's main module, _gw_mutant_child); the counts of the passes some rows add up are read from
+    it too, but the split rows (gw-cnt-heredoc-skip, gw-cnt-heredoc-split, and the split part of gw-cnt-span-dedup)
+    are worked out from their inputs, so a mutation that charges the split more cannot raise the expected count
+    with it."""
+    hooks = aiqt_hooks if hooks is None else hooks
+
+    def count(name, *args):
+        return _gw_counted(hooks, name, *args)[0]
+
+    plain = "git status x " * 20
+    no_git = "echo x " * 20
+    quoted = "$x 'a' log -m y " * 10 + "commit -m y"
+    bare = "$x git log -m y " * 10 + "commit -m y"
+    pieces = "echo x; " * 20
+    heredoc = "cat <<E\na$b\nE\n" + pieces
+    plain_words = ["x"] * 40  # read from word 20 on: 19 words after it, no git and no roster verb among them
+
+    def piece_want(piece, assembled_same):
+        # _gate_runtime_piece_hit on a piece no reading hits: the run-time test, the tilde search, the readings,
+        # the mask, then over each reading the run-time walk and the masked walk (over the same words, or none).
+        tilde = hooks._GATE_TILDE_START_RE.search(piece) is not None
+        readings = (hooks._gate_dequoted_words(piece),) + hooks._gate_bash_readings(piece)
+        want = (count("_gate_runtime_may_hit", piece) + len(piece) + count("_gate_dequoted_words", piece)
+                + count("_gate_bash_readings", piece) + count("_gate_runtime_masked_git", piece))
+        for words in readings:
+            want += count("_gate_runtime_reading", words, tilde)
+            want += count("_gate_assembled_reading", words if assembled_same else ())
+        return want
+
+    # What _gate_split_spans adds on pieces and on heredoc, worked out from the inputs, not read from the hook: no
+    # piece of either input holds a case word or "$'", so the doubt test (_gate_split_doubt_start) reads every piece
+    # but the last, each with its separator, which is all of the text but its last piece: the one blank after the
+    # last ';', in the split of the text and in the split of the masked text alike (masking 'a$b' to 'a_b' moves no
+    # cut). So pieces costs the split and the body mask (2 * len) and one doubt test (len - 1), and heredoc, whose
+    # body the mask changes, adds the masked split (len) and its doubt test (len - 1).
+    pieces_split = 2 * len(pieces) + (len(pieces) - 1)
+    heredoc_split = 3 * len(heredoc) + 2 * (len(heredoc) - 1)
+    dq_words = ["git", "push", "-n"] + ["x"] * 40  # the git-word pass reads the two words before the -n
+    # The pass stops at the git word, whose walk reads to the later -n (the last word the spelling test can read)
+    # and finds the bypass; a pass that read on would visit the 41 words after the verb as well.
+    dq_hit = ["git", "commit", "-n"] + ["x"] * 40 + ["-n"]
+    sub_skip = ["git", "-C", "-q", "status"] + ["x"] * 20  # -q is -C's value: walked past, never read
+    sub_open = ["git"] + ["-C", "dir"] * 20  # no subcommand: the walk reads the 20 options, not their values
+    assembled = ["git", "commit", "$O"] * 20  # every git word hits; the walk stops at the first
+    doubting = "case x; " + "echo x; " * 20  # the first piece holds a case word; the doubt test stops there
+    span_hit = "git commit " + "x " * 40  # the regex pass stops at the first git word, a roster git
+    denies = "git commit -n; " * 20  # the scan stops at the first git word, a bypass
+    # The results of the rows whose call gives one: each row's input keeps the result a full walk gives.
+    results = {
+        "gw-cnt-dq-git-hit": ("commit", hooks._no_verify_spelling("commit", ["-n"])),
+        "gw-cnt-sub-skip": ("status", ["x"] * 20, True),
+        "gw-cnt-sub-unresolved": (None, [], False),
+        "gw-cnt-assembled-first": ("git", "commit", "the word '$O', built at run time, which may expand to a "
+                                   "hook-skip spelling for it"),
+        "gw-cnt-span-first": True,
+        "gw-cnt-scan-first": ("bypass", "commit", hooks._no_verify_spelling("commit", ["-n"])),
+    }
+    spans = sorted(set(hooks._gate_split_spans(heredoc)[1]))
+    out = []
+    for label, name, text, want in (
+            ("gw-cnt-split-cache", "_gate_bash_readings", plain, 2 * len(plain)),
+            ("gw-cnt-walked", "_gate_text_bypass", plain, len(plain) + count("_gate_dequoted_words", plain)
+             + count("_gate_bash_readings", plain) + len(plain.split())),
+            ("gw-cnt-git-skip", "_gate_text_bypass", no_git, len(no_git)),
+            ("gw-cnt-runtime-skip", "_gate_runtime_bypass", no_git, len(no_git)),
+            ("gw-cnt-piece-skip", "_gate_runtime_piece_hit", no_git, len(no_git)),
+            ("gw-cnt-masked-reuse", "_gate_runtime_piece_hit", quoted, piece_want(quoted, True)),
+            ("gw-cnt-assembly-skip", "_gate_runtime_piece_hit", bare, piece_want(bare, False)),
+            ("gw-cnt-heredoc-skip", "_gate_split_spans", pieces, pieces_split),
+            ("gw-cnt-heredoc-split", "_gate_split_spans", heredoc, heredoc_split),
+            ("gw-cnt-span-dedup", "_gate_unread_bypass", heredoc,
+             heredoc_split + 2 * sum(end - start for start, end in spans)),
+            ("gw-cnt-walk-first", "_gate_any_word_bypass", (plain_words, 20), 19),
+            ("gw-cnt-verb-search", "_gate_runtime_hit", (plain_words, 20), 2 * 19),
+            # the table fill, the two words the git-word pass reads, and one walk over the -n (_gw_walk_count)
+            ("gw-cnt-dq-git-pass", "_gate_novrf_dequoted_bypass", (dq_words,), len(dq_words) + 2 + _gw_walk_count(1)),
+            # the table fill, the one word the pass reads before its walk returns the bypass, and that walk over the
+            # words from the first -n to the last
+            ("gw-cnt-dq-git-hit", "_gate_novrf_dequoted_bypass", (dq_hit,),
+             len(dq_hit) + 1 + _gw_walk_count(len(dq_hit) - 2)),
+            # -C and status walked, the 20 words after status copied
+            ("gw-cnt-sub-skip", "_gate_grammar_sub", (sub_skip,), 2 + 20),
+            ("gw-cnt-sub-unresolved", "_gate_grammar_sub", (sub_open,), 20),
+            # the pass finding the git words, the table fill, and the first git word the walk reads
+            ("gw-cnt-assembled-first", "_gate_assembled_reading", (assembled,), 2 * len(assembled) + 1),
+            # the split and the body mask, then the first piece and its separator
+            ("gw-cnt-doubt-first", "_gate_split_spans", doubting, 2 * len(doubting) + len("case x") + 1),
+            # the tokenizing pass and the table fill, then 'git' read and the one token walked past it
+            ("gw-cnt-span-first", "_gate_span_hides_roster_git", span_hit,
+             len(span_hit) + len(span_hit.split()) + len("git") + 1),
+            # the regex pass to the first git word, the lex of its segment (to the ';') and its subcommand walk (one
+            # word walked, one copied)
+            ("gw-cnt-scan-first", "_gate_closed_grammar_scan", denies, len("git") + len("git commit -n") + 2)):
+        args = text if isinstance(text, tuple) else (text,)
+        got, result = _gw_counted(hooks, name, *args)
+        if got != want:
+            out.append("({}) {} on an input of length {} counted {}, want {}".format(
+                label, name, len(args[0]), got, want))
+        if label in results:
+            if result != results[label]:
+                out.append("({}) {} on {!r} gave {!r}, want {!r}".format(
+                    label, name, args[0][:40], result, results[label]))
+        elif name not in ("_gate_split_spans", "_gate_bash_readings") and result is not None:
+            out.append("({}) {} on {!r} gave {!r}, want None".format(label, name, args[0][:40], result))
+    return out
+
+
+# One-line mutations of the hook, each losing one cache, reuse, skip or early stop a counted scan relies on: (label,
+# anchor, line, mutated line, row). The mutated line is the first occurrence of line (the anchor when line is None)
+# at or after the anchor, which the hook holds once. A row naming a gw-lin growth row runs that row on the mutated
+# copy at _GW_MUT_REPS units, and one naming a gw-cnt row runs _gw_work_failures on it; gw-lin-mut-<label> fails
+# unless that row fails on the copy, so a count that hides the lost work (a count read from a cached pointer, a
+# reading reused or passed over without being counted) is caught.
+_GW_MUTANTS = (
+    ("lex-restart", "            p = _sub_scan[0]\n", None, "            p = 1\n", "gw-lin-opts"),
+    ("span-restart", "        visited = 0\n        while base", "        visited = 0\n",
+     "        visited = base = 0\n", "gw-lin-span-roster"),
+    ("scan-watermark", "        if p < consumed:\n", None, "        if False:\n", "gw-lin-span-off"),
+    ("sq-off-roster-stop", "never re-walks the words from the start, so the stop stays O(1).",
+     "            if data_stop is not None and offroster_resolved():\n", "            if False:\n", "gw-dq-lin-sq"),
+    ("dq-off-roster-stop", "data_stop = i  # an all-literal interior still re-judged",
+     "            if data_stop is not None and offroster_resolved():\n", "            if False:\n", "gw-dq-lin-dq"),
+    ("dq-read-to", "        read_to[sub] = end\n", None, "        read_to[sub] = 0\n", "gw-lin-dq-roster-m"),
+    ("split-cache", "        if plain not in split:\n", None, "        if True:\n", "gw-cnt-split-cache"),
+    ("walked", "        if words in walked:\n", None, "        if False:\n", "gw-cnt-walked"),
+    ("git-skip", "    if not _gate_text_may_name_git(text):\n", None, "    if False:\n", "gw-cnt-git-skip"),
+    ("runtime-skip", "    if not _gate_runtime_may_hit(text):\n", None, "    if False:\n", "gw-cnt-runtime-skip"),
+    ("piece-skip", "    if not _gate_runtime_may_hit(piece):\n", None, "    if False:\n", "gw-cnt-piece-skip"),
+    ("masked-reuse", "    if masked == piece:\n", None, "    if False:\n", "gw-cnt-masked-reuse"),
+    ("assembly-skip", "    elif _GATE_ASSEMBLY_CHARS.isdisjoint(masked)", None,
+     "    elif False and _GATE_ASSEMBLY_CHARS.isdisjoint(masked)", "gw-cnt-assembly-skip"),
+    ("heredoc-skip", "    if masked != text:\n", None, "    if True:\n", "gw-cnt-heredoc-skip"),
+    ("span-dedup", "if span not in seen]", None, "if True]", "gw-cnt-span-dedup"),
+    ("walk-first", "    walk = range(len(words) - 1, first, -1)\n", None, "    walk = range(len(words) - 1, -1, -1)\n",
+     "gw-cnt-walk-first"),
+    ("verb-search-start", "    verb = _gate_scan_first(range(k + 1, len(words))", None,
+     "    verb = _gate_scan_first(range(1, len(words))", "gw-cnt-verb-search"),
+    # The git-word pass of the dequoted scan reads every word, not only those before the last spelling word.
+    ("dq-git-pass", "    for idx in range(max(last, 0)):\n", None, "    for idx in range(n):\n", "gw-cnt-dq-git-pass"),
+    # The grammar's subcommand walk reads a separated option's value as a word of its own.
+    ("sub-value-skip", "                i += 2  # a separated arg-consuming global option: skip its value word\n",
+     None, "                i += 1\n", "gw-cnt-sub-skip"),
+    # The assembled-git walk passes over every hit but the last, so it reads every git word.
+    ("assembled-first-hit", "        if s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:\n", None,
+     "        if g == gits[-1] and s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:\n",
+     "gw-cnt-assembled-first"),
+    # The split's doubt test keeps its first doubting piece but tests every piece.
+    ("doubt-first", "def _gate_split_doubt_start(",
+     "            start = spans[k][0]\n            break  # the first piece that holds such a construct ends the search\n",
+     "            start = spans[k][0] if start is None else start\n", "gw-cnt-doubt-first"),
+    # The git-word regex pass over a quoted span's interior keeps its hit but reads on to the end.
+    ("span-first", "def _gate_span_hides_roster_git(", "            break  # the first hit ends the pass\n",
+     "            continue\n", "gw-cnt-span-first"),
+    # The closed grammar scan returns a bypass only at the last git word, so it lexes every segment.
+    ("scan-first-deny", "def _gate_closed_grammar_scan(", "        if spelling is not None:\n",
+     "        if spelling is not None and _GATE_GIT_WORD_RE.search(command, end) is None:\n", "gw-cnt-scan-first"),
+    # The split of the masked text is charged twice its length (a second split, or a split that reads it twice).
+    ("masked-split-twice", "def _gate_split_spans(",
+     "        _gate_scan_count(len(text))  # the work count: the split of the masked text",
+     "        _gate_scan_count(2 * len(text))  # the work count: the split of the masked text", "gw-cnt-heredoc-split"),
+    # A second pass over the masked text after its split.
+    ("masked-split-extra", "def _gate_split_spans(", "        masked_pieces = _raw_push_segments(masked)\n",
+     "        masked_pieces = _raw_push_segments(masked)\n        _gate_scan_count(len(text))\n",
+     "gw-cnt-heredoc-split"),
+    # The doubt test of the masked split runs twice.
+    ("masked-doubt-twice", "def _gate_split_spans(",
+     "        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))\n",
+     "        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))\n"
+     "        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))\n", "gw-cnt-heredoc-split"),
+    # The dequoted scan's git-word pass keeps its first bypass but reads on to its end instead of returning it.
+    ("dq-first-hit", "def _gate_novrf_dequoted_bypass(",
+     "        if spelling is not None:\n            return sub, spelling\n        read_to[sub] = end\n    return None\n",
+     "        if spelling is not None:\n            read_to.setdefault(None, (sub, spelling))\n            continue\n"
+     "        read_to[sub] = end\n    return read_to.get(None)\n", "gw-cnt-dq-git-hit"),
+    # The grammar's subcommand walk steps onto each separated option's value word before passing it.
+    ("sub-value-step", "                i += 2  # a separated arg-consuming global option: skip its value word\n", None,
+     "                visited += 1\n                i += 2\n", "gw-cnt-sub-unresolved"),
+)
+
+
+# The hook's own entry guard, which it holds once, at its end. A mutated copy is written out as a script with
+# _GW_MUTANT_DRIVER ahead of that guard (_gw_mutant_source), so the copy run as the main module of a child
+# interpreter runs the row its mutation targets (_gw_mutant_child) and exits before the hook's main is reached.
+_GW_HOOK_MAIN_GUARD = '\n\nif __name__ == "__main__":\n'
+_GW_MUTANT_DRIVER = (
+    '\n\nif __name__ == "__main__":\n'
+    "    sys.path.insert(0, sys.argv[1])\n"
+    "    import selftest_aiqt_hooks\n"
+    "    sys.exit(selftest_aiqt_hooks._gw_mutant_child(sys.modules[__name__], sys.argv[2]))\n")
+# The most a child running one mutated copy may take (its compile of the hook, its import of this file, and one row).
+_GW_MUTANT_TIMEOUT = 300
+
+
+def _gw_mutant_source(anchor, line, mutated):
+    """The source of a copy of the hook with one line changed (_GW_MUTANTS) and _GW_MUTANT_DRIVER ahead of its
+    entry guard, or None when the anchor is not in the source exactly once, line does not follow it, or the
+    changed source does not hold the entry guard exactly once."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        return None
+    at = source.find(line, source.index(anchor))
+    if at < 0:
+        return None
+    return _gw_driven_source(source[:at] + mutated + source[at + len(line):])
+
+
+def _gw_driven_source(source):
+    """source, a copy of the hook, with _GW_MUTANT_DRIVER ahead of its entry guard, or None when it does not hold
+    the entry guard exactly once."""
+    if source.count(_GW_HOOK_MAIN_GUARD) != 1:
+        return None
+    return source.replace(_GW_HOOK_MAIN_GUARD, _GW_MUTANT_DRIVER + _GW_HOOK_MAIN_GUARD)
+
+
+def _gw_mutant_case(by_label, row):
+    """The case _gw_mutant_run takes for row: [unit, prefix, suffix, scan name, want] for a gw-lin growth row in
+    by_label (label to gw-lin case), or None for a gw-cnt row."""
+    if row not in by_label:
+        return None
+    _row, unit, prefix, suffix, scan, want = by_label[row]
+    return [unit, prefix, suffix, scan.__name__, want]
+
+
+def _gw_mutant_child(hooks, spec):
+    """The child side of _gw_mutant_run. hooks is the mutated copy of the hook, the child's main module, and spec
+    the JSON of [row, case]: case is [unit, prefix, suffix, scan name, want] for a gw-lin growth row, run on the
+    copy at _GW_MUT_REPS units (_gw_lin_failures), or null for a gw-cnt row (_gw_work_failures on the copy).
+    Prints the JSON list of what the row got wrong on the copy as its last line and returns 0."""
+    row, case = json.loads(spec)
+    if case is None:
+        got = _gw_work_failures(hooks)
+    else:
+        unit, prefix, suffix, scan, want = case
+
+        def once(cmd, scan_fn):
+            return _gw_count_once(cmd, scan_fn, hooks)
+
+        got = _gw_lin_failures(((row, unit, prefix, suffix, getattr(hooks, scan), want),), once, _GW_MUT_REPS)
+    print(json.dumps(got))
+    return 0
+
+
+def _gw_mutant_run(path, row, case):
+    """(failures, None) for the row on the mutated copy of the hook at path, run as a script in a child interpreter
+    (_gw_mutant_child; case as there), or (None, why) when the child gave no such list: it did not exit within
+    _GW_MUTANT_TIMEOUT seconds, exited other than 0, or did not end its output with a JSON list of strings."""
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", str(path), str(Path(__file__).resolve().parent),
+                               json.dumps([row, case])], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=_GW_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, "no exit within {}s".format(_GW_MUTANT_TIMEOUT)
+    lines = proc.stdout.splitlines()
+    try:
+        got = json.loads(lines[-1]) if proc.returncode == 0 and lines else None
+    except ValueError:
+        got = None
+    if not isinstance(got, list) or not all(isinstance(text, str) for text in got):
+        return None, "exit {}, output {!r}".format(proc.returncode, (proc.stdout + proc.stderr)[-1000:])
+    return got, None
+
+
+def _gw_mutant_failures(cases):
+    """(gw-lin-mut-control, gw-lin-mut-child-control-<part>, gw-lin-mut-<label>) Each _GW_MUTANTS mutation run on
+    a copy of the hook must fail the row it names; cases are the gw-lin growth rows. Each copy is written to a
+    temporary directory and run as a script in its own child interpreter (_gw_mutant_run), so no mutated source is
+    executed in this process; a child that gives no verdict fails its row. gw-lin-mut-control: every growth row
+    passes on the hook itself at _GW_MUT_REPS units, so a failure on a copy is the mutation's.
+    gw-lin-mut-child-control-<part>: the hook itself, run through the same child path with only the driver added,
+    fails none of the rows the mutations name (each gw-lin row they name, and _gw_work_failures once for the
+    gw-cnt rows), so a row a copy fails in its child is failed by the mutation, not by the child path; -guard when
+    the hook does not hold its entry guard once, -no-verdict when that child gives no verdict, -failed when it
+    reports a failure."""
+    out = []
+    by_label = {case[0]: case for case in cases}
+    for got in _gw_lin_failures(cases, size=_GW_MUT_REPS):
+        out.append("(gw-lin-mut-control) at {} units: {}".format(_GW_MUT_REPS, got))
+    with tempfile.TemporaryDirectory(prefix="gw-mutant-") as tmp:
+        path = Path(tmp) / "aiqt_hooks_mutant.py"
+        source = _gw_driven_source(Path(aiqt_hooks.__file__).read_text(encoding="utf-8"))
+        if source is None:
+            out.append("(gw-lin-mut-child-control-guard) the hook does not hold its entry guard {!r} once".format(
+                _GW_HOOK_MAIN_GUARD))
+        else:
+            path.write_text(source, encoding="utf-8")
+            rows = sorted({mutant[-1] for mutant in _GW_MUTANTS if mutant[-1] in by_label})
+            rows += sorted({mutant[-1] for mutant in _GW_MUTANTS if mutant[-1] not in by_label})[:1]
+            for row in rows:
+                got, why = _gw_mutant_run(path, row, _gw_mutant_case(by_label, row))
+                target = row if row in by_label else "the gw-cnt rows"
+                if got is None:
+                    out.append("(gw-lin-mut-child-control-no-verdict) the hook itself, run as a child for {}, gave "
+                               "no verdict: {}".format(target, why))
+                elif got != []:
+                    out.append("(gw-lin-mut-child-control-failed) the hook itself, run as a child for {}, failed: "
+                               "{!r}".format(target, got))
+        for label, anchor, line, mutated, row in _GW_MUTANTS:
+            name = "gw-lin-mut-" + label
+            line = anchor if line is None else line
+            source = _gw_mutant_source(anchor, line, mutated)
+            if source is None:
+                out.append("({}) the hook does not hold the anchor {!r} once with {!r} after it, and its entry guard "
+                           "{!r} once".format(name, anchor, line, _GW_HOOK_MAIN_GUARD))
+                continue
+            path.write_text(source, encoding="utf-8")
+            got, why = _gw_mutant_run(path, row, _gw_mutant_case(by_label, row))
+            if got is None:
+                out.append("({}) the child running a copy of the hook with {!r} made {!r} gave no verdict for {}: "
+                           "{}".format(name, line.strip(), mutated.strip(), row, why))
+                continue
+            if row in by_label:
+                caught = any(text.startswith("({}) doubling the input grew".format(row)) for text in got)
+            else:
+                # a count failure, not only a result failure, so the count itself shows the lost work
+                caught = any(text.startswith("({}) ".format(row)) and " counted " in text for text in got)
+            if not caught:
+                out.append("({}) a copy of the hook with {!r} made {!r} did not trigger the required count failure "
+                           "in {}, so its count does not show the lost work: {!r}".format(
+                               name, line.strip(), mutated.strip(), row, got))
     return out
 
 
@@ -7930,12 +8861,12 @@ def _gw_module_as(name, stand_in):
 
 def _gw_lin_usage_failures():
     """(gw-lin-usage-readable, gw-lin-usage-no-resource, gw-lin-usage-no-field, gw-lin-usage-no-collections)
-    The gw-lin rows' usage report, through stand-in scans that spend CPU time in proportion to the input
-    (linear) or to its square (super-linear). With every reading available, a super-linear row fails with each
-    usage field for both timed calls. With no resource module, with a getrusage result missing a field and
-    with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
-    their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
-    unavailable' for each reading it lost and the readings it kept."""
+    The gw-lin rows' diagnostic usage report, through stand-in scans whose work count grows in proportion to the
+    input (linear) or to its square (super-linear, _gw_count_scan). With every reading available, a super-linear
+    row fails with its CPU times and each usage field for both counted calls. With no resource module, with a
+    getrusage result missing a field and with collector statistics without 'collections' (each stood in through
+    sys.modules), the rows still reach their verdict instead of raising: a linear row passes and a super-linear
+    one fails reporting 'usage unavailable' for each reading it lost and the readings it kept."""
     pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
     pair = r"\d+ then \d+"
     lost = "usage unavailable"
@@ -7959,12 +8890,13 @@ def _gw_lin_usage_failures():
             ("gw-lin-usage-no-collections", "gc", no_collections,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
-        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
-                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
-        rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
+        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input grew the scan's work count "
+                          r"from 4000 to 16000, over twice that plus " + str(_GW_COUNT_SLACK) + r" \(super-linear\), "
+                          r"for inputs of length 4000 then 8000; diagnostics only, not judged: CPU \d+\.\d{3}s then "
+                          r"\d+\.\d{3}s, " + clause + r"\Z")
+        rows = ((label + "-super", "x", "", "", _gw_count_scan(2), None),)
         if module is not None:
-            rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
+            rows = ((label + "-linear", "x", "", "", _gw_count_scan(1), None),) + rows
         try:
             with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
                 got = _gw_lin_failures(rows)
@@ -8774,6 +9706,8 @@ _DEADLINE_SHAPES = {
         "question": "q" * n, "header": "h", "multiSelect": False,
         "options": [{"label": "a", "description": "b"}, {"label": "c", "description": "d"}]}]}),
     "wakeup_long": lambda n, base: ("ScheduleWakeup", {"prompt": "p" * n, "delaySeconds": 60, "reason": "r"}),
+    # A commit message made of cited line ranges, so the citation check lexes, scans and judges a long one.
+    "commit_cites": lambda n, base: ("Bash", {"command": 'git commit -m "' + _repeat("a.py:1-2 ", n - 15, '"')}),
     "fg_detach_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "long_job &")}),
     "fg_arith_open": lambda n, base: ("Bash", {"command": _repeat("$((", n)}),
     "fg_heredocs_amp": lambda n, base: ("Bash", {"command": _repeat("cat <<E\na & b's\nE\n", n)}),
@@ -8835,8 +9769,10 @@ _DEADLINE_SHAPES = {
 # Every PreToolUse handler is timed on each uncertain '#' shape as well, and must reach the decision the pinned
 # base commit reached on it: "allow", except where this map names another for the (handler, shape) or, first,
 # the (handler, shape, size): protected_line denies seps_hash5 past 64 KB, where the size cap of its commit
-# reading denies a command longer than 65,536 characters. Before the readings resumed where an earlier reading
-# stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
+# reading denies a command longer than 65,536 characters, and citation_read_check allows paren_hash4 at 1 MB
+# with a note, since that command is 1,048,577 characters, one over the check's bound (_CITECHK_COMMAND_MAX),
+# and a command over it is named as not read whatever its text names. Before the readings resumed where an
+# earlier reading stopped, four handlers took 10 to 12 s on seps_hash at 1 MB, past the hook timeout, and lexing
 # seps_hash_lines took about 30 s. With the long separator runs these shapes hold built in one batch, the
 # sink check on a failed lex resuming where the lex stopped, and the commit-identity reader skipping records
 # with no word and no redirect, the two costliest cases measured on one host (max of five runs) are
@@ -8852,7 +9788,8 @@ _DEADLINE_HASH_DECISIONS = {
     ("orch_truncation_guard", "seps_hash5"): "deny", ("protected_line", "seps_hash"): "deny",
     ("protected_line", "seps_hash_lines"): "deny", ("protected_line", "seps_hash_nested"): "deny",
     ("protected_line", "paren_hash4"): "deny", ("protected_line", "seps_hash5", 262144): "deny",
-    ("protected_line", "seps_hash5", 1048576): "deny"}
+    ("protected_line", "seps_hash5", 1048576): "deny",
+    ("citation_read_check", "paren_hash4", 1048576): "allow-note"}
 
 
 def _deadline_hash_decision(name, shape, size):
@@ -8882,6 +9819,7 @@ _DEADLINE_CASES = {
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
                             "dq_case_substs_after"),
     "branch_root": ("heredocs", "git_push_words_unbal", "nest_parens", "procsubst_run_after"),
+    "citation_read_check": ("git_words", "subst_after", "commit_cites"),
     "commit_identity": ("nest_parens", "git_words_unbal_dq"),
     "commit_msg_subst": ("git_words_unbal_dq", "cd_git_fetch_unbal", "git_add_unbal", "subst_after"),
     "console_prefix_pretool": ("git_words", "write_content"),
@@ -8982,7 +9920,8 @@ _DEADLINE_SIZES = (65536, 262144, 1048576)
 # run of it on a 24-core host with Python 3.14.4 (2026-10-25) measured at most 0.10, 0.46 and 2.01 s of CPU,
 # each on paren_hash4. Every timed row, here and in the lex-cost rows, compares the median of its _TIMED_RUNS
 # (3) runs' CPU times (_judged, the second-fastest) with its CPU bound and checks every run's outcome: one run
-# slowed by a loaded host is tolerated, while a slowdown on two of the three runs fails. Measured on one
+# slowed by a loaded host is tolerated only when a fresh-process replay of the case is within the bound
+# (the shared judge, _timing_judge), while a slowdown on two of the three runs fails. Measured on one
 # shared 80-CPU host (2026-11-01, one-minute load average 38 to 44, no load added), as that median over 3 to 5
 # trials with the handler's work done once (honest) and twice (doubled): cd_git_fetch_unbal under
 # review_workdir_hold at 256 KB, honest 0.861 to 0.947 s, doubled 1.801 to 1.908 s, so a 2.0 s bound would
@@ -9020,7 +9959,8 @@ _TIMED_RUNS = 3
 # much of their 4.57 and 5.02 s off the CPU was queueing is not known: had all of it been the call's own
 # waiting, their median, 8.47 s, would fail here. The CPU work is also bounded per size on the thread clock
 # (_DEADLINE_BOUNDS). Like the CPU bounds, this budget judges the median of the case's _TIMED_RUNS runs: own
-# work over it on two of the three runs fails, on only one run in three passes. A case whose median own work
+# work over it on two of the three runs fails, on only one run in three passes only when a fresh-process
+# replay of the case is within it (the shared judge, _timing_judge). A case whose median own work
 # is over it, with at least one run reaching a decision, fails and is run once more only as a diagnostic,
 # which never clears it; the failure carries every run's wall-clock time, CPU time, run-queue delay, own work
 # and outcome, and the diagnostic run's as well.
@@ -9057,53 +9997,567 @@ def _deadline_fixtures(tmp):
     return plain, orch, gensrc
 
 
-def _hook_cpu_timed(call, bound=None, runs=3):
-    """(the last call()'s result, the least CPU seconds the calling thread spent in one call()): the
-    clock of every row that holds one in-process handler call to a fixed absolute CPU bound. It charges
-    the call only for its own work, which a fixed bound can judge, where one process-CPU reading also
-    charges it for work it did not do (a commit-identity row so charged measured 2.43 s inside the full
-    suite on a host at a load near half its CPUs, against at most 0.03 s for the same call alone, about
-    80 times; at these rows the suite runs one thread, arms no interval timer and triggers no cyclic
-    collection, so that charge came from outside the call). Three guards, each against a charge a fixed
-    absolute bound cannot absorb: time.thread_time charges only the calling thread, so work another
-    thread does while the call runs is never billed to it; the cyclic collector is held off across the
-    call, the prior state restored after the second clock reading, so a collection that the call's own
-    allocations tip over a generation threshold cannot bill a pass over the whole suite heap, which a
-    hook process at its production size never carries, to the one call that tipped it (the deferred
-    collection runs outside every timed region, charged to no row); and with a bound the call is
-    re-timed, up to runs times in all, only while the least reading so far is at or over it, and that
-    least reading is judged, since stray charges the clock cannot see apart (kernel reclaim billed to
-    an allocating thread as system time, a co-scheduled sibling's cache pressure) only ever add time,
-    so the least of up to three is the fairest reading of the call's own cost. The call's own work, its
-    reference counting included, is always charged. The re-timed call must be deterministic: same
-    input, same decision, no state carried across runs (a counting shim is reset inside the call).
-    Disclosed limit: a real super-linear regression of the measured path is over the bound on every
-    run, and so still fails, only in a call that meets that precondition, and then only after up to
-    runs timed calls of the regressed path, so in about runs times its own cost: the psm-t rows, which
-    time one call at about 400 KB with no smaller probe first, are the worst recorded case (about 104 s
-    of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
-    fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
-    can read low on its second and third runs, and its least reading then passes the bound. The
-    median-judged rows (_timed_runs over the lex-cost and deadline-shape cases) judge the median of
-    three runs, which already tolerates one slowed run: the lex-cost rows on time.process_time, the
-    deadline-shape cases on time.thread_time read inside the call (_deadline_timed_call), with no
-    collector hold."""
+# THE SHARED TIMING JUDGE. Every row that holds a measured time to a fixed absolute bound is judged here
+# (_timing_judge), under one of the explicit shared policies below (_TimingPolicy): the in-process handler
+# rows (_timed_case: cp-oversized-cost, psm-t1 to psm-t3, ci-wr-rebase-cpu, ci-wr172, ci-wr173, ci-idc-cpu1 to
+# ci-idc-cpu8, ci-wr135 to ci-wr139, ci-wr-c47, ci-wr-c50, ci-wr-c51, ci-wr160 to ci-wr163, ci-wr165 to
+# ci-wr171, ci-idc15, ci-idc16, ci-idc-c8, ap-c95e, ap-c95f) and the lex-cost pairs (_timed_case on
+# time.process_time) under _TIMING_MEDIAN or _TIMING_MEDIAN_AT; the dl-shape cases' CPU time and own work
+# (_deadline_shape_verdicts) under _TIMING_MEDIAN; the deadline-path rows' tail spans and whole-run times
+# (_deadline_tail_problems, _deadline_total_problems) under _TIMING_UPPER_MIDDLE and _TIMING_UPPER_MIDDLE_AT;
+# and every per-invocation hard limit and watchdog (dl-defer-twice-outer-deadline,
+# _deadline_outer_deadline_failures; the deadline child's and the replay child's wall-clock limits,
+# _deadline_child_within; the dl-child-wait-* stop bounds, _deadline_child_wait_failures; the clock-hook
+# unit suite's test_hang_guard_interrupts) under _TIMING_HARD or _TIMING_HARD_AT. The rule of a median
+# policy, the same for every row under one:
+# (1) the row is measured _TIMED_RUNS (3) times (a deadline-path row 3 to 6), every run made whatever an
+#     earlier one gave, and every run's result is checked, so a wrong result on any run fails the row
+#     whatever its timing;
+# (2) the judged time (the median of an odd count; for an even count the lower middle under _TIMING_MEDIAN,
+#     the UPPER middle under _TIMING_UPPER_MIDDLE*, so there a time over the bound on half of the runs
+#     fails) over the bound (at or over it for an inclusive policy) fails the row, and nothing clears that
+#     failure;
+# (3) a time over the bound on fewer runs than that (a lone excursion) is replayed once: in a fresh
+#     interpreter (_timing_replay: sys.executable -I -B importing this module, under a fixed wall-clock
+#     limit) for the handler, lex-cost and dl-shape rows, which runs the same measurement function over the
+#     same inputs (_timing_replay_child); as one more fresh run of the row, in this process, for a
+#     deadline-path row, whose every run already builds a new stub and a new window around main(). The row
+#     passes only when the replay finishes and is within EVERY bound and check of the row TOGETHER: its
+#     result passes the row's check, and every metric the row judges (a dl-shape case's CPU time, own work
+#     with its run-queue delay read, and outcome; a deadline-path run's cut, tail span and whole-run time) is
+#     within its own bound, so a replay that clears one metric's excursion while over another bound, with a
+#     metric it could not read, or with a wrong outcome fails the row. A replay that crashes, times out,
+#     reports a malformed reply or is over a bound fails the row, and a row with no replay available fails
+#     the excursion;
+# (4) diagnostics (every run's time, wall-clock time and run-queue delay, the load averages) are printed on
+#     standard error as a 'timing-note:' line whenever a run is over its bound, and never decide: the judge
+#     takes only the times, the bound and the replay.
+# A hard policy has no median and no replay: every invocation's time is judged alone, and one invocation over
+# its limit (at or over it under _TIMING_HARD_AT), or one with no well-formed time (a child that was stopped),
+# fails the row, whatever any other invocation took.
+# Against the least-of-up-to-three rule the in-process rows used before, this never passes a row that rule
+# failed: a least time over the bound puts the median over it. Against the median-of-three rule the
+# lex-cost and dl-shape rows used before, and the upper-middle rule the deadline-path rows used before, it
+# adds the replay, which can only add a failure. The hard limits keep the single-invocation failure they had.
+# Residual, exactly (two blind spots, both a slowdown that times alone cannot tell from host noise or never
+# see; the rules these rows used before pass every such case too, so neither is a reduction): (a) ANY
+# INTERMITTENT SLOWDOWN THE REPLAY MISSES: a slowdown on fewer runs than (2) fails (one run in three for a
+# handler, lex-cost or dl-shape row) that does not show again on the replay passes, whatever its cause: host
+# noise, state earlier rows left in this process, or a fault that strikes only now and then (for a
+# deadline-path row the replay runs in this same process, so state those runs share escapes it too);
+# (b) COLD WORK BEFORE MEASUREMENT: work a handler does only on its first call in a process (a lazily
+# compiled pattern, a first-use cache fill, an import), when an untimed call of the same handler ran earlier
+# in this process, is spent before the first timed run, so no run measures it and no excursion triggers the
+# replay that would measure it cold. A cold-only slowdown is caught only where the first timed run is also
+# the handler's first call in the process (then run 1 is the excursion and the fresh-process replay, cold
+# again, fails it). In the suite's real order no in-process handler row (_timed_case) is such a row: each
+# has an untimed call of its handler earlier in this process: cp-oversized-cost (console_prefix_pretool,
+# called by the cp-* rows before it, see that row); psm-t1 to psm-t3 (pgrep_self_match, called by the
+# mbp-* and nul-* rows run just before them); the lex-cost pairs (gate_weakening, bash_absolute_paths and
+# protected_line, called by the gsf-*, glx-* and other rows before them); the timed ci-* rows
+# (commit_identity, called by the gsf-d, ci-l11* and other rows before them); and ap-c95e and ap-c95f
+# (bash_absolute_paths, called by the ap-c101 and ap-c95 rows just before them). No row adds an
+# unconditional cold measurement.
+_TimingPolicy = collections.namedtuple("_TimingPolicy", ("name", "rule", "inclusive"))
+# rule "median": _judged, the lower middle of an even count; "upper-middle": _judged_half_fails; "hard": every
+# invocation alone, no median, no replay. inclusive: the row fails at the bound, not only over it.
+_TIMING_MEDIAN = _TimingPolicy("the median of the runs, a lone excursion replayed, failing over the bound",
+                               "median", False)
+_TIMING_MEDIAN_AT = _TimingPolicy("the median of the runs, a lone excursion replayed, failing at the bound",
+                                  "median", True)
+_TIMING_UPPER_MIDDLE = _TimingPolicy("the median of the runs (the upper middle of an even count), a lone "
+                                     "excursion replayed, failing over the bound", "upper-middle", False)
+_TIMING_UPPER_MIDDLE_AT = _TimingPolicy("the median of the runs (the upper middle of an even count), a lone "
+                                        "excursion replayed, failing at the bound", "upper-middle", True)
+_TIMING_HARD = _TimingPolicy("a hard limit on every invocation, failing over the limit", "hard", False)
+_TIMING_HARD_AT = _TimingPolicy("a hard limit on every invocation, failing at the limit", "hard", True)
+_TIMING_REPLAY_SECONDS = 300.0
+# The handlers a timed case may name (_timing_case_run resolves the name on aiqt_hooks, in this process and
+# in the replay child alike); a case naming any other is refused, so a replay never runs supplied code.
+_TIMING_HANDLERS = frozenset(("bash_absolute_paths", "commit_identity", "console_prefix_pretool",
+                              "gate_weakening", "pgrep_self_match", "protected_line"))
+_TIMING_REPLAY_CODE = ("import json, sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
+                       "sys.stdout.write(json.dumps(m._timing_replay_child(sys.argv[2])))")
+
+
+def _timing_over(seconds, bound, inclusive):
+    """Whether seconds fails bound: at or over it for an inclusive row (one whose failure test is >=), over
+    it otherwise."""
+    return seconds >= bound if inclusive else seconds > bound
+
+
+def _timing_valid(seconds):
+    """Whether seconds is a well-formed time: a finite, nonnegative int or float (never a bool)."""
+    return (isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and math.isfinite(seconds)
+            and seconds >= 0)
+
+
+def _timing_judged(samples, policy):
+    """The time a median policy judges among samples (well-formed times): _judged for rule median,
+    _judged_half_fails for rule upper-middle. A hard policy judges no median, so asking for one is refused."""
+    if policy.rule == "median":
+        return _judged(samples)
+    if policy.rule == "upper-middle":
+        return _judged_half_fails(samples)
+    raise ValueError("the policy {!r} judges no median".format(policy.name))
+
+
+def _timing_hard_failed(policy, seconds, limit):
+    """Whether one invocation's seconds fails a hard policy's limit (_TIMING_HARD, _TIMING_HARD_AT): over the
+    limit (at or over it under _TIMING_HARD_AT), or not a well-formed time (an invocation that was stopped,
+    None, never passes). Never a median and never a replay: each invocation is judged alone."""
+    if policy.rule != "hard":
+        raise ValueError("the policy {!r} is not a hard limit".format(policy.name))
+    return not _timing_valid(seconds) or _timing_over(seconds, limit, policy.inclusive)
+
+
+def _timing_judge(samples, bound, policy, replay):
+    """(failed, text): the shared timing judge (see THE SHARED TIMING JUDGE above) over samples, the seconds
+    of each run, against bound under policy (a _TimingPolicy; inclusive: the row fails at the bound). Under a
+    hard policy every run is judged alone (_timing_hard_failed) and replay is never called. Under a median
+    policy replay is None (no replay can be built) or a function returning (seconds, None) for a replay that
+    reached a result passing every check and every other bound of the row, or (None, the reason it failed);
+    it is called only for a lone excursion: the judged time (_timing_judged) within the bound and at least
+    one run over it. Malformed samples fail."""
+    if not isinstance(policy, _TimingPolicy):
+        raise ValueError("{!r} is not a shared timing policy".format(policy))
+    if not samples or not all(_timing_valid(seconds) for seconds in samples):
+        return True, "malformed times {!r} (want finite, nonnegative seconds)".format(samples)
+    inclusive = policy.inclusive
+    over = [index for index, seconds in enumerate(samples, 1) if _timing_over(seconds, bound, inclusive)]
+    if policy.rule == "hard":
+        text = "times {} s, a hard limit failing {} {:g} s on any one invocation".format(
+            ", ".join("{:.3f}".format(seconds) for seconds in samples), ">=" if inclusive else ">", bound)
+        if over:
+            return True, text + " (run {} over the hard limit, which no median or replay clears)".format(
+                " and ".join(str(index) for index in over))
+        return False, text
+    median = _timing_judged(samples, policy)
+    text = "times {} s, {} {:.3f} s, failing {} {:g} s".format(
+        ", ".join("{:.3f}".format(seconds) for seconds in samples),
+        "judged (upper middle)" if policy.rule == "upper-middle" else "median", median,
+        ">=" if inclusive else ">", bound)
+    if _timing_over(median, bound, inclusive):
+        return True, text + " (median over the bound)"
+    if not over:
+        return False, text
+    text += " (run {} over the bound, the median within it)".format(" and ".join(str(index) for index in over))
+    if replay is None:
+        return True, text + "; no replay can be built, so the excursion fails"
+    try:
+        seconds, problem = replay()
+    except Exception as exc:
+        seconds, problem = None, "it raised {}: {}".format(type(exc).__name__, exc)
+    if problem is not None:
+        return True, text + "; the replay failed: " + problem
+    if not _timing_valid(seconds):
+        return True, text + "; the replay gave a malformed time {!r}".format(seconds)
+    if _timing_over(seconds, bound, inclusive):
+        return True, text + "; the replay took {:.3f} s, over the bound as well".format(seconds)
+    return False, text + "; cleared by a replay that took {:.3f} s".format(seconds)
+
+
+def _timing_diagnostics(samples):
+    """A diagnostic phrase for samples (_timing_case_run results): each run's wall-clock time and run-queue
+    delay, and the load averages. A reading that cannot be had says so; none of it ever decides a row."""
+    parts = []
+    for index, sample in enumerate(samples, 1):
+        wall, queued = sample.get("wall"), sample.get("queued")
+        parts.append("run {}: {} wall-clock, run-queue delay {}".format(
+            index, "{:.3f} s".format(wall) if _timing_valid(wall) else "unavailable",
+            "{:.3f} s".format(queued) if _timing_valid(queued) else "unavailable"))
+    try:
+        parts.append("load averages {:.2f} {:.2f} {:.2f}".format(*os.getloadavg()))
+    except (AttributeError, OSError) as exc:
+        parts.append("load averages unavailable ({}: {})".format(type(exc).__name__, exc))
+    return "; ".join(parts)
+
+
+# While false (_timing_notes_quiet, around the recorded-run vectors), _timing_note prints nothing.
+_TIMING_NOTES = [True]
+
+
+@contextlib.contextmanager
+def _timing_notes_quiet():
+    """While the block runs, _timing_note prints nothing (the vectors' recorded excursions are not real)."""
+    saved = _TIMING_NOTES[0]
+    _TIMING_NOTES[0] = False
+    try:
+        yield
+    finally:
+        _TIMING_NOTES[0] = saved
+
+
+def _timing_note(label, text, diagnostics):
+    """Print one advisory 'timing-note:' line on standard error; it never decides a row."""
+    if not _TIMING_NOTES[0]:
+        return
+    try:
+        sys.stderr.write("timing-note: {} {}; {}\n".format(label, text, diagnostics))
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _timing_bash(command):
+    """The PreToolUse payload of a Bash command for a timed case (the payload _decision builds)."""
+    return {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}}
+
+
+@contextlib.contextmanager
+def _timing_rebase_counts(counts):
+    """While the block runs, aiqt_hooks._cmtidn_run_lines counts into counts [the rebase reads, the run lines
+    built] (the ci-wr-rebase-cpu shim); the real reader is put back after."""
+    saved = aiqt_hooks._cmtidn_run_lines
+
+    def counted(tokens, k, *args):
+        if tokens[k] == "rebase":
+            counts[0] += 1
+        for line in saved(tokens, k, *args):
+            counts[1] += 1
+            yield line
+    aiqt_hooks._cmtidn_run_lines = counted
+    try:
+        yield
+    finally:
+        aiqt_hooks._cmtidn_run_lines = saved
+
+
+def _timing_case_run(spec):
+    """One timed run of the case spec (a JSON-ready dict: id, handler (a name in _TIMING_HANDLERS), payload,
+    and optionally clock "process" (time.process_time, the collector left alone) instead of the default
+    thread clock (time.thread_time with the cyclic collector held off across the call and its prior state
+    restored, so a collection the call's allocations tip over a threshold cannot bill a pass over the whole
+    suite heap to it), shim "rebase-count" (_timing_rebase_counts) and console_prefix [pattern, posture,
+    config] (_cp_environ)). Returns {id, seconds, wall, queued, code, stdout, counts, error}: error is the
+    exception the handler raised, as text, or None. The replay child runs this same function, so a replay
+    takes the measured path the in-process runs took."""
     import gc
-    spent = None
-    for _ in range(max(1, runs)):
+    name = spec.get("handler")
+    if name not in _TIMING_HANDLERS:
+        raise ValueError("{!r} is not a timed handler".format(name))
+    if spec.get("shim") not in (None, "rebase-count") or spec.get("clock") not in (None, "thread", "process"):
+        raise ValueError("unknown shim or clock in {!r}".format(spec.get("id")))
+    handler = getattr(aiqt_hooks, name)
+    process = spec.get("clock") == "process"
+    clock = time.process_time if process else time.thread_time
+    counts = [0, 0]
+    sample = {"id": spec.get("id"), "counts": counts, "error": None, "code": None, "stdout": None}
+    with contextlib.ExitStack() as stack:
+        if spec.get("console_prefix") is not None:
+            stack.enter_context(_cp_environ(*spec["console_prefix"]))
+        if spec.get("shim") == "rebase-count":
+            stack.enter_context(_timing_rebase_counts(counts))
+        queued_began = _deadline_run_queue_seconds()
         enabled = gc.isenabled()
-        gc.disable()
+        if not process:
+            gc.disable()
         try:
-            started = time.thread_time()
-            result = call()
-            once = time.thread_time() - started
+            wall_began = time.monotonic()
+            began = clock()
+            try:
+                sample["code"], sample["stdout"], _stderr = handler(spec["payload"])
+            except Exception as exc:
+                sample["error"] = "{}: {}".format(type(exc).__name__, exc)
+            sample["seconds"] = clock() - began
+            sample["wall"] = time.monotonic() - wall_began
         finally:
-            if enabled:
+            if enabled and not process:
                 gc.enable()
-        spent = once if spent is None else min(spent, once)
-        if bound is None or spent < bound:
-            break
-    return result, spent
+        queued_ended = _deadline_run_queue_seconds()
+    sample["queued"] = (None if queued_began is None or queued_ended is None
+                        else max(0.0, queued_ended - queued_began))
+    return sample
+
+
+def _timing_reduced(sample):
+    """A timed run's decision (_reduce_result over its exit code and stdout object), or 'error (...)' when
+    the handler raised."""
+    if sample.get("error") is not None:
+        return "error ({})".format(sample["error"])
+    return _reduce_result(sample.get("code"), sample.get("stdout"))
+
+
+def _timing_replay(spec):
+    """(the replay's sample, None), or (None, the reason the replay failed): the case spec run once by
+    _timing_case_run (or the dl-shape and dl-outer kinds, _timing_replay_child) in a fresh interpreter,
+    sys.executable -I -B importing this module, under _TIMING_REPLAY_SECONDS of wall-clock time
+    (_deadline_child_wait). The spec travels as a JSON file in a temporary directory removed after; the
+    child resolves its handler by name only. A reply must name the case's id and carry a well-formed time."""
+    with tempfile.TemporaryDirectory(prefix="timing-replay-") as where:
+        path = Path(where) / "case.json"
+        with open(path, "x", encoding="utf-8") as handle:
+            json.dump(spec, handle)
+        proc, waited = _deadline_child_wait(_TIMING_REPLAY_CODE, (str(Path(__file__).resolve().parent), str(path)),
+                                            _TIMING_REPLAY_SECONDS)
+    if proc is None:
+        return None, "the replay child was {} (limit {:g} s)".format(waited, _TIMING_REPLAY_SECONDS)
+    try:
+        reply = json.loads(proc.stdout)
+    except ValueError:
+        reply = None
+    if (proc.returncode != 0 or not isinstance(reply, dict) or reply.get("id") != spec.get("id")
+            or not _timing_valid(reply.get("seconds"))):
+        return None, "the replay child gave exit {} and a malformed reply: {!r}".format(
+            proc.returncode, (proc.stdout + proc.stderr)[-1000:])
+    return reply, None
+
+
+def _timing_replay_child(path):
+    """The replay child's work (_timing_replay): the case in the JSON file at path, run once in this fresh
+    process. kind "handler" (the default) is _timing_case_run; "dl-shape" is one _deadline_shape_case run
+    (_deadline_shape_replay_run), its run in "run". Any other kind is refused (dl-defer-twice-outer-deadline
+    is judged under a hard limit, _TIMING_HARD_AT, which no replay clears)."""
+    with open(path, encoding="utf-8") as handle:
+        spec = json.load(handle)
+    kind = spec.get("kind", "handler")
+    if kind == "handler":
+        sample = _timing_case_run(spec)
+    elif kind == "dl-shape":
+        run = _deadline_shape_replay_run(spec["name"], spec["shape"], spec["size"], spec["cwd"])
+        sample = {"seconds": run[0], "run": list(run)}
+    else:
+        raise ValueError("unknown replay kind {!r}".format(kind))
+    sample["id"] = spec.get("id")
+    return sample
+
+
+def _timed_case(spec, bound, inclusive, check, replay=None, run=None):
+    """The shared judge over one in-process handler case: spec run _TIMED_RUNS times by _timing_case_run,
+    every run's sample given to check (a phrase naming what is wrong with it, or None), the times judged by
+    _timing_judge against bound under the shared policy _TIMING_MEDIAN_AT (inclusive: the row fails at the
+    bound) or _TIMING_MEDIAN, a lone excursion replayed by replay (default _timing_replay) and its reply
+    checked by check as well. Returns a namespace: failed (a timing or check failure), timing_failed,
+    problems (each run's check failures), text (the judge's account, and any check failures), median (the
+    median seconds), samples, decisions (each run's _timing_reduced). Prints a 'timing-note:' line when any
+    run is over the bound. run (default _timing_case_run) measures one run; the vectors
+    (_timing_judge_failures) give recorded runs instead."""
+    policy = _TIMING_MEDIAN_AT if inclusive else _TIMING_MEDIAN
+    replay = _timing_replay if replay is None else replay
+    run = _timing_case_run if run is None else run
+    samples = [run(spec) for _ in range(_TIMED_RUNS)]
+    problems = []
+    for index, sample in enumerate(samples, 1):
+        problem = check(sample)
+        if problem:
+            problems.append("run {}: {}".format(index, problem))
+
+    def replayed():
+        reply, problem = replay(spec)
+        if problem is not None:
+            return None, problem
+        problem = check(reply)
+        if problem:
+            return None, "its result failed the row's check: {}".format(problem)
+        return reply.get("seconds"), None
+    times = [sample.get("seconds") for sample in samples]
+    timing_failed, text = _timing_judge(times, bound, policy, replayed)
+    if any(_timing_valid(seconds) and _timing_over(seconds, bound, inclusive) for seconds in times):
+        _timing_note(spec.get("id"), text, _timing_diagnostics(samples))
+    return types.SimpleNamespace(
+        failed=timing_failed or bool(problems), timing_failed=timing_failed, problems=problems,
+        text="; ".join([text] + problems),
+        median=_timing_judged(times, policy) if times and all(map(_timing_valid, times)) else None,
+        samples=samples, decisions=[_timing_reduced(sample) for sample in samples])
+
+
+def _timing_decision_check(want):
+    """A _timed_case check: the run must decide want (_timing_reduced)."""
+    def check(sample):
+        got = _timing_reduced(sample)
+        return None if got == want else "decided {}, expected {}".format(got, want)
+    return check
+
+
+def _timing_judge_failures():
+    """(timing-judge-*) The shared timing judge (_timing_judge, _timed_case, _timing_case_run, _timing_replay)
+    on recorded times and runs, except the rows marked real. B is a 1 s bound, L 0.9 s and H 1.1 s.
+    timing-judge-policy-upper-middle: under _TIMING_UPPER_MIDDLE and _TIMING_UPPER_MIDDLE_AT, H on half of
+    an even count of runs or more (L, L, H, H; H, L, H, L; L, L, L, H, H, H) fails with no replay, while
+    (timing-judge-policy-upper-middle-cleared) fewer (L, L, L, H; L, L, L, L, H, H; H, L, L) pass only after
+    one replay at L and (timing-judge-policy-upper-middle-replay-over) fail with a replay at H;
+    timing-judge-policy-lower-middle: under _TIMING_MEDIAN (the lower middle) L, L, H, H reaches the replay
+    instead.
+    timing-judge-policy-hard: under _TIMING_HARD and _TIMING_HARD_AT one H among any runs fails with no
+    replay asked for; (timing-judge-policy-hard-quiet) L, L, L passes; (timing-judge-policy-hard-edge) a time
+    exactly at B fails only _TIMING_HARD_AT; and (timing-judge-policy-hard-one) _timing_hard_failed fails a
+    stopped (None), NaN or negative invocation.
+    timing-judge-policy-refused: a bool in place of a policy, a median policy given to _timing_hard_failed
+    and a hard policy asked for a median are refused.
+    timing-judge-quiet: L, L, L passes with no replay.
+    timing-judge-two: every order of H, H, L fails, and no replay is asked for; H, H, H fails.
+    timing-judge-lone-cleared: every order of H, L, L passes after one replay that takes L.
+    timing-judge-lone: every order of H, L, L fails when the replay takes H, when no replay can be built,
+    when the replay reports a failure, raises, or gives a malformed time (NaN, negative, a bool, None).
+    timing-judge-edge-median: a median exactly at B passes an exclusive row and fails an inclusive one.
+    timing-judge-edge-replay: so does a replay exactly at B after H, L, L.
+    timing-judge-malformed: no times, or a NaN, negative or missing time, fails.
+    timing-judge-check-run: a wrong decision on the first, second or third run fails a case whose times
+    are all L.
+    timing-judge-check-replay: a wrong decision on the replay fails a case with one run at H.
+    timing-judge-check-cleared: that case passes when the replay decides right within the bound.
+    timing-judge-diagnostics: the same times with different or missing wall-clock times and run-queue
+    delays reach the same decision.
+    timing-judge-gc (real): _timing_case_run leaves the cyclic collector as it found it, enabled or
+    disabled.
+    timing-judge-handler-refused: _timing_case_run refuses a handler outside _TIMING_HANDLERS.
+    timing-judge-replay (real): a fresh-process replay of a small bash_absolute_paths case returns its id,
+    a well-formed time and the decision allow.
+    timing-judge-replay-unknown (real): a replay of an unknown kind fails."""
+    out = []
+    low, high, bound = 0.9, 1.1, 1.0
+    asked = []
+
+    def replay_at(seconds, problem=None):
+        def replay():
+            asked.append(seconds)
+            return seconds, problem
+        return replay
+
+    def judged(samples, replay, inclusive=False, policy=None):
+        asked.clear()
+        if policy is None:
+            policy = _TIMING_MEDIAN_AT if inclusive else _TIMING_MEDIAN
+        return _timing_judge(list(samples), bound, policy, replay)[0]
+    # timing-judge-policy-*: the shared policies themselves.
+    for policy in (_TIMING_UPPER_MIDDLE, _TIMING_UPPER_MIDDLE_AT):
+        for samples, want in (((low, low, high, high), True), ((high, low, high, low), True),
+                              ((low, low, low, high), None), ((low, low, low, low, high, high), None),
+                              ((low, low, low, high, high, high), True), ((high, low, low), None)):
+            failed = judged(samples, replay_at(low), policy=policy)
+            if want is True and (not failed or asked):
+                out.append("(timing-judge-policy-upper-middle) {!r} under {} must fail with no replay, got failed "
+                           "{} after replays {!r}".format(samples, policy.name, failed, asked))
+            elif want is None and (failed or asked != [low]):
+                out.append("(timing-judge-policy-upper-middle-cleared) {!r} under {} must pass after one replay at "
+                           "L, got failed {} after replays {!r}".format(samples, policy.name, failed, asked))
+            if want is None and not judged(samples, replay_at(high), policy=policy):
+                out.append("(timing-judge-policy-upper-middle-replay-over) {!r} under {} must fail with a replay at "
+                           "H".format(samples, policy.name))
+    if not judged((low, low, high, high), replay_at(low), policy=_TIMING_UPPER_MIDDLE) or \
+            judged((low, low, high, high), replay_at(low), policy=_TIMING_MEDIAN):
+        out.append("(timing-judge-policy-lower-middle) half of four runs over the bound must fail under the upper "
+                   "middle and reach the replay under the lower middle")
+    for policy in (_TIMING_HARD, _TIMING_HARD_AT):
+        for samples in ((high, low, low), (low, low, high), (high, high, high), (high,)):
+            if not judged(samples, replay_at(low), policy=policy) or asked:
+                out.append("(timing-judge-policy-hard) {!r} under {} must fail, with no replay asked for, replays "
+                           "{!r}".format(samples, policy.name, asked))
+        if judged((low, low, low), replay_at(high), policy=policy) or asked:
+            out.append("(timing-judge-policy-hard-quiet) L, L, L under {} must pass with no replay".format(
+                policy.name))
+        if judged((bound,), None, policy=policy) is not policy.inclusive:
+            out.append("(timing-judge-policy-hard-edge) a time exactly at the limit must {} under {}".format(
+                "fail" if policy.inclusive else "pass", policy.name))
+        for seconds, want in ((low, False), (high, True), (None, True), (float("nan"), True), (-0.1, True),
+                              (bound, policy.inclusive)):
+            if _timing_hard_failed(policy, seconds, bound) is not want:
+                out.append("(timing-judge-policy-hard-one) _timing_hard_failed({}, {!r}, {:g}) must be {}".format(
+                    policy.name, seconds, bound, want))
+    for bad_policy, call in ((True, lambda: _timing_judge([low], bound, True, None)),
+                             (_TIMING_MEDIAN, lambda: _timing_hard_failed(_TIMING_MEDIAN, low, bound)),
+                             (_TIMING_HARD, lambda: _timing_judged([low], _TIMING_HARD))):
+        try:
+            call()
+            out.append("(timing-judge-policy-refused) {!r} must be refused where it does not apply".format(
+                bad_policy))
+        except ValueError:
+            pass
+    if judged((low, low, low), replay_at(low)) or asked:
+        out.append("(timing-judge-quiet) L, L, L must pass with no replay, replays {!r}".format(asked))
+    for order in sorted(set(itertools.permutations((high, high, low)))) + [(high, high, high)]:
+        if not judged(order, replay_at(low)) or asked:
+            out.append("(timing-judge-two) {!r} must fail with no replay, replays {!r}".format(order, asked))
+    for order in sorted(set(itertools.permutations((high, low, low)))):
+        if judged(order, replay_at(low)) or asked != [low]:
+            out.append("(timing-judge-lone-cleared) {!r} with a replay at L must pass after one replay, replays {!r}"
+                       .format(order, asked))
+        for label, replay in (("a replay at H", replay_at(high)), ("no replay", None),
+                              ("a failed replay", replay_at(None, "crashed")),
+                              ("a raising replay", lambda: 1 / 0),
+                              ("a NaN replay", replay_at(float("nan"))), ("a negative replay", replay_at(-0.1)),
+                              ("a bool replay", replay_at(False)), ("a missing replay time", replay_at(None))):
+            if not judged(order, replay):
+                out.append("(timing-judge-lone) {!r} with {} must fail".format(order, label))
+    for inclusive in (False, True):
+        if judged((bound, bound, low), replay_at(low), inclusive) is not inclusive:
+            out.append("(timing-judge-edge-median) a median exactly at the bound must {} a row failing {} it".format(
+                "fail" if inclusive else "pass", "at" if inclusive else "over"))
+        if judged((high, low, low), replay_at(bound), inclusive) is not inclusive:
+            out.append("(timing-judge-edge-replay) a replay exactly at the bound must {} a row failing {} it".format(
+                "fail" if inclusive else "pass", "at" if inclusive else "over"))
+    for samples in ((), (float("nan"), low, low), (-0.1, low, low), (None, low, low), (True, low, low)):
+        if not judged(samples, replay_at(low)):
+            out.append("(timing-judge-malformed) times {!r} must fail".format(samples))
+
+    def recorded(times, decisions, walls=None, queued=None):
+        feed = iter(zip(times, decisions, walls or [0.1] * len(times), queued or [0.0] * len(times)))
+
+        def run(spec):
+            seconds, decision, wall, delay = next(feed)
+            return {"id": spec["id"], "seconds": seconds, "wall": wall, "queued": delay, "counts": [0, 0],
+                    "error": None if decision == "allow" else "recorded wrong decision", "code": 0,
+                    "stdout": None}
+        return run
+
+    def replay_with(seconds, decision):
+        def replay(spec):
+            asked.append(seconds)
+            return ({"id": spec["id"], "seconds": seconds, "error": None if decision == "allow" else "wrong",
+                     "code": 0, "stdout": None, "counts": [0, 0]}, None)
+        return replay
+    spec = {"id": "timing-judge-vector", "handler": "bash_absolute_paths", "payload": _timing_bash("true")}
+    check = _timing_decision_check("allow")
+    for wrong in range(3):
+        decisions = ["allow"] * 3
+        decisions[wrong] = "deny"
+        case = _timed_case(spec, bound, False, check, replay_with(low, "allow"), recorded([low] * 3, decisions))
+        if not case.failed or not case.problems:
+            out.append("(timing-judge-check-run) a wrong decision on run {} must fail, got {!r}".format(
+                wrong + 1, case.text))
+    asked.clear()
+    case = _timed_case(spec, bound, False, check, replay_with(low, "deny"), recorded([high, low, low], ["allow"] * 3))
+    if not case.failed or asked != [low]:
+        out.append("(timing-judge-check-replay) a wrong decision on the replay must fail, got {!r}".format(
+            case.text))
+    asked.clear()
+    case = _timed_case(spec, bound, False, check, replay_with(low, "allow"), recorded([high, low, low], ["allow"] * 3))
+    if case.failed or asked != [low]:
+        out.append("(timing-judge-check-cleared) a lone excursion cleared by a replay at L must pass, got {!r}".format(
+            case.text))
+    verdicts = set()
+    for walls, queued in (([0.1] * 3, [0.0] * 3), ([50.0] * 3, [40.0] * 3), ([None] * 3, [None] * 3)):
+        for times in ((low, low, low), (high, low, low), (high, high, low)):
+            verdicts.add((times, _timed_case(spec, bound, False, check, replay_with(low, "allow"),
+                                             recorded(list(times), ["allow"] * 3, walls, queued)).failed))
+    if verdicts != {((low, low, low), False), ((high, low, low), False), ((high, high, low), True)}:
+        out.append("(timing-judge-diagnostics) diagnostics must not change a decision, got {!r}".format(
+            sorted(verdicts)))
+    import gc
+    enabled = gc.isenabled()
+    try:
+        for start in (True, False):
+            gc.enable() if start else gc.disable()
+            sample = _timing_case_run(spec)
+            if gc.isenabled() is not start or _timing_reduced(sample) != "allow":
+                out.append("(timing-judge-gc) a run must leave the collector {} and allow 'true', got {} and "
+                           "{}".format("enabled" if start else "disabled", gc.isenabled(), _timing_reduced(sample)))
+    finally:
+        gc.enable() if enabled else gc.disable()
+    try:
+        _timing_case_run({"id": "x", "handler": "_reduce_result", "payload": {}})
+        out.append("(timing-judge-handler-refused) a handler outside _TIMING_HANDLERS must be refused")
+    except ValueError:
+        pass
+    reply, problem = _timing_replay(dict(spec, id="timing-judge-replay"))
+    if (problem is not None or reply.get("id") != "timing-judge-replay" or not _timing_valid(reply.get("seconds"))
+            or _timing_reduced(reply) != "allow"):
+        out.append("(timing-judge-replay) a fresh-process replay must return its id, a time and allow, got {!r} "
+                   "({})".format(reply, problem))
+    reply, problem = _timing_replay({"kind": "unknown", "id": "timing-judge-replay-unknown"})
+    if reply is not None or problem is None:
+        out.append("(timing-judge-replay-unknown) a replay of an unknown kind must fail, got {!r}".format(reply))
+    return out
 
 
 def _judged(times):
@@ -9238,7 +10692,8 @@ def _deadline_shape_runs(tmp, sizes):
     plain, orch, gensrc = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
-        cwd = str(orch if name.startswith(("orch_", "review_")) else
+        # The citation check is inert outside a git toplevel, so it is timed in the repository as well.
+        cwd = str(orch if name.startswith(("orch_", "review_", "citation_")) else
                   gensrc if name == "gensrc_guard" else plain)
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
@@ -9306,11 +10761,103 @@ def _deadline_shape_problems(name, shape, size, cpu, own, outcome):
     return problems
 
 
-def _deadline_shape_verdicts(runs, retime):
+def _deadline_shape_excursions(name, shape, size, cwd, timed, owns, replay):
+    """The dl-shape problems of a case's lone excursions (_deadline_shape_verdicts): the shared judge
+    (_timing_judge) over the runs' CPU times against the size's CPU bound and, where every run's own work was
+    evaluated, over their own work against the production budget, each only where its median is within its
+    bound (a median over it is _deadline_shape_problems' line), under _TIMING_MEDIAN. One replay
+    (replay(handler, shape, size, cwd) -> (run, None) or (None, reason)) serves both, and it clears an
+    excursion on either bound only when it is within EVERY bound and check together
+    (_deadline_shape_replay_problems: its CPU time within the size's bound, its run-queue delay read and its
+    own work within the budget, and its outcome right), so a replay within the CPU bound with its own work
+    over the budget or unread, or within the budget with its CPU time over the bound, or with a wrong outcome,
+    fails the case. A 'timing-note:' line is printed for every run over a bound."""
+    replayed = []
+
+    def replay_run():
+        if not replayed:
+            try:
+                replayed.append(replay(name, shape, size, cwd))
+            except Exception as exc:
+                replayed.append((None, "it raised {}: {}".format(type(exc).__name__, exc)))
+        run, problem = replayed[0]
+        if problem is None:
+            wrong = _deadline_shape_replay_problems(name, shape, size, run)
+            if wrong:
+                return None, "its run {} ({})".format("; ".join(wrong), _deadline_run_text(run))
+        return run, problem
+
+    def cpu_replay():
+        run, problem = replay_run()
+        return (None, problem) if problem is not None else (run[0], None)
+
+    def own_replay():
+        run, problem = replay_run()
+        return (None, problem) if problem is not None else (_deadline_run_own(run), None)
+    problems = []
+    for label, times, bound, judged_replay in (
+            ("CPU time:", [run[0] for run in timed], _DEADLINE_BOUNDS[size], cpu_replay),
+            ("own work:", owns, _DEADLINE_OWN_WORK_BOUND, own_replay)):
+        if None in times or _timing_over(_timing_judged(times, _TIMING_MEDIAN), bound, False):
+            continue
+        if not any(_timing_over(seconds, bound, False) for seconds in times):
+            continue
+        failed, text = _timing_judge(times, bound, _TIMING_MEDIAN, None if replay is None else judged_replay)
+        _timing_note("dl-shape-{}-{}-{} {}".format(name, shape, size, label), text,
+                     "; ".join("run: " + _deadline_run_text(run) for run in timed))
+        if failed:
+            problems.append("{} {}".format(label, text))
+    return problems
+
+
+def _deadline_shape_replay_problems(name, shape, size, run):
+    """What a dl-shape replay run (cpu_seconds, wall_seconds, outcome, queued_seconds) got wrong, as a list
+    of phrases ([] for none): every bound and check of the case at once (_deadline_shape_problems over the
+    run's OWN CPU time, its own work, None when its run-queue delay could not be read, and its outcome), so
+    the replay clears an excursion on one bound only while it is within the other as well."""
+    return _deadline_shape_problems(name, shape, size, run[0], _deadline_run_own(run), run[2])
+
+
+def _deadline_shape_replay(name, shape, size, cwd):
+    """(run, None) or (None, the reason it failed): one dl-shape case run in a fresh interpreter
+    (_timing_replay, kind dl-shape, _deadline_shape_replay_run) over the same fixture directory, its run
+    (cpu_seconds, wall_seconds, outcome, queued_seconds) as _deadline_timed_call reports it there."""
+    reply, problem = _timing_replay({"kind": "dl-shape", "id": "dl-shape-{}-{}-{}".format(name, shape, size),
+                                     "name": name, "shape": shape, "size": size, "cwd": cwd})
+    if problem is not None:
+        return None, problem
+    run = reply.get("run")
+    if not (isinstance(run, list) and len(run) == 4 and _timing_valid(run[0]) and _timing_valid(run[1])
+            and isinstance(run[2], str) and (run[3] is None or _timing_valid(run[3]))):
+        return None, "the replay child gave a malformed run {!r}".format(run)
+    return tuple(run), None
+
+
+def _deadline_shape_replay_run(name, shape, size, cwd):
+    """One run of a dl-shape case (_deadline_shape_case), in the replay child, under _no_registry_above for a
+    case of _DEADLINE_PLAIN_CASES alone, as _deadline_shape_runs runs it. A case that is not registered
+    there is refused."""
+    if size not in _DEADLINE_BOUNDS:
+        raise ValueError("no dl-shape size {!r}".format(size))
+    main = name in _DEADLINE_CASES and shape in tuple(_DEADLINE_CASES[name]) + tuple(_DEADLINE_HASH_SHAPES)
+    plain = shape in tuple(_DEADLINE_PLAIN_CASES.get(name, ()))
+    if not (main or plain):
+        raise ValueError("no dl-shape case {!r} {!r}".format(name, shape))
+    if plain and not main:
+        with _no_registry_above(cwd):
+            return _deadline_shape_case(name, shape, size, cwd)
+    return _deadline_shape_case(name, shape, size, cwd)
+
+
+def _deadline_shape_verdicts(runs, retime, replay=None):
     """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome,
     queued_seconds) for each run...)] (_deadline_timed_call): one line for each case whose median CPU time
     of the calling thread (_judged) is over its CPU bound, whose median own work (_deadline_run_own) is over
     the production budget or could not be evaluated on some run, or any of whose runs fails another check.
+    Both bounds are judged by the shared judge (_timing_judge): a lone excursion (a run over a bound whose
+    median is within it) is replayed once by replay(handler, shape, size, cwd), which returns (a run, None)
+    or (None, the reason it failed); one replay serves both bounds, its outcome is checked like every run's,
+    and the case fails unless the replay is within both bounds; with replay None, an excursion fails.
     A case whose median own work is over the budget, with at least one run reaching a decision, is run once
     more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the failure,
     carries every run's wall-clock time, CPU time, run-queue delay, own work and outcome, and applies every
@@ -9325,6 +10872,7 @@ def _deadline_shape_verdicts(runs, retime):
             problems += [problem for problem
                          in _deadline_shape_problems(name, shape, size, cpu_judged, own_judged, run[2])
                          if problem not in problems]
+        problems += _deadline_shape_excursions(name, shape, size, cwd, timed, owns, replay)
         if not problems:
             continue
         line = "(dl-shape-{}-{}-{}) {} (median times judged; {})".format(
@@ -9372,7 +10920,8 @@ def _deadline_shape_failures(tmp):
                      if event in (aiqt_hooks.PRETOOL, aiqt_hooks.PRETOOL_WARN_ONLY) and name not in _DEADLINE_CASES)
     if missing:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
-    return out + _deadline_shape_verdicts(_deadline_shape_runs(tmp, _DEADLINE_SIZES), _deadline_shape_case)
+    return out + _deadline_shape_verdicts(_deadline_shape_runs(tmp, _DEADLINE_SIZES), _deadline_shape_case,
+                                          _deadline_shape_replay)
 
 
 def _deadline_shape_rerun_failures():
@@ -9394,7 +10943,18 @@ def _deadline_shape_rerun_failures():
     budget). Both bounds judge the median of a case's runs: three runs at 9 s, 5 s and 5 s wall-clock give
     no line and no re-run, three at 9 s, 9 s and 5 s give one line and one re-run. Three runs at 256 KB,
     one a second over its CPU bound (3.0 s), one at 0.5 s and the median a microsecond inside or exactly
-    at the bound, give no line; with the median a microsecond over it, one line and no re-run.
+    at the bound, give no line; with the median a microsecond over it, one line and no re-run. Each lone
+    excursion among these is cleared by a recorded fresh-process replay within every bound.
+    dl-shape-replay: a lone excursion (_deadline_shape_excursions) on own work (9 s, 5 s and 5 s) gives no
+    line after one replay within the budget, and one line when the replay is over the budget, failed, or
+    could not read its run-queue delay, or when no replay is given; on CPU time at 256 KB, one line when the
+    replay is a microsecond over the bound and none when it is exactly at it; excursions on both bounds take
+    one replay; a deny case whose replay allows gives one line. Cross-metric (the replay must be within every
+    bound and check together): a CPU-time excursion whose replay is within the CPU bound but has its own work
+    over the budget, or its run-queue delay unread, gives one line, and none when the replay is within every
+    bound; an own-work excursion whose replay is within the budget but over the CPU bound, or reaches a wrong
+    outcome, gives one line, and none when the replay is right and within every bound; excursions on both
+    bounds whose one replay is within only one of them give one line.
     dl-shape-rerun-outcomes: every run's outcome is checked. A deny case whose three runs are within every
     bound and decide deny, allow and deny gives one line naming the allow, and none when all three deny.
     timed-runs-count and timed-runs-median: _timed_runs calls its timed function three times, whatever an
@@ -9409,6 +10969,14 @@ def _deadline_shape_rerun_failures():
             retimed.append((name, shape, size))
             return result
         return retime
+    replays = []
+
+    def replay_of(run, problem=None):
+        def replay(name, shape, size, cwd):
+            replays.append((name, shape, size))
+            return run, problem
+        return replay
+    cleared = replay_of((0.02, 0.15, "allow", 0.0))
 
     plain = ("absolute_paths", "write_content", 65536, "/")
     deny = ("protected_line", "push_force_after", 65536, "/")
@@ -9456,10 +11024,66 @@ def _deadline_shape_rerun_failures():
                 (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k + 1e-6, 0.15, "allow"),
                 (0.5, 0.15, "allow")), 1, 0)):
         retimed.clear()
-        lines = _deadline_shape_verdicts([run], recorded((0.02, 0.15, "allow")))
+        lines = _deadline_shape_verdicts([run], recorded((0.02, 0.15, "allow")), cleared)
         if len(lines) != want_lines or len(retimed) != want_reruns:
             out.append("(dl-shape-rerun-bounds) a run {} must give {} line(s) and {} re-run(s), got {!r} with "
                        "re-runs {!r}".format(edge, want_lines, want_reruns, lines, retimed))
+    # dl-shape-replay: a lone excursion (one run of three over a bound, the median within it) passes only
+    # when the fresh-process replay is within every bound and reaches a right outcome; one replay serves both
+    # bounds, and a case with no replay, or a replay that failed, fails.
+    for label, run, replay, want_lines, want_replays in (
+            ("own work cleared", plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")),
+             cleared, 0, 1),
+            ("own work replayed over the budget", plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"),
+                                                           (0.03, 5.0, "allow")), replay_of((0.02, 9.0, "allow")), 1, 1),
+            ("own work with no replay", plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")),
+             None, 1, 0),
+            ("own work with a failed replay", plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"),
+                                                       (0.03, 5.0, "allow")), replay_of(None, "crashed"), 1, 1),
+            ("own work replayed unread", plain + ((0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")),
+             replay_of((0.02, 0.15, "allow", None)), 1, 1),
+            ("CPU time replayed over the bound", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((cpu_bound_256k + 1e-6, 0.15, "allow")), 1, 1),
+            ("CPU time replayed at the bound", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((cpu_bound_256k, 0.15, "allow")), 0, 1),
+            ("both bounds, one replay", plain_256k + (
+                (cpu_bound_256k + 1, 9.0, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")), cleared, 0, 1),
+            ("a deny case replayed allowing", deny + (
+                (2.0, 0.15, "deny"), (0.5, 0.15, "deny"), (0.5, 0.15, "deny")), replay_of((0.02, 0.15, "allow")), 1, 1),
+            # cross-metric: the replay clears one bound's excursion only while within every other bound too.
+            ("CPU time replayed within its bound with its own work over the budget", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 9.0, "allow", 0.0)), 1, 1),
+            ("CPU time replayed within its bound with its run-queue delay unread", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 0.6, "allow", None)), 1, 1),
+            ("CPU time replayed within every bound", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 0.6, "allow", 0.0)), 0, 1),
+            ("own work replayed within the budget with its CPU time over the bound", plain + (
+                (0.03, 9.0, "allow"), (0.03, 5.0, "allow"), (0.03, 5.0, "allow")),
+             replay_of((_DEADLINE_BOUNDS[65536] + 0.5, 2.1, "allow", 0.0)), 1, 1),
+            ("own work replayed within the budget with a wrong outcome", deny + (
+                (0.03, 9.0, "deny"), (0.03, 5.0, "deny"), (0.03, 5.0, "deny")),
+             replay_of((0.02, 0.15, "allow", 0.0)), 1, 1),
+            ("own work replayed within every bound with the right outcome", deny + (
+                (0.03, 9.0, "deny"), (0.03, 5.0, "deny"), (0.03, 5.0, "deny")),
+             replay_of((0.02, 0.15, "deny", 0.0)), 0, 1),
+            ("excursions on both bounds replayed within the CPU bound only", plain_256k + (
+                (cpu_bound_256k + 1, 9.0, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((0.5, 9.0, "allow", 0.0)), 1, 1),
+            ("excursions on both bounds replayed within the budget only", plain_256k + (
+                (cpu_bound_256k + 1, 9.0, "allow"), (0.5, 0.15, "allow"), (0.5, 0.15, "allow")),
+             replay_of((cpu_bound_256k + 1, 3.5, "allow", 0.0)), 1, 1)):
+        retimed.clear()
+        replays.clear()
+        lines = _deadline_shape_verdicts([run], recorded((0.02, 0.15, "allow")), replay)
+        if len(lines) != want_lines or len(replays) != want_replays or retimed:
+            out.append("(dl-shape-replay) {} must give {} line(s) after {} replay(s), got {!r} after {} "
+                       "replay(s) and re-runs {!r}".format(label, want_lines, want_replays, lines, len(replays),
+                                                           retimed))
     for outcomes, want_lines in ((("deny", "allow", "deny"), 1), (("deny", "deny", "deny"), 0)):
         retimed.clear()
         lines = _deadline_shape_verdicts([deny + tuple((0.03, 0.15, outcome) for outcome in outcomes)],
@@ -9917,7 +11541,9 @@ _DEADLINE_STUB_SECONDS = 0.8
 # (_judged_half_fails, here always over exactly _DEADLINE_TAIL_RUNS spans, where that rule and _judged
 # agree) of the spans, each from a fresh run of the row (_deadline_row_problems, _deadline_tail_problems).
 # A stall on two of the three runs, whichever two, or on all three fails the row; a stall on one run in
-# three passes it, as does contention that inflates one span. A run that never logged its window's arming
+# three, or contention that inflates one span, passes it only when one more fresh run of the row is within
+# every bound and check of the row together (the shared judge under _TIMING_UPPER_MIDDLE, its replay
+# _deadline_row_problems' extra run), and fails it otherwise. A run that never logged its window's arming
 # gives no span and is no evidence either way: it is replaced by a fresh run, up to
 # _DEADLINE_TAIL_MAX_RUNS runs in all, and a row left with fewer than _DEADLINE_TAIL_RUNS spans fails, its
 # tail unmeasured.
@@ -9934,7 +11560,9 @@ _DEADLINE_TAIL_MAX_RUNS = 2 * _DEADLINE_TAIL_RUNS
 # covers the whole run, so a stall anywhere in it counts. Each run of these rows had this same 0.8-second
 # single-run bound before they were judged over fresh re-runs; it is kept as it was and judged over EVERY
 # fresh run the row took (3 to 6 of them), on the median of an odd count of times and the upper middle of
-# an even count (_judged_half_fails), so a stall on half of the runs or more fails the row: a
+# an even count (_judged_half_fails), so a stall on half of the runs or more fails the row, and a stall on
+# fewer passes only when one more fresh run is within every bound and check of the row together (the
+# shared judge under _TIMING_UPPER_MIDDLE_AT, _deadline_row_problems): a
 # run that never logged its window's arming gives no tail span and is replaced for the tail judgement, but
 # its wall-clock time still counts here, so a stall in such a run is not discarded
 # (_deadline_total_problems). Honest whole runs measured with the spans above (2026-11-07) took 0.108 to
@@ -10040,44 +11668,62 @@ def _deadline_tail_span(reads, returned):
     return None
 
 
-def _deadline_tail_problems(label, spans, runs):
+def _deadline_tail_problems(label, spans, runs, replay=None, notes=True):
     """What a row's tail got wrong, as a list of phrases ([] for none), judged over spans, the
     _deadline_tail_span of each of its runs that logged its window's arming, in run order, out of runs
     runs in all. A row with fewer than _DEADLINE_TAIL_RUNS spans fails, its tail unmeasured: a run that
-    logged no arming never counts as a pass. Otherwise the row fails when the judged span
-    (_judged_half_fails: the median, always of exactly _DEADLINE_TAIL_RUNS spans here) is over
-    _DEADLINE_TAIL_SECONDS, that is when two of the three spans or all three are over it, the rule the
-    timed rows use for CPU time (see the bound's comment for the measurements)."""
+    logged no arming never counts as a pass. Otherwise the spans are judged by the shared judge
+    (_timing_judge) under _TIMING_UPPER_MIDDLE against _DEADLINE_TAIL_SECONDS: the row fails when the
+    judged span (_judged_half_fails: the median, always of exactly _DEADLINE_TAIL_RUNS spans here) is over
+    the bound, that is when two of the three spans or all three are over it, the rule the timed rows use for
+    CPU time (see the bound's comment for the measurements); a span over it on one run in three is a lone
+    excursion, cleared only by replay (one more fresh run of the row, _deadline_row_problems, a function
+    returning (its span, None) when that run is within every bound and check of the row, or (None, the
+    reason)), and failed when replay is None. With notes (false for recorded vectors) a 'timing-note:' line
+    is printed when any span is over the bound."""
     if len(spans) < _DEADLINE_TAIL_RUNS:
         return ["({}) logged its window's arming on {} of {} fresh runs, short of the {} spans the {:g}s "
                 "tail bound judges, so its tail was not measured".format(
                     label, len(spans), runs, _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_SECONDS)]
-    if _judged_half_fails(spans) <= _DEADLINE_TAIL_SECONDS:
+    failed, text = _timing_judge(spans, _DEADLINE_TAIL_SECONDS, _TIMING_UPPER_MIDDLE, replay)
+    if notes and any(_timing_valid(span) and _timing_over(span, _DEADLINE_TAIL_SECONDS, False) for span in spans):
+        _timing_note(label + " tail", text, "tail spans only")
+    if not failed:
         return []
     # Spans are printed in full (repr), so a span just over the bound never reads as equal to it.
-    return ["({}) took {} seconds from its window's arming to main()'s return over {} fresh runs, "
-            "the median span over the {:g}s tail bound".format(
-                label, ", ".join(repr(span) for span in spans), len(spans),
-                _DEADLINE_TAIL_SECONDS)]
+    over = _timing_over(_timing_judged(spans, _TIMING_UPPER_MIDDLE), _DEADLINE_TAIL_SECONDS, False)
+    return ["({}) took {} seconds from its window's arming to main()'s return over {} fresh runs, {} ({})".format(
+        label, ", ".join(repr(span) for span in spans), len(spans),
+        "the median span over the {:g}s tail bound".format(_DEADLINE_TAIL_SECONDS) if over else
+        "a lone span over the {:g}s tail bound not cleared by a replay".format(_DEADLINE_TAIL_SECONDS), text)]
 
 
-def _deadline_total_problems(label, walls):
+def _deadline_total_problems(label, walls, replay=None, notes=True):
     """What a row's whole-run time got wrong, as a list of phrases ([] for none), judged over walls, the
     wall-clock seconds of EVERY fresh run the row took, runs that never logged their window's arming
-    included, 3 to 6 of them: the row fails when the judged time (_judged_half_fails: the median of an odd
-    count, the upper
-    middle of an even count, so a stall on half of the runs or more fails) is not under
-    _DEADLINE_TOTAL_SECONDS, the same bound each single run had before the rows were judged over fresh
-    re-runs (a run at exactly the bound is not under it)."""
-    if _judged_half_fails(walls) < _DEADLINE_TOTAL_SECONDS:
+    included, 3 to 6 of them, by the shared judge (_timing_judge) under _TIMING_UPPER_MIDDLE_AT: the row
+    fails when the judged time (_judged_half_fails: the median of an odd count, the upper middle of an even
+    count, so a stall on half of the runs or more fails) is not under _DEADLINE_TOTAL_SECONDS, the same bound
+    each single run had before the rows were judged over fresh re-runs (a run at exactly the bound is not
+    under it); a time not under it on fewer runs is a lone excursion, cleared only by replay (as for
+    _deadline_tail_problems: (its whole-run time, None) for one more fresh run within every bound and check
+    of the row, or (None, the reason)), and failed when replay is None. notes as for _deadline_tail_problems."""
+    failed, text = _timing_judge(walls, _DEADLINE_TOTAL_SECONDS, _TIMING_UPPER_MIDDLE_AT, replay)
+    if notes and any(_timing_valid(wall) and _timing_over(wall, _DEADLINE_TOTAL_SECONDS, True) for wall in walls):
+        _timing_note(label + " whole-run", text, "whole-run wall-clock times only")
+    if not failed:
         return []
     # Times are printed in full (repr), so a time just over the bound never reads as equal to it.
-    return ["({}) took {} seconds of wall-clock time over {} fresh runs, the judged time not under the "
-            "{:g}s whole-run bound".format(
-                label, ", ".join(repr(wall) for wall in walls), len(walls), _DEADLINE_TOTAL_SECONDS)]
+    over = (all(_timing_valid(wall) for wall in walls) and walls
+            and _timing_over(_timing_judged(walls, _TIMING_UPPER_MIDDLE_AT), _DEADLINE_TOTAL_SECONDS, True))
+    return ["({}) took {} seconds of wall-clock time over {} fresh runs, {} ({})".format(
+        label, ", ".join(repr(wall) for wall in walls), len(walls),
+        "the judged time not under the {:g}s whole-run bound".format(_DEADLINE_TOTAL_SECONDS) if over else
+        "a lone time not under the {:g}s whole-run bound not cleared by a replay".format(_DEADLINE_TOTAL_SECONDS),
+        text)]
 
 
-def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_problems):
+def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_problems, notes=True):
     """Problems for one deadline-firing row ([] for none), run_once one fresh run of it (a new stub with
     new clock reads) returning (code, err, seconds, reads, returned). The cut judgement is behavioural and
     single-run: cut(label, what, code, err, want, seconds, reads) judges each run (a note-only row passes
@@ -10093,7 +11739,13 @@ def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_proble
     unarmed runs' included, count toward the whole-run judgement, whose judged time (_judged_half_fails:
     a stall on half of the runs or more fails) must stay under _DEADLINE_TOTAL_SECONDS
     (_deadline_total_problems), so a stall before the deadline window is armed, or in a run the tail
-    judgement replaced, still fails the row."""
+    judgement replaced, still fails the row.
+    Both wall-clock judgements go through the shared judge (_TIMING_UPPER_MIDDLE, _TIMING_UPPER_MIDDLE_AT): a
+    lone excursion on either is replayed by ONE more fresh run of the row (run_once again, in this process),
+    which serves both and clears an excursion only when it is within every bound and check TOGETHER: its cut
+    passes, it logged its window's arming, its span is within _DEADLINE_TAIL_SECONDS and its whole-run time
+    is under _DEADLINE_TOTAL_SECONDS. The replay's times are not added to the judged spans or times. notes
+    (false for recorded vectors) prints 'timing-note:' lines for runs over a bound."""
     spans = []
     walls = []
     runs = 0
@@ -10107,7 +11759,32 @@ def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_proble
         span = _deadline_tail_span(reads, returned)
         if span is not None:
             spans.append(span)
-    return _deadline_tail_problems(label, spans, runs) + _deadline_total_problems(label, walls)
+    replayed = []
+
+    def replay_run():
+        if not replayed:
+            code, err, seconds, reads, returned = run_once()
+            span = _deadline_tail_span(reads, returned)
+            wrong = cut(label, what, code, err, want, seconds, reads)
+            if span is None:
+                wrong.append("it never logged its window's arming, so its tail span was not measured")
+            elif _timing_over(span, _DEADLINE_TAIL_SECONDS, False):
+                wrong.append("its tail span {!r} s is over the {:g}s tail bound".format(span, _DEADLINE_TAIL_SECONDS))
+            if not _timing_valid(seconds) or _timing_over(seconds, _DEADLINE_TOTAL_SECONDS, True):
+                wrong.append("its whole-run time {!r} s is not under the {:g}s whole-run bound".format(
+                    seconds, _DEADLINE_TOTAL_SECONDS))
+            replayed.append((span, seconds, "; ".join(wrong) if wrong else None))
+        return replayed[0]
+
+    def tail_replay():
+        span, _seconds, problem = replay_run()
+        return (None, "one more fresh run: " + problem) if problem else (span, None)
+
+    def total_replay():
+        _span, seconds, problem = replay_run()
+        return (None, "one more fresh run: " + problem) if problem else (seconds, None)
+    return (_deadline_tail_problems(label, spans, runs, tail_replay, notes)
+            + _deadline_total_problems(label, walls, total_replay, notes))
 
 
 def _deadline_path_failures():
@@ -10122,7 +11799,8 @@ def _deadline_path_failures():
     and behavioural, by the time from the window's arming (_armed_window) to main()'s return, judged as
     the median of _DEADLINE_TAIL_RUNS spans, each from a fresh run of the row (_deadline_row_problems),
     and by each run's whole wall-clock time, judged over every fresh run the row took under a rule that
-    fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails);
+    fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails), both through
+    the shared judge, whose replay of a lone excursion is one more fresh run of the row;
     (dl-cut-judged) recorded runs pin the cut judgement at the sleep's end, (dl-note-only-cut-judged)
     recorded runs pin the note-only cut judgement at the sleep's end and on its exit and streams,
     (dl-tail-span) recorded reads pin the span's measurement from the arming, however late or absent the
@@ -10133,7 +11811,9 @@ def _deadline_path_failures():
     never a pass, (dl-total-median) recorded times pin the whole-run judgement at its bound's ends, and
     (dl-total-rerun) recorded rows pin that a stall before the window, a stall after the cut past both
     bounds, a stall counted only through replaced unarmed runs, and a stall on half of an even count of
-    runs each fail, while one slow run in three, or stalls on two runs of five, pass."""
+    runs each fail, while one slow run in three, or stalls on two runs of five, pass only after one more
+    fresh run (the shared judge's replay) that is within every bound and check together, and fail when that
+    run is over either wall-clock bound, never logs its window's arming, or fails its cut."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
@@ -10231,19 +11911,39 @@ def _deadline_path_failures():
         if not ok:
             out.append("(dl-tail-span) the span measured {} must be {!r}, got {!r}".format(
                 edge, want_span, span))
-    for edge, spans, want_lines, want_text in (
-            ("every span just over the bound", [tail + 1e-6] * _DEADLINE_TAIL_RUNS, 1, "median span"),
-            ("its median just over the bound", [tail + 1e-6, tail - 1e-6, tail + 1e-6], 1, "median span"),
-            ("its median exactly at the bound", [tail + 1e-6, tail, tail - 1e-6], 0, ""),
-            ("its median just inside the bound", [tail + 1e-6, tail - 1e-6, tail - 1e-6], 0, ""),
+    tail_replays = []
+
+    def tail_replay_at(span, problem=None):
+        def replay():
+            tail_replays.append(span)
+            return span, problem
+        return replay
+    for edge, spans, replay, want_lines, want_text, want_replays in (
+            ("every span just over the bound", [tail + 1e-6] * _DEADLINE_TAIL_RUNS, tail_replay_at(0.11), 1,
+             "median span", 0),
+            ("its median just over the bound", [tail + 1e-6, tail - 1e-6, tail + 1e-6], tail_replay_at(0.11), 1,
+             "median span", 0),
+            ("its median exactly at the bound, one span over it cleared by a replay inside it",
+             [tail + 1e-6, tail, tail - 1e-6], tail_replay_at(0.11), 0, "", 1),
+            ("its median just inside the bound, one span over it cleared by a replay inside it",
+             [tail + 1e-6, tail - 1e-6, tail - 1e-6], tail_replay_at(0.11), 0, "", 1),
+            ("one span over the bound and a replay over it as well", [tail + 1e-6, tail - 1e-6, tail - 1e-6],
+             tail_replay_at(tail + 1e-6), 1, "lone span", 1),
+            ("one span over the bound and a replay that failed", [tail - 1e-6, tail - 1e-6, tail + 1e-6],
+             tail_replay_at(None, "its whole-run time is not under the bound"), 1, "lone span", 1),
+            ("one span over the bound and no replay", [tail - 1e-6, tail + 1e-6, tail - 1e-6], None, 1,
+             "lone span", 0),
+            ("every span inside the bound", [tail - 1e-6] * _DEADLINE_TAIL_RUNS, tail_replay_at(tail + 1), 0, "", 0),
             ("one span short of the full count, every span over the bound",
-             [tail + 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 1, "not measured"),
+             [tail + 1e-6] * (_DEADLINE_TAIL_RUNS - 1), tail_replay_at(0.11), 1, "not measured", 0),
             ("one span short of the full count, every span inside the bound",
-             [tail - 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 1, "not measured")):
-        lines = _deadline_tail_problems("recorded", spans, _DEADLINE_TAIL_MAX_RUNS)
-        if len(lines) != want_lines or (want_lines and want_text not in lines[0]):
-            out.append("(dl-tail-median) a row with {} must give {} line(s) holding {!r}, got {!r}".format(
-                edge, want_lines, want_text, lines))
+             [tail - 1e-6] * (_DEADLINE_TAIL_RUNS - 1), tail_replay_at(0.11), 1, "not measured", 0)):
+        tail_replays.clear()
+        lines = _deadline_tail_problems("recorded", spans, _DEADLINE_TAIL_MAX_RUNS, replay, notes=False)
+        if (len(lines) != want_lines or (want_lines and want_text not in lines[0])
+                or len(tail_replays) != want_replays):
+            out.append("(dl-tail-median) a row with {} must give {} line(s) holding {!r} after {} replay(s), got "
+                       "{!r} after {!r}".format(edge, want_lines, want_text, want_replays, lines, tail_replays))
 
     total = _DEADLINE_TOTAL_SECONDS
     for edge, walls, want_lines in (
@@ -10264,10 +11964,22 @@ def _deadline_path_failures():
              [0.15, 0.15, 0.15, total, total + 5.0, total + 5.0], 1),
             ("the upper middle of six just inside the bound",
              [0.15, 0.15, 0.15, total - 1e-6, total + 5.0, total + 5.0], 0)):
-        lines = _deadline_total_problems("recorded", walls)
-        if len(lines) != want_lines or (want_lines and "whole-run bound" not in lines[0]):
-            out.append("(dl-total-median) a row whose whole-run times have {} must give {} line(s) holding "
-                       "'whole-run bound', got {!r}".format(edge, want_lines, lines))
+        # A lone excursion (a time not under the bound, the judged time under it) is replayed once; a replay
+        # inside the bound clears it, and one over it, one exactly at it, one that failed, or none fails it.
+        lone = any(wall >= total for wall in walls) and want_lines == 0
+        for replay_wall, replay_problem, lone_lines in ((0.15, None, 0), (total, None, 1), (total + 1e-6, None, 1),
+                                                       (None, "its cut failed", 1), ("none", None, 1)):
+            if not lone and replay_wall != 0.15:
+                continue
+            tail_replays.clear()
+            replay = None if replay_wall == "none" else tail_replay_at(replay_wall, replay_problem)
+            lines = _deadline_total_problems("recorded", walls, replay, notes=False)
+            want = lone_lines if lone else want_lines
+            if (len(lines) != want or (want and "whole-run bound" not in lines[0])
+                    or len(tail_replays) != (1 if lone and replay is not None else 0)):
+                out.append("(dl-total-median) a row whose whole-run times have {}, a lone excursion replayed at "
+                           "{!r} ({}), must give {} line(s) holding 'whole-run bound', got {!r} after replays "
+                           "{!r}".format(edge, replay_wall, replay_problem, want, lines, tail_replays))
 
     ran = []
 
@@ -10298,10 +12010,19 @@ def _deadline_path_failures():
             ("a stall on runs 1 and 2 only", [over, over, inside], full, 1, "median span"),
             ("a stall on runs 1 and 3 only", [over, inside, over], full, 1, "median span"),
             ("a stall on runs 2 and 3 only", [inside, over, over], full, 1, "median span"),
-            ("a stall on run 1 only", [over, inside, inside], full, 0, ""),
-            ("a stall on run 3 only", [inside, inside, over], full, 0, ""),
-            ("a stall on run 1 only, the others exactly at the bound", [over, at_bound, at_bound], full, 0,
-             ""),
+            ("a stall on run 1 only, cleared by one more clean run", [over, inside, inside], full + 1, 0, ""),
+            ("a stall on run 3 only, cleared by one more clean run", [inside, inside, over], full + 1, 0, ""),
+            ("a stall on run 1 only, the others exactly at the bound, cleared by one more clean run",
+             [over, at_bound, at_bound], full + 1, 0, ""),
+            ("a stall on run 1 only, its replay stalled too", [over, inside, inside, over], full + 1, 1,
+             "lone span"),
+            ("a stall on run 2 only, its replay inside the tail bound but stalled before the window",
+             [inside, over, inside, (2, refusal, 1.1, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.05)],
+             full + 1, 1, "whole-run"),
+            ("a stall on run 3 only, its replay never arming its window", [inside, inside, over, unarmed],
+             full + 1, 1, "never logged"),
+            ("a stall on run 1 only, its replay's sleep run to its end", [over, inside, inside, ran_out],
+             full + 1, 1, "run to its end"),
             ("a stall on every run", [over] * full, full, 1, "median span"),
             ("a stall on every run, each with a delay before the stub's first loop read",
              [late_read_over] * full, full, 1, "median span"),
@@ -10316,12 +12037,12 @@ def _deadline_path_failures():
             ("a run over the bound, one that never armed its window, one over the bound and one inside it",
              [over, unarmed, over, inside], full + 1, 1, "median span"),
             ("a run over the bound then one that never armed its window, then clean runs",
-             [over, unarmed, inside, inside], full + 1, 0, ""),
+             [over, unarmed, inside, inside], full + 2, 0, ""),
             ("no run that armed its window", [unarmed] * most, most, 1, "not measured"),
             ("two clean runs among runs that never armed their window",
              [inside, unarmed, unarmed, inside, unarmed, unarmed], most, 1, "not measured")):
         ran.clear()
-        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs), notes=False)
         bad = len(ran) != want_runs or len(lines) != want_lines
         if not bad and want_lines and want_text not in lines[0]:
             bad = True
@@ -10342,20 +12063,28 @@ def _deadline_path_failures():
              "whole-run bound", [after_cut_only] * full, full, ("median span",)),
             ("a 1-second stall before the deadline window is armed on every run", [stalled_before] * full,
              full, ("whole-run bound",)),
-            ("a stall before the window on one run of three", [stalled_before, inside, inside], full, ()),
+            ("a stall before the window on one run of three, cleared by one more clean run",
+             [stalled_before, inside, inside], full + 1, ()),
+            ("a stall before the window on one run of three, its replay stalled before the window too",
+             [stalled_before, inside, inside, stalled_before], full + 1, ("whole-run bound",)),
+            ("a stall before the window on one run of three, its replay inside the whole-run bound but over the "
+             "tail bound", [stalled_before, inside, inside, over], full + 1, ("whole-run bound",)),
             ("a whole-run median pushed over the bound only by two replaced unarmed runs' times",
              [slow_unarmed, slow_unarmed, inside, inside, slowish], full + 2, ("whole-run bound",)),
             ("a stall in a replaced unarmed run and one before the window, on two of four runs",
              [slow_unarmed, stalled_before, inside, inside], full + 1, ("whole-run bound",)),
-            ("a stall in a replaced unarmed run and one after the deadline's cut, on two of four runs",
-             [slow_unarmed, stalled_after, inside, inside], full + 1, ("whole-run bound",)),
+            ("a stall in a replaced unarmed run and one after the deadline's cut, on two of four runs (the lone "
+             "tail excursion cleared by one more clean run)",
+             [slow_unarmed, stalled_after, inside, inside], full + 2, ("whole-run bound",)),
             ("stalls counted only through replaced unarmed runs on three of six runs",
              [slow_unarmed, slow_unarmed, slow_unarmed, inside, inside, inside], most,
              ("whole-run bound",)),
-            ("stalls counted only through replaced unarmed runs on two of five runs",
-             [slow_unarmed, slow_unarmed, inside, inside, inside], full + 2, ())):
+            ("stalls counted only through replaced unarmed runs on two of five runs, cleared by one more clean "
+             "run", [slow_unarmed, slow_unarmed, inside, inside, inside], full + 3, ()),
+            ("stalls counted only through replaced unarmed runs on two of five runs, the replay stalled too",
+             [slow_unarmed, slow_unarmed, inside, inside, inside, stalled_before], full + 3, ("whole-run bound",))):
         ran.clear()
-        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs), notes=False)
         bad = len(ran) != want_runs or len(lines) != len(want_texts)
         if not bad and any(text not in line for text, line in zip(want_texts, lines)):
             bad = True
@@ -12196,8 +13925,62 @@ def _deadline_outer_deadline_failures():
     _WindowInjector, a SIGUSR1 whose handler raises is raised at the entry of the inner window's first
     _close call and again at the entry of its second, and the outer body then sleeps 1.5 s. The outer
     deadline must reach its owner within 1.0 s, with neither window armed, both handlers run, and SIGALRM
-    back to SIG_DFL with the timer inactive."""
+    back to SIG_DFL with the timer inactive. The scenario runs _TIMED_RUNS (3) times, each with its own
+    windows, injector and handler (_deadline_outer_deadline_run), and every run must meet every check,
+    the time included: the 1.0 s is a per-scenario hard limit (the shared policy _TIMING_HARD_AT,
+    _deadline_outer_deadline_verdict), so one scenario that takes 1.0 s or more fails the row whatever the
+    others took, as the single scenario of earlier versions did; no median and no replay clears it.
+    Disclosed cost: earlier versions ran one scenario under this limit and this row runs three, each under
+    the same hard limit, so on a loaded host it has about three times their exposure to a spurious failure
+    from one scheduling stall (honest scenarios take about 0.3 s, so a stall of about 0.7 s in any of the
+    three fails the row)."""
+    return _deadline_outer_deadline_verdict([_deadline_outer_deadline_run() for _ in range(_TIMED_RUNS)])
+
+
+def _deadline_outer_deadline_verdict(runs):
+    """The dl-defer-twice-outer-deadline failures ([] or one line) for runs [(seconds, problem)]
+    (_deadline_outer_deadline_run): every run's problem, and its time judged alone under the hard policy
+    _TIMING_HARD_AT against 1.0 s (_timing_judge, which asks no replay of a hard policy)."""
+    problems = ["run {}: {}".format(index, problem) for index, (_used, problem) in enumerate(runs, 1) if problem]
+    times = [used for used, _problem in runs]
+    failed, text = _timing_judge(times, 1.0, _TIMING_HARD_AT, None)
+    if any(_timing_valid(used) and used >= 1.0 for used in times):
+        _timing_note("dl-defer-twice-outer-deadline", text, "wall-clock times only")
+    if failed or problems:
+        return ["(dl-defer-twice-outer-deadline) two raising handlers at an inner window's first two close "
+                "attempts must leave the outer deadline to fire within 1.0 s on every scenario: {}".format(
+                    "; ".join([text] + problems))]
+    return []
+
+
+def _deadline_outer_deadline_verdict_failures():
+    """(dl-outer-verdict) _deadline_outer_deadline_verdict on recorded scenarios: a real 1.2 s stall on the
+    first scenario fails even when the later two take 0.3 s; so does a stall on the second or the third alone,
+    a stall at exactly 1.0 s, and a scenario with no well-formed time; three scenarios at 0.3 s pass, as do
+    three a microsecond under 1.0 s; a scenario at 0.3 s that failed another check fails."""
     out = []
+    fast, under = (0.3, None), (1.0 - 1e-6, None)
+    with _timing_notes_quiet():
+        for edge, runs, want in (
+                ("a 1.2 s stall then two 0.3 s scenarios", [(1.2, None), fast, fast], 1),
+                ("a 1.2 s stall on the second scenario only", [fast, (1.2, None), fast], 1),
+                ("a 1.2 s stall on the third scenario only", [fast, fast, (1.2, None)], 1),
+                ("a scenario at exactly 1.0 s", [fast, (1.0, None), fast], 1),
+                ("a scenario with no well-formed time", [fast, (float("nan"), None), fast], 1),
+                ("three 0.3 s scenarios", [fast, fast, fast], 0),
+                ("three scenarios a microsecond under 1.0 s", [under, under, under], 0),
+                ("a 0.3 s scenario whose deadline reached the wrong owner",
+                 [fast, (0.3, "got another deadline"), fast], 1)):
+            lines = _deadline_outer_deadline_verdict(runs)
+            if len(lines) != want:
+                out.append("(dl-outer-verdict) {} must give {} line(s), got {!r}".format(edge, want, lines))
+    return out
+
+
+def _deadline_outer_deadline_run():
+    """(seconds, problem): one fresh dl-defer-twice-outer-deadline scenario (_deadline_outer_deadline_failures),
+    seconds its wall-clock time from entering the outer window to the deadline's arrival, problem None or a
+    phrase naming every check but the time that it failed."""
     ran = []
     close_code = aiqt_hooks._DeadlineWindow._close.__code__
 
@@ -12235,14 +14018,13 @@ def _deadline_outer_deadline_failures():
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
         signal.signal(signal.SIGUSR1, saved)
-    if not (caught == "the outer deadline" and used < 1.0 and len(injector.at) == 2 and len(ran) == 2
+    if not (caught == "the outer deadline" and len(injector.at) == 2 and len(ran) == 2
             and inner_armed is False and not inner.armed and not outer.armed
             and handler == signal.SIG_DFL and timer == (0.0, 0.0)):
-        out.append("(dl-defer-twice-outer-deadline) two raising handlers at an inner window's first two close "
-                   "attempts must leave the outer deadline to fire, got {} after {:.2f}s, injected at {!r}, "
-                   "inner armed {} after its with statement, armed {} and {}".format(
-                       caught, used, injector.at, inner_armed, inner.armed, outer.armed))
-    return out
+        return used, ("got {} after {:.2f}s, injected at {!r}, inner armed {} after its with statement, armed {} "
+                      "and {}, SIGALRM handler {!r}, timer {!r}".format(
+                          caught, used, injector.at, inner_armed, inner.armed, outer.armed, handler, timer))
+    return used, None
 
 
 class _FaultySignal:
@@ -12888,8 +14670,10 @@ _DEADLINE_CHILD_REAP_SECONDS = 10.0
 
 
 def _deadline_child_within(waited, limit):
-    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included."""
-    return waited <= limit
+    """Whether a child's wall-clock seconds (_deadline_child_wait) are within its limit, the limit included:
+    a per-invocation hard limit under the shared policy _TIMING_HARD (_timing_hard_failed), never a median
+    and never replayed."""
+    return not _timing_hard_failed(_TIMING_HARD, waited, limit)
 
 
 def _deadline_child_wait(code, args, limit):
@@ -12937,7 +14721,9 @@ def _deadline_child_wait_failures(tmp):
     wait.
     dl-child-wait-grandchild: a child that starts a grandchild sleeping 30 s on the same output pipes and
     then sleeps 600 s, under a 1-second limit, is stopped within 15 s, not when the grandchild lets go of
-    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed."""
+    the pipes; the grandchild, found by its pid and the marker path in its arguments, is then killed.
+    Every upper bound here is a per-invocation hard limit under a shared policy (_TIMING_HARD in
+    _deadline_child_within, _TIMING_HARD_AT for the stop bounds of busy-child and grandchild), never a median."""
     out = []
     began = time.monotonic()
     proc, waited = _deadline_child_wait("import time; time.sleep(600)", (), 1.0)
@@ -12963,7 +14749,7 @@ def _deadline_child_wait_failures(tmp):
     began = time.monotonic()
     proc, waited = _deadline_child_wait(code, (), 4.0)
     spent = time.monotonic() - began
-    if proc is not None or spent >= 4.0 + _DEADLINE_CHILD_REAP_SECONDS:
+    if proc is not None or _timing_hard_failed(_TIMING_HARD_AT, spent, 4.0 + _DEADLINE_CHILD_REAP_SECONDS):
         out.append("(dl-child-wait-busy-child) a child sleeping 6.2 s beside its own 6-second hashing thread must "
                    "be stopped under a 4-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
     marker = Path(tmp) / "dl-child-wait-grandchild.pid"
@@ -12976,7 +14762,7 @@ def _deadline_child_wait_failures(tmp):
         spent = time.monotonic() - began
     finally:
         _deadline_kill_marked(marker)
-    if proc is not None or spent >= 15.0:
+    if proc is not None or _timing_hard_failed(_TIMING_HARD_AT, spent, 15.0):
         out.append("(dl-child-wait-grandchild) a child whose grandchild holds its pipes must be stopped within "
                    "15 s under a 1-second limit, got {!r} after {:.1f}s ({})".format(proc, spent, waited))
     return out
@@ -12999,7 +14785,10 @@ def _deadline_kill_marked(marker):
 def _test_deadline_posture(failures, tmp):
     """(dl-*) The PreToolUse deadline posture; see the section comment above."""
     failures.extend(_deadline_relation_failures())
-    failures.extend(_deadline_shape_rerun_failures())
+    with _timing_notes_quiet():
+        failures.extend(_deadline_shape_rerun_failures())
+        failures.extend(_timing_judge_failures())
+        failures.extend(_deadline_outer_deadline_verdict_failures())
     failures.extend(_deadline_load_judgement_failures(Path(tmp)))
     failures.extend(_deadline_note_only_deny_failures())
     failures.extend(_raw_sequence_failures())
@@ -13036,6 +14825,9 @@ def _test_deadline_posture(failures, tmp):
         failures.append("(dl-child-failed) the deadline child failed (exit {}): {}".format(
             proc.returncode, (proc.stdout + proc.stderr)[-2000:]))
         return
+    for line in proc.stderr.splitlines():
+        if line.startswith("timing-note: "):
+            _timing_note("(from the deadline child)", line[len("timing-note: "):], "")
     failures.extend(found)
 
 
@@ -13206,8 +14998,8 @@ def _wall_clock_asserts(source, exempt=()):
     the host's speed. A time figure is a clock reading (time.time, perf_counter, monotonic, process_time,
     thread_time, clock_gettime, or an _ns variant; datetime.now, utcnow, or today), a result of a timing
     harness (run_timed, growth_in_child), a name assigned from one (a for target or unpacking included), or
-    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, or a method
-    call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
+    arithmetic, a comparison, a subscript, an attribute, min, max, abs, sum, int, float, round, a shared
+    timing judge (_timing_hard_failed, _timing_judge, called by that name), or a method call on one; a quotient of two time figures is a dimensionless ratio and may be bounded. A tuple or list
     literal assigned to a tuple or list target is matched element by element, so only the names that receive
     a time figure are tainted, and a shape it cannot match (a starred element, a length mismatch) taints
     nothing, the not-flagging direction. A clock read through an alias
@@ -13232,6 +15024,8 @@ def _wall_clock_asserts(source, exempt=()):
                  "process_time", "process_time_ns", "thread_time", "thread_time_ns", "clock_gettime",
                  "clock_gettime_ns"}
     dtclocks = ("now", "utcnow", "today")
+    # the shared timing judges: a call of one on a time figure is a verdict on that figure
+    verdicts = ("_timing_hard_failed", "_timing_judge")
     single = {"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"}
 
     def dtclass(node, al):  # a reference to the datetime class: a class alias, or <datetime module>.datetime
@@ -13246,7 +15040,7 @@ def _wall_clock_asserts(source, exempt=()):
             if isinstance(f, ast.Name):
                 if f.id in clocks or f.id in al["clock"]:
                     return True
-                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") and any(
+                return f.id in ("min", "max", "abs", "sum", "int", "float", "round") + verdicts and any(
                     timed(a, names, al) for a in node.args)
             if isinstance(f, ast.Attribute):
                 if f.attr in ("time", "time_ns"):
@@ -15217,10 +17011,12 @@ def _fsw_unit_suite():
         def test_hang_guard_interrupts(self):
             # a growth test's ceiling asserted only after every run returns could
             # not interrupt a hang; timed runs now go through run_timed, which kills the child at its timeout
+            # the 30-second ceiling is a per-invocation hard limit under the shared policy _TIMING_HARD_AT, never
+            # a median
             t0 = time.monotonic()
             with self.assertRaises(subprocess.TimeoutExpired):
                 run_timed("import time\ntime.sleep(60)\n", 1)
-            self.assertLess(time.monotonic() - t0, 30.0)
+            self.assertFalse(_timing_hard_failed(_TIMING_HARD_AT, time.monotonic() - t0, 30.0))
             for test in (T.test_scan_is_linear, T.test_unreadable_edit_literal_index_is_linear):
                 src = inspect.getsource(test)
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
@@ -16250,14 +18046,18 @@ def _fsw_unit_suite():
                    "def test_d(self):\n    for name, (s, big) in run_timed(c, 9).items():\n"
                    "        self.assertTrue(big < 3, name)\n"
                    "def test_e(self):\n    t = time.time()\n    self.assertLessEqual(time.time() - t, 1)\n"
-                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n")
+                   "def test_f(self):\n    def inner():\n        self.assertLess(growth_in_child(src, 9)[1], 1)\n"
+                   "def test_i(self):\n    t0 = time.monotonic()\n"
+                   "    self.assertFalse(_timing_hard_failed(_TIMING_HARD_AT, time.monotonic() - t0, 30.0))\n")
             self.assertEqual([name for name, _line in _wall_clock_asserts(bad)],
-                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f"])
-            # a ratio of two time figures, a time figure in the message only, and an exempt hang guard pass
+                             ["test_a", "test_b", "test_c", "test_d", "test_e", "test_f", "test_i"])
+            # a ratio of two time figures, a time figure in the message only, an exempt hang guard, and a shared
+            # hard-limit judge over a count pass
             good = ("def test_g(self):\n    small, large = run_timed(code, HANG_TIMEOUT)\n"
                     "    self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))\n"
                     "    self.assertTrue(large / small < 2, (small, large))\n"
-                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n")
+                    "def test_h(self):\n    t0 = time.monotonic()\n    self.assertLess(time.monotonic() - t0, 30.0)\n"
+                    "def test_j(self):\n    self.assertFalse(_timing_hard_failed(_TIMING_HARD_AT, len(rows), 3))\n")
             self.assertEqual(_wall_clock_asserts(good, ("test_h",)), [])
             self.assertEqual(_wall_clock_asserts(good), [("test_h", 7)])
             # a clock read through an alias (import-as, from-import, an assigned name) or a keyword operand is
@@ -26623,18 +28423,24 @@ def _main_isolated(monitor):
                        "doubt-comment-pipes": ("allow-note", "allow", "deny")}
         _cost_doubt_got = None
 
-        def _cost_timed(guard, cmd):
-            t0 = time.process_time()
-            got = _decision(guard, cmd)
-            return time.process_time() - t0, got
+        # Each pair is judged by the shared judge (_timed_case on time.process_time, the collector left alone):
+        # _lex_cost_problems judges the median and every run's decision, and a lone excursion must be cleared
+        # by a fresh-process replay that reaches the same decision.
         for _cost_name, _cost_cmd in _cost_inputs:
             for _cost_guard, _cost_want in zip(
                     (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line),
                     _cost_wants[_cost_name]):
-                _cost_cpu, _cost_runs = _timed_runs(lambda: _cost_timed(_cost_guard, _cost_cmd))
+                _cost_case = _timed_case({"id": "lex-cost-{}-{}".format(_cost_name, _cost_guard.__name__),
+                                          "handler": _cost_guard.__name__, "payload": _timing_bash(_cost_cmd),
+                                          "clock": "process"}, 1.0, True, _timing_decision_check(_cost_want))
+                _cost_runs = [(sample["seconds"], got) for sample, got in zip(_cost_case.samples,
+                                                                              _cost_case.decisions)]
                 _cost_got = sorted(set(got for _cpu, got in _cost_runs))
-                failures.extend(_lex_cost_problems(_cost_name, _cost_guard.__name__, len(_cost_cmd), _cost_cpu,
-                                                   _cost_runs, _cost_want))
+                failures.extend(_lex_cost_problems(_cost_name, _cost_guard.__name__, len(_cost_cmd),
+                                                   _cost_case.median, _cost_runs, _cost_want))
+                if _cost_case.timing_failed and _cost_case.median < 1.0:
+                    failures.append("(lex-cost-{}) {} on a {}-character command: {}".format(
+                        _cost_name, _cost_guard.__name__, len(_cost_cmd), _cost_case.text))
                 if _cost_name == "doubt-comment-pipes" and _cost_guard is aiqt_hooks.gate_weakening:
                     _cost_doubt_got = " and ".join(_cost_got)
         # The doubt-comment-pipes row bounds the fail-closed sink test only while its input still reaches
@@ -27010,6 +28816,39 @@ def _main_isolated(monitor):
                 _redir("git diff > ./proc/self/fd/1"), [(">", 1, "./proc/self/fd/1", "opaque", "opaque")])
         texpect("(tok-18e) a nested 'dev' component ('foo/dev/x') is a plain file, still file-real",
                 _redir("git diff > foo/dev/x"), [(">", 1, "foo/dev/x", "file-real", "file-real")])
+        # Given a spans list, the lexer reports, in order, the '<<' of each quoted heredoc and each
+        # double-quoted string it reads in a word or a redirect target, and returns the same segments. A
+        # comment, a heredoc's body, single quotes, escaped quotes and a heredoc's quoted delimiter give none.
+        _spans_cmd = ("cat <<'A' \"x <<B\" >\"o\" # \"c\" <<'C'\n<<'D' \"y\"\nA\n"
+                      "echo '\"s\"' \\\"e\\\" <<-\"Q\" a\"b\"\nw\nQ\n")
+        _spans = []
+        _spans_segs = aiqt_hooks._lex_command(_spans_cmd, spans=_spans)
+        texpect("(tok-19) spans: each quoted heredoc's '<<' and each double-quoted string the lexer reads",
+                ([(s, _spans_cmd[s:e]) for s, e in _spans], _spans_segs == aiqt_hooks._lex_command(_spans_cmd)),
+                ([(_spans_cmd.index(at), text) for at, text in (("<<'A'", "<<"), ("\"x", "\"x <<B\""),
+                                                                 ("\"o\"", "\"o\""), ("<<-", "<<"),
+                                                                 ("\"b\"", "\"b\""))], True))
+        # By default a command substitution or backquote inside a double-quoted string is its own quoting
+        # context, so a double quote nested in it does not close the string, and an ANSI-C quote with an
+        # escaped quote inside one is refused. With nested=False, the reading only the citation check asks for,
+        # the string ends at the next unescaped double quote and that ANSI-C form lexes.
+        def _nested_read(command, **options):
+            spans = []
+            try:
+                segs = aiqt_hooks._lex_command(command, spans=spans, **options)
+            except ValueError:
+                return "ValueError"
+            return [seg.argv for seg in segs], [command[s:e] for s, e in spans]
+        _nested_cmds = ('git commit -m "x $(echo "a b") y" -F f', "echo \"$(echo $'x\\' y')\"",
+                        'echo "a `echo "b c"` d"')
+        texpect("(tok-20) nested: a substitution in a double-quoted string is its own quoting context by default, "
+                "and nested=False ends the string at the next unescaped double quote",
+                [(_nested_read(c), _nested_read(c, nested=False)) for c in _nested_cmds],
+                [(([["git", "commit", "-m", 'x $(echo "a b") y', "-F", "f"]], ['"x $(echo "a b") y"']),
+                  ([["git", "commit", "-m", "x $(echo a", "b) y", "-F", "f"]], ['"x $(echo "', '") y"'])),
+                 ("ValueError", ([["echo", "$(echo $'x\\' y')"]], ["\"$(echo $'x\\' y')\""])),
+                 (([["echo", 'a `echo "b c"` d']], ['"a `echo "b c"` d"']),
+                  ([["echo", "a `echo b", "c` d"]], ['"a `echo "', '"` d"']))])
         # Unsupported constructs are cannot-evaluate (ValueError), never partial argv. an
         # UNQUOTED heredoc still raises (its body interpolates and stays in scope); a QUOTED heredoc does NOT
         # (its body is literal data, excluded from analysis - asserted separately below).
@@ -29866,48 +31705,47 @@ def _main_isolated(monitor):
         gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
                 "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
                 "trigger)", "git log \"a'\" git commit -nv", "deny")
-        # Timing: the whole-command scan, the hides-roster-git helper and the dequoted-word scan are linear in
-        # their input length on these shapes, so doubling the input should roughly double the time (ratio
-        # ~2); a quadratic re-walk quadruples it
-        # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
-        # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
-        # Each scan is timed with time.process_time (this process's CPU time, as in the lex-cost rows), so
-        # time the process spends waiting for a CPU on a busy runner is not counted. Because a short t_n gives
-        # a noisy ratio, n is DOUBLED (bounded: from 4000 repetitions, at most 9 sizes) until t_n clears a
-        # 0.1 s floor; if it never does, the check FAILS 'linearity not evaluated' rather than passing
-        # silently (the former early-pass path). The floor sets how much stray cost one comparison absorbs:
-        # extra work counted in t_2n moves a linear row's ratio of about 2 past 3 only when it costs more
-        # than t_n itself. With a 0.02 s floor and a wall clock, one CI row failed at 3.24x (0.030 s then
-        # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
-        # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
-        # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
-        # What else a timed call is charged for was measured on Python 3.14.4 with the whole suite running:
-        # no cyclic collection ran inside any timed call (the dequoted-word scan makes no lasting
-        # collector-tracked allocation, so none starts there even with the collector's count at its
-        # threshold), and every row's ratio stayed between 1.93 and 2.09 with the collector left on and with
-        # it disabled around each call. The one cost that grew faster than the input was the kernel's work
-        # on the page faults that first touch the memory a scan allocates (about 2.5 times the faults per
-        # doubling), under a tenth of t_2n there. A ratio above 3 that a CI runner measured for gw-lin-dq-off
-        # was not reproduced that way, nor with other processes loading the same CPU, so its cause is not
-        # known. A failing row therefore reports what the process used across each of its two timed calls,
-        # read outside the timed region: user and system CPU time, minor page faults, involuntary context
-        # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
-        # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
-        # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
-        # A CI runner later measured gw-lin-span-optgit at 3.01x (0.109 s then 0.327 s, with 2763 then 7290
-        # minor page faults) where 14 local runs gave 2.00 to 2.04x, so one call charged for stray work still
-        # failed a linear row. A ratio over 3 now times both sizes again, at most _GW_TIMINGS timings of each,
-        # and judges the least time of each size: stray work only adds time, so the least timing is the one
-        # nearest the scan's own cost, a linear row needs one clean timing of each size to pass, and a scan that
-        # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
-        # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
-        # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
+        # Growth: the whole-command scan, the hides-roster-git helper, the dequoted-word scan, the de-quoted text
+        # reading and the run-time word reading are linear in their input length on these shapes, so doubling
+        # the input at most doubles the WORK the scan does, plus a fixed part; a quadratic re-walk or a copy of
+        # the suffix after each unit quadruples it. The verdict reads that work as a COUNT, not a time: the
+        # hook's work-count seam (_GATE_SCAN_COUNTER, off and None in the hook) adds the characters or words each
+        # counted pass reads (_gate_scan_count), and a row fails when the count on the doubled input is over
+        # twice the count on the smaller one plus _GW_COUNT_SLACK (its derivation is at the constant). A count
+        # does not depend on the host, its load, its clock or its collector, so a linear row gives the same
+        # verdict on a loaded runner as on an idle one. The rows judged CPU time before (a ratio of 3 over a
+        # 0.1 s floor, retimed up to three times), and a linear row failed on CI runners that charged one timed
+        # call for stray work: gw-lin-dq-off was reported at 3.21x on one lane, and gw-lin-span-optgit at 3.01x
+        # (0.109 s then 0.327 s) where local runs gave about 2x. Each row still times both counted calls with time.process_time and
+        # reads the process's usage around them, outside the timed region (_gw_usage: user and system CPU time,
+        # minor page faults, involuntary context switches and cyclic collections, each best effort and reported
+        # as unavailable when the host cannot give it); a failing row reports them as diagnostics, and no verdict
+        # reads them. A row whose smaller count is under its input's length fails 'growth not evaluated', since
+        # every scan's own pass over its input is counted, so a seam the scan never reaches cannot pass a row.
+        # Each row also runs its smaller input with the seam off and asserts the same decision. gw-lin-count-edge
+        # pins the verdict over scripted readings (each end of the bound, the length floor, a doubled call
+        # charged 50 times the CPU time, a quadratic count, a wrong decision), gw-lin-count-linear/super pin it
+        # through the seam with stand-in scans, gw-lin-count-off-default/inert pin the seam off by default and
+        # inert there, gw-lin-count-raise-propagates/restores pin a raising scan's exception passing through and
+        # the seam off again after it, and gw-lin-usage-* pin the report.
+        # The seam counts the passes it instruments: a new loop added to a scan outside every counted pass is
+        # not counted, so the rows catch a re-walk or a suffix copy made through a counted pass or helper. A
+        # counted walk adds the steps it takes, never how far a cached pointer moved, and a reading reused from a
+        # cache or passed over by a skip adds nothing, and a walk or regex pass that can stop early adds only what
+        # it read before it stopped, never its bound, so losing the cache, the skip or the stop shows as added
+        # work: gw-lin-mut-* run each such site's one-line mutation (_GW_MUTANTS) on a copy of the hook and require
+        # the row it names to fail there, a gw-lin growth row for a loss that makes a scan quadratic and a gw-cnt
+        # row (_gw_work_failures, which pins the count of one call) for a loss that costs a fixed multiple; a
+        # gw-cnt row must fail on its count, not only on its result.
+        # gw-lin-slice-count, -pinned, -slack and -boundary pin the slack's derivation for the dequoted-word walk's
+        # slices, its truncated last slice included, at the sizes the rows use and at a boundary size.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
         # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
         #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
-        #   cached offroster_resolved makes it linear. Quadratic before that cache.
+        #   cached offroster_resolved makes it linear. Quadratic before that cache, and quadratic again when the
+        #   walk restarts at the first option (gw-lin-mut-lex-restart), which its count now shows.
         # gw-lin-span-roster (`git commit -m '` + `git x `*n + `'`) and gw-lin-span-off (`git log '` +
         #   `git log `*n + `'`): one quoted span naming many inner git words. The former
         #   _gate_span_hides_roster_git re-split the suffix per 'git' match (quadratic); the one-pass token
@@ -29916,7 +31754,7 @@ def _main_isolated(monitor):
         #   ` -C git`*n + ` x'`): every option word holds a 'git' match, or each '-C' consumes a git word as
         #   its value, so an option walk per match crossed every later option word (quadratic). The helper
         #   now reads each match's walk outcome from a table filled once from the end, so both are linear.
-        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) time
+        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) count
         #   _gate_novrf_dequoted_bypass over the word list itself: it copied the words after each git word
         #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
         #   subcommand from tables filled once from the end, so both are linear.
@@ -29924,28 +31762,29 @@ def _main_isolated(monitor):
         #   `-n`) pack ROSTER-verb git words before a '-n' that is a bypass for none of them (push's dry run,
         #   or -m's value): each git word's walk read every later word, quadratic. A walk that found no bypass
         #   now passes over every later git word of the same verb whose words it already read, so both are
-        #   linear. gw-lin-unread-roster times the de-quoted text reading over the quote-concatenated shape.
-        # gw-lin-runtime (`$x log -m y `*n + `commit -m y`) times the run-time word reading (_gate_runtime_bypass)
+        #   linear. gw-lin-unread-roster counts the de-quoted text reading over the quote-concatenated shape.
+        # gw-lin-runtime (`$x log -m y `*n + `commit -m y`) counts the run-time word reading (_gate_runtime_bypass)
         #   over one piece in which every unit holds a word built at run time and an off-roster verb, and a roster
         #   verb with no hook-skip spelling and no word built at run time after it ends the piece (a word built at
         #   run time after a roster verb denies, so no unit can repeat both): the walk and the verb search start
         #   at the first such word only, so they are linear; a walk restarted at every such word reads every later
-        #   word again, quadratic. gw-lin-runtime-extglob (`@(x);` + ` x commit -m y;`*n) times the whole-text
+        #   word again, quadratic. gw-lin-runtime-extglob (`@(x);` + ` x commit -m y;`*n) counts the whole-text
         #   read an extglob opener adds over many raw pieces that hold no word built at run time.
         #   gw-lin-runtime-tilde (`~ log -m y `*n + `commit -m y`) is gw-lin-runtime with a tilde word in each unit.
-        #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) times the
+        #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) counts the
         #   here-document mask and the second split it gives: each body's quote pairs with the next one for the
         #   first split, so the pieces of the two splits differ throughout. gw-lin-runtime-case (`case;` + ` $x log
-        #   -m y;`*n + ` commit -m y`) times the read from a case word's piece to the end of the text, over many
-        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) times the walk from each
+        #   -m y;`*n + ` commit -m y`) counts the read from a case word's piece to the end of the text, over many
+        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) counts the walk from each
         #   quote-assembled git (_gate_assembled_reading) over one piece in which every git's -C takes the next git
         #   as its value, so each git's subcommand is the one log near the end: the tables built from the end find
         #   each in one step, where a subcommand search restarted at every git reads every later word again,
         #   quadratic. Every runtime row holds a roster verb with no hook-skip spelling and no word built at run
         #   time after it, since text with no roster verb is passed over before any reading (_gate_runtime_may_hit).
-        # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
-        # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
-        # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
+        # Each counted scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
+        # gives each shape at both sizes with the seam on and at the smaller with it off: none of them names a
+        # refused segment or a bypass), so a scan made linear by deciding these shapes wrongly fails here
+        # instead of passing on its count alone.
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_unread_scan = aiqt_hooks._gate_unread_bypass
@@ -29970,10 +31809,13 @@ def _main_isolated(monitor):
             ("gw-lin-runtime-case", " $x log -m y;", "case;", " commit -m y", _gw_runtime_scan, None),
             ("gw-lin-runtime-assembled", " g'i't -C", "", " x log $x commit", _gw_runtime_scan, None),
         )
+        failures.extend(_gw_count_seam_failures())
         failures.extend(_gw_lin_failures(_gw_lin_cases))
+        failures.extend(_gw_slice_failures())
+        failures.extend(_gw_work_failures())
+        failures.extend(_gw_mutant_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
-        failures.extend(_gw_retime_failures())
-        failures.extend(_gw_retime_cpu_failures())
+        failures.extend(_gw_count_edge_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -34125,6 +35967,20 @@ def _main_isolated(monitor):
             if _ci_lex != _ci_lex_want:
                 failures.append("(ci-wr-locale-lex) the tokenizer with locale={} read {!r} as {!r} (want {!r})"
                                 .format(_ci_locale, _ci_cmd, _ci_lex, _ci_lex_want))
+        # A redirect target is read with the same locale setting as a word: with locale=True a locale quote
+        # there is a double-quoted string, by default its '$' stays literal, and the target stays opaque either
+        # way (ci-wr-locale-redirect).
+        _ci_redir_cmd = 'x >$"a b" 2>$"e""f"'
+        for _ci_locale, _ci_targets in ((False, ["$a b", "$ef"]), (True, ["a b", "ef"])):
+            try:
+                _ci_redir = [[(r.target, r.target_class) for r in seg.redirects]
+                             for seg in aiqt_hooks._lex_command(_ci_redir_cmd, locale=_ci_locale)]
+            except (TypeError, ValueError) as exc:
+                _ci_redir = "{}: {}".format(type(exc).__name__, exc)
+            if _ci_redir != [[(target, "opaque") for target in _ci_targets]]:
+                failures.append("(ci-wr-locale-redirect) the tokenizer with locale={} read the redirect targets of "
+                                "{!r} as {!r} (want {!r})".format(_ci_locale, _ci_redir_cmd, _ci_redir,
+                                                                  [[(t, "opaque") for t in _ci_targets]]))
         _ci_got = aiqt_hooks._segments(_ci_cmd)
         if _ci_got != [(_ci_want[False][0][0], "")]:
             failures.append("(ci-wr-locale-default) _segments read {!r} as {!r} by default (want the literal '$' "
@@ -34354,7 +36210,7 @@ def _main_isolated(monitor):
         # so a segment of many wrapped rebase commands costs time linear in its length, where reading the rest of
         # the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 65,536
         # characters for the two forms below). The bound is the CPU time the calling thread spends in the
-        # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
+        # handler (_timed_case: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
         # 131,072, the same bound per character, against about 0.13 s and 0.26 s measured for the first form and
@@ -34367,44 +36223,36 @@ def _main_isolated(monitor):
         # in the -x form each one's exec line
         # is built. For each form the command at the limit runs only when the shorter one is within its bound, so a
         # quadratic reader fails in seconds.
-        _ci_saved = aiqt_hooks._cmtidn_run_lines
-        _ci_counts = [0, 0]  # the rebase reads, and the run lines built
+        # Every run's counts are checked (each run counts into its own list, _timing_rebase_counts), the fresh
+        # replay's included.
+        for _ci_unit in (" -E git rebase x", " -E git rebase -x x"):
+            for _ci_size, _ci_cap in ((64 << 10, 0.5), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
+                _ci_reps = (_ci_size - 4) // len(_ci_unit)
+                _ci_cmd = "sudo" + _ci_unit * _ci_reps
+                _ci_cmd += " " * (_ci_size - len(_ci_cmd))
+                _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
 
-        def _ci_counted_rebase_lines(tokens, k, *args):
-            if tokens[k] == "rebase":
-                _ci_counts[0] += 1
-            for line in _ci_saved(tokens, k, *args):
-                _ci_counts[1] += 1
-                yield line
-
-        try:
-            aiqt_hooks._cmtidn_run_lines = _ci_counted_rebase_lines
-            for _ci_unit in (" -E git rebase x", " -E git rebase -x x"):
-                for _ci_size, _ci_cap in ((64 << 10, 0.5), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
-                    _ci_reps = (_ci_size - 4) // len(_ci_unit)
-                    _ci_cmd = "sudo" + _ci_unit * _ci_reps
-                    _ci_cmd += " " * (_ci_size - len(_ci_cmd))
-                    _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
-                    def _ci_reset_and_decide(_cmd=_ci_cmd):
-                        _ci_counts[:] = [0, 0]
-                        return _decision(cig, _cmd)
-                    _ci_got, _ci_spent = _hook_cpu_timed(_ci_reset_and_decide, bound=_ci_cap)
-                    if _ci_got != "allow" or _ci_spent > _ci_cap or _ci_counts != _ci_want:
-                        failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {:.2f} s of "
-                                        "CPU time, {} rebase reads and {} run lines built (want allow within {} s, "
-                                        "{} rebase reads and {} run lines){}".format(
-                                            len(_ci_cmd), _ci_unit, _ci_got, _ci_spent, _ci_counts[0],
-                                            _ci_counts[1], _ci_cap, _ci_want[0], _ci_want[1],
-                                            "; the longer command was not run" if _ci_size == 64 << 10 else ""))
-                        break
-        finally:
-            aiqt_hooks._cmtidn_run_lines = _ci_saved
+                def _ci_rebase_check(sample, _want=_ci_want):
+                    got = _timing_reduced(sample)
+                    if got != "allow" or list(sample.get("counts") or ()) != _want:
+                        return "gave {} with {!r} rebase reads and run lines built (want allow and {!r})".format(
+                            got, sample.get("counts"), _want)
+                    return None
+                _ci_case = _timed_case({"id": "ci-wr-rebase-cpu-{}".format(len(_ci_cmd)), "handler": "commit_identity",
+                                        "payload": _timing_bash(_ci_cmd), "shim": "rebase-count"},
+                                       _ci_cap, False, _ci_rebase_check)
+                if _ci_case.failed:
+                    failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' (want allow within {} s of CPU "
+                                    "time, {} rebase reads and {} run lines): {}{}".format(
+                                        len(_ci_cmd), _ci_unit, _ci_cap, _ci_want[0], _ci_want[1], _ci_case.text,
+                                        "; the longer command was not run" if _ci_size == 64 << 10 else ""))
+                    break
         # The co-author regex that the reader runs on each word (CO_AUTHOR_RE) and the user.name context of the
         # raw-string scan that judges a command the tokenizer cannot parse (_RAW_IDENTITY_CONTEXTS) take each
         # whitespace run whole, so a long run costs time linear in its length, where giving it back one character at
         # a time cost time quadratic in it (about 53 s and 130 s of CPU time at _CMTIDN_READ_LIMIT characters for
         # the two forms below). The bound is the CPU time the calling thread spends in the handler
-        # (_hook_cpu_timed: the thread clock, the cyclic collector held off) over a commit message of a
+        # (_timed_case: the thread clock, the cyclic collector held off) over a commit message of a
         # co-author name and a run of newlines, before a second message with an AI co-author trailer, which the
         # reader denies (ci-wr172), and over user.name, a run of spaces and a quote that does not close, before an
         # AI user.name value, which the raw-string scan denies (ci-wr173), each padded to 16,384 characters and to
@@ -34422,17 +36270,20 @@ def _main_isolated(monitor):
                  "' user.name Claude", ("could not be read in full", "(user.name/user.email value 'Claude')"))):
             for _ci_size, _ci_cap in ((16 << 10, 0.125), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
                 _ci_cmd = _ci_head + _ci_run * (_ci_size - len(_ci_head) - len(_ci_tail)) + _ci_tail
-                _ci_result, _ci_spent = _hook_cpu_timed(
-                    lambda _cmd=_ci_cmd: cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                              "tool_input": {"command": _cmd}}), bound=_ci_cap)
-                _ci_code, _ci_out = _ci_result[:2]
-                _ci_got = _reduce_result(_ci_code, _ci_out)
-                _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-                if _ci_got != "deny" or _ci_spent > _ci_cap or not all(_ci_w in _ci_reason for _ci_w in _ci_wants):
+                def _ci_reason_check(sample, _wants=_ci_wants):
+                    got = _timing_reduced(sample)
+                    out = sample.get("stdout") if isinstance(sample.get("stdout"), dict) else {}
+                    reason = (out.get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+                    if got != "deny" or not isinstance(reason, str) or not all(w in reason for w in _wants):
+                        return "gave {} with the reason {!r}".format(got, reason[-200:] if isinstance(reason, str)
+                                                                     else reason)
+                    return None
+                _ci_case = _timed_case({"id": "{}-{}".format(_ci_label[1:9], len(_ci_cmd)), "handler": "commit_identity",
+                                        "payload": _timing_bash(_ci_cmd)}, _ci_cap, False, _ci_reason_check)
+                if _ci_case.failed:
                     failures.append("{}: over {} characters expected deny within {} s of CPU time with a reason "
-                                    "holding {!r}, got {} after {:.2f} s with the reason {!r}{}".format(
-                                        _ci_label, len(_ci_cmd), _ci_cap, _ci_wants, _ci_got, _ci_spent,
-                                        _ci_reason[-200:],
+                                    "holding {!r}: {}{}".format(
+                                        _ci_label, len(_ci_cmd), _ci_cap, _ci_wants, _ci_case.text,
                                         "; the longer command was not run" if _ci_size == 16 << 10 else ""))
                     break
         # The inexact-text search finds let, [[ and a [X]=v word in one pass over the words of the text
@@ -34440,7 +36291,7 @@ def _main_isolated(monitor):
         # (on one shared host, in-process, about 2.2 s, 3.2 s and 0.5 s of the calling thread's CPU at 16,384
         # characters for the three forms below, and 9.1 s for the first at 32,768 in the review, past the
         # 8-second hook deadline). The bound is the CPU time the calling thread spends in the handler
-        # (_hook_cpu_timed) over 'echo x=! x=! ...', '! ! ...' and 'echo [ [ ...', each padded to 16,384 characters
+        # (_timed_case) over 'echo x=! x=! ...', '! ! ...' and 'echo [ [ ...', each padded to 16,384 characters
         # and to _CMTIDN_READ_LIMIT: 0.375 s and 3 s, the same bound per character, against at most about 0.11 s
         # and 0.87 s measured (the least of three in-process runs of the handler alone, in each of two samples on a
         # shared 96-CPU host at a one-minute load average of about 55, Python 3.14.4, 2026-11-17), a margin of about
@@ -34454,12 +36305,13 @@ def _main_isolated(monitor):
             for _ci_size, _ci_cap in ((16 << 10, 0.375), (aiqt_hooks._CMTIDN_READ_LIMIT, 3.0)):
                 _ci_cmd = _ci_head + _ci_unit * ((_ci_size - len(_ci_head)) // len(_ci_unit))
                 _ci_cmd += " " * (_ci_size - len(_ci_cmd))
-                _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
-                if _ci_got != "allow" or _ci_spent > _ci_cap:
-                    failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
-                                    "{:.2f} s{}".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
-                                                        "; the longer command was not run"
-                                                        if _ci_size == 16 << 10 else ""))
+                _ci_case = _timed_case({"id": "{}-{}".format(_ci_label[1:12], len(_ci_cmd)), "handler": "commit_identity",
+                                        "payload": _timing_bash(_ci_cmd)}, _ci_cap, False,
+                                       _timing_decision_check("allow"))
+                if _ci_case.failed:
+                    failures.append("{} over {} characters expected allow within {} s of CPU time: {}{}".format(
+                        _ci_label, len(_ci_cmd), _ci_cap, _ci_case.text,
+                        "; the longer command was not run" if _ci_size == 16 << 10 else ""))
                     break
         # The unread-route rule (_cmtidn_unread_route_ai) seeks an AI identity in the text once and hands the xargs
         # stdin rule only the matched name, where handing it the whole text searched the text again for each
@@ -34472,11 +36324,12 @@ def _main_isolated(monitor):
             _ci_unit = "xargs -a <(x) git config user.name;"
             _ci_cmd = _ci_unit * (_ci_size // len(_ci_unit))
             _ci_cmd += " " * (_ci_size - len(_ci_cmd))
-            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
-            if _ci_got != "allow" or _ci_spent > _ci_cap:
+            _ci_case = _timed_case({"id": "ci-idc-cpu4-{}".format(len(_ci_cmd)), "handler": "commit_identity",
+                                    "payload": _timing_bash(_ci_cmd)}, _ci_cap, False, _timing_decision_check("allow"))
+            if _ci_case.failed:
                 failures.append("(ci-idc-cpu4) 'xargs -a <(x) git config user.name; ...' over {} characters expected "
-                                "allow within {} s of CPU time, got {} after {:.2f} s{}".format(
-                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                "allow within {} s of CPU time: {}{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_case.text,
                                     "; the longer command was not run" if _ci_size == 16 << 10 else ""))
                 break
         # The raw-text rule judges every assignment in a word from one reading of the word (_CmtidnWord), where
@@ -34492,10 +36345,11 @@ def _main_isolated(monitor):
         for _ci_label, _ci_cmd, _ci_cap in (
                 ("(ci-idc-cpu5) 'echo \"EMAIL=x,EMAIL=x,...\"'", 'echo "' + "EMAIL=x," * 4095 + '"', 0.75),
                 ("(ci-idc-cpu6) 'xargs git config author.name; ...'", "xargs git config author.name;" * 2259, 1.5)):
-            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
-            if _ci_got != "allow" or _ci_spent > _ci_cap:
-                failures.append("{} over {} characters expected allow within {} s of CPU time, got {} after "
-                                "{:.2f} s".format(_ci_label, len(_ci_cmd), _ci_cap, _ci_got, _ci_spent))
+            _ci_case = _timed_case({"id": _ci_label[1:12], "handler": "commit_identity",
+                                    "payload": _timing_bash(_ci_cmd)}, _ci_cap, False, _timing_decision_check("allow"))
+            if _ci_case.failed:
+                failures.append("{} over {} characters expected allow within {} s of CPU time: {}".format(
+                    _ci_label, len(_ci_cmd), _ci_cap, _ci_case.text))
         # The += join rule of the unread-route rule (_cmtidn_unread_route_ai) judges every assignment in a word from
         # readings of the whole word that resume where the last one stopped (_CmtidnJoinWord), where copying the
         # rest of the word for each assignment, as written and dropped, and searching it for an expansion and the
@@ -34509,11 +36363,12 @@ def _main_isolated(monitor):
         for _ci_reps in (1024, 2048, 4095, 8191):
             _ci_cmd = 'echo "' + "EMAIL+=x," * _ci_reps + '"'
             _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
-            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
-            if _ci_got != "allow" or _ci_spent > _ci_cap:
+            _ci_case = _timed_case({"id": "ci-idc-cpu7-{}".format(_ci_reps), "handler": "commit_identity",
+                                    "payload": _timing_bash(_ci_cmd)}, _ci_cap, False, _timing_decision_check("allow"))
+            if _ci_case.failed:
                 failures.append("(ci-idc-cpu7) 'echo \"EMAIL+=x,EMAIL+=x,...\"' over {} characters expected allow "
-                                "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
-                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                "within {:.2f} s of CPU time: {}{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_case.text,
                                     "; the longer commands were not run" if _ci_reps != 8191 else ""))
                 break
         # The raw word reader (_cmtidn_raw_words) keeps a count of the double quotes open on its nesting stack, so
@@ -34529,11 +36384,12 @@ def _main_isolated(monitor):
         for _ci_depth in (3276, 6552, 13104):
             _ci_cmd = "echo " + "${a-" * _ci_depth + "''" * (_ci_depth * 5 // 2) + "}" * _ci_depth + " +="
             _ci_cap = 0.375 * len(_ci_cmd) / (16 << 10)
-            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_cmd: _decision(cig, _cmd), bound=_ci_cap)
-            if _ci_got != "allow" or _ci_spent > _ci_cap:
+            _ci_case = _timed_case({"id": "ci-idc-cpu8-{}".format(_ci_depth), "handler": "commit_identity",
+                                    "payload": _timing_bash(_ci_cmd)}, _ci_cap, False, _timing_decision_check("allow"))
+            if _ci_case.failed:
                 failures.append("(ci-idc-cpu8) 'echo ${{a-${{a-...'''...}}}} +=' over {} characters expected allow "
-                                "within {:.2f} s of CPU time, got {} after {:.2f} s{}".format(
-                                    len(_ci_cmd), _ci_cap, _ci_got, _ci_spent,
+                                "within {:.2f} s of CPU time: {}{}".format(
+                                    len(_ci_cmd), _ci_cap, _ci_case.text,
                                     "; the longer commands were not run" if _ci_depth != 13104 else ""))
                 break
         # Every co-author trailer name in a word is read, each with its own value of up to 160 characters, where the
@@ -34948,11 +36804,12 @@ def _main_isolated(monitor):
                  "denies (the disclosed over-deny)", '; git commit -m "thanks Claudette"', "deny"),
                 ("(ci-wr-c47) a command past the read limit that names no AI identity allows",
                  "; git commit -m x", "allow")):
-            _ci_got, _ci_spent = _hook_cpu_timed(
-                lambda _cmd=_ci_wide + _ci_tail: _decision(cig, _cmd), bound=1.0)
-            if _ci_got != _ci_want or _ci_spent > 1.0:
-                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
-                                .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
+            _ci_case = _timed_case({"id": _ci_label[1:_ci_label.index(")")], "handler": "commit_identity",
+                                    "payload": _timing_bash(_ci_wide + _ci_tail)}, 1.0, False,
+                                   _timing_decision_check(_ci_want))
+            if _ci_case.failed:
+                failures.append("{}: over {} characters expected {} within 1 s of CPU time: {}"
+                                .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_case.text))
         _ci_body = "cat > notes.txt <<'EOF'\n" + "the claude adapter notes\n" * ((1 << 20) // 25) + "EOF"
         _ci_heredoc = "\ncat > notes.txt <<EOF\n{}EOF"
         _ci_unparsed = ('/usr/bin/gi? commit --author="Claude <c@x>" -m x' + _ci_heredoc,
@@ -34995,10 +36852,11 @@ def _main_isolated(monitor):
                  _ci_body + "\nEMAIL=noreply@anthropic.com make release", "deny"),
                 ("(ci-idc-c8) a lower-case email word, which names no identity variable, with no git word, past "
                  "the read limit, allows", _ci_body + "\necho email", "allow")):
-            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
-            if _ci_got != _ci_want or _ci_spent > 1.0:
-                failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
-                                .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent))
+            _ci_case = _timed_case({"id": _ci_label[1:_ci_label.index(")")], "handler": "commit_identity",
+                                    "payload": _timing_bash(_ci_long)}, 1.0, False, _timing_decision_check(_ci_want))
+            if _ci_case.failed:
+                failures.append("{}: over {} characters expected {} within 1 s of CPU time: {}"
+                                .format(_ci_label, len(_ci_long), _ci_want, _ci_case.text))
         _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": _ci_cmd + " " * _ci_limit}})[1]
         _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
@@ -37773,19 +39631,19 @@ def _main_isolated(monitor):
         # COST: an escaped '>' run inside one absolute target word is passed over, so the scan makes one word
         # read for that run, not one per '>' (a read per '>' grows with the square of the run's length).
         _ut_cost_cmd = "cat <<<y > /" + "\\>/" * 8000
-        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
-            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
-        if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
-            failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
-                            .format(_ut_cost_got, _ut_cpu))
+        _ut_case = _timed_case({"id": "ap-c95e", "handler": "bash_absolute_paths",
+                                "payload": _timing_bash(_ut_cost_cmd)}, 1.0, True, _timing_decision_check("allow"))
+        if _ut_case.failed:
+            failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {}".format(
+                _ut_case.text))
         # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
         # it and the reads stay linear in the command's length.
         _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
-        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
-            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
-        if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
+        _ut_case = _timed_case({"id": "ap-c95f", "handler": "bash_absolute_paths",
+                                "payload": _timing_bash(_ut_cost_cmd)}, 1.0, True, _timing_decision_check("allow"))
+        if _ut_case.failed:
             failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
-                            "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
+                            "got {}".format(_ut_case.text))
         # malformed / out-of-scope payloads for the Bash floor
         _bap = aiqt_hooks.bash_absolute_paths
         if _reduce(_bap, {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -38367,6 +40225,8 @@ def _main_isolated(monitor):
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
+        _test_stdin_locale_decoding(failures, tmp)
+        _test_stdin_read_once(failures)
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)

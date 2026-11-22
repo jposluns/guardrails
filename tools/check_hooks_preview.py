@@ -387,7 +387,7 @@ def leg_integrity(pdir, hooks, rows, sums, findings):
             findings.append("{} lists {!r}, a path, not a bare file name; an adopter's `sha256sum -c` would "
                             "check the file at that path instead of the downloaded one (b)".format(SUMS_NAME, name))
             continue
-        if HOOK_NAME_RE.match(name) is None:
+        if HOOK_NAME_RE.fullmatch(name) is None:
             findings.append("{} is listed but is not a hook file name (lowercase, digits, hyphens, .py) (b)"
                             .format(name))
             continue
@@ -442,7 +442,7 @@ def run(root):
             if not stat.S_ISREG(mode):
                 findings.append("{}/{} is not a regular file (a symbolic link, directory, or other entry) "
                                 "(b)".format(PREVIEW_DIR, name))
-            elif HOOK_NAME_RE.match(name) is None:
+            elif HOOK_NAME_RE.fullmatch(name) is None:
                 findings.append("{}/{} is not an expected channel file (README.md, SHA256SUMS, or a hook "
                                 "named like clock-inject.py) (b)".format(PREVIEW_DIR, name))
             else:
@@ -649,6 +649,10 @@ def self_test_main():
         r = _build(base / "extra-entry", {})
         (r / PREVIEW_DIR / "notes.txt").write_text("x\n", encoding="utf-8")
         case("unexpected channel entry", 1, r)
+        # 4b. (b) an entry named like a hook plus a trailing newline is not a hook file name (fullmatch).
+        r = _build(base / "newline-entry", {})
+        (r / PREVIEW_DIR / "x.py\n").write_text("x\n", encoding="utf-8")
+        case("channel entry name ending in a newline", 1, r, needle="is not an expected channel file")
 
         # 5. malformed inputs -> exit 2: a missing SHA256SUMS, a missing table, a malformed row and line.
         case("missing SHA256SUMS", 2, _build(base / "no-sums", {}, sums=False))

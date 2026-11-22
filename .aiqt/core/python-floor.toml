@@ -202,6 +202,7 @@ guarded-surfaces = [
     "tools/measure_hook_latency.py",
     "tools/migrate.py",
     "tools/nrd_differential.py",
+    "tools/orch_dispatch_marker.py",
     "tools/orch_doctor.py",
     "tools/orch_preflight.py",
     "tools/orch_register.py",
@@ -216,6 +217,7 @@ guarded-surfaces = [
     "tools/selftest_git_fixture_env_config_system.py",
     "tools/selftest_git_fixture_env_core.py",
     "tools/selftest_opf_render.py",
+    "tools/selftest_orch_dispatch_marker.py",
     "tools/selftest_orch_hooks.py",
 ]
 nonblocking-surfaces = [

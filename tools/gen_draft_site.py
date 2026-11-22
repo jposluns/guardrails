@@ -50,7 +50,9 @@ renders, select.js where the install selector renders, and rail.js where the rai
 (section 7.6); no rail link carries a static aria-current. In an inline HTML value the token `$BASE/`
 renders as the base path, so content survives promotion unchanged, and the token `$HOOK_COUNT` renders as
 the number of Claude Code hooks in .aiqt/core/hooks/manifest.toml, so no page types that count. The document control strip reads its
-Version from the repository's VERSION file and its Status from changelog.toml.
+Version from the repository's VERSION file and its Status from changelog.toml: "Published" with the date of
+the release VERSION names on a cut or tag tree, and, on a development tree (VERSION X.Y.Z-dev, which must
+match the [unreleased] table), "Unreleased" with the latest release and its date.
 
 Escaping: every data value is text, escaped for its context (element text, or a double-quoted attribute
 value with quotes escaped, external hrefs included), except the inline HTML values, which render raw:
@@ -100,6 +102,17 @@ import _site_markup  # noqa: E402  (the element allowlist inline markup, the lin
 import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, registry and wording)
 import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
+# The tree-version grammar (X.Y.Z or X.Y.Z-dev), the fixed development suffix, the [unreleased] shape check and
+# the bare-SemVer parser, from the one shared source (opf/tools/_semver.py, re-exported by tools/check_versions.py),
+# never a copy here. check_versions puts opf/tools/ at the front of sys.path to reach _semver; the path is put back
+# after the import, so no later import in this process (a module importing this one included) resolves a tools/
+# module name to an opf/tools/ namesake (both folders hold a _selftest_exit_report.py).
+_saved_sys_path = list(sys.path)
+try:
+    from check_versions import DEV_SUFFIX, _parse, parse_tree_version, unreleased_problem  # noqa: E402
+finally:
+    sys.path[:] = _saved_sys_path
+del _saved_sys_path
 
 # The staging base path; each site's own base (SITES) is this while staging and "/" at its promotion.
 DRAFT_BASE = "/draft/"
@@ -783,13 +796,25 @@ def _c_about(site, doc, where):
     return _about(site)
 
 
-def _version_and_status():
-    """("AIQT X.Y.Z", "Published YYYY-MM-DD") from VERSION and changelog.toml; RefusedPage when the
-    released version has no changelog entry, so a stale strip cannot render."""
+def _version_and_status(root=None):
+    """The Version and Status cells of the control strip from VERSION and changelog.toml under `root` (the
+    repository when None).
+
+    A cut or tag tree (a VERSION other than X.Y.Z-dev): ("AIQT X.Y.Z", "Published YYYY-MM-DD"), taken from
+    the [[release]] whose version is VERSION; RefusedPage when no dated release matches, so a stale strip
+    cannot render.
+
+    A development tree (VERSION X.Y.Z-dev, between cuts): ("AIQT X.Y.Z-dev", "Unreleased (last release
+    A.B.C, published YYYY-MM-DD)"), where A.B.C and its date are the latest [[release]] (the last entry of
+    the array). RefusedPage when the [unreleased] table is absent or malformed (unreleased_problem), when its
+    version plus DEV_SUFFIX is not VERSION, when the latest release has no bare X.Y.Z version or no non-empty
+    string date, or when the [unreleased] version is not above that release, so a development strip never
+    names a planned version the changelog does not declare."""
+    root = ROOT if root is None else Path(root)
     try:
-        with open(ROOT / "VERSION", encoding="utf-8") as handle:
+        with open(root / "VERSION", encoding="utf-8") as handle:
             version = handle.read().strip()
-        with open(ROOT / "changelog.toml", "rb") as handle:
+        with open(root / "changelog.toml", "rb") as handle:
             data = handle.read()
     except (OSError, UnicodeError) as exc:
         raise RefusedPage("control strip inputs: {}".format(exc)) from exc
@@ -799,6 +824,29 @@ def _version_and_status():
         # tomllib raises the ValueError family on malformed TOML and RecursionError or MemoryError on
         # hostile nesting; each is disposed of here, at the parse site, as a refusal.
         raise RefusedPage("changelog.toml: cannot parse ({}: {})".format(type(exc).__name__, exc)) from exc
+    tree = parse_tree_version(version)
+    if tree is not None and tree[1]:
+        unreleased = log.get("unreleased")
+        if unreleased is None:
+            raise RefusedPage("changelog.toml: VERSION {} is a development version and there is no [unreleased] "
+                              "table".format(version))
+        problem = unreleased_problem(unreleased)
+        if problem is not None:
+            raise RefusedPage("changelog.toml: {}".format(problem))
+        if unreleased["version"] + DEV_SUFFIX != version:
+            raise RefusedPage("changelog.toml: [unreleased] version {} plus {} is not VERSION {}".format(
+                unreleased["version"], DEV_SUFFIX, version))
+        releases = log.get("release")
+        latest = releases[-1] if isinstance(releases, list) and releases else None
+        last = latest.get("version") if isinstance(latest, dict) else None
+        date = latest.get("date") if isinstance(latest, dict) else None
+        if not isinstance(last, str) or _parse(last) is None or not isinstance(date, str) or not date:
+            raise RefusedPage("changelog.toml: the latest [[release]] lacks a bare X.Y.Z version or a non-empty "
+                              "date to name beside development VERSION {}".format(version))
+        if _parse(unreleased["version"]) <= _parse(last):
+            raise RefusedPage("changelog.toml: [unreleased] version {} is not above the latest release {}".format(
+                unreleased["version"], last))
+        return "AIQT " + version, "Unreleased (last release {}, published {})".format(last, date)
     for release in log.get("release", []):
         if isinstance(release, dict) and release.get("version") == version:
             date = release.get("date")
@@ -3143,13 +3191,49 @@ def _self_test():
     expect("component/about", rendered('component = "about"\n', kind="landing") == _about(site))
     with open(ROOT / "VERSION", encoding="utf-8") as handle:
         released = handle.read().strip()
+    # The live tree is a cut or tag tree (VERSION X.Y.Z, a "Published" status) or a development tree (VERSION
+    # X.Y.Z-dev between cuts, an "Unreleased (last release ..." status); the row expects the status its VERSION
+    # calls for.
+    live_tree = parse_tree_version(released)
+    live_status = "Unreleased (last release " if live_tree is not None and live_tree[1] else "Published "
     control = rendered('component = "control"\ndocument = "aiqt.ai"\nsource_text = "jposluns/guardrails"\n'
                        'source_href = "https://github.com/jposluns/guardrails"\n')
     expect("component/control", control.startswith(
         '<dl class="control"><div><dt>Document</dt><dd>aiqt.ai</dd></div>'
-        '<div><dt>Version</dt><dd>AIQT {}</dd></div><div><dt>Status</dt><dd>Published '.format(released))
+        '<div><dt>Version</dt><dd>AIQT {}</dd></div><div><dt>Status</dt><dd>{}'.format(released, live_status))
         and '<div><dt>Licence</dt><dd><a href="/draft/license/">Apache 2.0, see NOTICE</a></dd></div></dl>'
         in control, control)
+
+    # The control strip's Version and Status from a fixture VERSION and changelog.toml (test I): a development
+    # VERSION with a matching [unreleased] table renders "AIQT X.Y.Z-dev" and the latest release with its date;
+    # a development VERSION with no [unreleased], a malformed one, one that does not match, one not above the
+    # latest release, or a latest release with no date, is refused; a cut VERSION still reads "Published".
+    def strip_cells(version_text, changelog_text):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-version-") as tmp:
+            with open(Path(tmp) / "VERSION", "w", encoding="utf-8") as handle:
+                handle.write(version_text)
+            with open(Path(tmp) / "changelog.toml", "w", encoding="utf-8") as handle:
+                handle.write(changelog_text)
+            return _version_and_status(tmp)
+
+    released_105 = '[[release]]\nversion = "1.0.5"\ndate = "2026-09-18"\n'
+    cells = accepted("version/dev-renders-unreleased", strip_cells, "1.1.0-dev\n",
+                     '[unreleased]\nversion = "1.1.0"\n\n' + released_105)
+    expect("version/dev-renders-unreleased",
+           cells == ("AIQT 1.1.0-dev", "Unreleased (last release 1.0.5, published 2026-09-18)"), cells)
+    refused("version/dev-without-unreleased-refused", strip_cells, "1.1.0-dev\n", released_105)
+    refused("version/dev-mismatched-unreleased-refused", strip_cells, "1.1.0-dev\n",
+            '[unreleased]\nversion = "1.1.1"\n\n' + released_105)
+    # Each refused fixture breaks exactly one rule, so each row is held by its own guard: here the table matches
+    # VERSION and is above the dated latest release, and only its unsupported key is malformed.
+    refused("version/dev-malformed-unreleased-refused", strip_cells, "1.1.0-dev\n",
+            '[unreleased]\nversion = "1.1.0"\nnote = "x"\n\n' + released_105)
+    refused("version/dev-unreleased-not-above-release-refused", strip_cells, "1.0.5-dev\n",
+            '[unreleased]\nversion = "1.0.5"\n\n' + released_105)
+    refused("version/dev-undated-latest-release-refused", strip_cells, "1.1.0-dev\n",
+            '[unreleased]\nversion = "1.1.0"\n\n[[release]]\nversion = "1.0.5"\n')
+    cells = accepted("version/cut-renders-published", strip_cells, "1.0.5\n", released_105)
+    expect("version/cut-renders-published", cells == ("AIQT 1.0.5", "Published 2026-09-18"), cells)
     clause = rendered('component = "clause"\nid = "st-1"\nnum = "1"\ntitle = "T"\nlbl = "Clause 1"\n'
                       'rail = "T"\n')
     expect("component/clause", clause == (
@@ -5479,7 +5563,9 @@ def _self_test():
     print("SELF-TEST PASS: gen_draft_site (shell and head order, the scheme script and switch, robots meta, "
           "the description metas (presence, escaping and order), the link-preview card metas, footer "
           "cycle, base path, every "
-          "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
+          "component's reference markup, the control strip's Version and Status on a cut and on a "
+          "development VERSION (a missing, malformed, mismatched or not-above [unreleased] or an undated latest "
+          "release refused), the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
           "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
           "hook count read from the hooks manifest of the root run() is given (a symbolic link, a FIFO or "

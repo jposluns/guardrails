@@ -191,7 +191,7 @@ def check_name(family, name):
             if name == "00-project-integrity.md":
                 return None
             return ("apex-nonstandard", "only 00-project-integrity.md may take the 00- prefix")
-        m = AIQT_NONAPEX_RE.match(name)
+        m = AIQT_NONAPEX_RE.fullmatch(name)
         if not m:
             return ("bad-name", "does not match the aiqt <tier>-<facet>-<slug>.md shape")
         tier, facet = m.group(1), m.group(2)
@@ -199,7 +199,7 @@ def check_name(family, name):
             return ("tier-code-mismatch", "facet {} belongs to tier {}, not {}".format(facet, AIQT_TIER_OF[facet], tier))
         return None
     if family == "security":
-        if SECURITY_RE.match(name):
+        if SECURITY_RE.fullmatch(name):
             return None
         return ("bad-name", "does not match the security <facet>-<slug>.md shape")
     return None
@@ -1623,6 +1623,11 @@ def self_test(report_path=None):
                                                       ("bad.md",), ())
                 caught = not _refused_naming(got, target)
             check("mutant/listing-identity-unchecked-caught", caught, got)
+
+            # 3c. a rule file name is matched whole: `$` also matches before a final newline, so a
+            # .match() would read "10-ACCUR-x.md" plus a newline as well-formed; fullmatch refuses it.
+            got = check_name("aiqt", "10-ACCUR-x.md\n")
+            check("name/aiqt-trailing-newline-bad-name", got is not None and got[0] == "bad-name", got)
 
             # 4. every --root vector holds against this gate
             roots = _fixtures(base)
