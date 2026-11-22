@@ -23395,7 +23395,8 @@ def _main_isolated(report_path=None):
                                  "ls -l /dev/fd/3/ 3</proc/self", "cat /proc/self/fd/3/status 3</proc/self",
                                  "dpkg -L lua5.4", "dpkg --pre-invoke true -L lua5.4",
                                  "ls > /dev/null", "cat a.txt 2>/dev/null", "/usr/bin/../bin/ls -l",
-                                 "PATH=/usr/local/bin:/usr/bin:/bin ls", "export PATH=/opt/tool/bin:$PATH",
+                                 "PATH=/usr/local/bin:/usr/bin:/bin ls",
+                                 "export PATH={}/tool/bin:$PATH".format(tmp),
                                  "readlink {}".format(_nrd_plink))
         check("nrd/other-name-more-reads-allow",
               [_verdict(nrd(c, cwd=outd, project=_nrd_proj)) for c in _nrd_other_more_allow],
@@ -25307,19 +25308,23 @@ def _main_isolated(report_path=None):
                in _nrdc_r_none, "/usr/local/bin/orch-deliverable" in _nrdc_r_none),
               (True, True, False, True, False))
         # F8: the store the deny text names is the registry's declared directories, not a literal path
+        # (no store leaf name at all, so no literal store path under any root; the flip's literal store is
+        # built under this test's temporary directory)
+        _nrdc_store_leaf = "orch-deliverables"
+        _nrdc_literal_store = "{}/{}/<UID>".format(tmp, _nrdc_store_leaf)
         check("nrd-contain/deny-text-store-from-registry",
-              ("/var/lib/orch-deliverables" in _nrdc_r_cont,
+              (_nrdc_store_leaf in _nrdc_r_cont,
                aiqt_hooks._nrd_store_names(("/a/one", "/a/two", "/a/one")),
                aiqt_hooks._nrd_store_names(())),
               (False, "/a/one, /a/two", "none declared"))
         _nrdc_real_store_names = aiqt_hooks._nrd_store_names
-        setattr(aiqt_hooks, "_nrd_store_names", lambda dirs: "/var/lib/orch-deliverables/<UID>")
+        setattr(aiqt_hooks, "_nrd_store_names", lambda dirs: _nrdc_literal_store)
         try:
             _nrdc_r_cont_mut = _nrdc_reason("contained", "python3 {}/x.py".format(hb), outd)
         finally:
             setattr(aiqt_hooks, "_nrd_store_names", _nrdc_real_store_names)
         check("nrd-contain/flip-deny-text-literal-store-red",
-              ("/var/lib/orch-deliverables" in _nrdc_r_cont_mut, st in _nrdc_r_cont_mut), (True, False))
+              (_nrdc_store_leaf in _nrdc_r_cont_mut, st in _nrdc_r_cont_mut), (True, False))
         # the real probe's detail reaches the reason (the fixture is not contained)
         _nrdc_r_real = (nrd("python3 {}/x.py".format(hb), cwd=outd, project=str(nd.root))[1] or {}).get(
             "hookSpecificOutput", {}).get("permissionDecisionReason", "")

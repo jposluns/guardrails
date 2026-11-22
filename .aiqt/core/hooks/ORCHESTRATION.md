@@ -1097,10 +1097,11 @@ with a stand-in base (`nrd-contain/differential-*`).
 
 Operator steps (host work, outside this repository; each is its own request to the host owner):
 
-1. R1, filesystem: a disk-backed filesystem (not tmpfs) mounted at `/var/lib/orch-deliverables` with
+1. R1, filesystem: a disk-backed filesystem (not tmpfs) mounted at the store directory that the
+   registry's `deliverable_dirs` will name (for example `/abs/path/to/deliverables`) with
    `rw,noexec,nosuid,nodev`, its own fstab entry, root directory `root:root 0711`.
 2. R2, account: a system user and group `orch-deliv` (no login, no home) owning
-   `/var/lib/orch-deliverables/<UID>/` for each adopting orchestrator UID, mode 0700, no ACL entries.
+   `/abs/path/to/deliverables/<UID>/` for each adopting orchestrator UID, mode 0700, no ACL entries.
 3. R3, helper and sudoers: the root-owned helper `/usr/local/bin/orch-deliverable` (`put`, `cat`, `ls`;
    it refuses symlinks, hard links, FIFOs, devices, oversize files, absolute names and `..`), and a
    sudoers rule letting each adopting orchestrator run exactly that path as `orch-deliv`, NOPASSWD,
