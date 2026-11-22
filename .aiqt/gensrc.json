@@ -49,7 +49,8 @@
         ".aiqt/core/rules/",
         ".aiqt/core/hooks/manifest.toml",
         ".aiqt/core/hooks/preview.toml",
-        ".aiqt/core/gates/manifest.toml"
+        ".aiqt/core/gates/manifest.toml",
+        ".aiqt/core/githooks/manifest.toml"
       ],
       "target": ".aiqt/enforceability.json"
     },
