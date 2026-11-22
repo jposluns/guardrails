@@ -3921,11 +3921,17 @@ def _self_test():
         # bytes the byte-canon scan forbids. These document the hole the whole-body fail-closed scan (in
         # _render_resolved) closes.
         for _lbl, _cp in (("zwsp", 0x200B), ("zwnj", 0x200C), ("zwj", 0x200D),
-                          ("wj", 0x2060), ("bom", 0xFEFF), ("shy", 0x00AD), ("rlo", 0x202E)):
+                          ("wj", 0x2060), ("bom", 0xFEFF), ("rlo", 0x202E)):
             _mt = _md_text("a" + chr(_cp) + "b")
             check("md-text-passes-forbidden-" + _lbl, chr(_cp) in _mt)
             check("byte-canon-flags-forbidden-" + _lbl,
                   check_byte_canon.scan_bytes(_mt.encode("utf-8")) != [])
+        # U+00AD SOFT HYPHEN is NOT in the shared forbidden set (like U+2028/U+2029 it is refused only by
+        # AIQT's release gate, since an adopter's store may already hold one): _md_text passes it and the
+        # shared scan does not flag it, so a view over such a record renders.
+        _mt = _md_text("co" + chr(0x00AD) + "op")
+        check("md-text-passes-soft-hyphen", chr(0x00AD) in _mt)
+        check("byte-canon-passes-soft-hyphen", check_byte_canon.scan_bytes((_mt + "\n").encode("utf-8")) == [])
         # A lone CR is a DIFFERENT case: _md_text COLLAPSES it to a space, so it never reaches a body; the
         # scan's CR leg is defence in depth for any non-_md_text path (schema also rejects a CR in title).
         check("md-text-collapses-cr", _md_text("a\rb") == "a b")
@@ -4787,8 +4793,7 @@ def _self_test():
         ]) + "\n"
         for _bcls, _bcp in (("zero-width-u200b", 0x200B), ("zero-width-u200c", 0x200C),
                             ("zero-width-u200d", 0x200D), ("word-joiner-u2060", 0x2060),
-                            ("bom-ufeff", 0xFEFF), ("soft-hyphen-u00ad", 0x00AD),
-                            ("bidi-rlo-u202e", 0x202E)):
+                            ("bom-ufeff", 0xFEFF), ("bidi-rlo-u202e", 0x202E)):
             _bcroot = new_root()
             write_toml(_bcroot, "manifest.toml", manifest)
             empty_indexes(_bcroot)
@@ -4801,6 +4806,21 @@ def _self_test():
                   render_write(_bcroot) == EXIT_CANNOT_EVALUATE)
             check("byte-canon-wrote-nothing-" + _bcls,
                   not (_bcroot / WORKING_DIRNAME / "TODO.md").exists())
+        # U+00AD SOFT HYPHEN stays OUT of that fail-closed set: a store whose record title holds a literal
+        # one (an earlier emitter wrote it so, and an imported or done record cannot be changed) still
+        # renders (EXIT_OK), and the view carries the character as the record does.
+        _shyroot = new_root()
+        write_toml(_shyroot, "manifest.toml", manifest)
+        empty_indexes(_shyroot)
+        write_toml(_shyroot, "version.toml", _bc_version)
+        write_toml(_shyroot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", "co" + chr(0x00AD) + "op"),
+        ]) + "\n")
+        check("soft-hyphen-store-renders", render_write(_shyroot) == EXIT_OK)
+        _shytodo = _shyroot / WORKING_DIRNAME / "TODO.md"
+        check("soft-hyphen-store-view-written",
+              _shytodo.exists() and chr(0x00AD) in _shytodo.read_text(encoding="utf-8"))
 
         # Byte-canon positive case: a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
         # renders a body line ending in whitespace; _render_resolved normalizes trailing line

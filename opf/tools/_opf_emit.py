@@ -48,10 +48,10 @@ byte rules; the self-test reconciles this module's forbidden-codepoint set again
 emitted vector through _byte_canon.scan_bytes, so the two cannot drift. The line and paragraph separators
 U+2028 and U+2029 (_byte_canon.LINE_SEPARATORS, outside the forbidden set) are escaped too and reconciled
 the same way; an earlier emitter wrote them literally, and matches_store_bytes and prior_separator_spelling
-let a caller accept a store file or a recorded digest in that spelling. U+00AD SOFT HYPHEN joined the
-forbidden set later (it is in _byte_canon's zero-width class); the emitters before that wrote it literally,
-and matches_store_bytes, prior_soft_hyphen_spelling and prior_spellings accept that spelling the same
-way. The en dash (U+2013) and em
+let a caller accept a store file or a recorded digest in that spelling. U+00AD SOFT HYPHEN
+(_byte_canon.SOFT_HYPHEN, outside the forbidden set for the separators' reason) is escaped and reconciled
+the same way since a later release; the emitters before that wrote it literally, and matches_store_bytes,
+prior_soft_hyphen_spelling and prior_spellings accept that spelling too. The en dash (U+2013) and em
 dash (U+2014) escaping is a SEPARATE house-style no-dash guarantee, not part of the byte_canon forbidden
 set, so the emitted bytes are dash-free by construction independent of what byte_canon covers.
 
@@ -90,6 +90,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import datetime
+import hashlib
 import math
 import re
 from pathlib import Path
@@ -107,10 +108,10 @@ class EmitError(Exception):
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 # Codepoints the byte-canon scanner forbids anywhere in a released text file (_byte_canon.py, VER-CORE 3.1):
-# zero-width (U+200B..U+200D, U+2060 word joiner, U+FEFF, U+00AD soft hyphen) and the Unicode Bidi_Control
-# set. They are escaped in emitted strings so they never appear literally. This constant is the authority's
-# set; the self-test asserts it equals _byte_canon.FORBIDDEN, so a change there cannot silently pass here.
-_ZERO_WIDTH = frozenset(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD))
+# zero-width (U+200B..U+200D, U+2060 word joiner, U+FEFF) and the Unicode Bidi_Control set. They are
+# escaped in emitted strings so they never appear literally. This constant is the authority's set; the
+# self-test asserts it equals _byte_canon.FORBIDDEN, so a change there cannot silently pass here.
+_ZERO_WIDTH = frozenset(chr(c) for c in (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF))
 _BIDI = frozenset(chr(c) for c in (0x061C, 0x200E, 0x200F)
                   + tuple(range(0x202A, 0x202F)) + tuple(range(0x2066, 0x206A)))
 _FORBIDDEN_CODEPOINTS = _ZERO_WIDTH | _BIDI
@@ -119,8 +120,15 @@ _FORBIDDEN_CODEPOINTS = _ZERO_WIDTH | _BIDI
 # forbidden set so render and record do not refuse a store that holds one): str.splitlines() splits on both,
 # so they are escaped too and never reach the emitted bytes literally. The self-test asserts this constant
 # equals _byte_canon.LINE_SEPARATORS, as it does for the forbidden set. An emitter before this escape wrote
-# them literally; matches_store_bytes and prior_separator_spelling accept that earlier spelling.
+# them (and U+00AD) literally; matches_store_bytes and prior_separator_spelling accept that earlier
+# spelling.
 _LINE_SEPARATORS = frozenset((chr(0x2028), chr(0x2029)))
+
+# U+00AD SOFT HYPHEN (_byte_canon.SOFT_HYPHEN, kept apart from the forbidden set for the separators' reason):
+# a literal one hides inside a word, so it is escaped too. The self-test asserts this constant equals
+# _byte_canon.SOFT_HYPHEN. The emitters before this escape wrote it literally; matches_store_bytes,
+# prior_soft_hyphen_spelling and prior_spellings accept that earlier spelling.
+_SOFT_HYPHEN_SET = frozenset((chr(0x00AD),))
 
 # House-style no-dash guarantee, separate from byte_canon (which does not cover dashes): the en dash
 # (U+2013) and em dash (U+2014) are escaped so they never reach the emitted bytes literally, whatever
@@ -162,14 +170,14 @@ _MAX_EMIT_BYTES = 64 * 1024 * 1024
 def _escape_basic(s):
     """Render `s` as a TOML basic string (with surrounding quotes), escaping every character that must
     not appear literally: the two structural characters (\\ and \"), the C0 controls and DEL and the C1
-    controls, the byte-canon forbidden codepoints, and the line and paragraph separators U+2028 and U+2029.
-    The en dash (U+2013) and em dash (U+2014) are also escaped, so the emitted bytes are dash-free whatever
-    the input carries; that is a house-style no-dash guarantee, separate from byte_canon (which does not
-    cover dashes). Everything else, including ordinary printable unicode, is left literal. A lone surrogate
-    has no UTF-8 encoding, so it is rejected fail-closed (EmitError) rather than returned in a document
-    whose bytes cannot be encoded. The result contains no raw CR, no forbidden codepoint, no line or
-    paragraph separator, no dash byte, and (because the closing quote follows the content) never leaves a
-    line with trailing whitespace."""
+    controls, the byte-canon forbidden codepoints, the line and paragraph separators U+2028 and U+2029, and
+    U+00AD SOFT HYPHEN. The en dash (U+2013) and em dash (U+2014) are also escaped, so the emitted bytes
+    are dash-free whatever the input carries; that is a house-style no-dash guarantee, separate from
+    byte_canon (which does not cover dashes). Everything else, including ordinary printable unicode, is
+    left literal. A lone surrogate has no UTF-8 encoding, so it is rejected fail-closed (EmitError) rather
+    than returned in a document whose bytes cannot be encoded. The result contains no raw CR, no forbidden
+    codepoint, no line or paragraph separator, no soft hyphen, no dash byte, and (because the closing quote
+    follows the content) never leaves a line with trailing whitespace."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -178,7 +186,7 @@ def _escape_basic(s):
         if ch in _NAMED_ESCAPES:
             out.append(_NAMED_ESCAPES[ch])
         elif (o < 0x20 or 0x7F <= o <= 0x9F or ch in _FORBIDDEN_CODEPOINTS or ch in _LINE_SEPARATORS
-              or ch in _HOUSE_STYLE_DASHES):
+              or ch in _SOFT_HYPHEN_SET or ch in _HOUSE_STYLE_DASHES):
             out.append("\\u{:04X}".format(o))
         else:
             out.append(ch)
@@ -583,11 +591,11 @@ def emit_checked(document):
     return text
 
 
-# U+00AD SOFT HYPHEN joined the byte-canon zero-width class after the separator escape shipped; the emitter
-# before that wrote it literally, as the one before the separator escape wrote U+2028 and U+2029 literally.
+# The U+00AD SOFT HYPHEN escape shipped after the separator escape; the emitter before it wrote the soft
+# hyphen literally, as the one before the separator escape wrote U+2028, U+2029 and U+00AD literally.
 _SOFT_HYPHEN = chr(0x00AD)
 # Every character an earlier emitter wrote literally that this one escapes.
-_EARLIER_LITERAL = _LINE_SEPARATORS | frozenset((_SOFT_HYPHEN,))
+_EARLIER_LITERAL = _LINE_SEPARATORS | _SOFT_HYPHEN_SET
 # Each such character's UTF-8 bytes paired with the escape text the emitter now writes for it inside a basic
 # string.
 _SEPARATOR_ESCAPES = tuple(sorted((ch.encode("utf-8"), "\\u{:04X}".format(ord(ch)).encode("ascii"))
@@ -603,7 +611,7 @@ def _earlier_escape_re(chars):
 # The spelling before the U+2028/U+2029 escape: the separators and the soft hyphen both literal.
 _SEPARATOR_ESCAPE_RE = _earlier_escape_re(_EARLIER_LITERAL)
 # The spelling before the U+00AD escape: the separators escaped, the soft hyphen literal.
-_SOFT_HYPHEN_ESCAPE_RE = _earlier_escape_re(frozenset((_SOFT_HYPHEN,)))
+_SOFT_HYPHEN_ESCAPE_RE = _earlier_escape_re(_SOFT_HYPHEN_SET)
 
 
 def matches_store_bytes(raw, fresh):
@@ -653,6 +661,17 @@ def prior_spellings(text):
         if spelled != text and spelled not in out:
             out.append(spelled)
     return tuple(out)
+
+
+def matches_recorded_digest(text, recorded):
+    """True iff `recorded` is the "sha256:<hex>" digest of `text`, a canonical emission, or of one of its
+    prior_spellings, so a digest (a per-record digest or a plan seal) an earlier emitter recorded over the
+    same model still matches. Every spelling is a function of the model alone, so a changed model matches
+    none."""
+    for spelled in (text,) + prior_spellings(text):
+        if recorded == "sha256:" + hashlib.sha256(spelled.encode("utf-8")).hexdigest():
+            return True
+    return False
 
 
 # --- self-test --------------------------------------------------------------------------------------
@@ -3812,9 +3831,10 @@ def _self_test_body():
         return 2
     if not (isinstance(getattr(byte_canon, "FORBIDDEN", None), dict)
             and isinstance(getattr(byte_canon, "LINE_SEPARATORS", None), dict)
+            and isinstance(getattr(byte_canon, "SOFT_HYPHEN", None), dict)
             and callable(getattr(byte_canon, "scan_bytes", None))):
-        print("error: the byte-canon authority lacks the expected FORBIDDEN/LINE_SEPARATORS/scan_bytes "
-              "interface; fail-closed", file=sys.stderr)
+        print("error: the byte-canon authority lacks the expected FORBIDDEN/LINE_SEPARATORS/SOFT_HYPHEN/"
+              "scan_bytes interface; fail-closed", file=sys.stderr)
         return 2
 
     # The forbidden-codepoint set MUST match the authority's, so a body carrying any of them is escaped.
@@ -3830,6 +3850,16 @@ def _self_test_body():
         failures.append("line-separator set disagrees with _byte_canon.LINE_SEPARATORS "
                         "(missing {}, extra {})".format(sorted(separator_authority - set(_LINE_SEPARATORS)),
                                                         sorted(set(_LINE_SEPARATORS) - separator_authority)))
+    # U+00AD SOFT HYPHEN is escaped too and kept out of FORBIDDEN for the same reason; this set MUST match
+    # the authority's separate SOFT_HYPHEN constant, and neither gate-only set may sit inside FORBIDDEN.
+    soft_hyphen_authority = set(byte_canon.SOFT_HYPHEN.values())
+    if set(_SOFT_HYPHEN_SET) != soft_hyphen_authority:
+        failures.append("soft-hyphen set disagrees with _byte_canon.SOFT_HYPHEN (missing {}, extra "
+                        "{})".format(sorted(soft_hyphen_authority - set(_SOFT_HYPHEN_SET)),
+                                     sorted(set(_SOFT_HYPHEN_SET) - soft_hyphen_authority)))
+    if (separator_authority | soft_hyphen_authority) & authority:
+        failures.append("a gate-only codepoint (a separator or the soft hyphen) is inside "
+                        "_byte_canon.FORBIDDEN, which opf's view generator refuses")
 
     # sys.modules-substitution pin: the authority is loaded from its pinned sibling FILE, not the ambient
     # sys.modules cache, so a poisoned _byte_canon entry cannot substitute an always-clean scanner
@@ -3864,11 +3894,16 @@ def _self_test_body():
         findings = byte_canon.scan_bytes(text.encode("utf-8"))
         if findings:
             failures.append("{}: emitted bytes are not byte-canonical: {}".format(label, findings))
-        # scan_bytes leaves the separators to the repository gate, so check the authority's set directly.
+        # scan_bytes leaves the separators and the soft hyphen to the repository gate, so check the
+        # authority's sets directly.
         literal = sorted(ch for b, ch in byte_canon.LINE_SEPARATORS.items() if b in text.encode("utf-8"))
         if literal:
             failures.append("{}: emitted bytes carry a literal line or paragraph separator: {}".format(
                 label, ["U+{:04X}".format(ord(ch)) for ch in literal]))
+        shy_literal = sorted(ch for b, ch in byte_canon.SOFT_HYPHEN.items() if b in text.encode("utf-8"))
+        if shy_literal:
+            failures.append("{}: emitted bytes carry a literal soft hyphen: {}".format(
+                label, ["U+{:04X}".format(ord(ch)) for ch in shy_literal]))
 
     def _round_trips(document, label):
         try:
@@ -4013,8 +4048,9 @@ def _self_test_body():
         if got != want or tomllib.loads(got) != model:
             failures.append("prior-spelling/{}: got {!r}; expected {!r}".format(label, got, want))
 
-    # U+00AD SOFT HYPHEN (in _byte_canon's zero-width class): written as TOML's backslash-u00AD escape in a value and in
-    # a quoted key and read back unchanged; its neighbours U+00AC and U+00AE stay literal. The emitters
+    # U+00AD SOFT HYPHEN (_byte_canon.SOFT_HYPHEN, outside the forbidden set): written as TOML's backslash-u00AD
+    # escape in a value and in a quoted key and read back unchanged; its neighbours U+00AC and U+00AE stay
+    # literal. The emitters
     # before that escape wrote it literally: matches_store_bytes accepts that spelling (alone and with the
     # separator spellings) and nothing wider, and prior_spellings yields both earlier digest spellings.
     shy = chr(0x00AD)
