@@ -15,17 +15,43 @@ TIMESTAMP CLAIM. Anywhere in assistant prose, bracketed or not:
     YYYY-MM-DD[T or space]HH:MM(:SS(.f{1,9})?)? ZONE
 ZONE is required: Z (attached or after one space); a numeric offset +HH, +HHMM, or +HH:MM, or with -,
 attached or after one space; or, after one space, UTC, GMT, or a letter abbreviation of 2 to 6 capitals.
-Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation counts only when it is the
+Z, UTC, and GMT are UTC; an offset is applied as written; a letter abbreviation counts when it is the
 process local zone's abbreviation at that wall time (both DST readings are tried; if both match, the earlier
-instant is taken). A time with no zone, or with an abbreviation that is not the local zone, is not a claim
-in prose (it is ignored). The zone grammar and the scheduling keyword list are duplicated verbatim in
-future-stamp-write.py (python3 -I forbids a sibling import); a self-test asserts they are identical.
+instant is taken), else when it is EST or EDT and is the abbreviation that LOCAL_ZONE (America/Toronto, the
+zone of clock-inject.py's CLOCK and CONSOLE PREFIX lines) in the system zone database gives that wall time,
+whatever the process zone (TZ), never a fixed offset: both folds of a repeated hour are tried (the earlier
+instant is taken), and a wall time in the skipped hour has none. The process zone's reading comes first, so
+a process zone whose own abbreviation at that wall time is EST or EDT (TZ=EST-10, say) keeps its reading and
+LOCAL_ZONE is not consulted: there the CONSOLE PREFIX stamp is read in the process zone, not in Toronto
+(test_process_zone_reading_keeps_precedence). When zoneinfo or that zone entry is missing, or any error
+comes from building or using it (a corrupt, truncated or unreadable zone file), LOCAL_ZONE
+counts for nothing and only the process zone does, exactly as without it. A time with no zone, or with an
+abbreviation that counts for neither, is not a claim in prose (it is ignored). The zone grammar and the
+scheduling keyword list are duplicated verbatim in future-stamp-write.py (python3 -I forbids a sibling
+import); a self-test asserts they are identical.
+EXEMPTIONS, the complete list (each scope is detailed below): (a) EXEMPT TEXT (fenced code, blockquote lines,
+inline code spans) for every rule; (b) the scheduling keyword exemption of EXEMPT TEXT, for AHEAD only and
+only for a claim that is NOT a status stamp; (c) BEHIND is checked only for the bracketed HEADER stamp
+(rule 2), so an unbracketed first status stamp, later status stamps and mid-line claims are never checked for
+BEHIND; (d) a claim that cannot be converted fails open (rule 2); (e) only the LAST elapsed footer is
+checked, and only with a known lease start (rule 3); (f) the message selection, block cap, lock and fail-open
+allows of WHICH MESSAGES and RESIDUAL COVERAGE. There is no other. NOT ADOPTED from the alternate copy (a
+separate release copy of these hooks), because each let through a stamp or footer that this hook blocked
+before: its scheduling-table column exemption, its `due:`, `scheduled` and `certificate rotation` suffix
+exemption for a line-leading stamp, its past-event
+header (launched, released, deployed, occurred) exemption from BEHIND, and its footer-prose (total, across,
+workers, timeout, limit) exemption; nor its twelve extra scheduling keywords (revisit, "retry after", window,
+"embargo lifts", follow-up, "returns on", "starts at", run_at, rerun, "check back", "moved to", resets),
+which widen (b): "the window opens T", a mid-line future time this hook blocks, would pass. NOT ADOPTED from
+the session copy (an open maintainer decision): its
+block, as UNVERIFIABLE, of a line-leading status stamp whose letter zone abbreviation it cannot convert (a
+wrong Toronto label such as EDT in November included); here such a stamp fails open as (d) says.
 
 EXEMPT TEXT. Lines inside a matched fenced code block (``` or ~~~, closed by a fence of the same character
 at least as long; an UNCLOSED fence is not code, so its lines are checked), blockquote lines (starting `>`
 after optional whitespace), and inline code spans (a backtick run closed by the next run of the same length
 on the same line; an unclosed run opens nothing). For the AHEAD rule only, a NON-leading claim is also exempt
-when a scheduling keyword IMMEDIATELY precedes it: the keyword ends at most SCHED_GAP_TOKENS (3) word tokens
+when a scheduling keyword CLOSELY precedes it: the keyword ends at most SCHED_GAP_TOKENS (3) word tokens
 before the claim (a word token holds a letter or digit, so `:`, `[`, or `**` do not count), as in "next run
 at T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T", "valid through T".
 Keywords (case-insensitive, whole words; see below): due, deadline, expir, until, next, scheduled, not before,
@@ -85,7 +111,8 @@ just past the last COMPLETE transcript record evaluated (a trailing record with 
 parse is unfinished, and OFFSET never passes it, so it is evaluated once complete), with a SHA-256 of up to
 256 bytes before OFFSET. The next Stop (with stop_hook_active or not) evaluates only records starting at or
 after OFFSET. The file is written when this hook blocks, and on a pass once a state file exists or was
-unavailable. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
+unavailable, when the state is absent under an explicit stop_hook_active true, and, with no state, on an
+observed new turn (the counter-only seed: counter 0 and OFFSET 0; see BLOCK CAP). LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
 its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
 after OFFSET only through transcript lag. Only a Stop that actually BLOCKS records an entry: a capped or
@@ -165,7 +192,12 @@ alone never resets it. While stop_hook_active is true the counter NEVER decrease
 and whatever the final message is: a transcript reset or rewrite, or a user-role entry
 read as a genuine user message, resets the boundary and the late-arrival exception but never the counter,
 and a clean pass inside the loop keeps it (in an earlier version a clean pass reset it, so alternating with ANOTHER Stop
-hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit); where
+hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit); a
+clean pass on an observed new turn saves the state even when none existed, so a corrective loop that ANOTHER
+Stop hook starts after it finds an established count, not an absent state, and this hook's refusals inside
+that loop are capped as usual; that seed records counter 0 with the boundary it loaded (offset 0, no
+pending entry), never the scanned end, so the next Stop reads and checks the same messages, from offset 0, as
+it would with no saved state, and only the counter differs (an established 0, not an absent state); where
 the host omits the field, a NEW user-role entry read as a genuine user message can still restart the count,
 and an externally deleted state file reads as an established 0 and erases the recorded reset history (the
 count protections above need the explicit true, and even under it an earlier version read such a deletion as
@@ -294,7 +326,15 @@ every name when there are fewer); the subdirectories that remain are those of tr
 locked when they were examined, and eligible ones the cursor has not reached yet, each reached by a later
 prune (a prune runs only when a Stop creates a new transcript's subdirectory, so a backlog drains only as new
 transcripts arrive). Two concurrent prunes can each write the cursor, the later write winning; a name either
-skips is examined when the cursor next wraps round to it.
+skips is examined when the cursor next wraps round to it. The listing itself is bounded: a prune reads at
+most 16385 entries of the state dir (PRUNE_ENTRIES + 1, unrelated names included), and when there are more it
+removes nothing and leaves the dir untouched, so offline cleanup is then required; it does not stop silently:
+the Stop that ran it adds the PRUNE NOTE, one line naming the state dir and the 16384-entry limit, to its
+notes, written as that Stop's systemMessage only when the Stop writes no block and no earlier warning or note
+(a Stop writes at most one stdout line, and the prune runs last), and every later prune repeats it while the
+dir stays over the limit; and it reads at most 65
+entries of a stale subdirectory (PRUNE_CHILDREN + 1), skipping one with more, which is never partially
+deleted. The eventual-removal guarantee above holds only within these limits.
 On each Stop that is not an observed new turn (stop_hook_active true or absent) the save also
 re-reads the stored counter and never
 writes a lower value, and a block whose write would not raise the stored counter fails open. It is written
@@ -363,8 +403,9 @@ treated as unreadable). The lease read is capped at 1 MiB. The transcript is rea
 at most 64 MiB, each record at most 4 MiB (a longer record is skipped unparsed); every scan is linear.
 
 Contract: pass = no stdout, exit 0 (a pass that left a header stamp unchecked, rule 1, writes the "not checked"
-note as top-level {"systemMessage": ...}); block = top-level {"decision": "block", "reason": ...} on stdout, exit 0
-(the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
+note as top-level {"systemMessage": ...}, and a pass whose prune met the state-dir entry limit writes the
+PRUNE NOTE the same way when it has no "not checked" note); block = top-level
+{"decision": "block", "reason": ...} on stdout, exit 0 (the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
 capped or fail-open allow (see BLOCK CAP), or a busy Stop (see RESIDUAL COVERAGE) = top-level
 {"systemMessage": ...} on stdout (the user-visible warning), exit 0. Every Stop writes at most ONE
 stdout line, and a block or an allow with a warning then writes at most ONE stderr diagnostic line that
@@ -415,7 +456,8 @@ to it); when the true elapsed is known and an elapsed-footer violation is not th
 footer can be corrected in the same cycle); and "; UTC now ...". A core longer than the soft cap
 is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
 unresolved claims and names the first the same way, its literal whole; the busy note is fixed text; the "not
-checked" note names the first unchecked header stamp, its literal whole, and counts any others. stderr
+checked" note names the first unchecked header stamp, its literal whole, and counts any others; the PRUNE
+NOTE names the state dir and the entry limit. stderr
 gets at most ONE diagnostic line (the kind, the claim count, the true UTC, elapsed, and the first violation
 in full, never cut), never a copy of the systemMessage. The true local time, the violations after the
 first, and the full remedy text are not sent: the remedy's `date` reads the local time (convert a
@@ -425,8 +467,9 @@ zone in prose must not be ahead of when it was written; a [bracketed] stamp that
 must also be recent, and never later than when it was written at all: truncate to the minute (or second),
 never round up (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
 must match the lease. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only
-when a schedule or validity word immediately precedes it (due, deadline, expires, until, through, valid, next
-run at, scheduled for, not before, by, ...) or when it is in a `code span`; a line-leading stamp is always
+when a schedule or validity word immediately precedes it, ending at most three words before it (due,
+deadline, expires, until, through, valid, next run at, scheduled for, not before, by, ...) or when it is in a
+`code span`; a line-leading stamp is always
 checked for being ahead. To quote the rejected value in a correction, put it in a `code span` or a `>` line,
 or leave it out. Re-read the clock with `date` and `date -u` (never compose a time from memory or context),
 then send a short corrected message with the correct stamp and, as its last footer, the correct elapsed
@@ -465,7 +508,8 @@ final message) passes, as does any older message when the recovery state is unav
 written. Inline code-span detection is
 per line and approximate (an unclosed backtick run hides later spans on that line, so their claims are
 checked, failing toward checking). A letter abbreviation is trusted as local when it matches the process
-zone's abbreviation; a foreign zone sharing that abbreviation is not distinguished, and a claim with a foreign
+zone's abbreviation, or is EST or EDT as LOCAL_ZONE gives it; a foreign zone sharing that abbreviation is not
+distinguished, LOCAL_ZONE readings are only as right as the host's zone database, and a claim with a foreign
 abbreviation or an invalid date is not checked anywhere, a line-leading status stamp included (it
 fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS, though a
 pass then carries the non-blocking "not checked" note of rule 1; stamp in UTC or a numeric offset, or run
@@ -1090,8 +1134,53 @@ def _local_us(y, mo, d, hh, mi, ss, abbr):
     return min(found) * US if found else None
 
 
+LOCAL_ZONE = "America/Toronto"  # the zone of clock-inject.py's CLOCK and CONSOLE PREFIX lines
+LOCAL_ZONE_ABBRS = ("EST", "EDT")
+
+
+def _zone():
+    """LOCAL_ZONE from the system zone database, or None when zoneinfo or that entry is missing or cannot be
+    loaded (a corrupt, truncated or unreadable zone file can raise any error, struct.error for a half-truncated
+    one, not only ZoneInfoNotFoundError)."""
+    try:
+        import zoneinfo
+        return zoneinfo.ZoneInfo(LOCAL_ZONE)
+    except Exception:
+        return None
+
+
+def _zone_readings(y, mo, d, hh, mi, ss):
+    """(abbreviation, epoch microseconds) for each fold of a LOCAL_ZONE wall time that the zone database maps
+    back to the same wall time: two in the repeated hour, none in the skipped hour, else one. An invalid or
+    unrepresentable wall time, and any error from the zone itself, give none, so LOCAL_ZONE acceptance is off
+    and only the process zone counts, exactly as without LOCAL_ZONE."""
+    zone = _zone()
+    if zone is None:
+        return []
+    found = []
+    try:
+        for fold in (0, 1):
+            wall = datetime.datetime(y, mo, d, hh, mi, ss, fold=fold, tzinfo=zone)
+            back = wall.astimezone(UTC).astimezone(zone)
+            if (back.year, back.month, back.day, back.hour, back.minute, back.second) == (y, mo, d, hh, mi, ss) \
+                    and back.tzname() == wall.tzname():
+                found.append((wall.tzname(), to_us(wall)))
+    except Exception:
+        return []
+    return found
+
+
+def _zone_us(y, mo, d, hh, mi, ss, abbr):
+    """Epoch microseconds for a LOCAL_ZONE wall time whose abbreviation there is `abbr` (EST or EDT), or None."""
+    if abbr not in LOCAL_ZONE_ABBRS:
+        return None
+    found = [us for name, us in _zone_readings(y, mo, d, hh, mi, ss) if name == abbr]
+    return min(found) if found else None
+
+
 def claim_us(m):
-    """Epoch microseconds for a matched claim, or None (invalid fields, or an abbreviation not local then)."""
+    """Epoch microseconds for a matched claim, or None (invalid fields, or an abbreviation that is neither the
+    process zone's nor LOCAL_ZONE's EST or EDT then)."""
     try:
         y, mo, d, hh, mi = (int(m.group(i)) for i in range(1, 6))
         ss = int(m.group(6) or 0)
@@ -1107,6 +1196,8 @@ def claim_us(m):
             base, delta = _naive_us(y, mo, d, hh, mi, ss, us), (hours * 3600 + mins * 60) * US
             return base - delta if off[0] == "+" else base + delta
         loc = _local_us(y, mo, d, hh, mi, ss, abbr)
+        if loc is None:
+            loc = _zone_us(y, mo, d, hh, mi, ss, abbr)
         return None if loc is None else loc + us
     except (ValueError, OverflowError, OSError, TypeError):
         return None
@@ -1245,7 +1336,8 @@ def check_message(text, ref, start, where, behind, unchecked=None, heads=None):
     """Violation strings for one assistant message written at `ref` (epoch us); `start` is epoch us or None.
     `unchecked` (a list), when given, receives the literal of a HEADER stamp that was not checked because its
     letter zone could not be matched to the local zone; `heads` (a set), when given, receives the violation
-    string of a HEADER stamp AHEAD of `ref`."""
+    string of a HEADER stamp AHEAD of `ref`. The only exemptions are those of the module docstring's
+    EXEMPTIONS list; no table column, suffix, past-event or footer-prose exemption applies."""
     bad, seen, cache = [], set(), {}
     lines = text.splitlines()
     code = _code_lines(lines)
@@ -1550,6 +1642,8 @@ def default_state_dir():
 STATE_FILE = "state"  # the state file's name inside its per-transcript subdirectory
 PRUNE_AGE_NS = 7 * 86400 * 10 ** 9  # a per-transcript subdirectory unwritten this long may be pruned
 PRUNE_SCAN = 4096  # at most this many subdirectory names are examined per prune
+PRUNE_ENTRIES = 16384  # root enumeration cap, unrelated names included: a larger root is left untouched
+PRUNE_CHILDREN = 64  # entries per stale subdirectory: a larger one is skipped, never partially deleted
 PRUNE_BATCH = 32  # at most this many subdirectories are removed per prune
 PRUNE_CURSOR = "prune-cursor"  # the file in the state root naming where the next prune resumes
 
@@ -1822,7 +1916,13 @@ def _write_prune_cursor(root, name):
                 pass
 
 
-def prune_state(sdir, keep=None, now_ns=None):
+def _prune_full_note(sdir):
+    """The one-line note of a prune that stopped because the state root holds more than PRUNE_ENTRIES entries."""
+    return _one_line(f"stamp-truth-stop: state dir {sdir} holds more than {PRUNE_ENTRIES} entries, so no stale "
+                     "state was pruned; remove old *.d subdirectories there offline")
+
+
+def prune_state(sdir, keep=None, now_ns=None, notes=None):
     """Remove per-transcript state subdirectories left by transcripts no longer in use, so their
     number stays bounded. Lists the private root `sdir` (opened no-follow, never created), sorts its
     state_subdir-shaped names (less `keep`), and examines at most PRUNE_SCAN of them, starting just after the
@@ -1834,7 +1934,11 @@ def prune_state(sdir, keep=None, now_ns=None):
     written for PRUNE_AGE_NS (its mtime, which every save's atomic rename updates). Its regular entries are
     unlinked relative to its descriptor, and it is removed by name only while that name still refers to the
     locked inode. The cursor then records the last name examined, or is removed when every name was examined.
-    Returns the number removed. Never raises."""
+    Enumeration is bounded: at most PRUNE_ENTRIES + 1 root entries are listed (a larger root is left untouched,
+    removing nothing, so offline cleanup is then required, and when `notes` (a list) is given the one-line
+    _prune_full_note is appended to it, so the stop is not silent) and at most PRUNE_CHILDREN + 1 entries of a
+    stale subdirectory (a larger one is skipped, never partially deleted, with no note); the cursor's
+    eventual-removal guarantee holds only within these limits. Returns the number removed. Never raises."""
     removed = 0
     if fcntl is None:
         return 0
@@ -1845,7 +1949,16 @@ def prune_state(sdir, keep=None, now_ns=None):
     try:
         now_ns = time.time_ns() if now_ns is None else now_ns
         with os.scandir(root) as it:
-            names = sorted(entry.name for entry in it if entry.name != keep and _is_state_subdir(entry.name))
+            names = []
+            for index, entry in enumerate(it):
+                if index >= PRUNE_ENTRIES:
+                    # an oversized private root is left untouched, for offline cleanup, and says so
+                    if notes is not None:
+                        notes.append(_prune_full_note(sdir))
+                    return 0
+                if entry.name != keep and _is_state_subdir(entry.name):
+                    names.append(entry.name)
+            names.sort()
         cursor = _read_prune_cursor(root)
         start = bisect.bisect_right(names, cursor) if cursor is not None else 0
         window = (names[start:] + names[:start])[:PRUNE_SCAN]  # sorted order from the cursor, wrapping around
@@ -1866,7 +1979,17 @@ def prune_state(sdir, keep=None, now_ns=None):
                 st = os.fstat(cfd)
                 if now_ns - st.st_mtime_ns < PRUNE_AGE_NS:
                     continue
-                for child in os.listdir(cfd):
+                with os.scandir(cfd) as it:
+                    children = []
+                    for index, child in enumerate(it):
+                        if index >= PRUNE_CHILDREN:
+                            break
+                        children.append(child.name)
+                    else:
+                        index = -1
+                if index >= PRUNE_CHILDREN:
+                    continue  # an oversized subdirectory is never partially deleted; it is skipped
+                for child in children:
                     try:
                         os.unlink(child, dir_fd=cfd)
                     except OSError:
@@ -1938,7 +2061,7 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None,
         if dfd is not None:
             os.close(dfd)
         if info.get("created"):
-            prune_state(sdir, state_subdir(tp))
+            prune_state(sdir, state_subdir(tp), notes=notes)
 
 
 def _deliver(reason, emit, owed):
@@ -2388,12 +2511,25 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
                 # refusal or in the allow's warning, which names the first violation; dropping them let an
                 # earlier-message-only violation pass with no warning at all
                 kept, earlier_bad = earlier_bad, []
-        elif had_state or not state_ok or absent_unknown:
+        elif had_state or not state_ok or absent_unknown or fresh:
             # advance, or repair an unreadable state, or persist the unknown marker a CLEAN Stop
             # discovered in an absent state under an explicit true; the counter is written too
             # (preserved under stop_hook_active, BLOCK_CAP when it was unknown), never reset to 0 inside
-            # the corrective loop
-            save(*(held if held is not None else (t["end"], t["tail"], remaining)))
+            # the corrective loop. A clean pass on an observed new turn (fresh) SEEDS the state even when
+            # none existed, so a corrective loop that ANOTHER Stop hook starts afterwards finds an established
+            # 0, not an absent state (an unknown count under an explicit true, which only allows with a
+            # warning), and this hook's refusals inside it are capped. The seed records ONLY the counter: it
+            # keeps the LOADED boundary (offset 0, no tail, no pending entry, since nothing was saved), so
+            # the next Stop re-reads and checks the whole turn exactly as it would with no state, only its
+            # counter being an established 0 instead of absent (an earlier version seeded the scanned end,
+            # so a later Stop with the field omitted no longer re-checked this turn's final message against
+            # the 10-minute earlier-message tolerance, and a stamp the no-state path blocked passed)
+            if held is not None:
+                save(*held)
+            elif had_state or not state_ok or absent_unknown:
+                save(t["end"], t["tail"], remaining)
+            else:
+                save(offset, tail, remaining)  # the counter-only seed of a clean new-turn pass
     # `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so in an earlier version the one signal that clears the flags
@@ -2629,10 +2765,13 @@ def _self_test():
     import inspect
     import io
     import shutil
+    import struct
     import subprocess
     import tempfile
     import threading
     import unittest
+    import unittest.mock
+    import zoneinfo
 
     def iso(dt):
         return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -2968,6 +3107,367 @@ def _self_test():
             self.assertIsNone(self.final("[2026-11-01 01:30 EDT] a", t))
             self.assertIn("+60m", self.final("[2026-11-01 01:30 EST] a", t))
 
+        # -- America/Toronto abbreviations through the zone database, with a host process zone that is not it --
+        def utc_process_zone(self):
+            os.environ["TZ"] = "UTC0"  # the host zone; tearDown restores the pinned zone
+            time.tzset()
+            self.assertIsNotNone(zoneinfo.ZoneInfo(LOCAL_ZONE))
+
+        def assertReads(self, vectors):
+            for text, want in vectors:
+                got = claim_us(_CLAIM_RE.search(text))
+                self.assertEqual(got, None if want is None else to_us(want), text)
+
+        def notes_of(self, text, now):
+            notes = []
+            r = evaluate({"last_assistant_message": text}, now, self.start, self.sdir, notes=notes)
+            return r, notes
+
+        def test_toronto_abbreviation_accepted(self):
+            self.utc_process_zone()
+            now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)
+            self.assertEqual(self.notes_of("[2026-11-04 16:14:35 EST] directive applied", now), (None, []))
+            self.assertEqual(self.notes_of("[2026-09-23 13:45:00 EDT] x", self.now), (None, []))
+            self.assertIn("` +30m", self.final("[2026-11-04 16:44:35 EST] x", now))
+            self.assertIn(BEHIND_IN, self.final("[2026-11-04 13:00 EST] x", now))
+
+        def test_console_prefix_header_checked_under_any_process_zone(self):
+            # the CONSOLE PREFIX line clock-inject.py adds ([YYYY-MM-DD HH:MM EST|EDT], America/Toronto, floored to
+            # the minute) is checked as a header stamp whatever TZ this hook runs under, never left as a note
+            now = datetime.datetime(2026, 11, 22, 1, 35, 38, tzinfo=UTC)
+            for tz in ("UTC0", "JST-9", "<+05>-5", "EST5EDT,M3.2.0,M11.1.0"):
+                os.environ["TZ"] = tz
+                time.tzset()
+                self.assertEqual(self.notes_of("[2026-11-21 20:35 EST] outcome", now), (None, []), tz)
+                r = self.final("[2026-11-21 20:36 EST] outcome", now)  # the minute rounded up is refused
+                self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-11-21 20:36 EST` +<1m"), (tz, r))
+
+        def test_toronto_wrong_abbreviation_not_checked(self):
+            # a wrong Toronto abbreviation cannot be converted, so it fails open as before (a header gets the note)
+            self.utc_process_zone()
+            now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)
+            r, notes = self.notes_of("[2026-11-04 16:14:35 EDT] x", now)
+            self.assertIsNone(r)
+            self.assertEqual(len(notes), 1, notes)
+            self.assertIn("`2026-11-04 16:14:35 EDT` not checked", notes[0])
+            self.assertIsNone(self.final("[2026-07-01 08:00 EST] x"))
+            # only EST and EDT count for LOCAL_ZONE: its historical LMT stays unconverted
+            self.assertIsNone(self.final("[1890-01-01 00:00 LMT] x"))
+            self.assertIsNone(self.final("their office shows 2026-11-04 16:14:35 EDT", now))
+            self.assertReads((("2026-11-04 16:14:35 EDT", None), ("2026-07-01 08:00 EST", None),
+                              ("1890-01-01 00:00 LMT", None)))
+
+        def test_toronto_spring_change_2026(self):
+            # 2026-03-08 07:00Z: 02:00 EST becomes 03:00 EDT, so 02:00:00 to 02:59:59 does not occur
+            self.utc_process_zone()
+            t = lambda *a: datetime.datetime(2026, 3, 8, *a, tzinfo=UTC)
+            self.assertReads((("2026-03-08 01:59:59 EST", t(6, 59, 59)), ("2026-03-08 03:00:00 EDT", t(7, 0, 0)),
+                              ("2026-03-08 03:00:01 EDT", t(7, 0, 1)), ("2026-03-08 01:59:59 EDT", None),
+                              ("2026-03-08 03:00:00 EST", None), ("2026-03-08 02:00:00 EST", None),
+                              ("2026-03-08 02:00:00 EDT", None), ("2026-03-08 02:30 EST", None),
+                              ("2026-03-08 02:59:59 EDT", None)))
+            self.assertIsNone(self.final("[2026-03-08 03:00:00 EDT] x", t(7, 0, 0)))
+            r, notes = self.notes_of("[2026-03-08 02:30 EDT] x", t(7, 0, 0))
+            self.assertIsNone(r)
+            self.assertIn("`2026-03-08 02:30 EDT` not checked", notes[0])
+
+        def test_toronto_autumn_change_2026(self):
+            # 2026-11-01 06:00Z: 02:00 EDT becomes 01:00 EST, so 01:00:00 to 01:59:59 occurs twice
+            self.utc_process_zone()
+            t = lambda *a: datetime.datetime(2026, 11, 1, *a, tzinfo=UTC)
+            self.assertReads((("2026-11-01 00:59:59 EDT", t(4, 59, 59)), ("2026-11-01 01:00:00 EDT", t(5, 0, 0)),
+                              ("2026-11-01 01:30 EDT", t(5, 30)), ("2026-11-01 01:59:59 EDT", t(5, 59, 59)),
+                              ("2026-11-01 01:00:00 EST", t(6, 0, 0)), ("2026-11-01 01:00:01 EST", t(6, 0, 1)),
+                              ("2026-11-01 01:30 EST", t(6, 30)), ("2026-11-01 02:00:00 EST", t(7, 0, 0)),
+                              ("2026-11-01 00:59:59 EST", None), ("2026-11-01 02:00:00 EDT", None)))
+            self.assertIsNone(self.final("[2026-11-01 01:30 EDT] a", t(5, 30)))
+            self.assertIn("+60m", self.final("[2026-11-01 01:30 EST] a", t(5, 30)))
+
+        def test_utc_and_offset_forms_unchanged_under_utc_process_zone(self):
+            self.utc_process_zone()
+            t = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)
+            self.assertReads((("2026-11-04T21:14:35Z", t), ("2026-11-04 21:14:35 Z", t),
+                              ("2026-11-04 21:14:35 UTC", t), ("2026-11-04 21:14:35 GMT", t),
+                              ("2026-11-04 16:14:35-05:00", t), ("2026-11-04 16:14:35 -0500", t),
+                              ("2026-11-04 17:14:35 -04", t), ("2026-11-05 02:14:35 +05", t)))
+            self.assertIsNone(self.final("[2026-11-04T21:14:35Z] x", t))
+            self.assertIsNone(self.final("[2026-11-04 16:14:35 -05:00] x", t))
+
+        def test_process_zone_reading_keeps_precedence(self):
+            # a process zone whose abbreviation is also EST keeps its own reading, as before LOCAL_ZONE was added
+            os.environ["TZ"] = "EST-10"
+            time.tzset()
+            self.assertReads((("2026-11-05 07:14:35 EST", datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)),))
+            # so under that zone the true Toronto CONSOLE PREFIX reads 15 hours old, and a header refusal follows;
+            # the docstring and README state this precedence rather than "under any TZ"
+            now = datetime.datetime(2026, 11, 22, 1, 35, 38, tzinfo=UTC)
+            self.assertIn(BEHIND_IN, self.final("[2026-11-21 20:35 EST] outcome", now))
+            self.assertIsNone(self.final("the run ended 2026-11-21 22:35 EST", now))  # mid-line: no BEHIND check
+
+        def test_missing_zone_entry_keeps_process_zone_only(self):
+            self.utc_process_zone()
+            g = globals()
+            old = g["LOCAL_ZONE"]
+            g["LOCAL_ZONE"] = "Nowhere/Missing_Zone"
+            try:
+                now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)
+                r, notes = self.notes_of("[2026-11-04 16:14:35 EST] x", now)
+                self.assertIsNone(r)
+                self.assertIn("not checked", notes[0])
+                self.assertIsNone(self.final("[2026-11-04 21:14:35 UTC] x", now))
+                self.assertEqual(_zone_readings(2026, 11, 4, 16, 14, 35), [])
+            finally:
+                g["LOCAL_ZONE"] = old
+
+        def damaged_zone(self, exc, method=None):
+            """A stand-in for zoneinfo.ZoneInfo with a present but damaged LOCAL_ZONE file: building the zone
+            raises `exc` (method None), or the named conversion (utcoffset, fromutc or tzname) does."""
+            zone = zoneinfo.ZoneInfo(LOCAL_ZONE)
+
+            class Damaged(datetime.tzinfo):
+                def call(self, name, dt):
+                    if name == method:
+                        raise exc("damaged zone data")
+                    return getattr(zone, name)(dt.replace(tzinfo=zone))
+
+                def utcoffset(self, dt):
+                    return self.call("utcoffset", dt)
+
+                def dst(self, dt):
+                    return self.call("dst", dt)
+
+                def tzname(self, dt):
+                    return self.call("tzname", dt)
+
+                def fromutc(self, dt):
+                    return self.call("fromutc", dt).replace(tzinfo=self)
+
+            def build(key):
+                if method is None:
+                    raise exc("damaged zone data")
+                return Damaged()
+            return build
+
+        def truncated_zone(self):
+            """Point the zone search path at a copy of the LOCAL_ZONE file cut to half its length, a real damaged
+            TZif file (loading it raises struct.error, neither ValueError nor OSError); the search path and the
+            zone cache are restored afterwards."""
+            src = next((os.path.join(d, LOCAL_ZONE) for d in zoneinfo.TZPATH
+                        if os.path.isfile(os.path.join(d, LOCAL_ZONE))), None)
+            self.assertIsNotNone(src, "no LOCAL_ZONE file on the zone search path")
+            with open(src, "rb") as f:
+                data = f.read()
+            zdir = os.path.join(self.tmp, "zoneinfo")
+            os.makedirs(os.path.dirname(os.path.join(zdir, LOCAL_ZONE)))
+            with open(os.path.join(zdir, LOCAL_ZONE), "wb") as f:
+                f.write(data[:len(data) // 2])
+            old = zoneinfo.TZPATH
+
+            def restore():
+                zoneinfo.reset_tzpath(to=old)
+                zoneinfo.ZoneInfo.clear_cache()
+            self.addCleanup(restore)
+            zoneinfo.reset_tzpath(to=[zdir])
+            zoneinfo.ZoneInfo.clear_cache()  # a cached LOCAL_ZONE would hide the damaged file
+            with self.assertRaises(struct.error):
+                zoneinfo.ZoneInfo(LOCAL_ZONE)
+
+        def assert_toronto_off(self, now, est):
+            # Toronto acceptance is off and every reading and refusal without it still holds
+            self.assertIn("` +105m", self.final("[2026-11-04T23:00Z] x", now))
+            self.assertIn(BEHIND_IN, self.final("[2026-11-04T19:00Z] x", now))
+            self.assertIn("` +30m", self.final("[2026-11-05 06:44:35 JST] x", now))
+            r, notes = self.notes_of(est, now)
+            self.assertIsNone(r)
+            self.assertIn("not checked", notes[0])
+            self.assertIsNone(self.final("the deploy ran at 2026-11-04 16:44:35 EST yesterday", now))
+            self.assertEqual(_zone_readings(2026, 11, 4, 16, 14, 35), [])
+            rc, out = run_main(json.dumps({"last_assistant_message": "[2999-01-01T00:00Z] x"}),
+                               {"AIQT_LEASE_FILE": os.path.join(self.tmp, "absent.md")})
+            self.assertEqual(rc, 0)
+            self.assertEqual(json.loads(out)["decision"], "block")
+
+        def test_damaged_zone_never_fails_open(self):
+            # a corrupt, truncated or unreadable zone file can raise any error, at construction or in a conversion
+            os.environ["TZ"] = "JST-9"  # a process zone that is not Toronto, so the fallback is visible
+            time.tzset()
+            now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)
+            est = "[2026-11-04 16:14:35 EST] x"
+            self.assertEqual(self.notes_of(est, now), (None, []))  # the control: an undamaged zone checks it
+            self.assertIn("` +30m", self.final("the deploy ran at 2026-11-04 16:44:35 EST yesterday", now))
+            for exc in (ValueError, OSError, struct.error):
+                for method in (None, "utcoffset", "fromutc", "tzname"):
+                    with self.subTest(exc=exc.__name__, method=method), \
+                            unittest.mock.patch.object(zoneinfo, "ZoneInfo", self.damaged_zone(exc, method)):
+                        self.assert_toronto_off(now, est)
+
+        def test_truncated_zone_file_never_fails_open(self):
+            # a real half-truncated LOCAL_ZONE file, loaded through the zone search path
+            os.environ["TZ"] = "JST-9"
+            time.tzset()
+            now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)
+            est = "[2026-11-04 16:14:35 EST] x"
+            self.assertEqual(self.notes_of(est, now), (None, []))  # the control: the intact file checks it
+            self.truncated_zone()
+            self.assert_toronto_off(now, est)
+
+        # -- bounded prune enumeration --
+        def test_prune_enumeration_bounds(self):
+            class Entries:
+                def __init__(self, count):
+                    self.count, self.visited = count, 0
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    pass
+
+                def __iter__(self):
+                    for i in range(self.count):
+                        self.visited += 1
+                        yield type("Entry", (), {"name": f"{i:064x}.d"})()
+            os.mkdir(self.sdir, 0o700)
+            entries = Entries(PRUNE_ENTRIES + 100)
+            with unittest.mock.patch.object(os, "scandir", return_value=entries):
+                self.assertEqual(prune_state(self.sdir, now_ns=0), 0)
+            self.assertEqual(entries.visited, PRUNE_ENTRIES + 1)  # listing stops one past the cap
+            # the stop at the cap is not silent: a caller's notes receive one line naming the dir and the limit
+            for count, want in ((PRUNE_ENTRIES + 1, 1), (PRUNE_ENTRIES, 0)):
+                notes = []
+                with unittest.mock.patch.object(os, "scandir", return_value=Entries(count)):
+                    self.assertEqual(prune_state(self.sdir, now_ns=0, notes=notes), 0)
+                self.assertEqual(len(notes), want, count)
+            notes = []
+            with unittest.mock.patch.object(os, "scandir", return_value=Entries(PRUNE_ENTRIES + 1)):
+                prune_state(self.sdir, now_ns=0, notes=notes)
+            self.assertEqual(notes, [_prune_full_note(self.sdir)])
+            self.assertIn(self.sdir, notes[0])
+            self.assertIn(str(PRUNE_ENTRIES), notes[0])
+            self.assertNotIn("\n", notes[0])
+            sub = os.path.join(self.sdir, "a" * 64 + ".d")
+            os.mkdir(sub, 0o700)
+            for i in range(PRUNE_CHILDREN + 1):
+                with open(os.path.join(sub, str(i)), "w"):
+                    pass
+            os.utime(sub, ns=(0, 0))
+            # a stale subdirectory over the child cap is skipped whole, never partially deleted
+            self.assertEqual(prune_state(self.sdir, now_ns=PRUNE_AGE_NS + 1), 0)
+            self.assertEqual(len(os.listdir(sub)), PRUNE_CHILDREN + 1)
+            os.unlink(os.path.join(sub, "0"))
+            os.utime(sub, ns=(0, 0))
+            # at the cap it is removed as before
+            self.assertEqual(prune_state(self.sdir, now_ns=PRUNE_AGE_NS + 1), 1)
+            self.assertFalse(os.path.exists(sub))
+            self.assertEqual((PRUNE_ENTRIES, PRUNE_CHILDREN), (16384, 64))
+
+        def test_prune_note_reaches_the_stop(self):
+            # the Stop that creates a transcript's subdirectory and then meets the root limit carries the note
+            g = globals()
+            old = g["PRUNE_ENTRIES"]
+            g["PRUNE_ENTRIES"] = 2
+            try:
+                os.mkdir(self.sdir, 0o700)
+                for i in range(3):
+                    os.mkdir(os.path.join(self.sdir, f"{i:064x}.d"), 0o700)
+                self.write([self.user("go"), self.asst("clean")])
+                notes = []
+                self.assertIsNone(evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                                            "stop_hook_active": False, "last_assistant_message": "clean"},
+                                           self.now, self.start, self.sdir, notes=notes))
+                self.assertEqual(notes, [_prune_full_note(self.sdir)])
+                self.assertEqual(len(os.listdir(self.sdir)), 4)  # nothing removed
+            finally:
+                g["PRUNE_ENTRIES"] = old
+
+        # -- the alternate copy's table, suffix, past-event and footer-prose exemptions are not adopted --
+        def test_alternate_exemptions_not_adopted(self):
+            # each of these passed with one of the alternate copy's four exemptions and is blocked here, as before
+            now = datetime.datetime(2026, 11, 22, 3, 0, 30, tzinfo=UTC)
+            stamp = "2099-01-01T00:00:00Z"
+            for text in ("- " + stamp + " due: cert rotation", stamp + " scheduled release",
+                         "- " + stamp + ": certificate rotation",
+                         "| Due |\n| --- |\n| " + stamp + " |",
+                         "| Checked by worker |\n| --- |\n| " + stamp + " |",
+                         "[2020-01-01T00:00:00Z] service launched",
+                         "[" + stamp + "] service launched", "Session elapsed 99:00",
+                         "total session elapsed: 14:30 across workers", "Timeout (session: 30m)"):
+                self.assertIsNotNone(self.final(text), text)
+            for text in ("[2026-11-22T05:00Z] Scheduled jobs all finished",
+                         "[2026-11-22 00:00 EST] scheduled the follow-up; tests pass",
+                         "[2026-11-22T05:00Z] Due: nothing outstanding, all done",
+                         "Next step | Note\n--- | ---\n[2026-11-22T05:00Z] all done | x",
+                         "[2026-11-22T01:00Z] Build released, tests pass",
+                         "Session elapsed 09:00 (limit 12:00)", "(session: 9h) 3 workers idle"):
+                self.assertIsNotNone(self.final(text, now), text)
+            # the header keeps its zero AHEAD tolerance with a past-event word after it
+            for text in ("[2026-11-22T03:01Z] Fix deployed to staging", "[2026-11-21 22:01 EST] Hotfix released"):
+                r = self.final(text, now)
+                self.assertIsNotNone(r, text)
+                self.assertIn("+<1m", r, text)
+
+        # -- the alternate copy's twelve extra scheduling words are not keywords here --
+        def test_alternate_schedule_words_not_adopted(self):
+            # each would exempt a mid-line future time this hook blocks ("the window opens T" is a case of
+            # test_header_stamp_ahead_by_any_amount_blocks), so they stay out until the maintainers decide
+            stamp = "2099-01-01T00:00:00Z"
+            for prefix in ("revisit", "retry after", "maintenance window starts", "embargo lifts",
+                           "follow-up check", "the maintainer returns on", "Release starts at",
+                           "CI will rerun at", "I will check back at", "Standup moved to", "Rate limit resets",
+                           "The maintenance window is", '{"run_at":'):
+                text = prefix + " " + stamp
+                self.assertIsNotNone(self.final(text), text)
+            self.assertEqual(SCHED_KEYWORDS, ("due", "deadline", "expir", "until", "next", "scheduled", "not before",
+                                              "not-before", "eta", "planned", "target date", "target:", "by ",
+                                              "through", "valid"))
+
+        # -- a clean pass outside the loop seeds the counter ONLY, so another hook's loop is capped --
+        def test_clean_pass_seeds_counter_only(self):
+            self.write([self.asst("clean") for _ in range(300)])
+            self.assertIsNone(self.ev(last_assistant_message="clean"))
+            extra = {}
+            offset, tail, pending, ok = load_state(self.sdir, self.tr, extra)
+            self.assertTrue(ok)
+            self.assertEqual(extra["blocks"], 0)
+            # the boundary stays the one loaded with no state, so the next Stop re-reads the turn as without state
+            self.assertEqual((offset, tail, pending), (0, None, []))
+            self.assertFalse(extra["reset"] or extra["unknown"])
+            for count in range(1, BLOCK_CAP + 1):
+                self.assertIsNotNone(self.ev(stop_hook_active=True,
+                                            last_assistant_message="heartbeat: 2099-01-01T00:00Z"))
+            self.assertIsNone(self.ev(stop_hook_active=True,
+                                     last_assistant_message="heartbeat: 2099-01-01T00:00Z"))
+
+        # -- the seed keeps every block the no-state path makes (QA finding: a seeded END boundary dropped one) --
+        def test_clean_pass_seed_keeps_no_state_recheck(self):
+            # the final is 20 minutes behind: inside the 30-minute final tolerance at Stop 1, but at a later Stop
+            # of the same turn it is an earlier message with the 10-minute tolerance, which the hook with NO
+            # saved state re-reads from offset 0 and blocks; the seed written at Stop 1 must keep that block
+            m1 = "[2026-09-23 13:25 EDT] outcome: done"
+            feedback = self.user("Stop hook feedback:\nstatus-header hook: your summary lacks a status header")
+            for first in (None, False):  # Stop 1 omits the field, or sends an explicit false
+                with self.subTest(first=first):
+                    self.write([self.user("go", self.now - datetime.timedelta(minutes=40)), self.asst(m1)])
+                    p1 = {"transcript_path": self.tr, "hook_event_name": "Stop", "last_assistant_message": m1}
+                    if first is not None:
+                        p1["stop_hook_active"] = first
+                    self.assertIsNone(evaluate(p1, self.now, self.start, self.sdir))
+                    extra = {}
+                    self.assertEqual(load_state(self.sdir, self.tr, extra)[:3], (0, None, []))
+                    self.assertEqual(extra["blocks"], 0)
+                    self.write([feedback, self.asst("summary fixed")], mode="a")
+                    p2 = {"transcript_path": self.tr, "hook_event_name": "Stop",
+                          "last_assistant_message": "summary fixed"}  # Stop 2 omits the field
+                    r = evaluate(p2, self.now, self.start, self.sdir)
+                    self.assertIsNotNone(r)
+                    self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 13:25 EDT` -20m"), r)
+            # the same two Stops with no state saved between them (the base path) block identically
+            self.write([self.user("go", self.now - datetime.timedelta(minutes=40)), self.asst(m1), feedback,
+                        self.asst("summary fixed")])
+            r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                          "last_assistant_message": "summary fixed"}, self.now, self.start, self.sdir)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 13:25 EDT` -20m"), r)
+
         # -- the bracketed header stamp: zero AHEAD tolerance --
         def test_header_stamp_ahead_by_any_amount_blocks(self):
             # a minute-precision header one minute later than the clock passed while the slack was 1 minute
@@ -3149,6 +3649,7 @@ def _self_test():
         def test_footer_prose_collision_disclosed(self):
             # disclosed false positive: prose naming "session elapsed" before an HH:MM reads as the footer
             self.assertIsNotNone(self.final("The total session elapsed: 14:30 across all workers today."))
+            self.assertIsNotNone(self.final("Our session elapsed: 14:30 so far, I think."))
             self.assertIsNone(self.final("The total `session elapsed: 14:30` across all workers today."))
 
         def test_elapsed_unknown_lease_skipped(self):

@@ -52,6 +52,7 @@ Fix errors and prevent their recurrence. Worked first.
 
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
+| FIX-SITE-FAMILY-FOOTER-7 | Not started | aiqt.ai and opfiles.ai footers lack the seventh project card and load assets from the draft path (S, S) | `[public]` |
 | MODE-CANONICAL-SOURCE | Partly done | Hooks that depend on the operating mode read both a configured canonical mode file and the session record, and treat the mode as unattended when either says so (reading one configured file already works) (H, S) | `[public]` `[tooling]` |
 | FIX-411-REBUILD-CHILD-CONTRACT | Planned | Gates run loaded code in a child under the shared fail-closed contract (M, M) | `[public]` `[tooling]` |
 
