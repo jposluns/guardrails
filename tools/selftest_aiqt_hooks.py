@@ -88,7 +88,16 @@ off-roster verb and data an accepted scan consumed stay allowed; a checker-shape
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
-push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+push/merge -n edges stay allowed; and the parse-error fallback fails safe. The interim narrowing (gcg-* rows): a
+command that runs a check and names git (or holds a $ or backquote after the check) denies unless it is exactly one
+shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which keeps its message; each flip row is
+red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
+(gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
+reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
+reverted); the interim push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
+accepts), a PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable denies, each flip row red with
+that deny reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
+reverted); and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -5435,6 +5444,251 @@ _TRKASY_RUNTIME_START_SPLIT_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_SPLI
 _TRKASY_RUNTIME_START_UNJOINED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_UNJOINED_FORMS)
 _TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUOTED_FORMS, ("heredoc-apos",))
 _TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS)
+
+
+# The gatdis interim narrowing (gcg-*): a check followed by git outside the exact shape list denies. "main" is the
+# decision main's guard gave before the narrowing (observed for the plan's rows); a flip row's decision changes,
+# a keep row's does not. With the new rule reverted (_gate_check_then_git returning False) every flip row goes
+# back to its main decision, so each is red then; with the shape list emptied (_gate_check_git_shape returning
+# False) every shape row denies, so each allow row is red then.
+_GCG_ROWS = (
+    # (label, command, main decision, decision now, kind)
+    ("gcg-01", "pytest && git commit -m x", "allow", "deny", "flip"),
+    ("gcg-02", "pytest | tee /tmp/check.log && git commit -m x", "allow", "deny", "flip"),
+    ("gcg-03", "pytest; git commit -m x", "allow", "deny", "flip"),
+    ("gcg-04", "pytest\ngit commit -m x", "allow", "deny", "flip"),
+    ("gcg-05", "pytest || true; git push origin feat", "allow-note", "deny", "flip"),
+    ("gcg-06", "make test && git -C /r push origin feat", "allow", "deny", "flip"),
+    ("gcg-07", "pytest && git status", "allow", "deny", "flip"),
+    ("gcg-08", "pytest && g'i't commit -m x", "allow", "deny", "flip"),
+    ("gcg-09", "bash tools/run_all_checks.sh && git commit -F /tmp/msg", "allow", "allow", "shape"),
+    ("gcg-10", "bash tools/run_all_checks.sh > /tmp/out.log 2>&1 && git commit -m 'fix parser'", "allow", "allow",
+     "shape"),
+    ("gcg-11", "python3 -I -B tools/check_leaks.py && git -C /r commit -F /tmp/m", "allow", "allow", "shape"),
+    ("gcg-12", "tools/run_all_checks.sh && git push origin feat/x", "allow", "allow", "shape"),
+    ("gcg-13", "bash tools/run_all_checks.sh  && git commit -F /tmp/msg", "allow", "deny", "flip"),
+    ("gcg-14", "bash tools/run_all_checks.sh && git commit -m 'see git log'", "allow", "deny", "flip"),
+    ("gcg-15", "bash tools/run_all_checks.sh && git commit -F /tmp/../etc/m", "allow", "deny", "flip"),
+    ("gcg-16", "bash tools/run_all_checks.sh && git push origin ../x", "allow", "deny", "flip"),
+    ("gcg-17", "bash tools/run_all_checks.sh | tail -5 && git commit -m x", "deny", "deny", "keep"),
+    ("gcg-18", "bash tools/run_all_checks.sh && git commit -F /tmp/msg --no-verify", "deny", "deny", "keep"),
+    ("gcg-19", "pytest", "allow", "allow", "keep"),
+    ("gcg-20", "git commit -m tests", "allow", "allow", "keep"),
+    ("gcg-21", "pytest && echo done", "allow", "allow", "keep"),
+    ("gcg-22", "pytest && cat .gitignore", "allow", "allow", "keep"),
+    ("gcg-23", "pytest && $G commit -m x", "allow", "deny", "flip"),
+    ("gcg-24", 'sh -c "$CMD" && git commit -m x', "allow", "allow", "keep"),
+    ("gcg-25", "pytest tests && git -C /r commit -F /tmp/m", "allow", "deny", "flip"),
+    ("gcg-26", "pytest 'unbalanced && git commit -m x", "allow", "deny", "flip"),
+    ("gcg-27", "python3 -I -B tools/check_selftest_execution.py --suite aiqt-hooks && git push origin feat", "allow",
+     "allow", "shape"),
+    ("gcg-28", "bash tools/run_all_checks.sh && git push origin feat.lock", "allow", "deny", "flip"),
+)
+
+
+# The gatdis interim plumbing deny (gpl-*): git commit-tree, send-pack and http-push run no hook.
+# With the deny reverted (_gate_plumbing_git returning False) every flip row goes back to main's decision.
+_GPL_ROWS = (
+    ("gpl-01", "git commit-tree -p HEAD -m x 4b825dc642cb6eb9a060e54bf8d69288fbee4904", "allow", "deny", "flip"),
+    ("gpl-02", "c=$(git commit-tree -p HEAD -m x HEAD^{tree}) && git update-ref refs/heads/p $c", "allow", "deny",
+     "flip"),
+    ("gpl-03", "git send-pack /srv/r.git refs/heads/plumb", "allow", "deny", "flip"),
+    ("gpl-04", "git -C /r send-pack origin plumb", "allow", "deny", "flip"),
+    ("gpl-05", "git http-push https://example.invalid/r.git plumb", "allow", "deny", "flip"),
+    ("gpl-06", "git commit-'tree' -m x T", "deny", "deny", "keep"),  # main's closed grammar denies it first
+    ("gpl-07", "git-send-pack /srv/r.git main", "allow", "deny", "flip"),
+    ("gpl-08", "$G send-pack /srv/r.git main", "allow", "deny", "flip"),
+    ("gpl-09", "git send-pack 'unbalanced", "allow", "deny", "flip"),
+    ("gpl-10", "git log --oneline", "allow", "allow", "keep"),
+    ("gpl-11", "git push origin feat", "allow", "allow", "keep"),
+    ("gpl-12", "grep -n send-pack notes.txt", "allow", "allow", "keep"),
+    ("gpl-13", "git commit-tree -p HEAD -m x T && git commit --no-verify -m y", "deny", "deny", "keep"),
+    # Messages as data: a verb inside a quoted literal git commit, tag or merge message is data ("data"
+    # rows: allowed, and denied again with _gate_plumbing_inert reverted); every other place still denies.
+    ("gpl-14", "git commit -m 'fix the send-pack docs'", "allow", "allow", "data"),
+    ("gpl-15", 'git commit -am "commit-tree: document it"', "allow", "allow", "data"),
+    ("gpl-16", "git tag -a v1 -m 'http-push notes'", "allow", "allow", "data"),
+    ("gpl-17", "git merge -m 'send-pack fix' feat", "allow", "allow", "data"),
+    ("gpl-18", "git commit -m 'send-pack' && git send-pack /r.git main", "allow", "deny", "flip"),
+    ("gpl-19", "echo commit-tree | xargs git", "allow", "deny", "flip"),
+    ("gpl-20", "sh -c \"git commit -m 'x' && git send-pack /r main\"", "allow", "deny", "flip"),
+    ("gpl-21", "git commit -m send-pack", "allow", "deny", "flip"),  # an unquoted message stays denied
+    ("gpl-22", "git -c 'core.editor=git send-pack /r' commit", "allow", "deny", "flip"),
+    ("gpl-23", "git config alias.sp send-pack", "allow", "deny", "flip"),
+    ("gpl-24", "git commit -m 'commit-tree' && git commit-tree -m 'commit-tree' T", "allow", "deny", "flip"),
+    ("gpl-25", "git commit -m 'send-pack' ; git commit -m 'send-pack' ; git-send-pack /r main", "allow", "deny",
+     "flip"),
+)
+
+
+# The gatdis interim push-redirect deny (gpr-*, residuals X4 and X5): a git push naming its own
+# receive-pack (--receive-pack, --exec, any prefix git accepts), a PATH or GIT_EXEC_PATH override, git
+# --exec-path= or a loader variable. The third column is 52baa177's decision; with the deny reverted
+# (_gate_push_redirect returning None) every row gives it again and every flip row is red.
+_GPR_ROWS = (
+    ("gpr-01", "git push '--receive-pack=git receive-pack /srv/r.git #' . HEAD:refs/heads/x", "allow", "deny",
+     "flip"),
+    ("gpr-02", "git push --receive-pack=/usr/bin/git-receive-pack origin main", "allow", "deny", "flip"),
+    ("gpr-03", "git push --rece=x . HEAD", "allow", "deny", "flip"),
+    ("gpr-04", "git push --receive-pack x origin", "allow", "deny", "flip"),
+    ("gpr-05", "git push --exec=x origin main", "allow", "deny", "flip"),
+    ("gpr-06", "git push --e x origin main", "allow", "deny", "flip"),
+    ("gpr-07", "git push --exe=x origin", "allow", "deny", "flip"),
+    ("gpr-08", "PATH=/x:/usr/bin git push origin main", "allow", "deny", "flip"),
+    ("gpr-09", "env PATH=/x git push origin main", "allow", "deny", "flip"),
+    ("gpr-10", "GIT_EXEC_PATH=/x git push origin main", "allow", "deny", "flip"),
+    ("gpr-11", "git --exec-path=/x push origin main", "allow", "deny", "flip"),
+    ("gpr-12", "export PATH=/x:$PATH; git push origin main", "allow", "deny", "flip"),
+    ("gpr-13", "LD_PRELOAD=/x.so git push origin main", "allow", "deny", "flip"),
+    # 52baa177 already denies these four (a nested shell, an ANSI-C or quoted option word, a parse failure)
+    ("gpr-14", "sh -c 'PATH=/x git push origin main'", "deny", "deny", "keep"),
+    ("gpr-15", "git push $'--receive-pack=x' .", "deny", "deny", "keep"),
+    ("gpr-16", "git push --rec'eive-pack'=x .", "deny", "deny", "keep"),
+    ("gpr-17", "git push --exec=x origin 'unbalanced", "deny", "deny", "keep"),
+    ("gpr-18", "git push origin main", "allow", "allow", "keep"),
+    ("gpr-19", "git push --no-exec origin", "allow", "allow", "keep"),
+    ("gpr-20", "git push --recurse-submodules=check origin", "allow", "allow", "keep"),
+    ("gpr-21", "git rebase --exec 'make test' main", "allow", "allow", "keep"),
+    ("gpr-22", "git fetch --upload-pack=x origin", "allow", "allow", "keep"),
+    ("gpr-23", "MYPATH=/x git push origin main", "allow", "allow", "keep"),
+    ("gpr-24", "git commit -m x && PATH=/x make", "allow", "allow", "keep"),
+    ("gpr-25", "echo $PATH && git push origin main", "allow", "allow", "keep"),
+    # Messages as data: a quoted literal commit message is data on the parsed path (_gate_plumbing_inert); the same
+    # spelling outside a message still denies. The data rows are red with that reading reverted (gpr-*-raw).
+    ("gpr-26", "git commit -m 'ci: set PATH= for node' && git push origin main", "allow", "allow", "data"),
+    ("gpr-27", "git merge -m 'merge the --receive-pack docs' topic && git push origin main", "allow", "allow",
+     "data"),
+    ("gpr-28", "git commit -m 'ci' && PATH=/x git push origin main", "allow", "deny", "flip"),
+    # The disclosed X5 form: an assignment read back at run time from a quoted literal message the same command
+    # writes is not read (allowed, with and without the deny); an ANSI-C message is not a quoted literal and
+    # still denies.
+    ("gpr-29", "git commit -m 'PATH=/x' && env $(git log -1 --format=%B) git push origin main", "allow", "allow",
+     "keep"),
+    ("gpr-30", "git commit -m 'PATH=/x' && declare -x $(git log -1 --format=%B) && git push origin main", "allow",
+     "allow", "keep"),
+    ("gpr-31", "git commit -m $'PATH=/x' && env $(git log -1 --format=%B) git push origin main", "deny", "deny",
+     "keep"),
+)
+
+
+def _gcg_reason(command):
+    _code, obj, _err = aiqt_hooks.gate_weakening({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                  "tool_input": {"command": command}})
+    return ((obj or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+
+
+def _test_gate_check_git(failures, tmp):
+    """The gatdis interim narrowing rows (gcg-*), their message rows, their revert proofs, and the write-scope
+    guard's gate-record directory rows (gcg-wr-*, orchestrator answer O5)."""
+    for label, command, main, now, kind in _GCG_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    reason = _gcg_reason("pytest && git commit -m x")
+    for token in ("runs a check and names git", "bash tools/run_all_checks.sh", "git commit -F /ABS/PATH",
+                  "as its own Bash call", "gate-record install"):
+        if token not in reason:
+            failures.append("(gcg-msg) the check-then-git deny does not name {!r}: {!r}".format(token, reason))
+    if "truncat" not in _gcg_reason("bash tools/run_all_checks.sh | tail -5 && git commit -m x"):
+        failures.append("(gcg-msg-17) the sink-tier deny no longer keeps its own message")
+    if "--no-verify" not in _gcg_reason("bash tools/run_all_checks.sh && git commit -F /tmp/msg --no-verify"):
+        failures.append("(gcg-msg-18) the hook-bypass deny no longer keeps its own message")
+    saved_rule, saved_shape = aiqt_hooks._gate_check_then_git, aiqt_hooks._gate_check_git_shape
+    try:
+        aiqt_hooks._gate_check_then_git = lambda command, records=None: False
+        for label, command, main, now, kind in _GCG_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the narrowing reverted, gate_weakening({!r}) should give main's "
+                                "{}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the narrowing reverted".format(label))
+        aiqt_hooks._gate_check_then_git = saved_rule
+        aiqt_hooks._gate_check_git_shape = lambda command: False
+        for label, command, main, now, kind in _GCG_ROWS:
+            if kind == "shape" and _decision(aiqt_hooks.gate_weakening, command) == now:
+                failures.append("({}-empty) shape row is not red with the shape list emptied".format(label))
+    finally:
+        aiqt_hooks._gate_check_then_git, aiqt_hooks._gate_check_git_shape = saved_rule, saved_shape
+    for label, command, main, now, kind in _GPL_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    if "commit-tree" not in _gcg_reason("git send-pack /r.git refs/heads/x"):
+        failures.append("(gpl-msg) the plumbing deny does not name the routes it refuses")
+    if "--no-verify" not in _gcg_reason("git commit-tree -p HEAD -m x T && git commit --no-verify -m y"):
+        failures.append("(gpl-msg-bypass) the hook-bypass deny no longer keeps its own message before the plumbing deny")
+    saved_plumb, saved_inert = aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert
+    try:
+        aiqt_hooks._gate_plumbing_git = lambda command, records=None: False
+        for label, command, main, now, kind in _GPL_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the plumbing deny reverted, gate_weakening({!r}) should give "
+                                "main's {}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the plumbing deny reverted".format(label))
+        aiqt_hooks._gate_plumbing_git = saved_plumb
+        aiqt_hooks._gate_plumbing_inert = lambda command, records: command
+        for label, command, main, now, kind in _GPL_ROWS:
+            if kind == "data" and _decision(aiqt_hooks.gate_weakening, command) != "deny":
+                failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert = saved_plumb, saved_inert
+    for label, command, main, now, kind in _GPR_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    if "receive-pack" not in _gcg_reason("git push --exec=x origin main"):
+        failures.append("(gpr-msg) the push-redirect deny does not name the routes it refuses")
+    if "--no-verify" not in _gcg_reason("PATH=/x git push --no-verify origin main"):
+        failures.append("(gpr-msg-bypass) the hook-bypass deny no longer keeps its own message before the "
+                        "push-redirect deny")
+    saved_redirect = aiqt_hooks._gate_push_redirect
+    try:
+        aiqt_hooks._gate_push_redirect = lambda command, records=None: None
+        for label, command, main, now, kind in _GPR_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the push-redirect deny reverted, gate_weakening({!r}) should "
+                                "give 52baa177's {}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the push-redirect deny reverted".format(label))
+    finally:
+        aiqt_hooks._gate_push_redirect = saved_redirect
+    saved_inert = aiqt_hooks._gate_plumbing_inert
+    try:
+        aiqt_hooks._gate_plumbing_inert = lambda command, records: command
+        for label, command, main, now, kind in _GPR_ROWS:
+            if kind == "data" and _decision(aiqt_hooks.gate_weakening, command) != "deny":
+                failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_inert = saved_inert
+    repo = _init_repo(Path(tmp) / "gcg-write-scope")
+
+    def write(path):
+        code, obj, _err = aiqt_hooks.write_scope_guard({
+            "hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": str(repo),
+            "tool_input": {"file_path": str(path), "content": "x\n"}})
+        return (_reduce_result(code, obj),
+                ((obj or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", ""))
+
+    log = repo / ".git" / "aiqt" / "gate-records.jsonl"
+    other = repo / ".git" / "worktrees" / "wt" / "aiqt" / "gate-records.jsonl"
+    for label, path, want in (("gcg-wr-1", log, ("deny", True)), ("gcg-wr-2", other, ("deny", True)),
+                              ("gcg-wr-3", repo / "notes.txt", ("allow", False))):
+        decision, why = write(path)
+        if (decision, "gate record's directory" in why) != want:
+            failures.append("({}) write_scope_guard Write {}: expected {}, got {} ({!r})".format(
+                label, path, want, (decision, "gate record's directory" in why), why))
+    saved_hit = aiqt_hooks._wrtscp_gate_record_hit
+    try:
+        aiqt_hooks._wrtscp_gate_record_hit = lambda root, file_path, target: ""
+        decision, why = write(log)
+        if "gate record's directory" in why:
+            failures.append("(gcg-wr-1-revert) the gate-record reason survives with the check reverted")
+    finally:
+        aiqt_hooks._wrtscp_gate_record_hit = saved_hit
 
 
 def _test_trkasy_no_amp(failures, tmp):
@@ -26438,8 +26692,10 @@ def _main_isolated(monitor):
                      aiqt_hooks.gate_weakening, "{ git c --no-verify -m y; }", None, "allow"),
                     ("glx-wc-3", {}, aiqt_hooks.gate_weakening, "time git log -c alias.x=y", None, "allow"),
                     ("glx-wc-4", {}, aiqt_hooks.gate_weakening, "echo git -c alias.x=y", None, "deny"),
+                    # was allow: the sh segment's script word holds 'verify', a checker name part, so the segment
+                    # is checker-shaped and names git, which the interim check-then-git narrowing denies
                     ("glx-wc-5", {}, aiqt_hooks.gate_weakening, "sh -c 'git -c alias.c=commit c --no-verify -m y'", None,
-                     "allow")):
+                     "deny")):
                 for _glx_name in _glx_names:
                     os.environ.pop(_glx_name, None)
                 os.environ.update(_glw_env)
@@ -32401,8 +32657,8 @@ def _main_isolated(monitor):
             ("(gw-ct-s6) sed 50q notes", "pytest | sed 50q", "allow-note"),
             ("(gw-ct-s7) sed 's/q/x/' substitutes, notes", "pytest | sed 's/q/x/'", "allow-note"),
             ("(gw-ct-s8) awk 'NR<=50' notes", "pytest | awk 'NR<=50'", "allow-note"),
-            ("(gw-ct-s9) awk '{print NR, $0}' compares nothing, notes", "pytest | awk '{print NR, $0}'",
-             "allow-note"),
+            ("(gw-ct-s9) awk '{print NR, $0}' compares nothing, and its '$' after the check denies under the interim "
+             "check-then-git narrowing (was a note)", "pytest | awk '{print NR, $0}'", "deny"),
             ("(gw-ct-s10) '| command tail' resolves through the wrapper, notes (outside the canonical deny shape)", "pytest | command tail",
              'allow-note'),
             ("(gw-ct-s11) an alias-suppressing '| \\tail' denies", "pytest | \\tail", "deny"),
@@ -32812,10 +33068,10 @@ def _main_isolated(monitor):
              'case x in a) echo ordinary;; pytest) echo ordinary;; esac | head', 'allow-note'),
             ('(gw-r4-c3.1) notes',
              '{ pytest > /abs/check.log 2>&1; echo ordinary; } | head', 'allow-note'),
-            ('(gw-r4-c4.1) notes',
-             'pytest | awk \'{print "exit", $0}\'', 'allow-note'),
-            ('(gw-r4-c4.2) notes',
-             "pytest | awk '{print $0} # exit'", 'allow-note'),
+            ('(gw-r4-c4.1) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             'pytest | awk \'{print "exit", $0}\'', 'deny'),
+            ('(gw-r4-c4.2) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             "pytest | awk '{print $0} # exit'", 'deny'),
             ('(gw-r4-c4.3) notes',
              "pytest | awk 'NR<=50'", 'allow-note'),
             ('(gw-r4-c4.4) notes',
@@ -32942,14 +33198,14 @@ def _main_isolated(monitor):
              'head <<< $(pytest)', 'allow-note'),
             ('(gw-r4-m4.9) notes',
              'echo "$(pytest)" | tail', 'allow-note'),
-            ('(gw-r4-m4.10) notes',
-             'x=$(pytest 2>&1); echo "$x" | tail', 'allow-note'),
+            ('(gw-r4-m4.10) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             'x=$(pytest 2>&1); echo "$x" | tail', 'deny'),
             ('(gw-r4-m4.11) notes',
              'echo "$(pytest | tail)"', 'allow-note'),
             ('(gw-r4-m4.12) notes',
              'echo `pytest | tail`', 'allow-note'),
-            ('(gw-r4-m4.13) notes',
-             'out=$(pytest | tail); echo "$out"', 'allow-note'),
+            ('(gw-r4-m4.13) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             'out=$(pytest | tail); echo "$out"', 'deny'),
             ('(gw-r4-m5.1) denies',
              'pytest | timeout 5 tail', 'deny'),
             ('(gw-r4-m5.2) notes',
@@ -33034,8 +33290,9 @@ def _main_isolated(monitor):
              'case x in a) :;; pytest|head) :;; esac', 'allow-note'),
             ('(gw-r4-k2) a producer whose stdout is redirected is outside the deny, notes',
              'pytest > /abs/check.log | head', 'allow-note'),
-            ('(gw-r4-k3) a substitution inside the sink stage is outside the deny, notes',
-             'pytest | head -n $(echo 5)', 'allow-note'),
+            ('(gw-r4-k3) a substitution inside the sink stage is outside the sink deny, and its $ after the check '
+             'denies under the interim check-then-git narrowing (was a note)',
+             'pytest | head -n $(echo 5)', 'deny'),
             ('(gw-r4-k4) a --check after a bare option may be its value, notes',
              'python3 tools/build.py -o --check | head', 'allow-note'),
             ('(gw-r4-k5) a pattern alternation spelling a pipe into head is not a pipeline, notes',
@@ -33052,10 +33309,10 @@ def _main_isolated(monitor):
              "pytest | sed 's/x/;q;/'", 'allow-note'),
             ('(gw-r5-x1.2) notes',
              "pytest | sed '# ;q;'", 'allow-note'),
-            ('(gw-r5-x2.1) notes',
-             "pytest | awk '{x=/exit/; print $0}'", 'allow-note'),
-            ('(gw-r5-x3.1) notes',
-             "pytest | awk '{print $0; x=NR==1}'", 'allow-note'),
+            ('(gw-r5-x2.1) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             "pytest | awk '{x=/exit/; print $0}'", 'deny'),
+            ('(gw-r5-x3.1) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             "pytest | awk '{print $0; x=NR==1}'", 'deny'),
             ('(gw-r5-x4.1) notes',
              'pytest | sort -o /abs/log | tail', 'allow-note'),
             ('(gw-r5-x5.1) notes',
@@ -33238,8 +33495,9 @@ def _main_isolated(monitor):
              'pytest | grep FAIL | tail', 'allow-note'),
             ('(gw-r5-p37) a sed program behind a plain wrapper, notes',
              'pytest | env sed 5q', 'allow-note'),
-            ('(gw-r5-p38) a sed program that deletes all but the last line, notes',
-             "pytest | sed '$!d'", 'allow-note'),
+            ('(gw-r5-p38) a sed program that deletes all but the last line, and its $ after the check denies under '
+             'the interim check-then-git narrowing (was a note)',
+             "pytest | sed '$!d'", 'deny'),
             ('(gw-r5-p39) a plain grep filter as the last stage is residual R4, allows',
              'pytest | grep FAIL', 'allow'),
             ('(gw-r5-p40) grep -m as the sink, denies',
@@ -40213,6 +40471,7 @@ def _main_isolated(monitor):
         _test_inline_errexit(failures, tmp)
         _test_console_prefix(failures, tmp)
         _test_pgrep_self_match(failures)
+        _test_gate_check_git(failures, tmp)
         _test_trkasy_no_amp(failures, tmp)
         _test_trkasy_heredoc_body_data(failures, tmp)
         _test_trkasy_heredoc_consumer(failures, tmp)
