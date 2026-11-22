@@ -14,11 +14,12 @@ overriding the root one.
 
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
-splits on both), held in _byte_canon.LINE_SEPARATORS. The separators stay out of FORBIDDEN because opf's
-view generator reads that set (opf's record emitter escapes both sets); no allowance clears them. Like the
-rest of the 3.1 scan, the separator scan reads every in-scope path except the [checkout].binary roster, and
-it matches only the UTF-8 encoding of each separator: a file in another encoding (UTF-16, say) that holds
-one is not reported.
+splits on both), held in _byte_canon.LINE_SEPARATORS, and a literal U+00AD SOFT HYPHEN, held in
+_byte_canon.SOFT_HYPHEN. The separators and the soft hyphen stay out of FORBIDDEN because opf's view
+generator reads that set (opf's record emitter escapes all three sets); no allowance clears them. Like the
+rest of the 3.1 scan, these gate-only scans read every in-scope path except the [checkout].binary roster,
+and they match only the UTF-8 encoding of each character: a file in another encoding (UTF-16, say) that
+holds one is not reported.
 
 check_no_dashes.py stays separate (3.1). Hashing elsewhere stays byte-literal (3.2): this gate
 canonicalizes at release; no verifier normalizes.
@@ -50,6 +51,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import base64
 import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -64,7 +66,8 @@ import gen_manifest  # noqa: E402  reuse the validated scope loader; never a sec
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
 from _byte_canon import (  # noqa: E402
-    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, scan_bytes, _is_two_space_break,
+    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, SOFT_HYPHEN, scan_bytes,
+    _is_two_space_break,
 )
 
 POLICY_REL = ".aiqt/core/gates/byte-canon.toml"
@@ -73,12 +76,13 @@ SUPPORTED = ("linux", "macos")
 ROADMAP = ("windows",)
 # Every vector class the published set may carry (3.4); each fail class names the scan leg it exercises.
 VECTOR_CLASSES = ("pass", "crlf", "bare-cr", "trailing-whitespace", "zero-width", "bidi", "bidi-mark",
-                  "word-joiner", "bom", "no-final-newline", "double-final-newline", "invalid-utf8",
-                  "empty")
+                  "word-joiner", "soft-hyphen", "bom", "no-final-newline", "double-final-newline",
+                  "invalid-utf8", "empty")
 # Classes that MUST appear in the published set (a missing one is fail-closed): one per released leg,
-# including the newly-covered bidi marks and the word joiner so those controls cannot silently drop.
+# including the newly-covered bidi marks, the word joiner and the soft hyphen so those controls cannot
+# silently drop.
 REQUIRED_VECTOR_CLASSES = ("pass", "crlf", "trailing-whitespace", "zero-width", "bidi", "bidi-mark",
-                           "word-joiner", "invalid-utf8", "empty")
+                           "word-joiner", "soft-hyphen", "invalid-utf8", "empty")
 # Each non-"pass" class is bound to a substring of the SPECIFIC scan_bytes finding it must provoke, so a
 # vector's class name proves its own scan leg fired, not merely that some finding did. The overlapping
 # codepoint classes name their exact U+codepoint (the U+{:04X} the scan emits), so swapping one class's
@@ -89,6 +93,7 @@ CLASS_FINDING = {
     "trailing-whitespace": "trailing whitespace",
     "zero-width": "U+200B",
     "word-joiner": "U+2060",
+    "soft-hyphen": "U+00AD",
     "bidi": "U+202E",
     "bidi-mark": "U+200E",
     "bom": "leading UTF-8 BOM",
@@ -106,6 +111,11 @@ CLASS_FINDING = {
 # generator (it refuses a render carrying any member), so widening it would make opf refuse to render or
 # record in an adopter's store that holds one. No allowance can clear them; write the escape text instead.
 LINE_SEPARATORS_RE = re.compile(b"|".join(re.escape(b) for b in sorted(LINE_SEPARATORS)))
+# U+00AD SOFT HYPHEN (_byte_canon.SOFT_HYPHEN): it renders nothing except at a line break, so a literal one
+# hides inside a word. For the separators' reason it is never added to _byte_canon.FORBIDDEN (an adopter's
+# store may already hold one, and an imported or done record cannot be changed), so only THIS gate refuses a
+# literal one. No allowance can clear it; write the escape text (or, in Markdown, &shy;) instead.
+SOFT_HYPHEN_RE = re.compile(b"|".join(re.escape(b) for b in sorted(SOFT_HYPHEN)))
 
 
 class GateError(Exception):
@@ -122,6 +132,21 @@ def scan_line_separators(data):
             "write the escape text".format(m.start(), ord(LINE_SEPARATORS[m.group(0)]))
             for m in LINE_SEPARATORS_RE.finditer(data)]
 
+
+def scan_soft_hyphen(data):
+    """The repository-only leg over one file's raw bytes: one finding per literal U+00AD SOFT HYPHEN. Like
+    scan_line_separators it runs on the raw bytes, so it reports one in a file that is not valid UTF-8 too.
+    Returns a list of finding strings."""
+    return ["byte offset {}: soft hyphen U+{:04X} (invisible except at a line break); write the escape "
+            "text".format(m.start(), ord(SOFT_HYPHEN[m.group(0)]))
+            for m in SOFT_HYPHEN_RE.finditer(data)]
+
+
+def scan_release_bytes(data, allowances=(), hardbreak=False):
+    """Every 3.1 leg this gate runs over one released file's raw bytes: the shared scan_bytes legs (with
+    the file's validated allowances and hard-break permission), then the repository-only separator and
+    soft-hyphen legs, which no allowance clears."""
+    return scan_bytes(data, allowances, hardbreak) + scan_line_separators(data) + scan_soft_hyphen(data)
 
 
 def coverage_findings(scope_paths, binary_set, effective):
@@ -362,8 +387,7 @@ def run(root):
             except OSError as exc:
                 raise GateError("cannot read in-scope file {} ({})".format(path, exc))
             findings += ["{}: {}".format(path, f) for f in
-                         scan_bytes(data, allowances.get(path, ()), path in hardbreak_paths)
-                         + scan_line_separators(data)]
+                         scan_release_bytes(data, allowances.get(path, ()), path in hardbreak_paths)]
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -378,6 +402,21 @@ def run(root):
 
 
 # --- self-test --------------------------------------------------------------------------------------
+
+# The registered execution-suite identity (tools/selftest_checks.toml) and the executed-leg record each
+# completed self-test leg appends to (check); tools/check_selftest_execution.py reconciles the report against
+# the registry, so a leg that silently stops running (the soft-hyphen flip, the no-reduction pin) fails it.
+SUITE_ID = "byte-canon-selftest"
+EXECUTED = []
+
+
+def check(name):
+    """Record one self-test leg as executed (after its assertions ran); a duplicate id is a harness error."""
+    if name in EXECUTED:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    EXECUTED.append(name)
+
 
 VECTOR_ROW_KEYS = frozenset(("name", "class", "payload-base64", "sha256"))
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -431,9 +470,10 @@ def self_test_main():
     if not (scan_bytes is _bc.scan_bytes and FORBIDDEN is _bc.FORBIDDEN
             and FORBIDDEN_RE is _bc.FORBIDDEN_RE and BOM is _bc.BOM
             and ZERO_WIDTH is _bc.ZERO_WIDTH and BIDI is _bc.BIDI
-            and LINE_SEPARATORS is _bc.LINE_SEPARATORS
+            and LINE_SEPARATORS is _bc.LINE_SEPARATORS and SOFT_HYPHEN is _bc.SOFT_HYPHEN
             and _is_two_space_break is _bc._is_two_space_break):
         failures.append("byte-canon primitives are not the single _byte_canon source (a silent fork)")
+    check("single-source-pin")
     # Pure 3.1 cases: (name, bytes, expect_finding).
     cases = [
         ("clean", b"a\n", False),
@@ -458,6 +498,7 @@ def self_test_main():
         got = bool(scan_bytes(data))
         if got != expect:
             failures.append("scan_bytes[{}] finding={}; expected {}".format(name, got, expect))
+    check("pure-cases")
     # An allowance clears exactly its span and codepoint, nothing else.
     zw = "a{}b\n".format(chr(0x200B)).encode("utf-8")
     off = zw.find(chr(0x200B).encode("utf-8"))
@@ -465,6 +506,7 @@ def self_test_main():
         failures.append("an in-span allowance failed to clear its codepoint")
     if not scan_bytes(zw, ((0, 1, frozenset(chr(0x200B))),)):
         failures.append("an out-of-span allowance wrongly cleared a codepoint")
+    check("allowance-span")
     # Line and paragraph separators: the repository-only leg flags each literal U+2028 and U+2029, in a
     # string and in a comment, one finding per occurrence. They stay outside _byte_canon.FORBIDDEN (opf's
     # view generator reads that set), so scan_bytes alone must still pass them.
@@ -486,15 +528,45 @@ def self_test_main():
     if [f.split(":")[0] for f in scan_line_separators(both)] != ["byte offset 1", "byte offset 5"]:
         failures.append("scan_line_separators did not report each of two separators once at its "
                         "byte offset")
-    # The gate's own run() path, over an isolated temp tree: run() must report each separator under its
-    # path and byte offset and exit 1, and pass the same tree without them. Only the inputs that need git
-    # or the live policy (the scope, the policy, the attribute map, the platform probe) are replaced; the
-    # per-file read and judgement are run()'s own, so a run() that drops the separator scan fails here.
+    check("separator-leg")
+    # U+00AD SOFT HYPHEN: the repository-only soft-hyphen leg flags each literal one, in a string, in a
+    # comment and in prose, one finding per occurrence at its byte offset; it stays outside
+    # _byte_canon.FORBIDDEN (opf's view generator reads that set), so scan_bytes alone must still pass it.
+    # The escape text and the neighbours U+00AC and U+00AE are not flagged.
+    shy = chr(0x00AD)
+    for name, text in (("soft-hyphen-in-string", 'x = "co{}op"\n'.format(shy)),
+                       ("soft-hyphen-in-comment", "# co{}op\n".format(shy)),
+                       ("soft-hyphen-in-prose", "co{}op\n".format(shy))):
+        data = text.encode("utf-8")
+        want = "byte offset {}: soft hyphen U+00AD ".format(data.find(shy.encode("utf-8")))
+        if [f[:len(want)] for f in scan_soft_hyphen(data)] != [want]:
+            failures.append("scan_soft_hyphen[{}] did not report U+00AD once at its byte offset "
+                            "({!r})".format(name, want))
+        if scan_bytes(data):
+            failures.append("scan_bytes[{}] reported a soft hyphen; it must stay out of the shared "
+                            "forbidden set".format(name))
+    two_shy = "a{}b{}c\n".format(shy, shy).encode("utf-8")
+    if [f.split(":")[0] for f in scan_soft_hyphen(two_shy)] != ["byte offset 1", "byte offset 4"]:
+        failures.append("scan_soft_hyphen did not report each of two soft hyphens once at its byte offset")
+    for name, data in (("soft-hyphen-escape-text", b'x = "co\\u00ADop"\n'),
+                       ("soft-hyphen-neighbours",
+                        "a{}{}b\n".format(chr(0x00AC), chr(0x00AE)).encode("utf-8"))):
+        if scan_release_bytes(data):
+            failures.append("control[{}] was flagged: {}".format(name, scan_release_bytes(data)))
+    check("soft-hyphen-leg")
+    # The gate's own run() path, over an isolated temp tree: run() must report each separator and the soft
+    # hyphen under its path and byte offset and exit 1, and pass the same tree without them. Only the inputs
+    # that need git or the live policy (the scope, the policy, the attribute map, the platform probe) are
+    # replaced; the per-file read and judgement are run()'s own, so a run() that drops the separator or the
+    # soft-hyphen scan fails here.
     import contextlib as _cl
     import io as _io
     import tempfile as _tf
-    sep_files = {"ls.py": ('x = "a{}b"\n'.format(chr(0x2028)), "byte offset 6: ", "U+2028"),
-                 "ps.md": ("# a{}b\n".format(chr(0x2029)), "byte offset 3: ", "U+2029")}
+    sep_files = {"ls.py": ('x = "a{}b"\n'.format(chr(0x2028)), "byte offset 6: ",
+                           "line or paragraph separator U+2028"),
+                 "ps.md": ("# a{}b\n".format(chr(0x2029)), "byte offset 3: ",
+                           "line or paragraph separator U+2029"),
+                 "sh.txt": ("co{}op\n".format(chr(0x00AD)), "byte offset 2: ", "soft hyphen U+00AD")}
     g = globals()
     saved_inputs = {k: g[k] for k in ("release_scope", "load_policy", "effective_attributes",
                                       "check_matrix")}
@@ -510,7 +582,7 @@ def self_test_main():
             for scope, want_rc, want_lines in (
                     ({"clean.txt"}, 0, []),
                     ({"clean.txt"} | set(sep_files), 1,
-                     ["  {}: {}line or paragraph separator {} ".format(name, off, cp)
+                     ["  {}: {}{} ".format(name, off, cp)
                       for name, (_t, off, cp) in sorted(sep_files.items())])):
                 g["release_scope"] = lambda _r, _s=scope: (set(_s), set())
                 out = _io.StringIO()
@@ -524,6 +596,7 @@ def self_test_main():
                                                                      want_lines))
     finally:
         g.update(saved_inputs)
+    check("run-temp-tree")
     for cp in (0x2028, 0x2029):
         if chr(cp) in FORBIDDEN.values():
             failures.append("U+{:04X} is in _byte_canon.FORBIDDEN, which also drives opf's view "
@@ -533,11 +606,17 @@ def self_test_main():
     if len(LINE_SEPARATORS) != 2:
         failures.append("_byte_canon.LINE_SEPARATORS holds {} entries; expected exactly U+2028 and "
                         "U+2029".format(len(LINE_SEPARATORS)))
+    if chr(0x00AD) in FORBIDDEN.values():
+        failures.append("U+00AD is in _byte_canon.FORBIDDEN, which also drives opf's view generator")
+    if SOFT_HYPHEN != {chr(0x00AD).encode("utf-8"): chr(0x00AD)}:
+        failures.append("_byte_canon.SOFT_HYPHEN is not exactly U+00AD ({!r})".format(SOFT_HYPHEN))
+    check("gate-only-sets")
     # Control: a printable non-ASCII letter (U+00E9) passes both legs, and the escape text passes too.
     for name, data in (("e-acute", 'x = "caf{}"\n'.format(chr(0x00E9)).encode("utf-8")),
                        ("escape-text", b'x = "a\\u2028b\\u2029c"\n')):
         if scan_bytes(data) or scan_line_separators(data):
             failures.append("control[{}] was flagged".format(name))
+    check("controls")
     # Coverage logic, synthetic effective maps.
     eff = {"a.md": {"text": "set", "eol": "lf"}, "b.zip": {"text": "unset", "eol": "unspecified"},
            "c.md": {"text": "unspecified", "eol": "unspecified"}}
@@ -549,6 +628,7 @@ def self_test_main():
         failures.append("coverage passed an uncovered path")
     if not coverage_findings({"b.zip"}, set(), eff):
         failures.append("coverage passed a binary-attributed path missing from the roster")
+    check("coverage-logic")
     # Mode table: every class x both containment states, unknown fails closed in BOTH states.
     for cls in (_containment.READ_ONLY,) + _containment.MUTATING_CLASSES:
         for cont, expect in ((True, "contained"),
@@ -574,6 +654,7 @@ def self_test_main():
         failures.append("probe raised instead of failing safe: {!r}".format(exc))
     finally:
         _containment.os.supports_dir_fd = saved_supports
+    check("containment-mode-table-and-probe")
     # load_policy strict schema: a valid policy passes; each malformation fails closed.
     def _policy_rejects(fake_data):
         g = globals()
@@ -604,6 +685,7 @@ def self_test_main():
         failures.append("an unknown [platforms] key was not rejected")
     if not _policy_rejects(dict(base_policy, hardbreak={"not": "a list"})):
         failures.append("a non-array hardbreak policy value was not rejected")
+    check("policy-schema")
     # validate_allowances row schema: an unknown key and a bool offset each fail closed.
     # The path does not exist, so a downstream read would also raise GateError; assert the SPECIFIC
     # schema rejection reason so the test isolates the key/type check, not the file-read failure.
@@ -632,8 +714,9 @@ def self_test_main():
                             "{}".format(exc))
     except Exception as exc:  # a non-GateError (e.g. TypeError) is the exact pre-fix escape
         failures.append("a nested allowance codepoint raised {!r} instead of GateError".format(exc))
-    # No allowance row can clear a line or paragraph separator.
-    for cp in ("U+2028", "U+2029"):
+    check("allowance-schema")
+    # No allowance row can clear a line or paragraph separator or the soft hyphen.
+    for cp in ("U+2028", "U+2029", "U+00AD"):
         try:
             validate_allowances(repo_root(), [dict(good_row, codepoints=[cp])], {"x"})
             failures.append("an allowance naming {} was not rejected".format(cp))
@@ -641,6 +724,7 @@ def self_test_main():
             if "outside the forbidden sets" not in str(exc):
                 failures.append("an allowance naming {} was not rejected on its own terms: {}".format(
                     cp, exc))
+    check("allowance-gate-only-rejected")
     # Two-space CommonMark hard break: cleared only with hardbreak=True, and ONLY for exactly two
     # trailing spaces on a non-blank line. Every other trailing-whitespace vector still fails, even on a
     # hardbreak-allowed path. This is the durable guard for the SKILL.md five-line header render.
@@ -662,6 +746,7 @@ def self_test_main():
         failures.append("_has_two_space_break missed a present hard break")
     if _has_two_space_break(b"Version: 1\nx\n"):
         failures.append("_has_two_space_break saw a hard break where none exists")
+    check("hardbreak-legs")
     # validate_hardbreak schema: an unknown key, a missing field, and an out-of-scope path fail closed.
     hb_good = {"path": "x", "rationale": "r"}
     for bad, reason in ((dict(hb_good, extra=1), "unknown key"),
@@ -679,6 +764,7 @@ def self_test_main():
     except GateError as exc:
         if "in-scope" not in str(exc):
             failures.append("validate_hardbreak out-of-scope rejection on wrong terms: {}".format(exc))
+    check("hardbreak-schema")
     # validate_hardbreak read-dependent legs: a valid used row passes; duplicate, unused/stale, and
     # unreadable rows each fail closed. Exercised against a temp root so the mutation guard is real.
     import tempfile as _tf
@@ -707,6 +793,7 @@ def self_test_main():
         except GateError as exc:
             if "cannot read" not in str(exc):
                 failures.append("validate_hardbreak unreadable rejection on wrong terms: {}".format(exc))
+    check("hardbreak-read-legs")
     # effective_attributes fail-closed: launch failure and malformed response each -> GateError.
     def _boom(*_a, **_k):
         raise FileNotFoundError("injected git launch failure")
@@ -734,6 +821,7 @@ def self_test_main():
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
     finally:
         subprocess.run = saved_run
+    check("check-attr-fail-closed")
     # _load_vectors strict rows: a malformed row and a missing required class each fail closed.
     def _vectors_reject(fake_rows):
         g = globals()
@@ -780,6 +868,7 @@ def self_test_main():
         bad_sha[0]["sha256"] = bad
         if not _vectors_reject(bad_sha):
             failures.append("a malformed pass-vector sha256 {!r} was not rejected".format(bad))
+    check("vector-schema")
     # Completeness guard (fail-closed, exit 2): every non-pass class MUST carry a CLASS_FINDING
     # binding, so a class added to VECTOR_CLASSES cannot silently ship unbound. It runs before any
     # CLASS_FINDING lookup below, so a gap fails closed here rather than raising a bare KeyError later.
@@ -800,21 +889,24 @@ def self_test_main():
     own_bytes = {"crlf": b"bad\r\n", "bare-cr": b"bad\rx\n", "trailing-whitespace": b"bad \n",
                  "zero-width": "a{}b\n".format(chr(0x200B)).encode("utf-8"),
                  "word-joiner": "a{}b\n".format(chr(0x2060)).encode("utf-8"),
+                 "soft-hyphen": "co{}op\n".format(chr(0x00AD)).encode("utf-8"),
                  "bidi": "a{}b\n".format(chr(0x202E)).encode("utf-8"),
                  "bidi-mark": "a{}b\n".format(chr(0x200E)).encode("utf-8"),
                  "bom": BOM + b"a\n", "no-final-newline": b"abc", "double-final-newline": b"abc\n\n",
                  "invalid-utf8": b"\xff\xfe\n", "empty": b""}
     for cls, sub in CLASS_FINDING.items():
-        if not any(sub in f for f in scan_bytes(own_bytes[cls])):
+        if not any(sub in f for f in scan_release_bytes(own_bytes[cls])):
             failures.append("class {!r} failed to bind to its own scan leg".format(cls))
-    # The published vectors (3.4), run through the same scan. Each non-pass class is bound to the
+    check("class-binding")
+    # The published vectors (3.4), run through the same scan run() applies (scan_release_bytes: the shared
+    # legs plus the repository-only separator and soft-hyphen legs). Each non-pass class is bound to the
     # SPECIFIC finding its scan leg emits (CLASS_FINDING), so a class name proves its own leg fired: a
     # cross-class payload swap (every failure payload replaced with identical CRLF bytes)
     # does not pass.
     try:
         for row in _load_vectors(repo_root()):
             data = base64.b64decode(row["payload-base64"], validate=True)
-            found = scan_bytes(data)
+            found = scan_release_bytes(data)
             if row["class"] == "pass":
                 if found:
                     failures.append("vector {}: expected clean, got {}".format(row["name"], found))
@@ -823,25 +915,71 @@ def self_test_main():
             elif not any(CLASS_FINDING[row["class"]] in f for f in found):
                 failures.append("vector {}: class {!r} did not provoke its scan leg (findings: {})".format(
                     row["name"], row["class"], found))
+        check("published-vectors")
+        # Flip: with the gate's soft-hyphen leg emptied (its pattern matching nothing), every published
+        # soft-hyphen vector must stop provoking its leg (red), and must provoke it again once the leg is
+        # restored, so the class row proves this gate's own leg fired, not merely that some finding did.
+        shy_rows = [r for r in _load_vectors(repo_root()) if r["class"] == "soft-hyphen"]
+        if not shy_rows:
+            failures.append("no published soft-hyphen vector to flip")
+        g = globals()
+        saved_re = g["SOFT_HYPHEN_RE"]
+        try:
+            g["SOFT_HYPHEN_RE"] = re.compile(b"(?!)")
+            for row in shy_rows:
+                data = base64.b64decode(row["payload-base64"], validate=True)
+                if any(CLASS_FINDING["soft-hyphen"] in f for f in scan_release_bytes(data)):
+                    failures.append("vector {}: still provoked U+00AD with the soft-hyphen leg emptied "
+                                    "(the flip did not go red)".format(row["name"]))
+        finally:
+            g["SOFT_HYPHEN_RE"] = saved_re
+        for row in shy_rows:
+            data = base64.b64decode(row["payload-base64"], validate=True)
+            if not any(CLASS_FINDING["soft-hyphen"] in f for f in scan_release_bytes(data)):
+                failures.append("vector {}: did not provoke U+00AD after the flip was restored".format(
+                    row["name"]))
+        check("soft-hyphen-vector-flip")
     except (GateError, KeyError, ValueError) as exc:
         print("error: vectors unusable ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
+    # No reduction: every codepoint the shared set holds is still in it, and every codepoint this gate
+    # refuses (the 17 shared ones, the two separators and the soft hyphen) is reported by the scan run()
+    # applies, at its byte offset, with an empty allowance table.
+    shared = (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F),
+              *range(0x2066, 0x206A))
+    for cp in shared:
+        if FORBIDDEN.get(chr(cp).encode("utf-8")) != chr(cp):
+            failures.append("U+{:04X} is missing from _byte_canon.FORBIDDEN".format(cp))
+    for cp in shared + (0x2028, 0x2029, 0x00AD):
+        data = "a{}b\n".format(chr(cp)).encode("utf-8")
+        if not any(f.startswith("byte offset 1: ") and "U+{:04X}".format(cp) in f
+                   for f in scan_release_bytes(data)):
+            failures.append("U+{:04X} is no longer refused by the release gate's scan".format(cp))
+    check("no-reduction")
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg (direct and through "
-          "run() over a temp tree), allowance scoping, "
+    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator and soft-hyphen legs (direct "
+          "and through run() over a temp tree), allowance scoping, "
           "coverage logic, the containment "
-          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, and the "
-          "published vectors all hold")
+          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, the "
+          "published vectors and the soft-hyphen vector flip all hold")
     return 0
 
 
 def main():
     args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:  # --selftest: the spec spelling (3.4)
+    # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
+    # that trailing two-token form, with an absolute path, alone or after --self-test.
+    if len(args) >= 2 and args[-2] == "--execution-report" and os.path.isabs(args[-1]) \
+            and args[:-2] in ([], ["--self-test"]):
+        # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
+        import _selftest_exit_report
+        _selftest_exit_report.arm(args[-1], SUITE_ID, EXECUTED)
+        return self_test_main()
+    if args in (["--self-test"], ["--selftest"]):  # --selftest: the spec spelling (3.4)
         return self_test_main()
     if args:
         print("usage: check_byte_canon.py [--self-test]; fail-closed", file=sys.stderr)
@@ -850,4 +988,6 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _code = main()
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

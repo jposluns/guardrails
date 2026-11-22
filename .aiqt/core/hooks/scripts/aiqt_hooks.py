@@ -33897,7 +33897,9 @@ def citation_read_check(data):
 # where a brief that names the worker draft the commit applies has every path the draft's diff headers name
 # declared too, less the paths it records as skipped (_rdp_draft_census);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
-# at the pinned gitlink, which are not read. A brief holding a control character other than a newline or a
+# at the pinned gitlink, which are not read; where the binding declares the carry labels (rule evgcmp), a review
+# carried from another revision transfers only with a byte-identical diff and the paths that differ between
+# the reviewed and new bases reopened (_rdp_carry_check). A brief holding a control character other than a newline or a
 # tab, or a format character, and a line that holds a label's name with a colon after it on that line
 # anywhere but in a column-0 label the hook reads (_rdp_labels), are a cannot-evaluate. A refusal is a deny naming its reason;
 # a cannot-evaluate is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through
@@ -33908,6 +33910,13 @@ _RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
 # The optional labels a binding declares together or not at all: the brief line naming the worker draft a
 # revision applies, and the lines recording the drafted paths deliberately left out of it.
 _RDP_DRAFT_LABEL_KEYS = frozenset(("draft", "skip"))
+# The optional labels of the carried-review check (rule evgcmp), declared together or not at all: the brief
+# line naming the reviewed revision a review is carried from (or none, for a fresh review), and the lines
+# naming each path where review reopens because it differs between the reviewed and the new bases.
+_RDP_CARRY_LABEL_KEYS = frozenset(("carried", "reopen"))
+_RDP_CARRY_NONE = "none"
+# A carried review compares two patches, each read whole and refused past this many times max_brief_bytes.
+_RDP_CARRY_PATCH_FACTOR = 16
 _RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
 _RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
 # Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
@@ -34015,7 +34024,12 @@ def _rdp_binding(reg):
         return ("bad", "review_dispatch.brief_option is not a single option word")
     labels = raw["labels"]
     if not isinstance(labels, dict) or set(labels) not in (
-            _RDP_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS):
+            _RDP_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_CARRY_LABEL_KEYS,
+            _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS | _RDP_CARRY_LABEL_KEYS):
+        if isinstance(labels, dict) and set(labels) & _RDP_CARRY_LABEL_KEYS:
+            return ("bad", "review_dispatch.labels must declare exactly {}, optionally with both of {} and "
+                    "optionally with both of {}".format(sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS),
+                                                        sorted(_RDP_CARRY_LABEL_KEYS)))
         return ("bad", "review_dispatch.labels must declare exactly {}, or those and both of {}".format(
             sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS)))
     values = list(labels.values())
@@ -34887,6 +34901,182 @@ def _rdp_draft_census(cfg, found, changed, pin):
     return (drafted - skipped, None)
 
 
+def _rdp_carry_diff_argv(base, commit):
+    """The git arguments (after _review_git's own) that write the patch from base to commit for the
+    carried-review comparison: plumbing diff-tree with every option that shapes its bytes pinned on the
+    command line (prefixes, context, algorithm, heuristic, colour, path quoting, blank context lines, rename
+    detection, submodule form, order file, relative paths, external diff, textconv), so repository
+    configuration cannot shape or thin it; each index line names full blob ids, and a binary change is
+    written in full. One helper, so the self-test can patch it."""
+    return ("-c", "diff.suppressBlankEmpty=false", "-c", "core.quotePath=true", "diff-tree", "-r", "-p",
+            "--binary", "--full-index", "-U3", "--no-color", "--no-renames", "--no-ext-diff", "--no-textconv",
+            "--src-prefix=a/", "--dst-prefix=b/", "--diff-algorithm=myers", "--indent-heuristic",
+            "-O" + os.devnull, "--no-relative", "--submodule=short", "--ignore-submodules=none", base, commit)
+
+
+def _rdp_commit_parents(repo, commit):
+    """The parent ids the raw commit object records (replacement refs and grafts off), or None when the
+    commit cannot be read."""
+    p = _review_git(repo, "cat-file", "commit", commit)
+    if p is None or p.returncode != 0:
+        return None
+    parents = []
+    for line in p.stdout.split(b"\n"):
+        if not line:
+            break
+        if line.startswith(b"parent "):
+            parents.append(line[len(b"parent "):].decode("ascii", "replace"))
+    return parents
+
+
+def _rdp_carry_first_difference(old, new):
+    """(line number, the diff --git line of the section it falls in or None, the differing line) for the
+    first line where two unequal patches differ; the line is the new patch's, or the old one's where the
+    new patch has ended."""
+    old_lines, new_lines = old.split(b"\n"), new.split(b"\n")
+    at = next((k for k, (a, b) in enumerate(zip(old_lines, new_lines)) if a != b),
+              min(len(old_lines), len(new_lines)))
+    line = new_lines[at] if at < len(new_lines) else old_lines[at] if at < len(old_lines) else b""
+    section = None
+    for candidate in [line] + old_lines[:at][::-1]:
+        if candidate.startswith(b"diff --git "):
+            section = candidate.decode("utf-8", "replace")
+            break
+    return (at + 1, section, line.decode("utf-8", "replace")[:80])
+
+
+def _rdp_carry_nameable(path):
+    """Whether a path git reports (bytes) can be written as a reopen line's value: UTF-8, with no newline,
+    no other line boundary (_RDP_NONPHYSICAL) and no character the label screen refuses (_rdp_hidden)."""
+    try:
+        text = path.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return not any(ch in text for ch in ("\n",) + _RDP_NONPHYSICAL) and _rdp_hidden(text) is None
+
+
+def _rdp_carry_check(cfg, found, repo, fmt, pin, pin_parents, pin_base):
+    """The carried-review check (rule evgcmp), run last for a revision brief where the binding declares the
+    carry labels: ("ok", note) when the brief carries no review ("none", note empty), carries one from the
+    pin itself (a note), or carries one whose replayed diff is byte-identical to the reviewed diff, that
+    touches no path that differs between the reviewed and the new bases, and whose reopen lines name exactly
+    those paths (note empty); otherwise ("deny"|"unverifiable", message) for the first failure. Both patches
+    are written by _rdp_carry_diff_argv. It compares one commit with its first parent: a merge on either
+    side is unverifiable, and a reviewed range or squash is not recognized, since the brief names one
+    commit (naming a range's tip compares that commit's own diff alone). A path that differs between the
+    bases but cannot be written on a reopen line (_rdp_carry_nameable) is unverifiable. Whether the change
+    relies on, or is called or consumed by, a file that differs between the bases is not computed: review
+    must reopen on every such path, an over-approximation."""
+    labels = cfg["labels"]
+    if "carried" not in labels:
+        return ("ok", "")
+    carried, reopen = found["carried"], found["reopen"]
+    if not carried:
+        return ("deny", "the brief has no {!r} line; where the binding declares the carried-review check (rule "
+                "evgcmp), a revision brief declares {!r} {} for a fresh review, or the full id of the reviewed "
+                "revision a review is carried from".format(labels["carried"], labels["carried"], _RDP_CARRY_NONE))
+    if len(carried) > 1:
+        return ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+            len(carried), labels["carried"]))
+    source = carried[0].strip()
+    if source == _RDP_CARRY_NONE:
+        if reopen:
+            return ("deny", "the brief has {!r} lines but declares {!r} {}; reopen lines need a carried "
+                    "revision, so name it or drop them".format(labels["reopen"], labels["carried"],
+                                                               _RDP_CARRY_NONE))
+        return ("ok", "")
+    width = _RDP_OID_LEN[fmt]
+    if len(source) != width or any(ch not in "0123456789abcdef" for ch in source):
+        return ("deny", "the carried revision {!r} is not a full {}-character lowercase {} commit id; a short "
+                "id, a branch name or HEAD is not accepted".format(source, width, fmt))
+    if _rdp_resolve(repo, source) != source:
+        return ("unverifiable", "the carried revision {} does not resolve to that commit in {}".format(
+            source, repo))
+    if not all(reopen):
+        return ("unverifiable", "the brief has an empty {!r} value".format(labels["reopen"]))
+    if source == pin:
+        if reopen:
+            return ("deny", "the carried revision is the pin {} itself, so nothing was replayed and no base "
+                    "moved; drop the {!r} lines".format(pin, labels["reopen"]))
+        return ("ok", "AIQT rule evgcmp: the review is carried from {} to itself, so nothing was "
+                "replayed.".format(pin))
+    full = "; to proceed, declare {!r} {} and dispatch a full review".format(labels["carried"], _RDP_CARRY_NONE)
+    if len(pin_parents) > 1:
+        return ("unverifiable", "the pin {} is a merge, so a review carried to it cannot be compared "
+                "diff for diff{}".format(pin, full))
+    source_parents = _rdp_commit_parents(repo, source)
+    if source_parents is None:
+        return ("unverifiable", "the raw commit {} cannot be read".format(source))
+    if len(source_parents) > 1:
+        return ("unverifiable", "the carried revision {} is a merge, so its review cannot be compared diff "
+                "for diff{}".format(source, full))
+    for parent in source_parents:
+        q = _review_git(repo, "cat-file", "-e", parent)
+        if q is None or q.returncode != 0:
+            return ("unverifiable", "the parent {} of the carried revision {} is not in the repository (a "
+                    "shallow or partial clone), so its base cannot be derived{}".format(parent, source, full))
+    if source_parents:
+        source_base = source_parents[0]
+    else:
+        q = _review_git(repo, "hash-object", "-t", "tree", "--stdin", stdin=b"")
+        source_base = q.stdout.decode("ascii", "replace").strip() if q is not None and q.returncode == 0 else ""
+        if len(source_base) != width:
+            return ("unverifiable", "the empty tree id cannot be computed in {}".format(repo))
+    cap = _RDP_CARRY_PATCH_FACTOR * cfg["max_brief_bytes"]
+    patches = []
+    for side_base, side in ((source_base, source), (pin_base, pin)):
+        p = _review_git(repo, *_rdp_carry_diff_argv(side_base, side))
+        if p is None or p.returncode != 0:
+            return ("unverifiable", "the patch of {} against its base cannot be read{}".format(side, full))
+        if len(p.stdout) > cap:
+            return ("unverifiable", "the patch of {} against its base is larger than {} bytes ({} times "
+                    "max_brief_bytes), so it is not compared{}".format(side, cap, _RDP_CARRY_PATCH_FACTOR, full))
+        patches.append(p.stdout)
+    if patches[0] != patches[1]:
+        number, section, line = _rdp_carry_first_difference(patches[0], patches[1])
+        return ("deny", "the review of {} does not transfer to {} (rule evgcmp): the replayed diff is not "
+                "byte-identical to the reviewed diff; they first differ at patch line {}{} ({!r}), and any "
+                "other diff needs a new review{}".format(
+                    source, pin, number, ", in the section {!r}".format(section[:120]) if section else "",
+                    line, full))
+    moved = _rdp_git_records(repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames",
+                             "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", source_base, pin_base)
+    if moved is None:
+        return ("unverifiable", "the paths that differ between the reviewed base {} and the new base {} "
+                "cannot be read".format(source_base, pin_base))
+    moved_b = set(moved)
+    unnameable = sorted(m.decode("utf-8", "replace") for m in moved_b if not _rdp_carry_nameable(m))
+    if unnameable:
+        return ("unverifiable", "{} differs between the reviewed base {} and the new base {} but cannot be named "
+                "on a {!r} line (it is not UTF-8, or holds a line break or a character the label screen "
+                "refuses), so review cannot reopen on it{}".format(
+                    _rdp_listing(unnameable), source_base, pin_base, labels["reopen"], full))
+    touched = _rdp_git_records(repo, "diff-tree", "-r", "-z", "--name-only", "--no-renames",
+                               "--ignore-submodules=none", "--no-ext-diff", "--no-textconv", pin_base, pin)
+    if touched is None:
+        return ("unverifiable", "the paths {} changes cannot be read".format(pin))
+    inside = sorted(m.decode("utf-8") for m in moved_b & set(touched))
+    if inside:
+        return ("deny", "the review of {} is carried to {} with a byte-identical diff, but the change touches {}, "
+                "which differs between the reviewed base {} and the new base {} (a change to a file's mode "
+                "alone names no blob); a base change inside a touched file needs a new review (rule "
+                "evgcmp){}".format(source, pin, _rdp_listing(inside), source_base, pin_base, full))
+    reopen_b = set(r.encode("utf-8") for r in reopen)
+    if moved_b != reopen_b:
+        parts = []
+        unreopened = sorted(m.decode("utf-8", "replace") for m in moved_b - reopen_b)
+        stray = sorted(r.decode("utf-8", "replace") for r in reopen_b - moved_b)
+        if unreopened:
+            parts.append("differs between bases but not reopened: {}".format(_rdp_listing(unreopened)))
+        if stray:
+            parts.append("reopened but identical in both bases: {}".format(_rdp_listing(stray)))
+        return ("deny", "the review of {} is carried to {} with a byte-identical diff, but its {!r} lines do not "
+                "name exactly the paths that differ between the reviewed base {} and the new base {} ({}); "
+                "review reopens on every such path (rule evgcmp)".format(
+                    source, pin, labels["reopen"], source_base, pin_base, "; ".join(parts)))
+    return ("ok", "")
+
+
 def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
     """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
     message). repo_default is the top level of the repository the dispatch runs in, used when the brief
@@ -35053,13 +35243,21 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
         return ("deny", "declared path {} differs from the pin in the working tree (compared by content in "
                 "{}); commit it, or set {!r} to a worktree checked out at the pin".format(
                     _rdp_listing(differ), repo, labels["repo"]))
+    # Where the binding declares the carry labels, a review carried from another revision transfers only
+    # with a byte-identical diff and the paths that differ between the bases reopened (rule evgcmp).
+    carry, carry_note = _rdp_carry_check(cfg, found, repo, fmt, pin, parents, base)
+    if carry != "ok":
+        return (carry, carry_note)
     if found["branch"]:
         branch = found["branch"][0].strip()
         tip = _rdp_resolve(repo, branch) if branch else None
         if tip != pin:
             return ("note", "AIQT rule vfxcmt: the review dispatch is pinned to {}, but the declared "
                     "branch {!r} {}; the review covers the pin, not the branch".format(
-                        pin, branch, "resolves to {}".format(tip) if tip else "does not resolve"))
+                        pin, branch, "resolves to {}".format(tip) if tip else "does not resolve")
+                    + (". " + carry_note if carry_note else ""))
+    if carry_note:
+        return ("note", carry_note)
     return ("allow", "")
 
 
@@ -36807,6 +37005,15 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     if target not in _RDP_TARGETS:
         return ("deny", "the brief {} declares the unknown target {!r}; use revision, "
                 "working-tree or not-a-review".format(brief, target))
+    if target != "revision" and "carried" in cfg["labels"] and (
+            found["reopen"] or any(v.strip() != _RDP_CARRY_NONE for v in found["carried"])):
+        return ("deny", "the brief {} declares target {} with a {!r} revision or {!r} lines; a carried review "
+                "needs a revision target (rule evgcmp), so declare {!r} {} or target the revision".format(
+                    brief, target, cfg["labels"]["carried"], cfg["labels"]["reopen"], cfg["labels"]["carried"],
+                    _RDP_CARRY_NONE))
+    if target != "revision" and "carried" in cfg["labels"] and len(found["carried"]) > 1:
+        return ("unverifiable", "the brief {} has {} {!r} lines; at most one is allowed".format(
+            brief, len(found["carried"]), cfg["labels"]["carried"]))
     if target != "revision":
         # the guard-events row is the only record of this departure from revision reconciliation, so a failed
         # append is reported on the note (the allow stands)
@@ -36830,7 +37037,11 @@ def review_dispatch_pin(data):
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
     applies declares every path the draft's diff headers name less the paths it records as skipped, so a
-    drafted path neither committed nor skipped is refused. A command string holding a NUL is withheld in
+    drafted path neither committed nor skipped is refused; where the binding declares the carry labels
+    (rule evgcmp), a revision brief declares the reviewed revision a review is carried from, or none, and a
+    carried review transfers only when the replayed diff is byte-identical to the reviewed diff and the
+    brief's reopen lines name exactly the paths that differ between the two bases (a carried revision on
+    another target is refused). A command string holding a NUL is withheld in
     every session, bound or not (the text before the NUL runs). Inert without a review_dispatch binding; in a
     session a binding scopes, a Bash call that is not one provably plain command (its command word on the
     allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
