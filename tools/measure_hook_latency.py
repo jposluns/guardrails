@@ -71,7 +71,10 @@ configuration out. The pinned HOME and XDG_CONFIG_HOME keep user configuration a
 calls. Outside the root this tool writes only the --json file. Residuals, disclosed:
 the hooks' own git calls read the system git configuration (they drop GIT_CONFIG_NOSYSTEM by design); a hook
 that writes to an absolute path of its own choosing is outside what the pins control; and the fixture's git
-objects and the hooks' recovery refs grow inside the root from one run to the next.
+objects and the hooks' recovery refs grow inside the root from one run to the next. No child is given a
+network on purpose: the fixture's one remote is the local bare origin under the root, and no proxy or other
+network variable reaches a child; the tool enters no network namespace, so a hook that opened a connection of
+its own would not be stopped (a residual, disclosed).
 
 CONDITIONS. The table is preceded by the conditions it was measured under: the load average at start and end
 (os.getloadavg), the CPU count, the harness and hook interpreters, the git version and the fixture sizes.
@@ -92,8 +95,19 @@ Exit). A timed-out sample is TIMED OUT, never a time: it is known only to exceed
 after every valid sample, and a statistic whose position lands on it reads TIMED OUT. A timed-out sample is
 not a failed sample, so timed-out samples alone never change the exit.
 
-  measure_hook_latency.py [--runs N] [--files N] [--commits N] [--case-timeout SECONDS] [--hook ID]...
-                          [--json PATH]
+FIGURES AND THE MARGIN. Each row gives the min, median, 95th percentile and max of its valid and timed-out
+samples, beside the configured timeout of its hook (the timeout of its hooks.json entry). The 95th percentile
+is the nearest rank: the sample at position ceil(0.95 n) of the n in sorted order, so with fewer than 20 samples
+it is the max. A row is near its timeout when its max reaches the threshold (one minus --margin) times that
+timeout (default margin 0.5, so half the timeout): yes when the max is a time at or above the threshold, or is
+TIMED OUT under a --case-timeout at or above it (such a sample is known to exceed the threshold); no when the
+max is a time below it; unknown when the max is TIMED OUT under a --case-timeout below the threshold, or the row
+reads NO VALID SAMPLE. After the table one line lists every row flagged yes, and one every row flagged unknown.
+The flag is a report, never a gate: it changes no exit. Every figure is what one host measured on one day
+under the conditions printed with it, an estimate, never a property of the hooks.
+
+  measure_hook_latency.py [--runs N] [--files N] [--commits N] [--case-timeout SECONDS] [--margin FRACTION]
+                          [--hook ID]... [--json PATH]
   measure_hook_latency.py --self-test     the harness's own checks, on stub hooks and tiny inputs
   measure_hook_latency.py [--self-test] --execution-report ABS_PATH
                                           the self-test, also writing its execution report, finalized at
@@ -165,6 +179,11 @@ DEFAULT_CASE_TIMEOUT = 60.0
 INT_OPTIONS = {"--runs": (1, 1000), "--files": (1, 1000000), "--commits": (1, 1000000)}
 # --case-timeout must be greater than 0 (an exclusive lower end) and at most this (an inclusive upper end).
 CASE_TIMEOUT_MAX = 3600.0
+# A row is near its timeout when its max reaches (1 - margin) times its hook's configured timeout; --margin is
+# a fraction strictly between 0 and 1.
+DEFAULT_MARGIN = 0.5
+PERCENTILE = 95
+NEAR_YES, NEAR_NO, NEAR_UNKNOWN = "yes", "no", "unknown"
 DECIMAL_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?")
 INTEGER_RE = re.compile(r"[0-9]+")
 
@@ -218,7 +237,7 @@ STARTUP_REJECTION = b"payload is not a JSON object"
 INTERRUPT_SIGNALS = tuple(getattr(signal, name) for name in ("SIGINT", "SIGTERM", "SIGHUP")
                           if hasattr(signal, name))
 USAGE = ("usage: measure_hook_latency.py [--runs N] [--files N] [--commits N] [--case-timeout SECONDS] "
-         "[--hook ID]... [--json PATH]\n"
+         "[--margin FRACTION] [--hook ID]... [--json PATH]\n"
          "       measure_hook_latency.py [--self-test] [--execution-report ABS_PATH]")
 
 Hook = collections.namedtuple("Hook", ("hook_id", "matcher", "argv", "script", "timeout"))
@@ -321,13 +340,13 @@ def _interrupt_handlers():
 
 def parse_args(argv):
     """The measurement options, or UsageError. Each numeric value is plain decimal digits; each bound is
-    checked at its own end (see INT_OPTIONS and CASE_TIMEOUT_MAX)."""
+    checked at its own end (see INT_OPTIONS, CASE_TIMEOUT_MAX and DEFAULT_MARGIN)."""
     opts = {"runs": DEFAULT_RUNS, "files": DEFAULT_FILES, "commits": DEFAULT_COMMITS,
-            "case_timeout": DEFAULT_CASE_TIMEOUT, "hooks": [], "json": None}
+            "case_timeout": DEFAULT_CASE_TIMEOUT, "margin": DEFAULT_MARGIN, "hooks": [], "json": None}
     index = 0
     while index < len(argv):
         arg = argv[index]
-        if arg not in INT_OPTIONS and arg not in ("--case-timeout", "--hook", "--json"):
+        if arg not in INT_OPTIONS and arg not in ("--case-timeout", "--margin", "--hook", "--json"):
             raise UsageError("unknown argument {!r}".format(arg))
         if index + 1 >= len(argv):
             raise UsageError("{} needs a value".format(arg))
@@ -344,6 +363,11 @@ def parse_args(argv):
                 raise UsageError("--case-timeout takes seconds greater than 0 and at most {:g}, not {!r}"
                                  .format(CASE_TIMEOUT_MAX, value))
             opts["case_timeout"] = seconds
+        elif arg == "--margin":
+            fraction = float(value) if DECIMAL_RE.fullmatch(value) else math.nan
+            if not 0 < fraction < 1:
+                raise UsageError("--margin takes a fraction greater than 0 and less than 1, not {!r}".format(value))
+            opts["margin"] = fraction
         elif arg == "--hook":
             if not value:
                 raise UsageError("--hook needs a hook id")
@@ -465,6 +489,29 @@ def summarize(samples):
         low, high = ordered[middle - 1], ordered[middle]
         median = None if low is None or high is None else (low + high) / 2
     return ordered[0], median, ordered[-1]
+
+
+def percentile(samples, rank=PERCENTILE):
+    """The nearest-rank rank-th percentile of samples (each seconds, or None for a timed-out sample sorted
+    after every completed one): the sample at position ceil(rank * n / 100) of the n in sorted order, None
+    (TIMED OUT) when that position lands on a timed-out sample or there is no sample."""
+    done = sorted(sample for sample in samples if sample is not None)
+    ordered = done + [None] * (len(samples) - len(done))
+    if not ordered:
+        return None
+    return ordered[max(1, math.ceil(rank * len(ordered) / 100)) - 1]
+
+
+def near_timeout(maximum, timeout, margin, case_timeout):
+    """Whether a row's max comes within margin of its hook's configured timeout (see FIGURES AND THE MARGIN in
+    the module docstring): NEAR_YES, NEAR_NO or NEAR_UNKNOWN. maximum is seconds, None (TIMED OUT, known only
+    to exceed case_timeout) or NO_VALID_SAMPLE."""
+    threshold = timeout * (1 - margin)
+    if maximum is None:
+        return NEAR_YES if case_timeout >= threshold else NEAR_UNKNOWN
+    if isinstance(maximum, str):
+        return NEAR_UNKNOWN
+    return NEAR_YES if maximum >= threshold else NEAR_NO
 
 
 def child_env(root, plugin_root, project):
@@ -724,7 +771,8 @@ def coverage_problems(hooks, cap, write_sizes, files, commits):
 
 
 def measure(hooks_json, plugin_root, runs=DEFAULT_RUNS, files=DEFAULT_FILES, commits=DEFAULT_COMMITS,
-            case_timeout=DEFAULT_CASE_TIMEOUT, selected=(), write_sizes=WRITE_SIZES, progress=None):
+            case_timeout=DEFAULT_CASE_TIMEOUT, selected=(), write_sizes=WRITE_SIZES, progress=None,
+            margin=DEFAULT_MARGIN):
     """Run every case and return the figures and conditions. MeasureError when it cannot measure; Interrupted
     when SIGINT, SIGTERM or SIGHUP stops it. Every hook id it needs, and the coverage of hooks.json by the
     cases, are checked before the fixture root exists. The root is removed at the normal end, on an error and
@@ -755,7 +803,7 @@ def measure(hooks_json, plugin_root, runs=DEFAULT_RUNS, files=DEFAULT_FILES, com
         try:
             interrupts.arm()
             result = _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, case_timeout, cap,
-                                 write_sizes, progress, interrupts)
+                                 write_sizes, progress, interrupts, margin)
         except BaseException as exc:
             interrupts.armed = False
             failure = exc
@@ -791,7 +839,7 @@ def _remove_root(root):
 
 
 def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, case_timeout, cap, write_sizes,
-                progress, interrupts):
+                progress, interrupts, margin=DEFAULT_MARGIN):
     repo = root / "repo"
     env = child_env(root, plugin_root, repo)
     for _variable, rel in PINNED_DIRS:
@@ -833,6 +881,9 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
         for row in case_rows:
             row["min"], row["median"], row["max"] = (summarize(row["samples"]) if row["samples"]
                                                      else (NO_VALID_SAMPLE,) * 3)
+            row["p95"] = percentile(row["samples"]) if row["samples"] else NO_VALID_SAMPLE
+            row["near_timeout_threshold_seconds"] = row["platform_timeout_seconds"] * (1 - margin)
+            row["near_timeout"] = near_timeout(row["max"], row["platform_timeout_seconds"], margin, case_timeout)
         rows.extend(case_rows)
     hooks_name = Path(hooks_json)
     if hooks_name.is_relative_to(ROOT):
@@ -845,6 +896,7 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
         "hook_interpreters": interpreters, "git_version": git_version,
         "hooks_json": hooks_name.as_posix(), "runs": runs, "untracked_files": files, "commits": commits,
         "case_timeout_seconds": case_timeout, "command_budget": cap, "write_sizes": list(write_sizes),
+        "margin": margin, "percentile": PERCENTILE,
         "order": "one child at a time; each run goes once through the hooks of the case",
     }
     return {"format": "aiqt-hook-latency/1", "conditions": conditions, "cases": ran, "rows": rows,
@@ -884,25 +936,43 @@ def render(result):
                  "names no decision) is counted under failed and contributes no time; {} is known only to exceed "
                  "the case timeout; {} means the row has no valid or timed-out sample".format(TIMED_OUT,
                                                                                          NO_VALID_SAMPLE))
+    lines.append("figures: an estimate measured on this host on the date above, not a fixed fact; p{} s is the "
+                 "nearest-rank {}th percentile; near timeout is yes when the max reaches {:g} times the hook's "
+                 "configured timeout (margin {:g})".format(PERCENTILE, PERCENTILE, 1 - conditions["margin"],
+                                                          conditions["margin"]))
     lines.append("cases:")
     width = max([len(case["case"]) for case in result["cases"]] + [4])
     lines.extend("  {}  {}".format(case["case"].ljust(width), case["note"]) for case in result["cases"])
     if result["skipped_cases"]:
         lines.append("skipped (no selected hook matches): {}".format(", ".join(result["skipped_cases"])))
-    header = ("case", "hook id", "runs", "failed", "min s", "median s", "max s", "outcomes")
+    header = ("case", "hook id", "runs", "failed", "min s", "median s", "p{} s".format(PERCENTILE), "max s",
+              "timeout s", "near timeout", "outcomes")
     table = [header]
     for row in result["rows"]:
         outcomes = ", ".join("{} x{}".format(label, count) for label, count in sorted(row["outcomes"].items()))
         table.append((row["case"], row["hook_id"], str(len(row["samples"]) + row["failed_samples"]),
                       str(row["failed_samples"]), _seconds(row["min"]), _seconds(row["median"]),
-                      _seconds(row["max"]), outcomes))
+                      _seconds(row["p95"]), _seconds(row["max"]),
+                      "{:g}".format(row["platform_timeout_seconds"]), row["near_timeout"], outcomes))
     widths = [max(len(line[column]) for line in table) for column in range(len(header))]
     lines.append("")
     for line in table:
         cells = [line[0].ljust(widths[0]), line[1].ljust(widths[1])]
-        cells += [cell.rjust(width) for cell, width in zip(line[2:7], widths[2:7])]
-        lines.append("  ".join(cells + [line[7]]).rstrip())
+        cells += [cell.rjust(width) for cell, width in zip(line[2:9], widths[2:9])]
+        cells.append(line[9].ljust(widths[9]))
+        lines.append("  ".join(cells + [line[10]]).rstrip())
+    lines.append("")
+    for label, flag in (("near timeout", NEAR_YES), ("near timeout unknown", NEAR_UNKNOWN)):
+        named = _flagged(result["rows"], flag)
+        lines.append("{}: {} row(s){}".format(label, len(named), (" (case/hook id): " + ", ".join(named))
+                                               if named else ""))
     return "\n".join(lines) + "\n"
+
+
+def _flagged(rows, flag):
+    """Each row, as case/hook id (each written by _one_line), whose near-timeout flag is flag."""
+    return ["{}/{}".format(_one_line(row["case"]), _one_line(row["hook_id"])) for row in rows
+            if row["near_timeout"] == flag]
 
 
 def _cause(exc):
@@ -951,7 +1021,7 @@ def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, er
     try:
         result = measure(hooks_json, plugin_root, runs=opts["runs"], files=opts["files"], commits=opts["commits"],
                          case_timeout=opts["case_timeout"], selected=opts["hooks"], write_sizes=write_sizes,
-                         progress=lambda text: print(text, file=err, flush=True))
+                         progress=lambda text: print(text, file=err, flush=True), margin=opts["margin"])
     except Interrupted as exc:
         print("error: {} (the measurement stopped; nothing was reported)".format(_cause(exc)), file=err)
         return 128 + exc.signum
@@ -981,9 +1051,10 @@ def run_cli(argv, hooks_json, plugin_root, write_sizes=WRITE_SIZES, out=None, er
 # (the rejection on stderr, exit 2), except stub_lax.py, which exits 0 with nothing on stdout (an allow, so its
 # startup sample is a failed one). Otherwise they read their payload and exit 0, except: stub_slow.py sleeps
 # 30 s as branch_root (the timeout case and the interrupt checks; it first writes its process group id and
-# working directory to held-branch_root in the plugin directory) and 0.2 s as protected_line (a sample inside
-# the timeout); stub_fail.py kills itself with SIGKILL as protected_line, as branch_root exits 1 on its first,
-# third, ... launch and naps MIXED_NAP before exiting 0 on the others (a row mixing failed and valid samples),
+# working directory to held-branch_root in the plugin directory), 0.2 s as protected_line (a sample inside
+# the timeout) and PAST_NAP as orch_ask_guard (past the configured PAST_TIMEOUT of the margin run);
+# stub_fail.py kills itself with SIGKILL as protected_line, as branch_root exits 1 on its first, third, ...
+# launch and naps MIXED_NAP before exiting 0 on the others (a row mixing failed and valid samples),
 # and exits 1 as any other hook id (git_discard and CONTROL_ID among them). Two real dispatcher launches confirm
 # the premises of two cases (the startup payload is rejected, the Write line scans clean); neither runs git.
 
@@ -1016,6 +1087,8 @@ if name == "stub_slow.py" and mode == "branch_root":
     time.sleep(30)
 if name == "stub_slow.py" and mode == "protected_line":
     time.sleep(0.2)
+if name == "stub_slow.py" and mode == "orch_ask_guard":
+    time.sleep(0.75)
 if name == "stub_fail.py" and mode not in ("branch_root", "protected_line"):
     sys.exit(1)
 if name == "stub_fail.py" and mode == "protected_line":
@@ -1044,8 +1117,16 @@ CONTROL_ID = "line\nbreak\rhook"
 # Each variant's script and the hook ids that run it; every other hook runs stub_fast.py.
 STUB_VARIANTS = {"fast": ("stub_fast.py", ()), "slow": ("stub_slow.py", ("branch_root", "protected_line")),
                  "fail": ("stub_fail.py", ("git_discard", "branch_root", "protected_line")),
-                 "lax": ("stub_lax.py", ("git_discard",)), "control": ("stub_fail.py", (CONTROL_ID,))}
+                 "lax": ("stub_lax.py", ("git_discard",)), "control": ("stub_fail.py", (CONTROL_ID,)),
+                 "past": ("stub_slow.py", ("orch_ask_guard",))}
 MIXED_NAP = 0.25                     # stub_fail.py's nap as branch_root on a valid sample (in STUB_SOURCE)
+# The margin checks: stub_slow.py as orch_ask_guard naps PAST_NAP (in STUB_SOURCE), past the configured
+# PAST_TIMEOUT its stub hooks.json gives that hook alone; every other stub hook keeps STUB_TIMEOUT.
+PAST_NAP = 0.75
+PAST_TIMEOUT = 0.5
+STUB_TIMEOUT = 10
+# A hook id named only in the margin run's stub hooks.json, so the run shows the list is read from there.
+CONFIG_ONLY_ID = "listed_only_in_config"
 SELF_TEST_WRITE_SIZES = (1024, 2048, 4096)
 SELF_TEST_CASES = ["startup", "bash-512b", "write-1kib", "write-2kib", "write-4kib", "ask-user-question",
                    "schedule-wakeup", "git-discard", "branch-root", "protected-line"]
@@ -1071,9 +1152,10 @@ INTERRUPT_WAIT = 20.0                # seconds for the held hook to start, and f
 GROUP_WAIT = 5.0                     # seconds for the hook child's process group to be gone
 
 
-def _stub_plugin(base, name, variant="fast", drop=None, extra=()):
+def _stub_plugin(base, name, variant="fast", drop=None, extra=(), timeouts=None):
     """A plugin tree whose hooks.json runs the stub dispatcher for STUB_HOOKS (less drop) and then the extra
-    (matcher, hook id) pairs, the variant's script for the hook ids it names: (hooks.json, root)."""
+    (matcher, hook id) pairs, the variant's script for the hook ids it names, each hook with the configured
+    timeout timeouts gives it, else STUB_TIMEOUT: (hooks.json, root)."""
     plugin = Path(base, name)
     scripts = plugin / "hooks" / "scripts"
     scripts.mkdir(parents=True)
@@ -1085,7 +1167,8 @@ def _stub_plugin(base, name, variant="fast", drop=None, extra=()):
         if hook_id == drop:
             continue
         script = special if hook_id in special_ids else "stub_fast.py"
-        entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": "python3", "timeout": 10,
+        timeout = (timeouts or {}).get(hook_id, STUB_TIMEOUT)
+        entries.append({"matcher": matcher, "hooks": [{"type": "command", "command": "python3", "timeout": timeout,
                                                         "args": ["-I", PLUGIN_ROOT_TOKEN + "/hooks/scripts/" + script,
                                                                  hook_id]}]})
     hooks_json = plugin / "hooks" / "hooks.json"
@@ -1159,6 +1242,8 @@ def _bounds_vectors():
     table += [(["--case-timeout", "0"], False), (["--case-timeout", "0.0"], False),
               (["--case-timeout", "0.001"], True), (["--case-timeout", "3599.999"], True),
               (["--case-timeout", "3600"], True), (["--case-timeout", "3600.001"], False)]
+    table += [(["--margin", "0"], False), (["--margin", "0.0"], False), (["--margin", "0.001"], True),
+              (["--margin", "0.999"], True), (["--margin", "1"], False), (["--margin", "1.0"], False)]
     wrong = []
     for argv, accepted in table:
         try:
@@ -1175,7 +1260,7 @@ def _unknown_vectors():
     refused = (["--nonesuch"], ["--runs"], ["--runs", "five"], ["--runs", "-1"], ["--runs", "+2"],
                ["--case-timeout", "nan"], ["--case-timeout", "1e3"], ["--case-timeout", "inf"], ["--hook", ""],
                ["--self-test", "--runs", "2"], ["--execution-report", "relative/report.json"],
-               ["--runs", "2", "--json"])
+               ["--runs", "2", "--json"], ["--margin", "-0.1"], ["--margin", "5e-1"], ["--margin", "nan"])
     wrong = []
     for argv in refused:
         try:
@@ -1199,6 +1284,28 @@ def _summary_vectors():
              ([1.0, 2.0, 3.0, None], (1.0, 2.5, None)), ([1.0, 2.0, None, None], (1.0, None, None)),
              ([], (None, None, None)))
     wrong = [(samples, summarize(samples)) for samples, want in table if summarize(samples) != want]
+    return not wrong, wrong
+
+
+def _percentile_vectors():
+    """The nearest-rank 95th percentile: the max below 20 samples, the 19th of 20, the 95th of 100, and
+    TIMED OUT (None) when its position lands on a timed-out sample."""
+    hundred = [float(number) for number in range(100, 0, -1)]
+    table = (([1.0], 1.0), ([None], None), ([], None), ([3.0, 1.0, 2.0], 3.0),
+             ([float(number) for number in range(1, 20)], 19.0), ([float(number) for number in range(1, 21)], 19.0),
+             ([float(number) for number in range(1, 21)] + [None], 20.0), (hundred, 95.0),
+             ([float(number) for number in range(1, 20)] + [None], 19.0), ([1.0, 2.0, None], None))
+    wrong = [(samples, percentile(samples), want) for samples, want in table if percentile(samples) != want]
+    return not wrong, wrong
+
+
+def _near_vectors():
+    """The near-timeout rule at its boundaries: (maximum, timeout, margin, case timeout, want)."""
+    table = ((5.0, 10, 0.5, 60.0, NEAR_YES), (4.999, 10, 0.5, 60.0, NEAR_NO), (0.01, 10, 0.5, 60.0, NEAR_NO),
+             (12.0, 10, 0.5, 60.0, NEAR_YES), (7.5, 10, 0.25, 60.0, NEAR_YES), (7.49, 10, 0.25, 60.0, NEAR_NO),
+             (None, 10, 0.5, 5.0, NEAR_YES), (None, 10, 0.5, 4.999, NEAR_UNKNOWN), (None, 10, 0.5, 60.0, NEAR_YES),
+             (NO_VALID_SAMPLE, 10, 0.5, 60.0, NEAR_UNKNOWN), (0.8, 0.5, 0.5, 30.0, NEAR_YES))
+    wrong = [(row, near_timeout(*row[:4])) for row in table if near_timeout(*row[:4]) != row[4]]
     return not wrong, wrong
 
 
@@ -1449,11 +1556,11 @@ def _samples_verdict(result, error, runs):
     return not wrong, wrong
 
 
-def _stub_cli_rows(base, name, argv, variant="fail", extra=(), startup=False):
-    """run_cli over a stub plugin of its own (with the extra hooks), with --json: (the exit code, stdout,
-    stderr, the JSON rows less the startup case's unless startup), the rows one item naming the error when the
-    JSON cannot be read."""
-    hooks_json, plugin = _stub_plugin(base, name, variant=variant, extra=extra)
+def _stub_cli_rows(base, name, argv, variant="fail", extra=(), startup=False, timeouts=None):
+    """run_cli over a stub plugin of its own (with the extra hooks and configured timeouts), with --json: (the
+    exit code, stdout, stderr, the JSON rows less the startup case's unless startup), the rows one item naming
+    the error when the JSON cannot be read."""
+    hooks_json, plugin = _stub_plugin(base, name, variant=variant, extra=extra, timeouts=timeouts)
     figures = Path(base, name + "-figures.json")
     out, err = io.StringIO(), io.StringIO()
     code = _try_cli(argv + ["--json", str(figures)], hooks_json, plugin, write_sizes=SELF_TEST_WRITE_SIZES,
@@ -1580,11 +1687,14 @@ def self_test(report_path=None):
         check("args/bounds", *_bounds_vectors())
         defaults = parse_args([])
         check("args/defaults", (defaults["runs"], defaults["files"], defaults["commits"], defaults["case_timeout"],
-                                defaults["hooks"], defaults["json"]) == (5, 20000, 1000, 60.0, [], None), defaults)
+                                defaults["margin"], defaults["hooks"], defaults["json"])
+              == (5, 20000, 1000, 60.0, 0.5, [], None), defaults)
         check("args/unknown-refused", *_unknown_vectors())
 
         # 2. the statistics and the synthetic inputs
         check("summary/order-statistics", *_summary_vectors())
+        check("summary/p95-nearest-rank", *_percentile_vectors())
+        check("flag/near-timeout-rule", *_near_vectors())
         check("summary/outcome-classified", *_outcome_vectors())
         check("inputs/bash-command-at-cap", *_bash_vectors())
         check("inputs/write-sizes-exact", *_write_vectors())
@@ -1594,6 +1704,17 @@ def self_test(report_path=None):
         # 3. hooks.json: the real file resolves, a malformed one is refused, a missing or unknown id is named
         check("hooks/real-hooks-json-resolves", *_real_hooks_vectors())
         check("hooks/malformed-refused", *_malformed_vectors(base))
+        # an unreadable configuration (a hooks.json that is absent, or a directory) is cannot-evaluate: the run
+        # exits 2 naming it, before any fixture root exists, and measures nothing
+        unreadable = []
+        for name, path in (("absent", Path(base, "absent", "hooks.json")), ("directory", Path(base))):
+            err, out = io.StringIO(), io.StringIO()
+            with _recording_roots() as made:
+                code = _try_cli(["--runs", "1"], path, base, out=out, err=err)
+            if not (code == 2 and "cannot read {}".format(path) in err.getvalue() and made == []
+                    and out.getvalue() == ""):
+                unreadable.append((name, code, err.getvalue()[:300], made))
+        check("hooks/unreadable-config-refused", unreadable == [], unreadable)
         missing_json, missing_root = _stub_plugin(base, "missing", drop="branch_root")
         with _recording_roots() as made:
             result, error = _try_measure(missing_json, missing_root, runs=1, files=1, commits=1)
@@ -1677,14 +1798,19 @@ def self_test(report_path=None):
         check("report/json-conditions", all(key in conditions for key in (
             "load_average_start", "load_average_end", "cpu_count", "harness_python", "hook_interpreters",
             "git_version", "runs", "untracked_files", "commits", "case_timeout_seconds", "started_utc",
-            "finished_utc")) and conditions.get("git_version", "").startswith("git version")
+            "finished_utc", "margin", "percentile"))
+            and conditions.get("git_version", "").startswith("git version")
+            and conditions.get("margin") == DEFAULT_MARGIN
             and conditions.get("cpu_count") == os.cpu_count() and len(rows) == 9, sorted(conditions))
         text = out.getvalue()
         lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:]
                  if " branch_root " in line and not line.startswith("startup ")]
-        check("report/table-plain", "case" in text and "median s" in text and len(lines) == 4 and all(
-            line.count(TIMED_OUT) == 4 and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines),
-            text[-1200:])
+        # min, median, p95 and max read TIMED OUT, and so does the outcome; under a case timeout below the
+        # threshold (half of 10 s) the row's near-timeout flag is unknown
+        check("report/table-plain", "case" in text and "median s" in text and "p95 s" in text
+              and len(lines) == 4 and all(line.count(TIMED_OUT) == 5 and re.search(r" 10  unknown ", line)
+                                          and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines),
+              text[-1200:])
         before = figures.read_bytes() if figures.exists() else None
         err = io.StringIO()
         with _recording_roots() as made_again:
@@ -1726,7 +1852,7 @@ def self_test(report_path=None):
         lines = [line for line in text.partition("\ncase ")[2].splitlines()[1:]
                  if not line.startswith("startup ") and (" git_discard " in line or " protected_line " in line)]
         check("report/no-valid-sample-shown", len(lines) == 8 and all(
-            line.count(NO_VALID_SAMPLE) == 3 and re.search(r"\b2 +2 +" + NO_VALID_SAMPLE, line)
+            line.count(NO_VALID_SAMPLE) == 4 and re.search(r"\b2 +2 +" + NO_VALID_SAMPLE, line)
             and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines), text[-1500:])
         # a --json file that cannot be written is exit 2 with its diagnostic, never 3, even once rows holding
         # failed samples (git_discard's four Bash rows) are measured and reported: an OSError is injected at
@@ -1746,7 +1872,7 @@ def self_test(report_path=None):
         check("report/json-write-failure-exit-two", lost_code == 2 and "cannot evaluate" not in lost_err
               and [line for line in lost_err.splitlines() if line.startswith("error:")]
               == ["error: cannot write --json {}: injected --json write failure".format(unwritable)]
-              and len(lines) == 4 and all(line.count(NO_VALID_SAMPLE) == 3 for line in lines)
+              and len(lines) == 4 and all(line.count(NO_VALID_SAMPLE) == 4 for line in lines)
               and "figures written" not in lost_text and not os.path.lexists(unwritable),
               (lost_code, lost_err[-600:], lines))
         # the startup case's row is held to the exit like any other: with stub_lax.py as git_discard (the
@@ -1781,6 +1907,37 @@ def self_test(report_path=None):
         check("report/control-ids-escaped", control_code == 3 and len(named) == 4 and control_err.endswith(want)
               and control_err.count("cannot evaluate") == 1 and "\r" not in control_err and wrong == [],
               (control_code, control_err[-600:], wrong))
+
+        # 7b. the margin. The stub hooks.json gives orch_ask_guard a configured timeout of PAST_TIMEOUT and runs
+        # stub_slow.py for it (a nap of PAST_NAP, past that timeout): its row is near its timeout, and the line
+        # after the table names it alone. Every other hook is the fast stub under STUB_TIMEOUT and is not near.
+        # The flag changes no exit. The same hooks.json also names CONFIG_ONLY_ID, a Bash hook that no list in
+        # this tool holds, and exactly the hooks it names are measured: the hook list is read from there.
+        past_code, past_text, past_err, past_rows = _stub_cli_rows(base, "past", [
+            "--runs", "2", "--files", "1", "--commits", "1", "--case-timeout", "30"], variant="past",
+            extra=(("Bash", CONFIG_ONLY_ID),), timeouts={"orch_ask_guard": PAST_TIMEOUT})
+        slow_rows = [row for row in past_rows if row.get("hook_id") == "orch_ask_guard"]
+        other_rows = [row for row in past_rows if row.get("hook_id") != "orch_ask_guard"]
+        past_bash = sum(1 for matcher, _hook_id in STUB_HOOKS if matcher == "Bash") + 1
+        check("flag/slow-stub-flagged", past_code == 0 and [
+            (row.get("case"), row.get("near_timeout"), row.get("platform_timeout_seconds")) for row in slow_rows]
+            == [("ask-user-question", NEAR_YES, PAST_TIMEOUT)] and all(
+                isinstance(row["max"], float) and row["max"] >= PAST_NAP and row["p95"] == row["max"]
+                for row in slow_rows)
+            and "near timeout: 1 row(s) (case/hook id): ask-user-question/orch_ask_guard\n" in past_text,
+            (past_code, past_err[-400:], slow_rows, past_text[-600:]))
+        check("flag/fast-stub-not-flagged", past_code == 0 and len(other_rows) == 4 * past_bash
+              + len(SELF_TEST_WRITE_SIZES) + 1 and all(
+                  row.get("near_timeout") == NEAR_NO and row.get("platform_timeout_seconds") == STUB_TIMEOUT
+                  and isinstance(row.get("max"), float) and row["max"] < STUB_TIMEOUT * (1 - DEFAULT_MARGIN)
+                  for row in other_rows) and "near timeout unknown: 0 row(s)\n" in past_text,
+              (past_code, len(other_rows), [row for row in other_rows if row.get("near_timeout") != NEAR_NO][:3]))
+        configured = [hook_id for _matcher, hook_id in STUB_HOOKS] + [CONFIG_ONLY_ID]
+        measured = sorted({str(row.get("hook_id")) for row in past_rows})
+        first_bash = [row.get("hook_id") for row in past_rows if row.get("case") == "bash-512b"]
+        check("hooks/list-from-config", measured == sorted(configured) and first_bash == [
+            hook_id for matcher, hook_id in STUB_HOOKS if matcher == "Bash"] + [CONFIG_ONLY_ID],
+            (measured, first_bash))
 
         # 8. an interpreter version probe that fails ends the run with exit 2, not a report naming no version
         real_sample = _sample
@@ -1889,8 +2046,11 @@ def self_test(report_path=None):
         for check_id, detail in failed:
             print("  {}: {}".format(check_id, repr(detail)[:600]))
         return 1
-    print("SELF-TEST PASS: hook-latency {} checks (option bounds at both ends, order statistics with timed-out "
-          "samples, the Bash command at its budget and the Write sizes exact, the real hooks.json resolved and "
+    print("SELF-TEST PASS: hook-latency {} checks (option bounds at both ends, order statistics and the "
+          "nearest-rank 95th percentile with timed-out samples, the near-timeout rule at its boundaries, a stub "
+          "that naps past its configured timeout flagged and fast stubs not, the hook list read from hooks.json, "
+          "an unreadable hooks.json refused before any fixture, the Bash command at its budget and the Write "
+          "sizes exact, the real hooks.json resolved and "
           "fully measured, malformed, missing and unmeasured hook ids refused by name, the git fixture shape, "
           "the pinned child environment, every case with its runs, TIMED OUT never a time, failed samples "
           "never timed and a run with one (in the startup row too) exiting 3 while an all-valid or timed-out "
