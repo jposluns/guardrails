@@ -598,8 +598,15 @@ def local_time(now_utc):
     return now_utc.astimezone() if local is None else local
 
 
-def clock_line(now_utc, start=None, source="session"):
-    local = local_time(now_utc)
+_UNSET = object()  # "not computed yet" for the zoned argument (None means the zone cannot be used)
+
+
+def clock_line(now_utc, start=None, source="session", zoned=_UNSET):
+    """The CLOCK line. `zoned`, when given, is zone_time(now_utc) already computed (None: the process zone)."""
+    if zoned is _UNSET:
+        local = local_time(now_utc)
+    else:
+        local = now_utc.astimezone() if zoned is None else zoned
     line = (f"CLOCK (read by hook, authoritative): {local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()} | "
             f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}")
     if start is not None:
@@ -609,12 +616,13 @@ def clock_line(now_utc, start=None, source="session"):
     return line
 
 
-def console_prefix(now_utc):
+def console_prefix(now_utc, zoned=_UNSET):
     """The console stamp for the aware instant now_utc, for example [2026-11-21 18:33 EST]: ZONE's local date
     and time FLOORED to the minute (strftime drops the seconds; nothing is rounded), then `EDT` when the zone
     observes daylight saving time at that instant, else `EST` (require-console-timestamp.py's zone_label and
-    stamp). None when the zone cannot be loaded or used."""
-    local = zone_time(now_utc)
+    stamp). None when the zone cannot be loaded or used. `zoned`, when given, is zone_time(now_utc) already
+    computed."""
+    local = zone_time(now_utc) if zoned is _UNSET else zoned
     if local is None:
         return None
     return "[%s %s]" % (local.strftime("%Y-%m-%d %H:%M"), "EDT" if local.dst() else "EST")
@@ -622,9 +630,12 @@ def console_prefix(now_utc):
 
 def clock_context(now_utc, start=None, source="session"):
     """The additionalContext: the CLOCK line, then the CONSOLE PREFIX line for the same instant (omitted when
-    the zone cannot be loaded)."""
-    text = clock_line(now_utc, start, source)
-    prefix = console_prefix(now_utc)
+    the zone cannot be loaded). The zone is loaded and used ONCE per context, and both lines are built from
+    that one result, so they can never name different zones (a zone file replaced between two loads once
+    could give the CLOCK line the process zone and the prefix Toronto)."""
+    zoned = zone_time(now_utc)
+    text = clock_line(now_utc, start, source, zoned)
+    prefix = console_prefix(now_utc, zoned)
     return text if prefix is None else text + "\n" + PREFIX_LABEL + prefix
 
 
@@ -1102,6 +1113,33 @@ def _self_test():
             for parts, want in prefix_cases:
                 now = datetime.datetime(*parts, tzinfo=utc)
                 self.assertEqual(clock_context(now).split("\n"), [clock_line(now), PREFIX_LABEL + want], parts)
+
+        def test_zone_loaded_once_per_context(self):
+            # both lines come from ONE zone load, so a load that would fail on a second call (a zone file
+            # replaced mid-run) can never give the CLOCK line the process zone and the prefix Toronto
+            real = _console_zone
+            if real() is None:
+                self.skipTest("zone data for America/Toronto is unavailable")
+            calls = []
+
+            def first_only():
+                calls.append(1)
+                return real() if len(calls) == 1 else None
+            now = datetime.datetime(2026, 11, 22, 3, 0, 30, tzinfo=utc)
+            with unittest.mock.patch.dict(globals(), {"_console_zone": first_only}):
+                ctx = clock_context(now)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(ctx, "CLOCK (read by hook, authoritative): 2026-11-21 22:00:30 EST | 2026-11-22T03:00:30Z"
+                             "\n" + PREFIX_LABEL + "[2026-11-21 22:00 EST]")
+            calls.clear()
+
+            def fail_first():
+                calls.append(1)
+                return None if len(calls) == 1 else real()
+            with unittest.mock.patch.dict(globals(), {"_console_zone": fail_first}):
+                ctx = clock_context(now)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(ctx, clock_line(now, zoned=None))  # the process zone, and no prefix line
 
         def test_console_prefix_omitted_without_zone(self):
             global _console_zone

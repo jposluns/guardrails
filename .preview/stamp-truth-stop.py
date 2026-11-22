@@ -26,12 +26,22 @@ counts for nothing and only the process zone does, exactly as without it. A time
 abbreviation that counts for neither, is not a claim in prose (it is ignored). The zone grammar and the
 scheduling keyword list are duplicated verbatim in future-stamp-write.py (python3 -I forbids a sibling
 import); a self-test asserts they are identical.
-Further exemptions (check_message): a claim in a markdown table column whose header cell carries a
-scheduling keyword, and a line-leading stamp directly followed by `due:`, `scheduled` or `certificate
-rotation`, are scheduled values and not checked; a bracketed header directly followed (within three words) by
-a named past event (launched, released, deployed, occurred) is history, not checked for BEHIND (AHEAD still
-applies); and a line naming total, across, workers, timeout or limit is aggregate or timeout prose, never
-read as the session's elapsed footer.
+EXEMPTIONS, the complete list (each scope is detailed below): (a) EXEMPT TEXT (fenced code, blockquote lines,
+inline code spans) for every rule; (b) the scheduling keyword exemption of EXEMPT TEXT, for AHEAD only and
+only for a claim that is NOT a status stamp; (c) BEHIND is checked only for the bracketed HEADER stamp
+(rule 2), so an unbracketed first status stamp, later status stamps and mid-line claims are never checked for
+BEHIND; (d) a claim that cannot be converted fails open (rule 2); (e) only the LAST elapsed footer is
+checked, and only with a known lease start (rule 3); (f) the message selection, block cap, lock and fail-open
+allows of WHICH MESSAGES and RESIDUAL COVERAGE. There is no other. NOT ADOPTED from the fleet copy, because
+each let through a stamp or footer that this hook blocked before: its scheduling-table column exemption, its
+`due:`, `scheduled` and `certificate rotation` suffix exemption for a line-leading stamp, its past-event
+header (launched, released, deployed, occurred) exemption from BEHIND, and its footer-prose (total, across,
+workers, timeout, limit) exemption; nor its twelve extra scheduling keywords (revisit, "retry after", window,
+"embargo lifts", follow-up, "returns on", "starts at", run_at, rerun, "check back", "moved to", resets),
+which widen (b): "the window opens T", a mid-line future time this hook blocks, would pass. NOT ADOPTED from
+the session copy (an open maintainer decision): its
+block, as UNVERIFIABLE, of a line-leading status stamp whose letter zone abbreviation it cannot convert (a
+wrong Toronto label such as EDT in November included); here such a stamp fails open as (d) says.
 
 EXEMPT TEXT. Lines inside a matched fenced code block (``` or ~~~, closed by a fence of the same character
 at least as long; an UNCLOSED fence is not code, so its lines are checked), blockquote lines (starting `>`
@@ -461,12 +471,10 @@ only a whole word (or its plural) exempts: "validated" or "throughput" does not;
 quote line, or an inline code span passes. An unquoted worker footer pasted AFTER the real footer is the one
 checked (quote worker output in a fence or a `>` line). A stale footer that lags true elapsed by up to the
 BEHIND window (10 minutes, 30 for the final message) passes. FALSE POSITIVES: prose that happens to put the
-words "session elapsed" before an HH:MM outside code, for example "our session elapsed: 14:30 so far", is
-read as the footer when it is the last such occurrence and blocks on a mismatch; remedy: put it in a `code
-span` or a `>` line. Likewise any "(session: 30m)"-shaped parenthetical in prose is read as the footer when
-it is the last footer-shaped occurrence; same remedy. A line naming total, across, workers, timeout or limit
-(aggregate or timeout prose, such as "the total session elapsed: 14:30 across all workers" or "Timeout
-(session: 30m)") is never read as the footer, so a real footer on such a line is not checked (a MISS). A footer
+words "session elapsed" before an HH:MM outside code, for example "the total session elapsed: 14:30 across
+all workers", is read as the footer when it is the last such occurrence and blocks on a mismatch; remedy:
+put it in a `code span` or a `>` line. Likewise any "(session: 30m)"-shaped parenthetical in prose (a
+timeout, say) is read as the footer when it is the last footer-shaped occurrence; same remedy. A footer
 written in any other shape (`(session 2h 5m)`, `(2h 5m session)`, `(session: 2h 5m, 1 compaction)`) is not
 recognized and not checked. AHEAD applies to EVERY zoned claim
 (that breadth is the drift catch), so a genuine FUTURE time mentioned mid-line without an immediately
@@ -1310,123 +1318,18 @@ def _foreign_zone(m):
     return True
 
 
-# ---- scheduling tables, schedule and history suffixes, footer prose ----
-
-# a GFM delimiter row (whole stripped line): cells of optional colon, 1+ hyphens, optional colon
-_DELIM_ROW_RE = re.compile(r"\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?")
-
-
-def _pipes(line):
-    """Positions of the unescaped `|` characters of `line` (a `\\|` does not split a cell). Linear."""
-    return [i for i, c in enumerate(line) if c == "|" and (i == 0 or line[i - 1] != "\\")]
-
-
-def _leading_pipe(line, pipes):
-    """1 when the first unescaped pipe of `line` has only whitespace before it (a leading pipe), else 0."""
-    return 1 if pipes and not line[:pipes[0]].strip() else 0
-
-
-def _table_cells(line, pipes):
-    """The cell texts of a table line split on its unescaped pipes (`pipes`, non-empty): a leading pipe opens
-    the first cell and a trailing pipe closes the last, so neither adds an empty cell."""
-    bounds = [-1] + pipes + [len(line)]
-    cells = [line[bounds[k] + 1:bounds[k + 1]] for k in range(len(bounds) - 1)]
-    if not line[pipes[-1] + 1:].strip():
-        cells.pop()
-    return cells[_leading_pipe(line, pipes):]
-
-
-def _delim_cell_count(s):
-    """The cell count of a stripped GFM delimiter row (it must contain a pipe), else None."""
-    if "|" not in s or not _DELIM_ROW_RE.fullmatch(s):
-        return None
-    s = s[1:] if s.startswith("|") else s
-    s = s[:-1] if s.endswith("|") else s
-    return s.count("|") + 1
-
-
-def _row_exempter(line, pipes, sched_cols):
-    """A predicate pos -> True when position `pos` of table row `line` lies in a column whose header cell
-    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos)."""
-    lead = _leading_pipe(line, pipes)
-
-    def exempt(pos):
-        return (bisect.bisect_right(pipes, pos) - lead) in sched_cols
-    return exempt
-
-
-_BLOCK_START_RE = re.compile(r"(?:[-*+]|[0-9]+[.)]|#{1,6})(?:[ \t]|$)|>|```|~~~")
-
-
-def _ends_table(line, pipes):
-    """True when `line` cannot continue the table it follows: it is blank or starts a new block (a list
-    marker, an ATX heading (`#` to `######` then whitespace or the line end), a `>` blockquote, or a code
-    fence). A pipe-free line continues the table as a one-cell row (GFM), so `pipes` does not decide it; a
-    leading pipe is optional on a row whatever the header had (GFM)."""
-    s = line.strip()
-    return not s or bool(_BLOCK_START_RE.match(s))
-
-
-def _table_walk(text, tables=True, ids=None):
-    """Yield (line, ctx, extra) for every line of `text`, linearly. ctx is an integer id of the table context
-    (header line, delimiter row) for a row of a markdown table, assigned once per distinct context through
-    `ids` (a dict shared across scans, so equal contexts get equal ids), and None for any other line (a header
-    and a delimiter row included); extra is the row's header-keyword exempter, or None (always None for a
-    pipe-free row, which keeps the table open but gets no header exemption). With tables False, every line is
-    (line, None, None)."""
-    ids = {} if ids is None else ids
-    prev, ctx, sched = None, None, None  # prev: (line, pipes) of a possible header; ctx, sched: table
-    for line in text.splitlines():
-        if not tables:
-            yield line, None, None
-            continue
-        pipes = _pipes(line)
-        if ctx is not None:
-            if not _ends_table(line, pipes):
-                # only a row with an unescaped pipe gets the header exemption; a pipe-free row keeps the
-                # table open (GFM) but is checked as an ordinary line
-                yield line, ctx, (_row_exempter(line, pipes, sched) if sched and pipes else None)
-                continue
-            ctx = None  # a new block (see _ends_table) ends the table
-        if prev is not None:
-            ncols = _delim_cell_count(line.strip())
-            if ncols is not None:
-                hcells = _table_cells(*prev)
-                if ncols == len(hcells):
-                    ctx = ids.setdefault((prev[0], line), len(ids))
-                    sched = {k for k, c in enumerate(hcells) if _SCHED_RE.search(c.strip())}
-                    prev = None
-                    yield line, None, None
-                    continue
-        prev = (line, pipes) if pipes else None
-        yield line, None, None
-
-
-# a line-leading stamp directly followed by one of these is a scheduled value, not a reading
-_SCHEDULE_SUFFIX_RE = re.compile(
-    r"[\]\s*_:.]*(?:due\s*:|scheduled\b|certificate rotation\b)", re.IGNORECASE)
-# a bracketed header directly followed by a named past event (up to three words first) is history: no BEHIND
-_HISTORY_SUFFIX_RE = re.compile(
-    r"[\]\s*_:.-]*(?:[A-Za-z0-9_-]+\s+){0,3}(?:launched|released|deployed|occurred)\b", re.IGNORECASE)
-# a line with one of these words is aggregate or timeout prose, not this session's elapsed footer
-_FOOTER_PROSE_RE = re.compile(r"\b(?:total|across|workers|timeout|limit)\b", re.IGNORECASE)
-
-
 def check_message(text, ref, start, where, behind, unchecked=None, heads=None):
     """Violation strings for one assistant message written at `ref` (epoch us); `start` is epoch us or None.
     `unchecked` (a list), when given, receives the literal of a HEADER stamp that was not checked because its
     letter zone could not be matched to the local zone; `heads` (a set), when given, receives the violation
-    string of a HEADER stamp AHEAD of `ref`. A claim in a table column whose header cell carries a scheduling
-    keyword, and a line-leading stamp directly followed by `due:`, `scheduled` or `certificate rotation`, is
-    not checked; a bracketed header directly followed by a named past event (launched, released, deployed,
-    occurred) is not checked for BEHIND (AHEAD still applies); and a line naming total, across, workers,
-    timeout or limit is not read as the elapsed footer."""
+    string of a HEADER stamp AHEAD of `ref`. The only exemptions are those of the module docstring's
+    EXEMPTIONS list; no table column, suffix, past-event or footer-prose exemption applies."""
     bad, seen, cache = [], set(), {}
     lines = text.splitlines()
     code = _code_lines(lines)
     foot, foot_at = None, (-1, -1)  # the last elapsed footer (either form) outside code and quotes
     header_seen = False  # the first line-leading stamp (the header) is the only one checked for BEHIND
-    for i, (line, _ctx, table_exempt) in enumerate(_table_walk(text)):
+    for i, line in enumerate(lines):
         if i in code or line.lstrip().startswith(">"):
             continue
         spans = _code_spans(line) if "`" in line else []
@@ -1442,11 +1345,6 @@ def check_message(text, ref, start, where, behind, unchecked=None, heads=None):
                 # leading date (a history line such as "2020-01-01T00:00Z service launched") is never BEHIND
                 header = status and not header_seen and line[m.start() - 1:m.start()] == "["
                 header_seen = header_seen or status
-                if header and _HISTORY_SUFFIX_RE.match(line[m.end():]):
-                    header = False  # an explicitly named past event is not a current status header
-                if (table_exempt and table_exempt(m.start())) or (
-                        status and _SCHEDULE_SUFFIX_RE.match(line[m.end():])):
-                    continue
                 sched = False
                 if not status:
                     if exempt is None:
@@ -1462,8 +1360,6 @@ def check_message(text, ref, start, where, behind, unchecked=None, heads=None):
             if v and v not in seen:
                 seen.add(v)
                 bad.append(v)
-        if _FOOTER_PROSE_RE.search(line):
-            continue  # aggregate or timeout prose is not this session's elapsed footer
         for rx in (_FOOT_RE, _SFOOT_RE):
             for m in rx.finditer(line):
                 if not (spans and _in_spans(spans, m.start())) and (i, m.start()) > foot_at:
@@ -3413,21 +3309,46 @@ def _self_test():
             self.assertFalse(os.path.exists(sub))
             self.assertEqual((PRUNE_ENTRIES, PRUNE_CHILDREN), (16384, 64))
 
-        # -- scheduling table columns, schedule and history suffixes, footer prose --
-        def test_schedule_table_history_and_footer(self):
+        # -- the fleet copy's table, suffix, past-event and footer-prose exemptions are not adopted --
+        def test_fleet_exemptions_not_adopted(self):
+            # each of these passed with one of the fleet copy's four exemptions and is blocked here, as before
+            now = datetime.datetime(2026, 11, 22, 3, 0, 30, tzinfo=UTC)
             stamp = "2099-01-01T00:00:00Z"
             for text in ("- " + stamp + " due: cert rotation", stamp + " scheduled release",
                          "- " + stamp + ": certificate rotation",
                          "| Due |\n| --- |\n| " + stamp + " |",
+                         "| Checked by worker |\n| --- |\n| " + stamp + " |",
                          "[2020-01-01T00:00:00Z] service launched",
+                         "[" + stamp + "] service launched", "Session elapsed 99:00",
                          "total session elapsed: 14:30 across workers", "Timeout (session: 30m)"):
-                self.assertIsNone(self.final(text), text)
-            for text in ("| Observed |\n| --- |\n| " + stamp + " |",
-                         "[" + stamp + "] service launched", "Session elapsed 99:00"):
                 self.assertIsNotNone(self.final(text), text)
-            # a pipe-free row keeps the table open but gets no column exemption; a new block ends the table
-            self.assertIsNotNone(self.final("| Due |\n| --- |\n" + stamp + " heartbeat"))
-            self.assertIsNotNone(self.final("| Due |\n| --- |\n| x |\n\n| " + stamp + " |"))
+            for text in ("[2026-11-22T05:00Z] Scheduled jobs all finished",
+                         "[2026-11-22 00:00 EST] scheduled the follow-up; tests pass",
+                         "[2026-11-22T05:00Z] Due: nothing outstanding, all done",
+                         "Next step | Note\n--- | ---\n[2026-11-22T05:00Z] all done | x",
+                         "[2026-11-22T01:00Z] Build released, tests pass",
+                         "Session elapsed 09:00 (limit 12:00)", "(session: 9h) 3 workers idle"):
+                self.assertIsNotNone(self.final(text, now), text)
+            # the header keeps its zero AHEAD tolerance with a past-event word after it
+            for text in ("[2026-11-22T03:01Z] Fix deployed to staging", "[2026-11-21 22:01 EST] Hotfix released"):
+                r = self.final(text, now)
+                self.assertIsNotNone(r, text)
+                self.assertIn("+<1m", r, text)
+
+        # -- the fleet copy's twelve extra scheduling words are not keywords here --
+        def test_fleet_schedule_words_not_adopted(self):
+            # each would exempt a mid-line future time this hook blocks ("the window opens T" is a case of
+            # test_header_stamp_ahead_by_any_amount_blocks), so they stay out until the maintainers decide
+            stamp = "2099-01-01T00:00:00Z"
+            for prefix in ("revisit", "retry after", "maintenance window starts", "embargo lifts",
+                           "follow-up check", "the maintainer returns on", "Release starts at",
+                           "CI will rerun at", "I will check back at", "Standup moved to", "Rate limit resets",
+                           "The maintenance window is", '{"run_at":'):
+                text = prefix + " " + stamp
+                self.assertIsNotNone(self.final(text), text)
+            self.assertEqual(SCHED_KEYWORDS, ("due", "deadline", "expir", "until", "next", "scheduled", "not before",
+                                              "not-before", "eta", "planned", "target date", "target:", "by ",
+                                              "through", "valid"))
 
         # -- a clean pass outside the loop seeds the counter and boundary, so another hook's loop is capped --
         def test_clean_pass_seeds_counter_and_boundary(self):
@@ -3627,10 +3548,8 @@ def _self_test():
                           check_message("Session elapsed 03:30", ref, to_us(self.start), "x", BEHIND_US)[0])
 
         def test_footer_prose_collision_disclosed(self):
-            # aggregate prose (a line naming total, across, workers, timeout or limit) is not this session's
-            # footer; an earlier version read it as the footer, a disclosed false positive
-            self.assertIsNone(self.final("The total session elapsed: 14:30 across all workers today."))
-            # the disclosed false positive remains for prose without those words
+            # disclosed false positive: prose naming "session elapsed" before an HH:MM reads as the footer
+            self.assertIsNotNone(self.final("The total session elapsed: 14:30 across all workers today."))
             self.assertIsNotNone(self.final("Our session elapsed: 14:30 so far, I think."))
             self.assertIsNone(self.final("The total `session elapsed: 14:30` across all workers today."))
 

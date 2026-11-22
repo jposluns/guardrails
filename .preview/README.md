@@ -43,7 +43,8 @@ the authority, and the summary further down this page only points to it.
   hook falls back to the transcript's first entry). The second is a console stamp ready to copy, for example
   `CONSOLE PREFIX (copy exactly): [2026-11-21 18:33 EST]`: the same instant floored to the minute (never
   rounded up), `EDT` while Toronto observes daylight saving time and `EST` otherwise. Both lines use the
-  America/Toronto zone from the system zone database whatever the process zone (`TZ`). When that zone entry
+  America/Toronto zone from the system zone database whatever the process zone (`TZ`); the zone is loaded
+  once per tool call and both lines use that one result. When that zone entry
   is missing or cannot be loaded, the CLOCK line uses the process zone instead and the CONSOLE PREFIX line is
   left out. Hook input over 8 MiB is not read; the clock line is still added, without elapsed time from the
   transcript. The freshest time value in context
@@ -55,14 +56,20 @@ the authority, and the summary further down this page only points to it.
 - **`stamp-truth-stop.py`** checks each finished turn. When the assistant's prose carries a timestamp with
   an explicit zone that lies ahead of the clock, or an elapsed-time footer that disagrees with the
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
-  back. Text in code spans, fenced code blocks, and `>` quote lines is not checked, and a time that a
-  scheduling word (such as `until`, `due`, or `next run at`) directly precedes is treated as a scheduled
-  time, not a reading. So is a time in a table column whose header cell names a scheduling word, and a
-  line-leading time directly followed by `due:`, `scheduled`, or `certificate rotation`. An opening stamp
-  directly followed by a named past event (`launched`, `released`, `deployed`, `occurred`) is history and is
-  not checked for being too old, though it is still checked for being ahead; and a line that names `total`,
-  `across`, `workers`, `timeout`, or `limit` is not read as the session's elapsed-time footer. Other times
-  may run up to 1 minute ahead, but the bracketed stamp that opens a message, such as
+  back. Its exemptions, the complete list (the `EXEMPTIONS` paragraph of its docstring gives each exact
+  scope): text in code spans, fenced code blocks, and `>` quote lines is not checked; a time that is not
+  the first thing on its line and that a scheduling word (such as `until`, `due`, or `next run at`)
+  directly precedes is treated as a scheduled time and is not checked for being ahead; only the bracketed
+  opening stamp is checked for being too old; a time it cannot convert passes; and only the last
+  elapsed-time footer is checked, and only when a lease start is known. The fleet copy's other exemptions
+  are not included, because each let through a stamp this hook blocked before: a time in a table column
+  whose header names a scheduling word, a line-leading time followed by `due:`, `scheduled`, or
+  `certificate rotation`, an opening stamp followed by a past-event word, a line naming `total`, `across`,
+  `workers`, `timeout`, or `limit`, and its twelve extra scheduling words (such as `window` and `resets`).
+  Also not included: the session copy's refusal, as unverifiable, of a line-leading stamp whose zone
+  abbreviation it cannot convert (a wrong Toronto label such as `EDT` in November included). Whether to
+  adopt it is an open maintainer decision; here such a stamp passes, with a note when it opens the message.
+  Other times may run up to 1 minute ahead, but the bracketed stamp that opens a message, such as
   `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate it to the minute
   and never round up. `EST` and `EDT` are checked against America/Toronto from the system
   zone database whatever the process zone (`TZ`), so the CONSOLE PREFIX stamp that `clock-inject.py` adds is
@@ -74,7 +81,12 @@ the authority, and the summary further down this page only points to it.
   to come from the clock, so one dated in the future was composed. A scheduled value (a deadline, a next
   run) is legitimately in the future and is allowed. It checks file writes and edits, and shell commands
   that write into those folders, including those made by a helper session started inside your session.
-  Event: `PreToolUse`, matcher `Write|Edit|MultiEdit|Bash`.
+  It writes a note to standard error when no store folder is configured (it then checks nothing) and when
+  a shell command is too complex to analyse within its work budget (that command is then allowed
+  unchecked). If it cannot write a deny decision, it exits with status 2, which still blocks the call.
+  Three fleet-copy behaviours are not included, because each allowed a write this hook denies: an 8 MiB
+  input limit, an exemption for a `grep` or `rg` pattern whatever the search prints, and twelve extra
+  scheduling words. Event: `PreToolUse`, matcher `Write|Edit|MultiEdit|Bash`.
 - **`ungated-record.py`** denies a shell command that can write a completion claim after a test gate
   fails. For example, `pytest; echo PASS >> report` writes PASS even on failure; use
   `pytest && echo PASS >> report` so the record depends on success. It follows recognized test runners
@@ -223,13 +235,13 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `d208b2e7e22e19d01cc6aea5347a0a3548300579f5faaad49312c5c671ef9d4c` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `2019f0c58386c8fd3836c88b64e2ee2498b87cdf5d847d6b3b6513a1e9a63e43` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
-| `future-stamp-write.py` | `be125990e7ba4505821be61d832bcac9e7280cca82488f1690c99cce6bda576d` | [future-stamp-write.py](future-stamp-write.py) |
+| `future-stamp-write.py` | `741b73d043b1bd51f2f5f414e4677a48282de23d4dfbf0091a281ef20e2c8f9e` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `94e0bb28e7f3b83421a61a3898505f9597221ea96c7204605037a9d211e08f52` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `51edd991615f4c4c9ea03fe62fde7aa199bd5a64b910f0a33b47729643d5e657` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
