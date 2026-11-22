@@ -869,7 +869,9 @@ malformed.
 - `commands` lists the basenames of the commands that dispatch a review.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
 - `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
-  together or not at all, which turn on the worker draft census below. They must be distinct.
+  together or not at all, which turn on the worker draft census below, and three more, `export`,
+  `export_diff` and `export_base`, declared together or not at all, which turn on the review export
+  check below. One or two of the export labels is a malformed binding. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
   for the hook's own git reads, and it must print exactly one full commit id: the
@@ -980,6 +982,10 @@ MODIFIER LETTER TRIANGULAR COLON); and when it is split across lines.
   of the worker draft the commit applies, once.
 - `Review-skip:` lines (only with the `skip` label) each name one drafted path deliberately left out
   of the commit, kept exactly as written.
+- `Review-export:`, `Review-export-diff:` and `Review-export-base:` (optional, only where the binding
+  declares the export labels; the label text is the binding's) name a review export together, once
+  each: its root by an absolute path, and its diff file and base-copy directory by paths relative to
+  that root.
 
 For a `revision` target, the hook checks the following in order. The first failure decides.
 
@@ -991,7 +997,8 @@ For a `revision` target, the hook checks the following in order. The first failu
    paths the draft's headers name, less the skipped ones, join the declared paths.
 5. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
    of a merge, or the empty tree for a root commit.
-6. No declared path is staged against the pin, and the working tree matches the pin at every
+6. Where the brief names a review export, the review export check below passes.
+7. No declared path is staged against the pin, and the working tree matches the pin at every
    declared path. The working tree is compared by content: the hook hashes each declared file, or
    reads each symlink target, and compares the result and the file mode with the pin's tree entry.
    An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
@@ -1126,6 +1133,44 @@ a value other than `7bit` or `8bit` is refused with the rest, which can withhold
 telling a message line from a part header or a section's line needs the mailbox structure, which a
 draft can mangle, so the census refuses such a line wherever it stands.
 
+### The review export check
+
+A review copy that carries a diff, base copies of files, or a statement that files outside the diff
+are unchanged takes all of them from the one derived base (rule vfxcmt). When the diff comes from one
+base and the base copies from another, the copy contradicts itself: a series reviewed through its last
+commit's diff names only what that commit changed, and base copies taken from the series base then
+present a file an earlier commit changed as unchanged. Where the binding declares the `export`,
+`export_diff` and `export_base` labels and a revision brief names an export, the hook checks it,
+after the changed-set equality, against the pin and the base it derives itself (never a base the
+export or the brief names):
+
+- P1: the paths the export's diff headers name, read by the draft census parser above, equal the
+  pin's changed set from its derived base. A path the diff names that the pin does not change, and a
+  changed path the diff leaves out, are refused.
+- P2: every changed path is exported (a head copy where the pin has the path, a base copy where the
+  base has it); every head copy, a regular file under the root outside the diff file and the
+  base-copy directory, is byte-identical to the pin's blob at its path; every base copy, a regular
+  file under the base-copy directory, is byte-identical to the derived base's blob at its path, so a
+  path the base lacks has none; and a root commit's export holds no base copy. Each mismatch is
+  refused.
+
+The hook walks the root itself, opening each directory and file by name from its parent's descriptor
+without following a symlink, so no path it reads escapes the root. Withheld as `UNVERIFIABLE:`: a
+brief naming the export only in part or twice, a relative root, a diff or base path that is absolute
+or holds an empty, `.` or `..` component, a diff file inside the base-copy directory, a root, diff
+file or base-copy directory that is missing or cannot be read, a diff over `max_brief_bytes` or one
+the census cannot read, a symlink, FIFO, device or socket anywhere under the root, a changed path that
+is a symlink or submodule entry or that the diff file or base-copy directory stands in place of, a
+failed git read, more than 50000 entries under the root, and the 8 second budget.
+
+The check applies to a `revision` target only, and a brief that names no export is reconciled as
+before. Its residual: edits between the check and the reviewers' reads are not caught. The brief's
+"unchanged" prose is not parsed. A series whose pin's first-parent diff is not the whole task still
+passes (the self-test row `rdp/export-first-parent-base-copies-allows`). Only the adopter's authority
+command and the rule text decide the pin. Context files and sealers that never call the preflight or
+a declared dispatch command are not seen (a context file inside the export root is a head copy and is
+compared with the pin; one a reviewer reads from elsewhere is not).
+
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
 duplicate label, an unreadable brief, a failed or timed-out git probe, an exhausted time budget, and
@@ -1225,6 +1270,10 @@ Limits:
   census reads the draft the brief names, which is not proven to be the draft the commit applied.
   A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
   rather than censused.
+- A review export is checked only where the brief names it. Edits between the check and the
+  reviewers' reads, the brief's "unchanged" prose, earlier commits of a series outside the pin's
+  first-parent diff, and context files and sealers that never call the preflight or a declared
+  dispatch command are not caught (the review export check above).
 
 ## Review holds
 

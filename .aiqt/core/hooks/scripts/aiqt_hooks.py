@@ -33895,7 +33895,9 @@ def citation_read_check(data):
 # that commit and equals the authoritative task revision the adopter's authority command prints; the
 # declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers),
 # where a brief that names the worker draft the commit applies has every path the draft's diff headers name
-# declared too, less the paths it records as skipped (_rdp_draft_census);
+# declared too, less the paths it records as skipped (_rdp_draft_census); where a brief names a review
+# export, the export's diff naming that changed set and its head and base copies byte-identical to the
+# pin's and the derived base's blobs (_rdp_export_check);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
 # at the pinned gitlink, which are not read. A brief holding a control character other than a newline or a
 # tab, or a format character, and a line that holds a label's name with a colon after it on that line
@@ -33908,6 +33910,12 @@ _RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
 # The optional labels a binding declares together or not at all: the brief line naming the worker draft a
 # revision applies, and the lines recording the drafted paths deliberately left out of it.
 _RDP_DRAFT_LABEL_KEYS = frozenset(("draft", "skip"))
+# The optional labels a binding declares together or not at all: the brief lines naming a review export,
+# its root by absolute path, and its diff file and base-copy directory, each by a path relative to that root
+# (_rdp_export_check).
+_RDP_EXPORT_LABEL_KEYS = frozenset(("export", "export_diff", "export_base"))
+# The entries the export walk reads at most (files and directories together); one more is a cannot-evaluate.
+_RDP_EXPORT_MAX_ENTRIES = 50000
 _RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
 _RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
 # Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
@@ -34014,10 +34022,11 @@ def _rdp_binding(reg):
             or any(ch.isspace() or ch == "=" for ch in option):
         return ("bad", "review_dispatch.brief_option is not a single option word")
     labels = raw["labels"]
-    if not isinstance(labels, dict) or set(labels) not in (
-            _RDP_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS):
-        return ("bad", "review_dispatch.labels must declare exactly {}, or those and both of {}".format(
-            sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS)))
+    if not isinstance(labels, dict) or not _RDP_LABEL_KEYS <= set(labels) or set(labels) - _RDP_LABEL_KEYS not in (
+            set(), _RDP_DRAFT_LABEL_KEYS, _RDP_EXPORT_LABEL_KEYS, _RDP_DRAFT_LABEL_KEYS | _RDP_EXPORT_LABEL_KEYS):
+        return ("bad", "review_dispatch.labels must declare exactly {}, or those and both of {}, all three of {}, "
+                "or both groups".format(sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS),
+                                        sorted(_RDP_EXPORT_LABEL_KEYS)))
     values = list(labels.values())
     if not all(isinstance(v, str) and v and v.strip() == v and "\n" not in v and "\r" not in v
                for v in values):
@@ -34887,6 +34896,249 @@ def _rdp_draft_census(cfg, found, changed, pin):
     return (drafted - skipped, None)
 
 
+# The review export check. A review copy that carries a diff, base copies or a statement that files
+# outside the diff are unchanged takes all of them from the one derived base, so where the binding declares
+# the export labels and a revision brief names an export, the export is checked against the pin and the base
+# the hook derives (never a base the export or the brief names), after the changed-set equality:
+# - P1: the paths the export's diff headers name (read by the draft census parser, _rdp_draft_paths) equal
+#   the pin's changed set from its derived base;
+# - P2: every changed path is exported (a head copy where the pin has the path, a base copy where the base
+#   has it); every head copy, a regular file under the root outside the diff file and the base-copy
+#   directory, is byte-identical to the pin's blob at its path; every base copy, a regular file under the
+#   base-copy directory, is byte-identical to the base's blob at its path, so a path the base lacks has none;
+#   and a root commit has no base copy at all (_rdp_export_p2).
+# A brief naming the export only in part, a value that is not an absolute root or a plain relative path, an
+# unreadable or malformed input (the root, the diff file, the base-copy directory), a symlink, a FIFO, device
+# or socket anywhere under the root, a changed path that is a symlink or submodule entry, a failed git read
+# and a walk past _RDP_EXPORT_MAX_ENTRIES entries or the decision's deadline are each a cannot-evaluate. Every
+# directory under the root is opened without following a symlink and read by its descriptor, so no path the
+# walk reads escapes the root.
+
+
+def _rdp_export_rel(value):
+    """The slash-separated bytes path value names under the export root, or None when it is empty, absolute,
+    or holds an empty, `.` or `..` component (so it cannot name the root itself or a path outside it)."""
+    if not value or value.startswith("/") or any(part in ("", ".", "..") for part in value.split("/")):
+        return None
+    return value.encode("utf-8", "surrogateescape")
+
+
+def _rdp_export_declared(cfg, found):
+    """((root, diff, base), None) for the export a revision brief names, root an absolute path and diff and
+    base slash-separated bytes paths under it; (None, None) when the binding declares no export labels or the
+    brief names no export; (None, (kind, message)) for a declaration that cannot be evaluated."""
+    labels = cfg["labels"]
+    if "export" not in labels:
+        return (None, None)
+    keys = ("export", "export_diff", "export_base")
+    named = [key for key in keys if found[key]]
+    if not named:
+        return (None, None)
+    for key in keys:
+        if len(found[key]) > 1:
+            return (None, ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+                len(found[key]), labels[key])))
+    if len(named) != len(keys):
+        return (None, ("unverifiable", "the brief names a review export only in part (no {}); an export is "
+                       "declared by its root, its diff file and its base-copy directory together".format(
+                           " or ".join(repr(labels[key]) for key in keys if key not in named))))
+    root = found["export"][0].strip()
+    if not os.path.isabs(root):
+        return (None, ("unverifiable", "the {!r} value {!r} is not an absolute path".format(
+            labels["export"], root)))
+    rels = []
+    for key in ("export_diff", "export_base"):
+        rel = _rdp_export_rel(found[key][0].strip())
+        if rel is None:
+            return (None, ("unverifiable", "the {!r} value {!r} is not a path relative to the export root "
+                           "(empty, absolute, or holding an empty, . or .. component)".format(
+                               labels[key], found[key][0].strip())))
+        rels.append(rel)
+    diff, base = rels
+    if diff == base or diff.startswith(base + b"/") or base.startswith(diff + b"/"):
+        return (None, ("unverifiable", "the export's diff file {!r} and base-copy directory {!r} overlap".format(
+            diff.decode("utf-8", "replace"), base.decode("utf-8", "replace"))))
+    return ((root, diff, base), None)
+
+
+def _rdp_export_walk(root, fmt, diff, max_bytes):
+    """(files, dirs, text, None) for the export under root: files maps each regular file's slash-separated
+    bytes path under root, the diff file's excepted, to its git blob id; dirs is the set of directory paths;
+    text is the diff file's bytes (None when there is no regular file at diff). (None, None, None, reason)
+    for a cannot-evaluate: a root that cannot be opened as a directory, a symlink, FIFO, device or socket
+    under it, an entry that cannot be read, a diff file over max_bytes, more than _RDP_EXPORT_MAX_ENTRIES
+    entries, or the decision's deadline. Each directory is opened without following a symlink, by name from
+    its parent's descriptor, and each file the same way, its type checked on the open descriptor."""
+    dir_flags = _RDP_OPEN_FLAGS | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        _rdp_check_deadline()
+        top = os.open(root, dir_flags)
+    except (OSError, ValueError) as exc:
+        return (None, None, None, "the export root {} cannot be opened as a directory ({})".format(root, exc))
+    files, dirs, text, count = {}, set(), None, 0
+    stack = [(top, b"")]
+    try:
+        while stack:
+            dirfd, prefix = stack.pop()
+            try:
+                names = sorted(os.fsencode(name) for name in os.listdir(dirfd))
+                for name in names:
+                    count += 1
+                    if count > _RDP_EXPORT_MAX_ENTRIES:
+                        return (None, None, None, "the export under {} holds more than {} entries".format(
+                            root, _RDP_EXPORT_MAX_ENTRIES))
+                    _rdp_check_deadline()
+                    rel = prefix + name
+                    shown = rel.decode("utf-8", "replace")
+                    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                    if stat.S_ISLNK(st.st_mode):
+                        return (None, None, None, "the export under {} holds a symlink at {!r}".format(root, shown))
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append((os.open(name, dir_flags, dir_fd=dirfd), rel + b"/"))
+                        dirs.add(rel)
+                        continue
+                    if not stat.S_ISREG(st.st_mode):
+                        return (None, None, None, "the export under {} holds {!r}, which is not a regular file "
+                                "or directory".format(root, shown))
+                    fd = os.open(name, _RDP_OPEN_FLAGS | os.O_NOFOLLOW, dir_fd=dirfd)
+                    try:
+                        fst = os.fstat(fd)
+                        if not stat.S_ISREG(fst.st_mode):
+                            return (None, None, None, "the export under {} holds {!r}, which is not a regular "
+                                    "file".format(root, shown))
+                        if rel == diff:
+                            text = _rdp_read_fd(fd, max_bytes + 1)
+                            if len(text) > max_bytes:
+                                return (None, None, None, "the export's diff file {!r} is larger than "
+                                        "max_brief_bytes ({})".format(shown, max_bytes))
+                        else:
+                            files[rel] = _rdp_blob_id(fmt, fst.st_size, fd)
+                    finally:
+                        os.close(fd)
+            finally:
+                os.close(dirfd)
+    except (OSError, ValueError) as exc:
+        return (None, None, None, "the export under {} cannot be read ({})".format(root, exc))
+    finally:
+        for dirfd, _prefix in stack:
+            os.close(dirfd)
+    return (files, dirs, text, None)
+
+
+def _rdp_export_tree(repo, rev):
+    """The blob and gitlink entries of rev's tree, each bytes path mapped to (mode, object id), or None when
+    the tree cannot be read or parsed."""
+    tree = _rdp_git_records(repo, "ls-tree", "-r", "-z", "--full-tree", rev)
+    if tree is None:
+        return None
+    entries = {}
+    for line in tree:
+        meta, tab, name = line.partition(b"\t")
+        fields = meta.split(b" ")
+        if not tab or len(fields) != 3:
+            return None
+        entries[name] = (fields[0].decode("ascii", "replace"), fields[2].decode("ascii", "replace"))
+    return entries
+
+
+def _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, root_commit):
+    """P2 of the export check: None when every changed path is exported and every head and base copy is
+    byte-identical to the blob at its path in the pin and in the derived base, a root commit having no base
+    copy; otherwise (kind, message) for the first failure. changed is the pin's changed set, the entries are
+    _rdp_export_tree maps, and heads and bases map each copy's bytes path to its blob id."""
+    regular = ("100644", "100755")
+    for path in sorted(changed):
+        for where, entries in ((pin, pin_entries), (base, base_entries)):
+            entry = entries.get(path)
+            if entry is not None and entry[0] not in regular:
+                return ("unverifiable", "the changed path {!r} is a symlink or submodule entry (mode {}) in {}, "
+                        "and the export check compares regular files only".format(
+                            path.decode("utf-8", "replace"), entry[0], where))
+
+    def shown(paths):
+        return _rdp_listing(sorted(p.decode("utf-8", "replace") for p in paths))
+    unexported = [p for p in changed if (p in pin_entries and p not in heads)
+                  or (p in base_entries and p not in bases)]
+    if unexported:
+        return ("deny", "the export does not hold every path {} changes: {} (a changed path needs a head copy "
+                "where {} has it and a base copy where its base {} has it)".format(pin, shown(unexported), pin,
+                                                                                  base))
+    if root_commit and bases:
+        return ("deny", "{} is a root commit, so its export holds no base copy, but it holds {}".format(
+            pin, shown(bases)))
+    stale = [p for p, oid in heads.items() if pin_entries.get(p, ("", ""))[0] not in regular
+             or pin_entries[p][1] != oid]
+    if stale:
+        return ("deny", "the export's head copies {} are not byte-identical to the blobs at {} (a path {} "
+                "lacks, or other bytes)".format(shown(stale), pin, pin))
+    stale = [p for p, oid in bases.items() if base_entries.get(p, ("", ""))[0] not in regular
+             or base_entries[p][1] != oid]
+    if stale:
+        return ("deny", "the export's base copies {} are not byte-identical to the blobs at {}, the base the "
+                "hook derives for {} (a path the base lacks, or other bytes, as when the copies come from "
+                "another base)".format(shown(stale), base, pin))
+    return None
+
+
+def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
+    """None when the revision brief names no review export (or the binding declares no export labels), or
+    when the export it names passes P1 and P2 against the pin and its derived base; otherwise (kind,
+    message) for the first failure. changed is the pin's changed set (bytes paths)."""
+    declared, failed = _rdp_export_declared(cfg, found)
+    if failed is not None:
+        return failed
+    if declared is None:
+        return None
+    root, diff, base_dir = declared
+    shadowed = sorted(c.decode("utf-8", "replace") for c in changed
+                      if c in (diff, base_dir) or c.startswith(base_dir + b"/")
+                      or diff.startswith(c + b"/") or base_dir.startswith(c + b"/"))
+    if shadowed:
+        return ("unverifiable", "the export's diff file {!r} or base-copy directory {!r} stands where {} changes "
+                "{}, so its head copy cannot be told apart".format(diff.decode("utf-8", "replace"),
+                                                                   base_dir.decode("utf-8", "replace"), pin,
+                                                                   _rdp_listing(shadowed)))
+    files, dirs, blob, why = _rdp_export_walk(root, fmt, diff, cfg["max_brief_bytes"])
+    if why is not None:
+        return ("unverifiable", why)
+    if blob is None:
+        return ("unverifiable", "the export's diff file {!r} is not a regular file under {}".format(
+            diff.decode("utf-8", "replace"), root))
+    if base_dir not in dirs:
+        return ("unverifiable", "the export's base-copy directory {!r} is not a directory under {}".format(
+            base_dir.decode("utf-8", "replace"), root))
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return ("unverifiable", "the export's diff file is not valid UTF-8 ({})".format(exc))
+    if text[:1] == chr(0xFEFF):  # one leading byte-order mark is dropped, as _rdp_read_text drops it
+        text = text[1:]
+    if "\x00" in text:
+        return ("unverifiable", "the export's diff file contains a NUL")
+    named, why = _rdp_draft_paths(text)
+    if named is None:
+        return ("unverifiable", "the export's diff file cannot be read as a git diff: {}".format(why))
+    named = set(p.encode("utf-8", "surrogateescape") for p in named)
+    if named != changed:
+        parts = []
+        missing = sorted(c.decode("utf-8", "replace") for c in changed - named)
+        extra = sorted(d.decode("utf-8", "replace") for d in named - changed)
+        if missing:
+            parts.append("changed by {} but not in the export's diff: {}".format(pin, _rdp_listing(missing)))
+        if extra:
+            parts.append("in the export's diff but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        return ("deny", "the export's diff does not name the commit's changed set from its derived base {} "
+                "({})".format(base, "; ".join(parts)))
+    pin_entries = _rdp_export_tree(repo, pin)
+    base_entries = {} if root_commit else _rdp_export_tree(repo, base)
+    if pin_entries is None or base_entries is None:
+        return ("unverifiable", "the trees of {} and its base {} cannot be read".format(pin, base))
+    prefix = base_dir + b"/"
+    heads = {p: oid for p, oid in files.items() if not p.startswith(prefix)}
+    bases = {p[len(prefix):]: oid for p, oid in files.items() if p.startswith(prefix)}
+    return _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, root_commit)
+
+
 def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
     """Reconcile a revision-target brief against the repository: ("allow"|"note"|"deny"|"unverifiable",
     message). repo_default is the top level of the repository the dispatch runs in, used when the brief
@@ -35000,6 +35252,11 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
                          "{}".format(found["draft"][0].strip(), pin, labels["skip"], _rdp_listing(unapplied)))
         return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
             "; ".join(parts)))
+    # A brief naming a review export has that export checked against the pin and the derived base: its diff
+    # names the changed set, and its head and base copies are the blobs of the pin and that base.
+    failed = _rdp_export_check(cfg, found, repo, fmt, pin, base, not parents, changed_b)
+    if failed is not None:
+        return failed
     paths = sorted(declared)
     staged = _rdp_git_records(repo, "diff-index", "--cached", "-z", "--name-only", "--ignore-submodules=none",
                               pin, "--", *paths)

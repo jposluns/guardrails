@@ -1390,6 +1390,7 @@ def _rdp_cases(tmp):
     check("rdp/handler-crash-fails-closed", rc, 2)
     _rdp_label_screen_cases(base)
     _rdp_draft_cases(base)
+    _rdp_export_cases(base)
     _rdp_scope_cases(base, bare)
 
 
@@ -5131,6 +5132,223 @@ def _rdp_draft_cases(base):
     lb.write_registry(dict(lb.binding, labels=labels))
     lb_got.append(_rdp_kind(lb.run("ls")))
     check("rdp/draft-labels-declared-together", lb_got, ["unverifiable"] * 3 + ["allow"])
+
+
+def _rdp_blob(root, rev, path):
+    """The bytes of the blob at path in rev of the fixture repository root, or None when rev has no such
+    path."""
+    p = subprocess.run(["git", "-C", str(root), "cat-file", "blob", "{}:{}".format(rev, path)],
+                       capture_output=True, timeout=30)
+    return p.stdout if p.returncode == 0 else None
+
+
+def _rdp_export_cases(base):
+    """The review export vectors (rdp/export-*): where the binding declares the export labels, a revision
+    brief naming a review export has the export's diff headers name exactly the pin's changed set from its
+    derived base (P1), and every changed path exported, each head copy byte-identical to the pin's blob and
+    each base copy byte-identical to the derived base's blob, with no base copy for a root commit (P2). The
+    fixture is a series of three fixes on top of the RdpFixture change commit, pinned at the third: a diff of
+    the third fix with base copies from the series base is refused, the same with base copies from the third
+    fix's parent is allowed (the series residual), and each unreadable, malformed, symlinked or partial input
+    is a cannot-evaluate."""
+    labels = dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                  repo="Review-repo:", branch="Review-branch:", export="Review-export:",
+                  export_diff="Review-export-diff:", export_base="Review-export-base:")
+    ex = RdpFixture(base, "export")
+    ex.binding = dict(ex.binding, labels=labels)
+    ex.write_registry(ex.binding)
+    series_base = ex.pin
+    fixes = []
+    for edits in ((("seed.txt", "seed 2\n"),), (("src/b.py", "b = 2\n"),),
+                  (("src/a.py", "a = 3\n"), ("src/c.py", "c = 1\n"))):
+        for path, text in edits:
+            (ex.root / path).write_text(text, encoding="utf-8")
+        _rdp_git(ex.root, "add", "-A")
+        _rdp_git(ex.root, "commit", "-q", "-m", "fix {}".format(len(fixes) + 1))
+        fixes.append(_rdp_git(ex.root, "rev-parse", "HEAD"))
+    f1, f2, f3 = fixes
+    ex.authority(f3 + "\n")
+    touched = ("seed.txt", "src/a.py", "src/b.py", "src/c.py")
+
+    def diff_of(old, new, *paths):
+        return _rdp_git(ex.root, "diff", "--no-color", "--no-ext-diff", "--no-renames", "--src-prefix=a/",
+                        "--dst-prefix=b/", old, new, "--", *paths) + "\n"
+
+    def export(name, base_rev, diff_text, paths=touched, fixture=None, head_rev=None):
+        fixture = fixture or ex
+        root = fixture.briefs / name
+        (root / "base").mkdir(parents=True)
+        (root / "CHANGE.diff").write_text(diff_text, encoding="utf-8")
+        for path in paths:
+            for rev, top in ((head_rev or f3, root), (base_rev, root / "base")):
+                blob = _rdp_blob(fixture.root, rev, path) if rev else None
+                if blob is not None:
+                    (top / path).parent.mkdir(parents=True, exist_ok=True)
+                    (top / path).write_bytes(blob)
+        return root
+
+    def copy(src, name):
+        dst = ex.briefs / name
+        shutil.copytree(str(src), str(dst), symlinks=True)
+        return dst
+
+    def lines(root, diff="CHANGE.diff", based="base"):
+        return ["Review-export: " + str(root), "Review-export-diff: " + diff, "Review-export-base: " + based]
+
+    def run(root, fixture=None, pin=None, paths=("src/a.py", "src/c.py"), extra=(), **kw):
+        fixture = fixture or ex
+        return fixture.dispatch(fixture.good(pin=pin or f3, paths=paths, extra=lines(root, **kw) + list(extra)))
+
+    def named(result, *needles):
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        return (_rdp_kind(result), all(needle in reason for needle in needles))
+
+    last = diff_of(f2, f3)
+    series = export("series", series_base, last)
+    good = export("first-parent", f2, last)
+    # The seed row: the third fix's diff with base copies from the series base. P1 holds (the diff names what
+    # the third fix changed), and P2 refuses the base copies of the files the earlier fixes changed, which
+    # are not the blobs at the third fix's parent.
+    check("rdp/export-series-base-copies-denies", named(run(series), "export's base copies 'seed.txt', "
+                                                        "'src/b.py' are not byte-identical to the blobs at " + f2),
+          ("deny", True))
+    # The same export with base copies from the third fix's parent is self-consistent and allowed, though the
+    # earlier fixes stay unreviewed: the series residual the rule text and the authority decide.
+    check("rdp/export-first-parent-base-copies-allows", named(run(good)), ("allow", True))
+    # P1: a diff naming a path whose head and base copies are identical (src/b.py, changed by the second
+    # fix), and a diff that leaves out a changed and exported path.
+    wide = export("wide", f2, diff_of(f1, f3))
+    check("rdp/export-diff-extra-path-denies", named(run(wide), "in the export's diff but not changed by {}: "
+                                                     "'src/b.py'".format(f3)), ("deny", True))
+    narrow = export("narrow", f2, diff_of(f2, f3, "src/a.py"))
+    check("rdp/export-diff-missing-path-denies", named(run(narrow), "changed by {} but not in the export's "
+                                                       "diff: 'src/c.py'".format(f3)), ("deny", True))
+    # An export root that cannot be opened as a directory: missing, a regular file, a symlink to the good
+    # export. The first row is the control.
+    plain = ex.briefs / "plain-root"
+    plain.write_text("x\n", encoding="utf-8")
+    linked = ex.briefs / "linked-root"
+    linked.symlink_to(str(good))
+    check("rdp/export-root-unreadable-unverifiable", [named(run(r), w) for r, w in (
+        (good, ""), (ex.briefs / "absent-root", "cannot be opened as a directory"),
+        (plain, "cannot be opened as a directory"), (linked, "cannot be opened as a directory"))],
+        [("allow", True)] + [("unverifiable", True)] * 3)
+    # A base-copy directory that cannot be read: missing, a regular file, a FIFO.
+    filed = copy(good, "base-file")
+    (filed / "basefile").write_text("x\n", encoding="utf-8")
+    fifo = copy(good, "base-fifo")
+    os.mkfifo(str(fifo / "basefifo"))
+    check("rdp/export-base-dir-unreadable-unverifiable", [named(run(r, based=b), w) for r, b, w in (
+        (good, "base", ""), (good, "absent", "base-copy directory 'absent' is not a directory"),
+        (filed, "basefile", "base-copy directory 'basefile' is not a directory"),
+        (fifo, "basefifo", "'basefifo', which is not a regular file or directory"))],
+        [("allow", True)] + [("unverifiable", True)] * 3)
+    # A symlink anywhere under the root, pointing outside it: among the head copies, among the base copies,
+    # and the base-copy directory itself.
+    outside = ex.briefs / "outside.txt"
+    outside.write_text("seed 2\n", encoding="utf-8")
+    head_link = copy(good, "head-link")
+    (head_link / "seed.txt").unlink()
+    (head_link / "seed.txt").symlink_to(str(outside))
+    base_link = copy(good, "base-link")
+    (base_link / "base" / "extra.txt").symlink_to(str(outside))
+    dir_link = copy(good, "dir-link")
+    shutil.rmtree(str(dir_link / "base"))
+    (dir_link / "base").symlink_to(str(good / "base"))
+    check("rdp/export-symlink-unverifiable", [named(run(r), w) for r, w in (
+        (good, ""), (head_link, "holds a symlink at 'seed.txt'"),
+        (base_link, "holds a symlink at 'base/extra.txt'"), (dir_link, "holds a symlink at 'base'"))],
+        [("allow", True)] + [("unverifiable", True)] * 3)
+    # A root commit has no base: its export holds no base copy. The control is the same export with an empty
+    # base-copy directory.
+    rc = RdpFixture(base, "exportroot")
+    rc.binding = dict(rc.binding, labels=labels)
+    rc.write_registry(rc.binding)
+    _rdp_git(rc.root, "checkout", "-q", "--detach", rc.seed)
+    rc.authority(rc.seed + "\n")
+    empty_tree = _rdp_git(rc.root, "hash-object", "-t", "tree", "/dev/null")
+    root_files = ("old.txt", "seed.txt", "src/a.py")
+    root_diff = _rdp_git(rc.root, "diff", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/",
+                         empty_tree, rc.seed) + "\n"
+    root_ok = export("root-ok", None, root_diff, root_files, rc, rc.seed)
+    root_bad = export("root-bad", None, root_diff, root_files, rc, rc.seed)
+    (root_bad / "base" / "seed.txt").write_text("seed\n", encoding="utf-8")
+    check("rdp/export-root-commit-base-copies-denies", [named(run(r, rc, rc.seed, root_files), w) for r, w in (
+        (root_ok, ""), (root_bad, "is a root commit, so its export holds no base copy"))],
+        [("allow", True), ("deny", True)])
+    # The three export labels are declared together or not at all: one or two of them is a malformed binding,
+    # which withholds every Bash call; all three, alone or with the draft labels, is well formed.
+    lb = RdpFixture(base, "exportlabels")
+    lb_got = []
+    for extra in (dict(export="Review-export:"), dict(export="Review-export:", export_diff="Review-export-diff:"),
+                  dict(export_base="Review-export-base:")):
+        lb.write_registry(dict(lb.binding, labels=dict(lb.binding["labels"], **extra)))
+        lb_got.append(_rdp_kind(lb.run("ls")))
+    lb.write_registry(dict(lb.binding, labels=labels))
+    lb_got.append(_rdp_kind(lb.run("ls")))
+    lb.rebind(dict(lb.binding, labels=dict(labels, draft="Review-draft:", skip="Review-skip:")))
+    lb_got.append(_rdp_kind(lb.run("ls")))
+    check("rdp/export-labels-declared-together", lb_got, ["unverifiable"] * 3 + ["allow"] * 2)
+    # A missing parent object stays a cannot-evaluate with an export named.
+    shallow = base / "export-shallow"
+    _rdp_git(base, "clone", "-q", "--depth", "1", "file://" + str(ex.root), str(shallow))
+    check("rdp/export-missing-parent-unverifiable", named(run(good, extra=["Review-repo: " + str(shallow)]),
+                                                          "is not in the repository"), ("unverifiable", True))
+    # P2 is load bearing: with it patched out, the seed row is allowed.
+    check("rdp/export-p2-revert-allows-series", [_rdp_kind(run(series)), _rdp_mutant(
+        [("_rdp_export_p2", lambda *args: None)], lambda: _rdp_kind(run(series)))], ["deny", "allow"])
+    # The brief's export lines: named in part, twice, a relative root, a diff or base path that is absolute or
+    # holds a . or .. component, and a diff file inside the base-copy directory. The first row is the control.
+    part = ["Review-export: " + str(good)]
+    check("rdp/export-brief-declaration-unverifiable", [named(ex.dispatch(ex.good(
+        pin=f3, paths=("src/a.py", "src/c.py"), extra=e)), w) for e, w in (
+        (lines(good), ""), (part, "names a review export only in part"),
+        (part + ["Review-export-diff: CHANGE.diff"], "names a review export only in part"),
+        (lines(good) + part, "has 2 'Review-export:' lines"),
+        (lines(os.path.relpath(str(good))), "is not an absolute path"),
+        (lines(good, diff="../CHANGE.diff"), "is not a path relative to the export root"),
+        (lines(good, based="/base"), "is not a path relative to the export root"),
+        (lines(good, based="base/./x"), "is not a path relative to the export root"),
+        (lines(good, diff="base/CHANGE.diff"), "overlap"))],
+        [("allow", True)] + [("unverifiable", True)] * 8)
+    # A diff file that is missing, a directory, not UTF-8, or not a git diff the census reads.
+    no_diff = copy(good, "no-diff")
+    (no_diff / "CHANGE.diff").unlink()
+    dir_diff = copy(good, "dir-diff")
+    (dir_diff / "CHANGE.diff").unlink()
+    (dir_diff / "CHANGE.diff").mkdir()
+    latin = copy(good, "latin-diff")
+    (latin / "CHANGE.diff").write_bytes(last.encode("utf-8") + b"caf\xe9\n")
+    mangled = copy(good, "mangled-diff")
+    (mangled / "CHANGE.diff").write_text(last + "@@ -1 +1 @@\n", encoding="utf-8")
+    check("rdp/export-diff-unreadable-unverifiable", [named(run(r), w) for r, w in (
+        (good, ""), (no_diff, "is not a regular file under"), (dir_diff, "is not a regular file under"),
+        (latin, "is not valid UTF-8"), (mangled, "cannot be read as a git diff"))],
+        [("allow", True)] + [("unverifiable", True)] * 4)
+    # P2 on the head side and on completeness: a head copy with other bytes, a head copy of a path the pin
+    # deletes, and a changed path with no head copy or no base copy.
+    stale = copy(good, "stale-head")
+    (stale / "src" / "a.py").write_text("a = 9\n", encoding="utf-8")
+    ghost = copy(good, "ghost-head")
+    (ghost / "old.txt").write_text("old\n", encoding="utf-8")
+    no_head = copy(good, "no-head")
+    (no_head / "src" / "c.py").unlink()
+    no_base = copy(good, "no-base")
+    (no_base / "base" / "src" / "a.py").unlink()
+    check("rdp/export-head-copies-and-completeness-deny", [named(run(r), w) for r, w in (
+        (good, ""), (stale, "head copies 'src/a.py' are not byte-identical"),
+        (ghost, "head copies 'old.txt' are not byte-identical"),
+        (no_head, "does not hold every path {} changes: 'src/c.py'".format(f3)),
+        (no_base, "does not hold every path {} changes: 'src/a.py'".format(f3)))],
+        [("allow", True)] + [("deny", True)] * 4)
+    # The walk's entry bound: past it the export is a cannot-evaluate.
+    check("rdp/export-entry-bound-unverifiable", [named(run(good)), _rdp_mutant(
+        [("_RDP_EXPORT_MAX_ENTRIES", 3)], lambda: named(run(good), "holds more than 3 entries"))],
+        [("allow", True), ("unverifiable", True)])
+    # The export check is opt in per brief: a brief under the export binding that names no export is
+    # reconciled as before.
+    check("rdp/export-unnamed-brief-unchanged", [_rdp_kind(ex.dispatch(ex.good(pin=f3, paths=p))) for p in (
+        ("src/a.py", "src/c.py"), ("src/a.py",))], ["allow", "deny"])
 
 
 def _rdp_ls(cwd, background):
