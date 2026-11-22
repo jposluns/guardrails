@@ -7837,6 +7837,37 @@ expected-check-ids = [
   "flip/shrink-no-change",
   "ratchet/raise-no-change",
   "flip/raise-no-change",
+  # history: in real git repositories, against the budget committed at the merge base with main. A shrink
+  # merged and then undone is refused by each history guard alone and passes with both switched off; a
+  # rewritten cap, kind or note of an entry committed there exits 1 and exit 0 with its guard switched off
+  "history/shrink-merged-then-undone",
+  "history/shrink-undone-refused-by-base-grew-alone",
+  "history/shrink-undone-refused-by-base-rewritten-alone",
+  "flip/shrink-merged-then-undone",
+  "history/entry-cap-rewritten",
+  "flip/entry-cap-rewritten",
+  "history/entry-kind-rewritten",
+  "flip/entry-kind-rewritten",
+  "history/seed-note-rewritten",
+  "flip/seed-note-rewritten",
+  # history still accepts a shrink or a naming raise appended since main, and a main with no budget file
+  "history/shrink-appended-accepted",
+  "history/raise-appended-naming-the-id-accepted",
+  "history/no-budget-at-merge-base-accepted",
+  # a replacement ref or a grafts line cannot move the merge base; exit 0 once git is let honour them
+  "history/replace-ref-ignored",
+  "flip/replace-ref-ignored",
+  "history/graft-ignored",
+  "flip/graft-ignored",
+  # a base that cannot be read is exit 2 with nothing written, never a pass; read as absent, the undo passes
+  "cannot-evaluate/base-no-git",
+  "flip/base-unreadable-read-as-absent",
+  "cannot-evaluate/base-not-a-repository",
+  "cannot-evaluate/base-shallow",
+  "cannot-evaluate/base-no-main",
+  "cannot-evaluate/base-no-merge-base",
+  "cannot-evaluate/base-budget-off-schema",
+  "cannot-evaluate/base-budget-symlink",
   # finding: the budget's other findings, each exit 0 with its guard switched off
   "finding/pending-stale",
   "flip/pending-stale",
@@ -7893,7 +7924,8 @@ expected-check-ids = [
   "linked-dir/renders",
   "flip/linked-dir-renders",
   "cannot-evaluate/unknown-argument",
-  # lanes: the config lanes exclude the bare launch (write mode) and keep the --self-test launch
+  # lanes: each config lane's real roster (--list-shard 1/1) leaves out the bare launch (write mode) and
+  # keeps the --self-test launch and the suite step; the predicate goes red on a listing that swaps them
   "lanes/bare-launch-excluded-self-test-kept",
   "flip/lanes-bare-launch",
 ]

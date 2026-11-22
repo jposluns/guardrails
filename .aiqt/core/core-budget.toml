@@ -12,15 +12,18 @@
 # file-cap: the largest CORE render, in UTF-16 units; enforced once pending is empty, printed against until then.
 # pending: the sorted corpus-ids of the rules over entry-cap that are not split yet.
 #
-# ACCEPTED in tools/gen_rules_core.py pins the last accepted entry (its position here, its caps and its
-# pending); this log must hold that entry unchanged, so deleting or rewriting an accepted entry is a finding.
-# To change a cap or pending, append an entry; the gate compares each entry with the one before it. Every
-# entry after the pinned one, of any kind, may only lower a cap or drop a pending id, and every entry after
-# the seed must change something. Raising a cap or putting an id back on pending takes a raise entry here
-# and moving ACCEPTED to it; every passing run prints the pinned entry and how many raise entries this log
-# holds. An id that is split, now within entry-cap or the apex is a finding until a shrink entry drops it.
-# The gate reads this file and the generator, not git history: an entry appended after the pin is protected
-# once ACCEPTED moves to it, and an edit made to both together is not caught by the gate.
+# The gate reads this file as committed at the merge base of HEAD with main (origin/main, else main; read
+# only, replacement refs and grafts ignored). Every entry committed there must stay here unchanged, every key
+# compared, so deleting or rewriting an entry already on main is a finding. Against the budget in force
+# there, an id back on pending or a cap raised is a finding unless a raise entry appended since names it.
+# Where that read fails (no git, a shallow clone, no main, no merge base) the gate cannot evaluate (exit 2).
+# An entry not yet on main is covered by the per-entry rules only. To change a cap or pending, append an
+# entry; the gate compares each entry with the one before it. ACCEPTED in tools/gen_rules_core.py pins one
+# entry (its position here, its caps and its pending), which this log must hold unchanged; every entry
+# after it, of any kind, may only lower a cap or drop a pending id, and every entry after the seed must
+# change something. Raising a cap or putting an id back on pending takes a raise entry here and moving
+# ACCEPTED to it. An id that is split, now within entry-cap or the apex is a finding until a shrink entry
+# drops it.
 
 format-version = 1
 

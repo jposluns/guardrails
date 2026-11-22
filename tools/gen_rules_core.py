@@ -29,33 +29,51 @@ it is always kept whole and no cap applies to its entry. A pending rule is rende
 split. file-cap is enforced once pending is empty; until then the render is larger than it by construction,
 and the measured size is printed against it.
 
-THE RATCHET. The budget in force is shrink-only against the last accepted entry, by construction:
-  - ACCEPTED here pins the last accepted entry: its number in the log, its caps and its pending. The log
-    must hold that entry and it must equal the pin, so deleting or rewriting an accepted entry, which moves
-    or changes the pinned one, is a finding;
+HISTORY. The budget is judged against the log as committed at the merge base of HEAD with main, read from
+git (read only: rev-parse, merge-base, ls-tree and cat-file, with replacement refs ignored, the graft file
+pinned to the empty null device, the commit-graph not consulted, and no caller GIT_ variable, global or
+system config). main is refs/remotes/origin/main when it resolves to a commit, else refs/heads/main. Where
+that commit holds a budget file:
+  - every entry committed there must be held here unchanged, in place, every key compared (the note and the
+    kind included), so deleting or rewriting an entry committed at the merge base is a finding;
+  - the budget in force here may not hold a pending id that is not on the budget in force there, or a cap
+    above it, unless a raise entry appended after the entries committed there names it (lists that id while
+    the entry before it does not, or raises that cap above the entry before it).
+Where that commit holds no budget file (the change that adds one), nothing is compared there, and the seed
+and the pin below bound the log. Where the base cannot be read (git cannot run, the root is not the top of
+a git work tree, the repository is shallow, neither main ref resolves, HEAD is not a commit, there is no
+merge base or more than one, or the budget there is not a regular file, not UTF-8, not TOML or off the
+schema), the result is cannot-evaluate (exit 2), never a pass. An entry appended since the merge base is
+not history yet: until it is on main, these two checks do not cover it, and the per-entry rules below do.
+What this does not show: that main itself was reviewed, or anything about an entry before it reached main.
+
+THE RATCHET (per entry, within the log here):
+  - ACCEPTED here pins one accepted entry: its number in the log, its caps and its pending. The log must
+    hold that entry and it must equal the pin. The pin proves no history (HISTORY does). What it adds: a
+    raise is in force only once ACCEPTED is moved to it, so a raise is a reviewed edit of this file as well
+    as an entry in the log; and where main holds no budget file yet, it is what keeps every later entry
+    shrink-only;
   - every entry after the pinned one, of any kind, may only lower a cap or drop a pending id, never raise a
     cap or list an id the entry before it does not, so no entry can lift the budget in force above the pin;
   - the seed entry must equal the budget as this renderer was added (CAP_SEED and PENDING_SEED here);
   - up to the pin, a shrink entry may only lower a cap or drop a pending id, as above, and a raise entry is
-    the only kind that may raise a cap or put an id on pending; a raise is in force only once ACCEPTED here
-    is moved to it, so it is recorded twice, as a raise entry in the log and as a reviewed edit of this file;
+    the only kind that may raise a cap or put an id on pending;
   - every entry after the seed must change something, so consecutive entries always differ.
-Every passing run prints the pinned entry number and how many raise entries the log holds. An id on the
-budget in force that no longer needs to be there (now split, now within entry-cap, or the apex) is a
-finding until a shrink entry drops it. The gate reads the committed budget and this file, not git history:
-an entry appended after the pin is protected once ACCEPTED moves to it (until then, removing it returns
-the budget to the accepted one, never above it), and an edit of the log made together with an edit of
-ACCEPTED here is not caught by this gate; it shows as a changed pin in review. Every logged pending id must
-fully match the corpus-id pattern (an id with a trailing newline is refused) in every entry, and the
-corpus must hold each id of the budget in force.
+Every passing run prints the pinned entry number, how many raise entries the log holds and the merge base
+it compared with. An id on the budget in force that no longer needs to be there (now split, now within
+entry-cap, or the apex) is a finding until a shrink entry drops it. Every logged pending id must fully
+match the corpus-id pattern (an id with a trailing newline is refused) in every entry, here and at the
+merge base, and the corpus must hold each id of the budget in force.
 
 EXIT. 0 clean. 1 on drift (--check) or on a finding, and a finding in write mode writes nothing:
   - a non-apex rule over entry-cap with no split and not on pending; a split rule whose core layer is over
     entry-cap; a detail-trigger over trigger-cap; a seed entry that differs from CAP_SEED and PENDING_SEED;
     a log that does not hold the entry ACCEPTED pins, or holds it with other values; a shrink entry, or
     any entry after the pinned one, that lists a pending id the entry before it does not or raises a cap;
-    an entry after the seed that changes nothing; a pending id that no longer needs to be there; the render
-    over file-cap while pending is empty;
+    an entry after the seed that changes nothing; an entry committed at the merge base with main that is
+    deleted or rewritten here; a pending id or a cap in force above the budget in force there that no raise
+    entry appended since names; a pending id that no longer needs to be there; the render over file-cap
+    while pending is empty;
   - in the fresh render, and in --check also in the committed file when it differs from the fresh render:
     a frontmatter block; an `@` anywhere (the instruction-budget gate reads an `@` as an import even inside a
     code span, so no `@` is allowed at all); a corpus-id with no entry; a corpus-id with more than one entry;
@@ -80,19 +98,22 @@ unknown or missing key, an empty or missing log, a kind out of place or unknown,
 is not a positive integer, a format-version other than 1, a pending entry that is not an id, an unsorted or
 repeated pending list, or a pending id in force the corpus does not hold); a committed render that is not
 UTF-8, or is there but is not a regular file (a symbolic link, wherever it points, a directory or another
-kind), which neither mode reads or writes through; and a .aiqt/renders/ that cannot be read as a directory
-inside the repository. A committed render that is absent is drift (exit 1), as for every generated file.
+kind), which neither mode reads or writes through; a .aiqt/renders/ that cannot be read as a directory
+inside the repository; and a budget at the merge base with main that cannot be read (HISTORY), in both
+modes. A committed render that is absent is drift (exit 1), as for every generated file.
 Write mode opens the render without following a symbolic link in its last component.
 
   gen_rules_core.py               regenerate .aiqt/renders/aiqt-core.md
   gen_rules_core.py --check       exit 1 on drift or a finding, 2 when it cannot evaluate; write nothing
-  gen_rules_core.py --self-test   synthetic trees: every finding and every cannot-evaluate input; a flip
-                                  for every guard, for the byte comparison, the id pattern, the render
-                                  target check, the linked-directory probe and the config-lane
-                                  registration of this file's bare launch, showing its case changes outcome
-                                  with it switched off (the exit, or for a diagnostic guard only its named
-                                  reason); and a backstop row for each load check (no-title, empty-layer,
-                                  group-outside), whose case another step also refuses
+  gen_rules_core.py --self-test   synthetic trees (real git repositories for HISTORY): every finding and
+                                  every cannot-evaluate input; a flip for every guard, for the byte
+                                  comparison, the id pattern, the render target check, the linked-directory
+                                  probe, the replacement-ref and graft settings and the fail-closed base
+                                  read, showing its case changes outcome with it switched off (the exit, or
+                                  for a diagnostic guard only its named reason); a backstop row for each
+                                  load check (no-title, empty-layer, group-outside), whose case another step
+                                  also refuses; and the config-lane rows, which read each lane runner's real
+                                  roster (--list-shard 1/1, in a child) for this file's launches
 """
 import sys
 
@@ -111,6 +132,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import os
 import re
 import stat
+import subprocess
+import tomllib
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -165,8 +188,13 @@ PENDING_SEED = frozenset((
 # The last accepted entry of core-budget.toml (THE RATCHET): its number in the log ("entries") and its caps
 # and pending. The log must hold that entry with exactly these values, and no entry after it may raise a cap
 # or list a pending id the entry before it does not. A raise entry takes moving this pin to it, here, with
-# the values that entry holds. The pinned entry is the seed today.
+# the values that entry holds. The pinned entry is the seed today. The pin proves no history (the merge-base
+# read below does that); what it adds is that a raise is a reviewed edit of this file as well as of the log,
+# and that where main holds no budget file yet, the entries after it may still only shrink.
 ACCEPTED = dict(CAP_SEED, entries=1, pending=PENDING_SEED)
+# The refs read as main, in order: the first that resolves to a commit is used (HISTORY in the docstring).
+MAIN_REFS = ("refs/remotes/origin/main", "refs/heads/main")
+GIT_TIMEOUT = 60
 
 
 def units(text):
@@ -276,16 +304,29 @@ def load_budget(root, rules):
         raise ValueError("{} cannot be examined ({})".format(BUDGET_REL, exc)) from None
     if not stat.S_ISREG(mode):
         raise ValueError("{} is not a regular file (a symlink, a directory or another kind)".format(BUDGET_REL))
-    data = load_toml(path)
-    _exact_keys(data, BUDGET_KEYS, BUDGET_REL)
+    log = _validated_log(load_toml(path), BUDGET_REL)
+    known = {rule.cid for rule in rules}
+    unknown = [cid for cid in log[-1]["pending"] if cid not in known]
+    if unknown:
+        raise ValueError("{}: pending in force names no rule of the corpus: {}".format(
+            BUDGET_REL, ", ".join(unknown)))
+    budget = {key: log[-1][key] for key in CAP_KEYS + ("pending",)}
+    budget["log"] = log
+    return budget
+
+
+def _validated_log(data, label):
+    """The accepted log of a parsed budget, checked against the schema in the module docstring; label names
+    the file in each message. Raises ValueError (cannot evaluate) on anything off the schema."""
+    _exact_keys(data, BUDGET_KEYS, label)
     version = data["format-version"]
     if type(version) is not int or version != 1:
-        raise ValueError("{}: format-version must be 1, got {!r}".format(BUDGET_REL, version))
+        raise ValueError("{}: format-version must be 1, got {!r}".format(label, version))
     log = data["accepted"]
     if not isinstance(log, list) or not log or not all(isinstance(entry, dict) for entry in log):
-        raise ValueError("{}: accepted must be a non-empty array of tables ([[accepted]])".format(BUDGET_REL))
+        raise ValueError("{}: accepted must be a non-empty array of tables ([[accepted]])".format(label))
     for number, entry in enumerate(log, 1):
-        where = "{} accepted entry {}".format(BUDGET_REL, number)
+        where = "{} accepted entry {}".format(label, number)
         _exact_keys(entry, ENTRY_KEYS, where)
         allowed = KINDS[:1] if number == 1 else KINDS[1:]
         if entry["kind"] not in allowed:
@@ -303,14 +344,111 @@ def load_budget(root, rules):
             raise ValueError("{}: pending repeats an id".format(where))
         if pending != sorted(pending):
             raise ValueError("{}: pending is not sorted".format(where))
-    known = {rule.cid for rule in rules}
-    unknown = [cid for cid in log[-1]["pending"] if cid not in known]
-    if unknown:
-        raise ValueError("{}: pending in force names no rule of the corpus: {}".format(
-            BUDGET_REL, ", ".join(unknown)))
-    budget = {key: log[-1][key] for key in CAP_KEYS + ("pending",)}
-    budget["log"] = log
-    return budget
+    return log
+
+
+# --- the budget as committed at the merge base with main (HISTORY in the module docstring) ---------------
+
+def _base_git_env():
+    """The caller's environment with every GIT_ variable dropped (no repository, index or config
+    redirection), the system and global config skipped, HOME and XDG_CONFIG_HOME at the null device, and an
+    offline, non-interactive, lock-free posture with replacement refs ignored and the graft file pinned to
+    the empty null device, so neither a replacement ref nor a grafts line can move the merge base or swap
+    the budget read there. A name-keyed function, so the self-test can show both settings carry weight."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, HOME=os.devnull,
+               XDG_CONFIG_HOME=os.devnull, GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
+               GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1", GIT_GRAFT_FILE=os.devnull)
+    return env
+
+
+def _base_git(root, *args):
+    """A read-only git command in root under _base_git_env. Raises ValueError (cannot evaluate) when git
+    cannot be launched or does not finish in time."""
+    try:
+        # The auto-maintenance pins ride the argv in option position, so no read here can start a detached
+        # gc or maintenance child; the commit-graph is not consulted, so a crafted one cannot rewrite parents.
+        return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                               "-c", "maintenance.auto=false", "-c", "core.commitGraph=false", *args],
+                              capture_output=True, timeout=GIT_TIMEOUT, env=_base_git_env(),
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("git {} could not run ({}), so the budget at the merge base with main cannot be "
+                         "read".format(args[0], exc)) from None
+
+
+def _git_stderr(proc):
+    return proc.stderr.decode("utf-8", "backslashreplace").strip() or "no message"
+
+
+def _git_lines(root, what, *args):
+    proc = _base_git(root, *args)
+    if proc.returncode != 0:
+        raise ValueError("{}: git exited {} ({})".format(what, proc.returncode, _git_stderr(proc)))
+    return [line for line in proc.stdout.decode("utf-8", "backslashreplace").splitlines() if line]
+
+
+def _read_base(root):
+    """The budget log as committed at the merge base of HEAD with main: a dict of the main ref used, the
+    merge-base commit and "log", the validated log there or None when that commit holds no budget file.
+    Raises ValueError (cannot evaluate, never a pass) when it cannot be read: no git, root not the top of a
+    git work tree, a shallow repository, no main ref, no HEAD commit, no merge base or more than one, or a
+    budget there that is not a regular file, not UTF-8, not TOML or off the schema. A name-keyed function."""
+    top = _git_lines(root, "root is not a git work tree", "rev-parse", "--show-toplevel")
+    if len(top) != 1 or os.path.realpath(top[0]) != os.path.realpath(root):
+        raise ValueError("{} is not the top of a git work tree (git names {!r})".format(root, top))
+    if _git_lines(root, "the shallow-repository probe failed", "rev-parse", "--is-shallow-repository") \
+            != ["false"]:
+        raise ValueError("the repository is shallow, so its merge base with main can be wrong; fetch the "
+                         "full history")
+    main = None
+    for ref in MAIN_REFS:
+        proc = _base_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}")
+        if proc.returncode == 0:
+            main = (ref, proc.stdout.decode("ascii", "replace").strip())
+            break
+        if proc.returncode != 1:
+            raise ValueError("{} cannot be read: git exited {} ({})".format(ref, proc.returncode,
+                                                                            _git_stderr(proc)))
+    if main is None:
+        raise ValueError("neither {} resolves to a commit, so there is no main to compare the budget "
+                         "with".format(" nor ".join(MAIN_REFS)))
+    head = _git_lines(root, "HEAD does not resolve to a commit", "rev-parse", "--verify", "--quiet",
+                      "--end-of-options", "HEAD^{commit}")
+    proc = _base_git(root, "merge-base", "--all", main[1], head[0] if head else "HEAD")
+    if proc.returncode not in (0, 1):
+        raise ValueError("git merge-base exited {} ({})".format(proc.returncode, _git_stderr(proc)))
+    bases = [line for line in proc.stdout.decode("ascii", "replace").splitlines() if line]
+    if len(bases) != 1:
+        raise ValueError("HEAD and {} have {} merge bases ({}); exactly one is needed".format(
+            main[0], len(bases), ", ".join(bases) or "no common ancestor"))
+    base = {"ref": main[0], "commit": bases[0], "log": None}
+    where = "{} at the merge base {} with {}".format(BUDGET_REL, bases[0][:12], main[0])
+    proc = _base_git(root, "ls-tree", "-z", "--full-tree", bases[0], "--", BUDGET_REL)
+    if proc.returncode != 0:
+        raise ValueError("{}: git ls-tree exited {} ({})".format(where, proc.returncode, _git_stderr(proc)))
+    records = [record for record in proc.stdout.split(b"\x00") if record]
+    if not records:
+        return base
+    meta, _tab, name = records[0].partition(b"\t")
+    parts = meta.split(b" ")
+    if len(records) != 1 or name != BUDGET_REL.encode("ascii") or len(parts) != 3:
+        raise ValueError("{}: unexpected git ls-tree output {!r}".format(where, proc.stdout[:120]))
+    mode, kind, oid = parts
+    if kind != b"blob" or mode not in (b"100644", b"100755"):
+        raise ValueError("{} is not a regular file (mode {}, {})".format(
+            where, mode.decode("ascii", "replace"), kind.decode("ascii", "replace")))
+    proc = _base_git(root, "cat-file", "blob", oid.decode("ascii", "replace"))
+    if proc.returncode != 0:
+        raise ValueError("{}: git cat-file exited {} ({})".format(where, proc.returncode, _git_stderr(proc)))
+    try:
+        data = tomllib.loads(proc.stdout.decode("utf-8"))
+    except UnicodeError as exc:
+        raise ValueError("{} is not UTF-8 ({})".format(where, exc)) from None
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise ValueError("{} cannot be parsed as TOML ({}: {})".format(where, type(exc).__name__, exc)) from None
+    base["log"] = _validated_log(data, where)
+    return base
 
 
 def _is_cid(cid):
@@ -430,6 +568,51 @@ def _accepted_pin(_rules, budget, _text, pins):
                 number, ", ".join(changed))] if changed else []
 
 
+def _base_where(base):
+    return "the merge base {} with {}".format(base["commit"][:12], base["ref"])
+
+
+def _base_rewritten(_rules, budget, _text, pins):
+    """Every entry committed at the merge base with main must be held here unchanged, in place: none
+    deleted, none rewritten (every key compared, the note and the kind included)."""
+    base = pins["base"]
+    if base["log"] is None:
+        return []
+    log, held = budget["log"], base["log"]
+    findings = []
+    if len(log) < len(held):
+        findings.append("the log holds {} accepted entries, fewer than the {} committed at {}; an entry "
+                        "committed there was deleted".format(len(log), len(held), _base_where(base)))
+    for number in range(1, min(len(log), len(held)) + 1):
+        changed = [key for key in ENTRY_KEYS if log[number - 1][key] != held[number - 1][key]]
+        if changed:
+            findings.append("accepted entry {}: {} differ(s) from the entry committed at {}; an entry "
+                            "committed there may not be rewritten, append an entry instead".format(
+                                number, ", ".join(changed), _base_where(base)))
+    return findings
+
+
+def _base_grew(_rules, budget, _text, pins):
+    """Against the budget in force at the merge base with main, the budget in force here may not hold an
+    id that is not there or a cap above it, unless a raise entry appended after the entries committed
+    there names it: lists the id while the entry before it does not, or raises that cap above it."""
+    base = pins["base"]
+    if base["log"] is None:
+        return []
+    log, held = budget["log"], base["log"]
+    before = held[-1]
+    raises = [(log[index - 1], log[index]) for index in range(max(len(held), 1), len(log))
+              if log[index]["kind"] == "raise"]
+    findings = ["{}: on pending in force but not on pending at {}, and no raise entry appended since names "
+                "it".format(cid, _base_where(base)) for cid in budget["pending"]
+                if cid not in before["pending"]
+                and not any(cid in entry["pending"] and cid not in prior["pending"] for prior, entry in raises)]
+    findings += ["{} {} is above {} at {}, and no raise entry appended since raises it".format(
+        key, budget[key], before[key], _base_where(base)) for key in CAP_KEYS
+        if budget[key] > before[key] and not any(entry[key] > prior[key] for prior, entry in raises)]
+    return findings
+
+
 def _pending_stale(rules, budget, _text, _seed):
     by_id = {rule.cid: rule for rule in rules}
     stale = []
@@ -451,7 +634,7 @@ SOURCE_GUARDS = {"over-cap-not-pending": _over_cap_not_pending, "core-over-cap":
                  "trigger-over-cap": _trigger_over_cap, "seed-altered": _seed_altered,
                  "accepted-pin": _accepted_pin, "pending-grew": _pending_grew, "cap-raised": _cap_raised,
                  "shrink-no-change": _shrink_no_change, "pending-stale": _pending_stale,
-                 "file-over-cap": _file_over_cap}
+                 "file-over-cap": _file_over_cap, "base-rewritten": _base_rewritten, "base-grew": _base_grew}
 
 
 def _entries(text):
@@ -569,19 +752,21 @@ def _write_render(target, text):
         raise SystemExit(2)
 
 
-def run(root, check_mode, seed=None, accepted=None):
+def run(root, check_mode, seed=None, accepted=None, base=None):
     """Reconcile root's CORE render. Exit 0 clean, 1 on drift (check mode) or a finding, 2 when it cannot
     evaluate (see the module docstring). seed stands in for CAP_SEED and PENDING_SEED, a dict of the three
     caps and pending, and accepted for ACCEPTED, a dict of the pinned entry number ("entries"), the three
-    caps and pending (the self-test's synthetic trees)."""
+    caps and pending (the self-test's synthetic trees). base, when given, stands in for what _read_base
+    reads from git (a self-test tree that is not a git repository); when None, it is read."""
     seed = dict(CAP_SEED, pending=PENDING_SEED) if seed is None else seed
-    pins = {"seed": seed, "accepted": ACCEPTED if accepted is None else accepted}
     try:
         rules = load_rules(root)
         budget = load_budget(root, rules)
+        base = _read_base(root) if base is None else base
     except (ValueError, OSError) as exc:
         print("error: {} (cannot evaluate)".format(exc), file=sys.stderr)
         return 2
+    pins = {"seed": seed, "accepted": ACCEPTED if accepted is None else accepted, "base": base}
     target = root / CORE_REL
     # The directory chain first (exit 2 on a link out of the tree), then the render itself, in both modes.
     target_dir_present(target, root)
@@ -625,10 +810,12 @@ def run(root, check_mode, seed=None, accepted=None):
     split = sum(rule.split for rule in rules)
     log = budget["log"]
     print("rules-core: {} entries ({} whole, {} split, {} pending); {} units against file-cap {} ({}); budget "
-          "log {} accepted entries, {} of them raise entries, accepted pin at entry {}".format(
+          "log {} accepted entries, {} of them raise entries, accepted pin at entry {}; {}: {}".format(
               len(rules), len(rules) - split, split, len(budget["pending"]), units(text), budget["file-cap"],
               "reported only while pending is not empty" if budget["pending"] else "enforced",
-              len(log), sum(entry["kind"] == "raise" for entry in log), pins["accepted"]["entries"]))
+              len(log), sum(entry["kind"] == "raise" for entry in log), pins["accepted"]["entries"],
+              _base_where(base), "no budget file committed there" if base["log"] is None else
+              "{} accepted entries committed there, held unchanged".format(len(base["log"]))))
     return 0
 
 
@@ -744,16 +931,20 @@ def _pin(entries, entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longa
 
 
 _PIN = _pin(1)
+# The stand-in base for a synthetic tree that is not a git repository: main holds no budget file, so only
+# the seed and the accepted pin bound the log. READ_BASE makes run() read the base from git instead.
+_NO_BASE = {"ref": "refs/heads/main", "commit": "0" * 40, "log": None}
+READ_BASE = None
 
 
-def _run(root, check_mode, seed=_SEED, accepted=_PIN):
+def _run(root, check_mode, seed=_SEED, accepted=_PIN, base=_NO_BASE):
     """(exit, captured stdout and stderr) of run(root, check_mode), SystemExit read as its code."""
     import io
     from contextlib import redirect_stderr, redirect_stdout
     out = io.StringIO()
     with redirect_stdout(out), redirect_stderr(out):
         try:
-            code = run(root, check_mode, seed, accepted)
+            code = run(root, check_mode, seed, accepted, base)
         except SystemExit as exc:
             code = exc.code
     return code, out.getvalue()
@@ -782,18 +973,65 @@ def _committed_case(tmp, label, mutate):
     return root
 
 
-def _both(root, seed=_SEED, accepted=_PIN):
+def _both(root, seed=_SEED, accepted=_PIN, base=_NO_BASE):
     """(check exit, write exit, render unchanged) for a tree that may already hold a render."""
     target = root / CORE_REL
     before = target.read_bytes() if target.exists() else None
-    codes = (_run(root, True, seed, accepted)[0], _run(root, False, seed, accepted)[0])
+    codes = (_run(root, True, seed, accepted, base)[0], _run(root, False, seed, accepted, base)[0])
     after = target.read_bytes() if target.exists() else None
     return codes[0], codes[1], before == after
 
 
-def _write_then_check(root, seed=_SEED, accepted=_PIN):
+def _write_then_check(root, seed=_SEED, accepted=_PIN, base=_NO_BASE):
     """(write exit, check exit) for a tree: the check sees the render the write made, if it made one."""
-    return _run(root, False, seed, accepted)[0], _run(root, True, seed, accepted)[0]
+    return _run(root, False, seed, accepted, base)[0], _run(root, True, seed, accepted, base)[0]
+
+
+def _fx_git(repo, *args):
+    """A fixture git command in repo under the shared fixture scrub (tools/_git_fixture_env.py), with the
+    auto-maintenance pins in option position. Raises RuntimeError when it fails (a broken fixture)."""
+    from _git_fixture_env import git_fixture_env
+    proc = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                           "-c", "maintenance.auto=false", "-c", "user.name=rules-core fixture",
+                           "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+                           "-c", "core.hooksPath=/dev/null", *args],
+                          capture_output=True, timeout=GIT_TIMEOUT, env=git_fixture_env(),
+                          stdin=subprocess.DEVNULL)
+    if proc.returncode != 0:
+        raise RuntimeError("fixture git {} exited {}: {}".format(args[0], proc.returncode, _git_stderr(proc)))
+    return proc.stdout.decode("utf-8", "replace").strip()
+
+
+def _put(root, sources, budget):
+    """Write sources (replacing every rule source) and budget into root's working tree; a None leaves that
+    part as it is, and a budget of False deletes the budget file."""
+    if sources is not None:
+        rules_dir = root / ".aiqt" / "core" / "rules"
+        for path in rules_dir.iterdir():
+            path.unlink()
+        for name, text in sources.items():
+            (rules_dir / name).write_text(text, encoding="utf-8")
+    if budget is False:
+        (root / BUDGET_REL).unlink()
+    elif budget is not None:
+        (root / BUDGET_REL).write_text(budget, encoding="utf-8")
+
+
+def _git_tree(base, main_sources=None, main_budget=None, head_sources=None, head_budget=None,
+              branch="main"):
+    """A git repository at base: one commit on branch holding main_sources and main_budget (main_budget
+    False: no budget file there), then branch topic checked out from it with head_sources and head_budget
+    written to the working tree, uncommitted. Returns base."""
+    root = _tree(base, sources=main_sources, budget=None if main_budget is False else main_budget)
+    (root / ".git").rmdir()
+    if main_budget is False:
+        (root / BUDGET_REL).unlink()
+    _fx_git(root, "init", "-q", "-b", branch)
+    _fx_git(root, "add", "-A")
+    _fx_git(root, "commit", "-q", "--no-verify", "-m", "main")
+    _fx_git(root, "checkout", "-q", "-b", "topic")
+    _put(root, head_sources, head_budget)
+    return root
 
 
 def _argv_failures():
@@ -850,8 +1088,15 @@ def self_test_main():
           "written, among them a logged id with a trailing newline and a committed render that is a symbolic "
           "link (in --check, and in write mode with nothing written through it), each exit 0 with its check "
           "switched off; .aiqt/renders/ linked outside the tree is exit 2 and inside it is rewritten, the "
-          "shared cases going red with the probe switched off; the config-lane tables exclude the bare launch "
-          "and keep the --self-test launch)".format(len(EXECUTED)))
+          "shared cases going red with the probe switched off; in real git repositories, a shrink merged to "
+          "main and then undone (its entry deleted, its rule regrown) is refused by each history guard alone "
+          "and passes with both switched off, a rewritten cap, kind or note of an entry committed at the merge "
+          "base exits 1 and exit 0 with its guard switched off, a replacement ref or a grafts line cannot move "
+          "the merge base (exit 0 once honoured), a shrink or a named raise appended since main and a main with "
+          "no budget pass, and no git, no repository, a shallow clone, no main, no merge base and a budget at "
+          "the merge base off the schema or not a regular file are each exit 2 with nothing written, an "
+          "unreadable base read as absent letting the undo pass; each config lane's real roster keeps the "
+          "--self-test launch and the suite step and leaves the bare launch out)".format(len(EXECUTED)))
     return 0
 
 
@@ -1048,6 +1293,8 @@ def _self_test_cases(tmp):
     with _without(SOURCE_GUARDS, "shrink-no-change"):
         flipped = _write_then_check(root, accepted=_pin(2))
     check("flip/raise-no-change", flipped == (0, 0), flipped)
+
+    _history_cases(tmp, shortened, shrunk)
 
     # --- the other findings ---
     root = _tree(tmp / "stale", budget=_budget_text(pending=("longaa1", "shrtaa1"), kind="raise"))
@@ -1258,8 +1505,8 @@ def _self_test_cases(tmp):
     # modes with nothing written there; linked inside the tree it is written and re-checks clean.
     from _gen_common import linked_dir_failures
     linked = linked_dir_failures(tmp / "linked", "renders", _tree,
-                                 lambda base, check_mode: run(base, check_mode, _SEED, _PIN), ".aiqt/renders",
-                                 CORE_REL)
+                                 lambda tree, check_mode: run(tree, check_mode, _SEED, _PIN, _NO_BASE),
+                                 ".aiqt/renders", CORE_REL)
     check("linked-dir/renders", not linked, linked)
     # The flip: with the directory-chain probe switched off (here and in the shared module), the outside
     # case reads through the link and the shared cases go red.
@@ -1268,7 +1515,7 @@ def _self_test_cases(tmp):
     globals()["target_dir_present"] = _gen_common.target_dir_present = lambda *_args, **_kwargs: True
     try:
         flipped = linked_dir_failures(tmp / "linked-flip", "renders", _tree,
-                                      lambda base, check_mode: run(base, check_mode, _SEED, _PIN),
+                                      lambda tree, check_mode: run(tree, check_mode, _SEED, _PIN, _NO_BASE),
                                       ".aiqt/renders", CORE_REL)
     finally:
         globals()["target_dir_present"], _gen_common.target_dir_present = saved
@@ -1276,47 +1523,273 @@ def _self_test_cases(tmp):
     failures = _argv_failures()
     check("cannot-evaluate/unknown-argument", not failures, failures)
 
-    # --- the config lanes: a bare launch of this file is its write mode, so tools/selftest_git_fixture_env.py
-    # must exclude it and keep the direct --self-test launch; the flip drops both registrations ---
-    bare, direct = ("tools/gen_rules_core.py",), ("tools/gen_rules_core.py", "--self-test")
+    # --- the config lanes: a bare launch of this file is its write mode, so each config lane must leave it
+    # out and keep the direct --self-test launch and the suite step. The rows read the REAL roster: each
+    # lane runner's own --list-shard 1/1 listing (built by tools/selftest_git_fixture_env.py's rule from the
+    # registries, in a child that runs nothing). The flip feeds the same predicate each real listing with
+    # the bare launch put in and the direct launch taken out, so the predicate is shown to tell them apart ---
+    listings = {lane: _lane_listing(lane) for lane in LANES}
+    verdicts = {lane: _lane_ok(listing) for lane, listing in listings.items()}
+    check("lanes/bare-launch-excluded-self-test-kept", all(verdicts.values()) and len(verdicts) == 3,
+          {lane: "ok" if verdicts[lane] else listing for lane, listing in listings.items()})
+    flipped = {lane: _lane_ok(None if listing is None else
+                              (listing - {" ".join(LANE_DIRECT)}) | {" ".join(LANE_BARE)})
+               for lane, listing in listings.items()}
+    check("flip/lanes-bare-launch", not any(flipped.values()) and all(listings.values()), flipped)
+
+
+def _history_cases(tmp, shortened, shrunk):
+    """The rows for HISTORY (module docstring): each builds a real git repository, main holding one budget
+    and the topic branch's working tree another, and runs with the base read from git."""
+    seed_budget = _budget_text()
+    shrunk_budget = _budget_text(entries=[shrunk])
+
+    def git_case(label, *args, **kwargs):
+        """(the fixture repository or None, why it could not be built)."""
+        try:
+            return _git_tree(tmp / label, *args, **kwargs), ""
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return None, "fixture: {}".format(exc)
+
+    def judged(root, accepted=_PIN):
+        """((write exit, check exit, render written), output) with the base read from git."""
+        if root is None:
+            return None, "no fixture"
+        written, out_w = _run(root, False, accepted=accepted, base=READ_BASE)
+        checked, out_c = _run(root, True, accepted=accepted, base=READ_BASE)
+        return (written, checked, (root / CORE_REL).exists()), out_w + out_c
+
+    # The reviewed defect: a shrink is accepted and merged (main holds the shortened rule and the shrink
+    # entry that drops its id), then a later change restores the longer rule and deletes that shrink entry.
+    # The pin never moved, so every in-file check agrees; against the merge base with main it is refused,
+    # by each of the two history guards on its own.
+    root, why = git_case("h-undone", shortened, shrunk_budget, _fixture_sources(), seed_budget)
+    got, out = judged(root)
+    check("history/shrink-merged-then-undone", got == (1, 1, False)
+          and "fewer than the 2 committed at the merge base" in out
+          and "longaa1: on pending in force but not on pending at the merge base" in out, (got, out, why))
+    with _without(SOURCE_GUARDS, "base-rewritten"):
+        alone = judged(root)
+    check("history/shrink-undone-refused-by-base-grew-alone", alone[0] == (1, 1, False)
+          and "longaa1: on pending in force" in alone[1], alone)
+    with _without(SOURCE_GUARDS, "base-grew"):
+        alone = judged(root)
+    check("history/shrink-undone-refused-by-base-rewritten-alone", alone[0] == (1, 1, False)
+          and "an entry committed there was deleted" in alone[1], alone)
+    with _without(SOURCE_GUARDS, "base-rewritten"), _without(SOURCE_GUARDS, "base-grew"):
+        flipped = judged(root)
+    check("flip/shrink-merged-then-undone", flipped[0] == (0, 0, True), flipped)
+
+    # The reviewed defect: the public text said deleting or rewriting an accepted entry is a finding, but
+    # with the pin at the seed a rewrite of a later entry's cap or kind, or of the seed's note, passed.
+    # Against the merge base every key of every entry committed there is compared.
+    three = _budget_text(entries=[{"kind": "shrink", "file_cap": 90000}, {"kind": "shrink", "file_cap": 80000}])
+    for label, case_id, flip_id, edit in (
+            ("h-cap", "history/entry-cap-rewritten", "flip/entry-cap-rewritten",
+             lambda text: text.replace("file-cap = 90000", "file-cap = 85000")),
+            ("h-kind", "history/entry-kind-rewritten", "flip/entry-kind-rewritten",
+             lambda text: text.replace('kind = "shrink"', 'kind = "raise"', 1)),
+            ("h-note", "history/seed-note-rewritten", "flip/seed-note-rewritten",
+             lambda text: text.replace('note = "why"', 'note = "reworded"', 1))):
+        root, why = git_case(label, None, three, None, edit(three))
+        got, out = judged(root)
+        check(case_id, got == (1, 1, False) and "from the entry committed at the merge base" in out,
+              (got, out, why))
+        with _without(SOURCE_GUARDS, "base-rewritten"):
+            flipped = judged(root)
+        check(flip_id, flipped[0] == (0, 0, True), flipped)
+
+    # What history still accepts: a shrink appended since main, a raise appended since main that names the
+    # id it puts back (with the pin moved to it), and a log on a branch whose main holds no budget file yet
+    # (the seed and the pin then bound it).
+    root, why = git_case("h-shrink", None, seed_budget, shortened, shrunk_budget)
+    got = judged(root)
+    check("history/shrink-appended-accepted", got[0] == (0, 0, True), (got, why))
+    root, why = git_case("h-raise", shortened, shrunk_budget, _fixture_sources(),
+                         _budget_text(entries=[shrunk, {"kind": "raise"}]))
+    got = judged(root, accepted=_pin(3))
+    check("history/raise-appended-naming-the-id-accepted", got[0] == (0, 0, True), (got, why))
+    root, why = git_case("h-absent", None, False, None, seed_budget)
+    got = judged(root)
+    check("history/no-budget-at-merge-base-accepted", got[0] == (0, 0, True)
+          and "no budget file committed there" in got[1], (got, why))
+
+    # Replacement refs and grafts are ignored: main is C1 (seed only) then C2 (the shrink), the topic
+    # branch starts at C2 and undoes the shrink. A replacement ref C2 -> C1, or a grafts line giving the
+    # topic commit C1 as its parent, would make the merge base read as C1 and the undo pass.
+    def undo_after_shrink(label, commit_topic):
+        root, why = git_case(label, None, seed_budget)
+        if root is None:
+            return None, None, None, why
+        try:
+            first = _fx_git(root, "rev-parse", "HEAD")
+            _fx_git(root, "checkout", "-q", "main")
+            _put(root, shortened, shrunk_budget)
+            _fx_git(root, "commit", "-q", "--no-verify", "-a", "-m", "shrink")
+            second = _fx_git(root, "rev-parse", "HEAD")
+            _fx_git(root, "checkout", "-q", "-B", "topic")
+            _put(root, _fixture_sources(), seed_budget)
+            if commit_topic:
+                _fx_git(root, "commit", "-q", "--no-verify", "-a", "-m", "undo")
+            return root, first, second, ""
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return None, None, None, "fixture: {}".format(exc)
+
+    def honouring_env():
+        env = _BASE_GIT_ENV_SAVED()
+        del env["GIT_NO_REPLACE_OBJECTS"], env["GIT_GRAFT_FILE"]
+        return env
+
+    _BASE_GIT_ENV_SAVED = globals()["_base_git_env"]
+
+    @contextmanager
+    def honouring():
+        globals()["_base_git_env"] = honouring_env
+        try:
+            yield
+        finally:
+            globals()["_base_git_env"] = _BASE_GIT_ENV_SAVED
+
+    root, first, second, why = undo_after_shrink("h-replace", False)
+    if root is not None:
+        try:
+            _fx_git(root, "replace", second, first)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            root, why = None, "fixture: {}".format(exc)
+    got = judged(root)
+    check("history/replace-ref-ignored", got[0] == (1, 1, False), (got, why))
+    with honouring():
+        flipped = judged(root)
+    check("flip/replace-ref-ignored", flipped[0] == (0, 0, True), flipped)
+    root, first, second, why = undo_after_shrink("h-graft", True)
+    if root is not None:
+        topic = _fx_git(root, "rev-parse", "HEAD")
+        (root / ".git" / "info").mkdir(exist_ok=True)
+        (root / ".git" / "info" / "grafts").write_text("{} {}\n".format(topic, first), encoding="utf-8")
+    got = judged(root)
+    check("history/graft-ignored", got[0] == (1, 1, False), (got, why))
+    with honouring():
+        flipped = judged(root)
+    check("flip/graft-ignored", flipped[0] == (0, 0, True), flipped)
+
+    # Where the base cannot be read the result is cannot-evaluate (exit 2 in both modes, nothing written),
+    # never a pass: no git, not a git repository, a shallow repository, no main, no merge base, and a
+    # budget at the merge base that is off the schema or not a regular file.
+    def cannot(root, why):
+        if root is None:
+            return None, why
+        return _both(root, base=READ_BASE), _run(root, True, base=READ_BASE)[1]
+
+    root, why = git_case("h-nogit", shortened, shrunk_budget, _fixture_sources(), seed_budget)
+    empty_path = tmp / "h-empty-path"
+    empty_path.mkdir()
+    saved_path = os.environ.get("PATH")
+    os.environ["PATH"] = str(empty_path)
     try:
-        exclusions, directs = _lane_tables()
-    except (OSError, SyntaxError, UnicodeError, ValueError, KeyError, TypeError) as exc:
-        exclusions, directs = {}, {}
-        print("lane tables unreadable: {}".format(exc))
-    members = _lane_members(exclusions, directs)
-    check("lanes/bare-launch-excluded-self-test-kept", bare not in members and direct in members, members)
-    flipped = _lane_members({key: value for key, value in exclusions.items() if key != bare},
-                            {key: value for key, value in directs.items() if key != SUITE_ID})
-    check("flip/lanes-bare-launch", bare in flipped and direct not in flipped, flipped)
+        got = cannot(root, why)
+    finally:
+        if saved_path is None:
+            del os.environ["PATH"]
+        else:
+            os.environ["PATH"] = saved_path
+    check("cannot-evaluate/base-no-git", got[0] == (2, 2, True) and "could not run" in got[1], got)
+    # The flip: an unreadable base read as "no budget at main" lets the undone shrink pass.
+    saved = globals()["_read_base"]
+
+    def lenient(tree):
+        try:
+            return saved(tree)
+        except ValueError:
+            return dict(_NO_BASE)
+
+    globals()["_read_base"] = lenient
+    try:
+        os.environ["PATH"] = str(empty_path)
+        try:
+            flipped = judged(root)
+        finally:
+            if saved_path is None:
+                del os.environ["PATH"]
+            else:
+                os.environ["PATH"] = saved_path
+    finally:
+        globals()["_read_base"] = saved
+    check("flip/base-unreadable-read-as-absent", flipped[0] == (0, 0, True), flipped)
+    got = cannot(_tree(tmp / "h-norepo"), "")
+    check("cannot-evaluate/base-not-a-repository", got[0] == (2, 2, True), got)
+    root, why = git_case("h-shallow-src", None, seed_budget, shortened, shrunk_budget)
+    clone = tmp / "h-shallow"
+    try:
+        if root is None:
+            raise RuntimeError(why)
+        _fx_git(root, "commit", "-q", "--no-verify", "-a", "-m", "second")
+        _fx_git(tmp, "clone", "-q", "--depth", "1", "--no-single-branch", root.as_uri(), str(clone))
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        clone, why = None, "fixture: {}".format(exc)
+    got = cannot(clone, why)
+    check("cannot-evaluate/base-shallow", got[0] == (2, 2, True) and "shallow" in got[1], got)
+    root, why = git_case("h-nomain", None, seed_budget, None, seed_budget, branch="trunk")
+    got = cannot(root, why)
+    check("cannot-evaluate/base-no-main", got[0] == (2, 2, True) and "resolves to a commit" in got[1], got)
+    root, why = git_case("h-orphan", None, seed_budget)
+    try:
+        if root is not None:
+            _fx_git(root, "checkout", "-q", "--orphan", "lonely")
+            _fx_git(root, "commit", "-q", "--no-verify", "-m", "unrelated")
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        root, why = None, "fixture: {}".format(exc)
+    got = cannot(root, why)
+    check("cannot-evaluate/base-no-merge-base", got[0] == (2, 2, True) and "no common ancestor" in got[1], got)
+    root, why = git_case("h-badbase", None, seed_budget.replace("format-version = 1", "format-version = 2"),
+                         None, seed_budget)
+    got = cannot(root, why)
+    check("cannot-evaluate/base-budget-off-schema", got[0] == (2, 2, True) and "at the merge base" in got[1], got)
+    root, why = git_case("h-linkbase", None, seed_budget)
+    try:
+        if root is not None:
+            _fx_git(root, "checkout", "-q", "main")
+            (root / "budget-elsewhere.toml").write_text(seed_budget, encoding="utf-8")
+            (root / BUDGET_REL).unlink()
+            (root / BUDGET_REL).symlink_to(root / "budget-elsewhere.toml")
+            _fx_git(root, "add", "-A")
+            _fx_git(root, "commit", "-q", "--no-verify", "-m", "linked budget")
+            _fx_git(root, "checkout", "-q", "-B", "topic")
+            (root / BUDGET_REL).unlink()
+            (root / BUDGET_REL).write_text(seed_budget, encoding="utf-8")
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        root, why = None, "fixture: {}".format(exc)
+    got = cannot(root, why)
+    check("cannot-evaluate/base-budget-symlink", got[0] == (2, 2, True) and "not a regular file" in got[1], got)
 
 
-def _lane_tables():
-    """(CONFIG_EXCLUSIONS["all"], CONFIG_DIRECT_SELFTESTS) of tools/selftest_git_fixture_env.py, read as
-    literals from its source (read only, never imported, so that file stays out of this renderer's import
-    closure). Raises on a file that is unreadable or whose two tables are missing or not literals."""
-    import ast
-    path = Path(__file__).resolve().parent / "selftest_git_fixture_env.py"
-    tables = {}
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
-                and node.targets[0].id in ("CONFIG_EXCLUSIONS", "CONFIG_DIRECT_SELFTESTS"):
-            tables[node.targets[0].id] = ast.literal_eval(node.value)
-    return tables["CONFIG_EXCLUSIONS"]["all"], tables["CONFIG_DIRECT_SELFTESTS"]
+LANES = ("combined", "malformed", "system")
+LANE_BARE = ("tools/gen_rules_core.py",)
+LANE_DIRECT = ("tools/gen_rules_core.py", "--self-test")
+LANE_STEP = ("tools/check_selftest_execution.py", "--suite", SUITE_ID)
 
 
-def _lane_members(exclusions, directs):
-    """The config-lane members tools/selftest_git_fixture_env.py _registered_selftests builds from this
-    suite's registered step, under the given CONFIG_EXCLUSIONS["all"] and CONFIG_DIRECT_SELFTESTS: the bare
-    runner and any direct self-test launch, less every excluded identity (a model of that rule, kept to the
-    one suite step)."""
-    step = ("tools/check_selftest_execution.py", "--suite", SUITE_ID)
-    members = {step}
-    if step not in exclusions:
-        members.add(("tools/gen_rules_core.py",))
-        if SUITE_ID in directs:
-            members.add(directs[SUITE_ID])
-    return {member for member in members if member not in exclusions}
+def _lane_listing(lane):
+    """The set of member lines tools/selftest_git_fixture_env_config_<lane>.py --list-shard 1/1 prints (its
+    whole roster), or None when the child cannot run or does not exit 0. The runner is launched, never
+    imported, so the git-fixture engine stays out of this renderer's import closure."""
+    runner = Path(__file__).resolve().parent / "selftest_git_fixture_env_config_{}.py".format(lane)
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", str(runner), "--list-shard", "1/1"],
+                              capture_output=True, timeout=GIT_TIMEOUT * 5, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print("lane {} listing could not run: {}".format(lane, exc))
+        return None
+    if proc.returncode != 0:
+        print("lane {} listing exited {}: {}".format(lane, proc.returncode, _git_stderr(proc)))
+        return None
+    return {line for line in proc.stdout.decode("utf-8", "replace").splitlines() if line}
+
+
+def _lane_ok(listing):
+    """True when a lane listing keeps the suite step and the direct --self-test launch of this file and
+    leaves its bare launch (its write mode) out."""
+    return listing is not None and " ".join(LANE_STEP) in listing and " ".join(LANE_DIRECT) in listing \
+        and " ".join(LANE_BARE) not in listing
 
 
 def shutil_rmtree(path):

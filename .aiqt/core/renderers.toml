@@ -52,7 +52,7 @@ entrypoint = "tools/gen_rules_core.py"
 semantics-revision = 1
 targets = [".aiqt/renders/aiqt-core.md"]
 closure = ["tools/gen_rules_core.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_selftest_exit_report.py", "tools/_standards.py", "tools/gen_adapters.py", "tools/gen_agents.py", "tools/gen_claude.py", "tools/gen_rules.py"]
-code-digest = "05c7992594def29f479a93ecf59826a08cee5cc47ba05a2d2e5e41dff94cf4a2"
+code-digest = "76b592032b45003e83a57688ad9af157d2d94e3fa81803568665344c637bed59"
 
 [[renderer]]
 renderer-id = "skill"
