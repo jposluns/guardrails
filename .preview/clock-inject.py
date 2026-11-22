@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """PostToolUse and PostToolUseFailure hook (all tools): inject the real clock into the assistant's context.
 
-Input bound: stdin is capped at 8 MiB; overflow fails open like malformed input (the clock is still emitted).
+Input bound: at most 8 MiB plus one byte of stdin is read; input over 8 MiB is discarded unparsed and fails
+open like malformed input (the clock is still emitted, with hookEventName PostToolUse, see Coverage).
 
 Motivated by an assistant composing console timestamps and "Session elapsed HH:MM" footers from its own
 sense of time instead of reading the clock, drifting up to 4h40m ahead (timestamp-from-clock;
@@ -29,10 +30,12 @@ instant and `EST` otherwise (that hook's zone_label). Residual: the prefix is th
 a message composed later passes that hook only within its 10-minute window.
 
 Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
-PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName matches the
-incoming payload's hook_event_name (PostToolUseFailure when that is the event, otherwise PostToolUse), as the
-hooks contract requires. Both registrations are needed for both outcomes. Neither event fires for a tool
-call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
+PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName is the
+incoming payload's hook_event_name when that is PostToolUseFailure, otherwise PostToolUse, so it matches the
+event as the hooks contract requires whenever the payload was parsed. Input that was not parsed (over 8 MiB,
+or not a JSON object) carries no event name it can read, so it is answered as PostToolUse, which does not
+match a PostToolUseFailure call (test_oversized_input_answers_as_post_tool_use). Both registrations are
+needed for both outcomes. Neither event fires for a tool call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
 calls, and any stretch of prose with no tool call, see no fresh reading.
 
 Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (a legacy
@@ -944,6 +947,18 @@ def _self_test():
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
             rc, out = run_main(json.dumps({"hook_event_name": "Bogus"}))
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+
+        def test_oversized_input_answers_as_post_tool_use(self):
+            # input over 8 MiB is discarded unparsed, so its event name is unknown: the reply names PostToolUse,
+            # even for a PostToolUseFailure call (the docstring's Coverage paragraph and the README say so)
+            small = json.dumps({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash"})
+            for text, want in ((small + " " * 16, "PostToolUseFailure"),
+                               (small + " " * STDIN_MAX_BYTES, "PostToolUse")):
+                rc, out = run_main(text)
+                self.assertEqual(rc, 0)
+                obj = json.loads(out)
+                self.assertEqual(obj["hookSpecificOutput"]["hookEventName"], want, len(text))
+                self.assertRegex(clock_of(obj["hookSpecificOutput"]["additionalContext"]), line_re)
 
         def test_worker_kill_switch_silent(self):
             for env in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}):

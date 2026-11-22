@@ -46,8 +46,10 @@ the authority, and the summary further down this page only points to it.
   America/Toronto zone from the system zone database whatever the process zone (`TZ`); the zone is loaded
   once per tool call and both lines use that one result. When that zone entry
   is missing or cannot be loaded, the CLOCK line uses the process zone instead and the CONSOLE PREFIX line is
-  left out. Hook input over 8 MiB is not read; the clock line is still added, without elapsed time from the
-  transcript. The freshest time value in context
+  left out. Hook input over 8 MiB is discarded unparsed (the hook reads at most 8 MiB plus one byte); the
+  clock line is still added, without elapsed time from the transcript, and because the discarded input's
+  event name is unknown the reply names `PostToolUse`, even after a `PostToolUseFailure` call. Input that is
+  not valid JSON is answered the same way. The freshest time value in context
   is then a real reading, not one the model composed. It informs; it blocks nothing. Events:
   `PostToolUse` (after a tool call that succeeded) and `PostToolUseFailure` (after one that started and
   failed); register both to cover both outcomes. The pack's plugin now adds its own host clock line on
@@ -58,11 +60,14 @@ the authority, and the summary further down this page only points to it.
   configured lease, it blocks the stop and says why, so the assistant corrects the value before handing
   back. Its exemptions, the complete list (the `EXEMPTIONS` paragraph of its docstring gives each exact
   scope): text in code spans, fenced code blocks, and `>` quote lines is not checked; a time that is not
-  the first thing on its line and that a scheduling word (such as `until`, `due`, or `next run at`)
-  directly precedes is treated as a scheduled time and is not checked for being ahead; only the bracketed
-  opening stamp is checked for being too old; a time it cannot convert passes; and only the last
-  elapsed-time footer is checked, and only when a lease start is known. The fleet copy's other exemptions
-  are not included, because each let through a stamp this hook blocked before: a time in a table column
+  the first thing on its line, with a scheduling word (such as `until`, `due`, or `next run at`) ending at
+  most three words before it, is treated as a scheduled time and is not checked for being ahead (so
+  `done by the CI bot 2026-11-22T05:00Z` passes, `by` being a scheduling word); only the bracketed
+  opening stamp is checked for being too old; a time it cannot convert passes; only the last
+  elapsed-time footer is checked, and only when a lease start is known; plus the docstring's item (f):
+  the choice of which messages a stop reads, the block cap, the state lock and the fail-open allows (the
+  cap and the lock are summarized under "What each hook does not catch" below). The fleet copy's other
+  exemptions are not included, because each let through a stamp this hook blocked before: a time in a table column
   whose header names a scheduling word, a line-leading time followed by `due:`, `scheduled`, or
   `certificate rotation`, an opening stamp followed by a past-event word, a line naming `total`, `across`,
   `workers`, `timeout`, or `limit`, and its twelve extra scheduling words (such as `window` and `resets`).
@@ -72,10 +77,12 @@ the authority, and the summary further down this page only points to it.
   Other times may run up to 1 minute ahead, but the bracketed stamp that opens a message, such as
   `[2026-09-23 13:45 EDT]`, claims the current time and may not be ahead at all: truncate it to the minute
   and never round up. `EST` and `EDT` are checked against America/Toronto from the system
-  zone database whatever the process zone (`TZ`), so the CONSOLE PREFIX stamp that `clock-inject.py` adds is
-  checked under any `TZ`. When that opening stamp uses another zone abbreviation that is not the hook's local
-  zone, the hook cannot check it and says so in a note instead of passing silently. Event:
-  `Stop`.
+  zone database when the process zone (`TZ`) does not itself use that abbreviation at that time, so the
+  CONSOLE PREFIX stamp that `clock-inject.py` adds is checked under `TZ` values such as `UTC0` or `JST-9`.
+  A process zone whose own abbreviation is `EST` or `EDT` keeps its own reading: under `TZ=EST-10`, for
+  example, the stamp is read as UTC+10 and a true CONSOLE PREFIX is refused as far too old. When that
+  opening stamp uses another zone abbreviation that is not the hook's local zone, the hook cannot check it
+  and says so in a note instead of passing silently. Event: `Stop`.
 - **`future-stamp-write.py`** denies a write that would record a future-dated timestamp into a folder you
   have declared as holding working records. An observed-time entry (a heartbeat, a recorded-at value) has
   to come from the clock, so one dated in the future was composed. A scheduled value (a deadline, a next
@@ -235,13 +242,13 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `char-policy-write.py` | `6529312e9dadd856353294d8774f09f02525f1a65b71598d88843140617894dc` | [char-policy-write.py](char-policy-write.py) |
-| `clock-inject.py` | `2019f0c58386c8fd3836c88b64e2ee2498b87cdf5d847d6b3b6513a1e9a63e43` | [clock-inject.py](clock-inject.py) |
+| `clock-inject.py` | `923641c47a5236c8f09e00fd2855c25f72cd15bc20644de4d9866b280c93becd` | [clock-inject.py](clock-inject.py) |
 | `constraint-reread.py` | `5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `741b73d043b1bd51f2f5f414e4677a48282de23d4dfbf0091a281ef20e2c8f9e` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `51edd991615f4c4c9ea03fe62fde7aa199bd5a64b910f0a33b47729643d5e657` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `604dbe18bc364d1822e3de7d8cda96f5c4dac6088b2d3ff6a9eb2fd8b117ce3f` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
@@ -576,12 +583,13 @@ section of its opening docstring. Read that section before relying on a hook; in
   rejected before it ran, or across a stretch of prose with no tool call.
 - **`stamp-truth-stop.py`** checks only timestamps written with an explicit zone; an unzoned, 12-hour, or
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
-  or just after a scheduling word passes. A genuinely future time mentioned in plain prose without a
+  or within three words after a scheduling word passes. A genuinely future time mentioned in plain prose without a
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
   An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
   offset, or run the hook under the same `TZ`. `EST` and `EDT` are the exception: they are read as
-  America/Toronto whatever the `TZ`, so a foreign zone that shares those letters is not distinguished, and
-  without usable zone data for America/Toronto they are checked only when they are the process zone's. An
+  America/Toronto unless the process zone itself uses that abbreviation at that time (its reading then
+  wins), so a foreign zone that shares those letters is not distinguished, and without usable zone data
+  for America/Toronto they are checked only when they are the process zone's. An
   opening stamp read from a different clock that runs ahead
   of this host's (a remote or container `date`) is refused while it is still later than the time the hook
   compares it with (when the message was recorded, else when the hook runs); put it in a code span. A stamp

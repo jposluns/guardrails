@@ -20,8 +20,11 @@ process local zone's abbreviation at that wall time (both DST readings are tried
 instant is taken), else when it is EST or EDT and is the abbreviation that LOCAL_ZONE (America/Toronto, the
 zone of clock-inject.py's CLOCK and CONSOLE PREFIX lines) in the system zone database gives that wall time,
 whatever the process zone (TZ), never a fixed offset: both folds of a repeated hour are tried (the earlier
-instant is taken), and a wall time in the skipped hour has none. When zoneinfo or that zone entry is missing,
-or any error comes from building or using it (a corrupt, truncated or unreadable zone file), LOCAL_ZONE
+instant is taken), and a wall time in the skipped hour has none. The process zone's reading comes first, so
+a process zone whose own abbreviation at that wall time is EST or EDT (TZ=EST-10, say) keeps its reading and
+LOCAL_ZONE is not consulted: there the CONSOLE PREFIX stamp is read in the process zone, not in Toronto
+(test_process_zone_reading_keeps_precedence). When zoneinfo or that zone entry is missing, or any error
+comes from building or using it (a corrupt, truncated or unreadable zone file), LOCAL_ZONE
 counts for nothing and only the process zone does, exactly as without it. A time with no zone, or with an
 abbreviation that counts for neither, is not a claim in prose (it is ignored). The zone grammar and the
 scheduling keyword list are duplicated verbatim in future-stamp-write.py (python3 -I forbids a sibling
@@ -47,7 +50,7 @@ EXEMPT TEXT. Lines inside a matched fenced code block (``` or ~~~, closed by a f
 at least as long; an UNCLOSED fence is not code, so its lines are checked), blockquote lines (starting `>`
 after optional whitespace), and inline code spans (a backtick run closed by the next run of the same length
 on the same line; an unclosed run opens nothing). For the AHEAD rule only, a NON-leading claim is also exempt
-when a scheduling keyword IMMEDIATELY precedes it: the keyword ends at most SCHED_GAP_TOKENS (3) word tokens
+when a scheduling keyword CLOSELY precedes it: the keyword ends at most SCHED_GAP_TOKENS (3) word tokens
 before the claim (a word token holds a letter or digit, so `:`, `[`, or `**` do not count), as in "next run
 at T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T", "valid through T".
 Keywords (case-insensitive, whole words; see below): due, deadline, expir, until, next, scheduled, not before,
@@ -107,7 +110,8 @@ just past the last COMPLETE transcript record evaluated (a trailing record with 
 parse is unfinished, and OFFSET never passes it, so it is evaluated once complete), with a SHA-256 of up to
 256 bytes before OFFSET. The next Stop (with stop_hook_active or not) evaluates only records starting at or
 after OFFSET. The file is written when this hook blocks, and on a pass once a state file exists or was
-unavailable. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
+unavailable, when the state is absent under an explicit stop_hook_active true, and, with no state, on an
+observed new turn (the counter-only seed: counter 0 and OFFSET 0; see BLOCK CAP). LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
 its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
 after OFFSET only through transcript lag. Only a Stop that actually BLOCKS records an entry: a capped or
@@ -188,9 +192,11 @@ and whatever the final message is: a transcript reset or rewrite, or a user-role
 read as a genuine user message, resets the boundary and the late-arrival exception but never the counter,
 and a clean pass inside the loop keeps it (in an earlier version a clean pass reset it, so alternating with ANOTHER Stop
 hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit); a
-clean pass on an observed new turn saves the state even when none existed (counter 0 and the boundary), so a
-corrective loop that ANOTHER Stop hook starts after it finds an established count, not an absent state, and
-this hook's refusals inside that loop are capped as usual; where
+clean pass on an observed new turn saves the state even when none existed, so a corrective loop that ANOTHER
+Stop hook starts after it finds an established count, not an absent state, and this hook's refusals inside
+that loop are capped as usual; that seed records counter 0 with the boundary it loaded (offset 0, no
+pending entry), never the scanned end, so the next Stop reads and checks the same messages, from offset 0, as
+it would with no saved state, and only the counter differs (an established 0, not an absent state); where
 the host omits the field, a NEW user-role entry read as a genuine user message can still restart the count,
 and an externally deleted state file reads as an established 0 and erases the recorded reset history (the
 count protections above need the explicit true, and even under it an earlier version read such a deletion as
@@ -321,7 +327,11 @@ prune (a prune runs only when a Stop creates a new transcript's subdirectory, so
 transcripts arrive). Two concurrent prunes can each write the cursor, the later write winning; a name either
 skips is examined when the cursor next wraps round to it. The listing itself is bounded: a prune reads at
 most 16385 entries of the state dir (PRUNE_ENTRIES + 1, unrelated names included), and when there are more it
-removes nothing and leaves the dir untouched, so offline cleanup is then required; and it reads at most 65
+removes nothing and leaves the dir untouched, so offline cleanup is then required; it does not stop silently:
+the Stop that ran it adds the PRUNE NOTE, one line naming the state dir and the 16384-entry limit, to its
+notes, written as that Stop's systemMessage only when the Stop writes no block and no earlier warning or note
+(a Stop writes at most one stdout line, and the prune runs last), and every later prune repeats it while the
+dir stays over the limit; and it reads at most 65
 entries of a stale subdirectory (PRUNE_CHILDREN + 1), skipping one with more, which is never partially
 deleted. The eventual-removal guarantee above holds only within these limits.
 On each Stop that is not an observed new turn (stop_hook_active true or absent) the save also
@@ -392,8 +402,9 @@ treated as unreadable). The lease read is capped at 1 MiB. The transcript is rea
 at most 64 MiB, each record at most 4 MiB (a longer record is skipped unparsed); every scan is linear.
 
 Contract: pass = no stdout, exit 0 (a pass that left a header stamp unchecked, rule 1, writes the "not checked"
-note as top-level {"systemMessage": ...}); block = top-level {"decision": "block", "reason": ...} on stdout, exit 0
-(the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
+note as top-level {"systemMessage": ...}, and a pass whose prune met the state-dir entry limit writes the
+PRUNE NOTE the same way when it has no "not checked" note); block = top-level
+{"decision": "block", "reason": ...} on stdout, exit 0 (the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
 capped or fail-open allow (see BLOCK CAP), or a busy Stop (see RESIDUAL COVERAGE) = top-level
 {"systemMessage": ...} on stdout (the user-visible warning), exit 0. Every Stop writes at most ONE
 stdout line, and a block or an allow with a warning then writes at most ONE stderr diagnostic line that
@@ -444,7 +455,8 @@ to it); when the true elapsed is known and an elapsed-footer violation is not th
 footer can be corrected in the same cycle); and "; UTC now ...". A core longer than the soft cap
 is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
 unresolved claims and names the first the same way, its literal whole; the busy note is fixed text; the "not
-checked" note names the first unchecked header stamp, its literal whole, and counts any others. stderr
+checked" note names the first unchecked header stamp, its literal whole, and counts any others; the PRUNE
+NOTE names the state dir and the entry limit. stderr
 gets at most ONE diagnostic line (the kind, the claim count, the true UTC, elapsed, and the first violation
 in full, never cut), never a copy of the systemMessage. The true local time, the violations after the
 first, and the full remedy text are not sent: the remedy's `date` reads the local time (convert a
@@ -454,8 +466,9 @@ zone in prose must not be ahead of when it was written; a [bracketed] stamp that
 must also be recent, and never later than when it was written at all: truncate to the minute (or second),
 never round up (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
 must match the lease. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only
-when a schedule or validity word immediately precedes it (due, deadline, expires, until, through, valid, next
-run at, scheduled for, not before, by, ...) or when it is in a `code span`; a line-leading stamp is always
+when a schedule or validity word immediately precedes it, ending at most three words before it (due,
+deadline, expires, until, through, valid, next run at, scheduled for, not before, by, ...) or when it is in a
+`code span`; a line-leading stamp is always
 checked for being ahead. To quote the rejected value in a correction, put it in a `code span` or a `>` line,
 or leave it out. Re-read the clock with `date` and `date -u` (never compose a time from memory or context),
 then send a short corrected message with the correct stamp and, as its last footer, the correct elapsed
@@ -1902,7 +1915,13 @@ def _write_prune_cursor(root, name):
                 pass
 
 
-def prune_state(sdir, keep=None, now_ns=None):
+def _prune_full_note(sdir):
+    """The one-line note of a prune that stopped because the state root holds more than PRUNE_ENTRIES entries."""
+    return _one_line(f"stamp-truth-stop: state dir {sdir} holds more than {PRUNE_ENTRIES} entries, so no stale "
+                     "state was pruned; remove old *.d subdirectories there offline")
+
+
+def prune_state(sdir, keep=None, now_ns=None, notes=None):
     """Remove per-transcript state subdirectories left by transcripts no longer in use, so their
     number stays bounded. Lists the private root `sdir` (opened no-follow, never created), sorts its
     state_subdir-shaped names (less `keep`), and examines at most PRUNE_SCAN of them, starting just after the
@@ -1915,9 +1934,10 @@ def prune_state(sdir, keep=None, now_ns=None):
     unlinked relative to its descriptor, and it is removed by name only while that name still refers to the
     locked inode. The cursor then records the last name examined, or is removed when every name was examined.
     Enumeration is bounded: at most PRUNE_ENTRIES + 1 root entries are listed (a larger root is left untouched,
-    removing nothing, so offline cleanup is then required) and at most PRUNE_CHILDREN + 1 entries of a stale
-    subdirectory (a larger one is skipped, never partially deleted); the cursor's eventual-removal guarantee
-    holds only within these limits. Returns the number removed. Never raises."""
+    removing nothing, so offline cleanup is then required, and when `notes` (a list) is given the one-line
+    _prune_full_note is appended to it, so the stop is not silent) and at most PRUNE_CHILDREN + 1 entries of a
+    stale subdirectory (a larger one is skipped, never partially deleted, with no note); the cursor's
+    eventual-removal guarantee holds only within these limits. Returns the number removed. Never raises."""
     removed = 0
     if fcntl is None:
         return 0
@@ -1931,7 +1951,10 @@ def prune_state(sdir, keep=None, now_ns=None):
             names = []
             for index, entry in enumerate(it):
                 if index >= PRUNE_ENTRIES:
-                    return 0  # an oversized private root is left untouched, for offline cleanup
+                    # an oversized private root is left untouched, for offline cleanup, and says so
+                    if notes is not None:
+                        notes.append(_prune_full_note(sdir))
+                    return 0
                 if entry.name != keep and _is_state_subdir(entry.name):
                     names.append(entry.name)
             names.sort()
@@ -2037,7 +2060,7 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None,
         if dfd is not None:
             os.close(dfd)
         if info.get("created"):
-            prune_state(sdir, state_subdir(tp))
+            prune_state(sdir, state_subdir(tp), notes=notes)
 
 
 def _deliver(reason, emit, owed):
@@ -2492,10 +2515,20 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
             # discovered in an absent state under an explicit true; the counter is written too
             # (preserved under stop_hook_active, BLOCK_CAP when it was unknown), never reset to 0 inside
             # the corrective loop. A clean pass on an observed new turn (fresh) SEEDS the state even when
-            # none existed: counter 0 and the boundary, so a corrective loop that ANOTHER Stop hook starts
-            # afterwards finds an established 0, not an absent state (an unknown count under an explicit
-            # true, which only allows with a warning), and this hook's refusals inside it are capped
-            save(*(held if held is not None else (t["end"], t["tail"], remaining)))
+            # none existed, so a corrective loop that ANOTHER Stop hook starts afterwards finds an established
+            # 0, not an absent state (an unknown count under an explicit true, which only allows with a
+            # warning), and this hook's refusals inside it are capped. The seed records ONLY the counter: it
+            # keeps the LOADED boundary (offset 0, no tail, no pending entry, since nothing was saved), so
+            # the next Stop re-reads and checks the whole turn exactly as it would with no state, only its
+            # counter being an established 0 instead of absent (an earlier version seeded the scanned end,
+            # so a later Stop with the field omitted no longer re-checked this turn's final message against
+            # the 10-minute earlier-message tolerance, and a stamp the no-state path blocked passed)
+            if held is not None:
+                save(*held)
+            elif had_state or not state_ok or absent_unknown:
+                save(t["end"], t["tail"], remaining)
+            else:
+                save(offset, tail, remaining)  # the counter-only seed of a clean new-turn pass
     # `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so in an earlier version the one signal that clears the flags
@@ -3164,6 +3197,11 @@ def _self_test():
             os.environ["TZ"] = "EST-10"
             time.tzset()
             self.assertReads((("2026-11-05 07:14:35 EST", datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=UTC)),))
+            # so under that zone the true Toronto CONSOLE PREFIX reads 15 hours old, and a header refusal follows;
+            # the docstring and README state this precedence rather than "under any TZ"
+            now = datetime.datetime(2026, 11, 22, 1, 35, 38, tzinfo=UTC)
+            self.assertIn(BEHIND_IN, self.final("[2026-11-21 20:35 EST] outcome", now))
+            self.assertIsNone(self.final("the run ended 2026-11-21 22:35 EST", now))  # mid-line: no BEHIND check
 
         def test_missing_zone_entry_keeps_process_zone_only(self):
             self.utc_process_zone()
@@ -3293,6 +3331,19 @@ def _self_test():
             with unittest.mock.patch.object(os, "scandir", return_value=entries):
                 self.assertEqual(prune_state(self.sdir, now_ns=0), 0)
             self.assertEqual(entries.visited, PRUNE_ENTRIES + 1)  # listing stops one past the cap
+            # the stop at the cap is not silent: a caller's notes receive one line naming the dir and the limit
+            for count, want in ((PRUNE_ENTRIES + 1, 1), (PRUNE_ENTRIES, 0)):
+                notes = []
+                with unittest.mock.patch.object(os, "scandir", return_value=Entries(count)):
+                    self.assertEqual(prune_state(self.sdir, now_ns=0, notes=notes), 0)
+                self.assertEqual(len(notes), want, count)
+            notes = []
+            with unittest.mock.patch.object(os, "scandir", return_value=Entries(PRUNE_ENTRIES + 1)):
+                prune_state(self.sdir, now_ns=0, notes=notes)
+            self.assertEqual(notes, [_prune_full_note(self.sdir)])
+            self.assertIn(self.sdir, notes[0])
+            self.assertIn(str(PRUNE_ENTRIES), notes[0])
+            self.assertNotIn("\n", notes[0])
             sub = os.path.join(self.sdir, "a" * 64 + ".d")
             os.mkdir(sub, 0o700)
             for i in range(PRUNE_CHILDREN + 1):
@@ -3308,6 +3359,25 @@ def _self_test():
             self.assertEqual(prune_state(self.sdir, now_ns=PRUNE_AGE_NS + 1), 1)
             self.assertFalse(os.path.exists(sub))
             self.assertEqual((PRUNE_ENTRIES, PRUNE_CHILDREN), (16384, 64))
+
+        def test_prune_note_reaches_the_stop(self):
+            # the Stop that creates a transcript's subdirectory and then meets the root limit carries the note
+            g = globals()
+            old = g["PRUNE_ENTRIES"]
+            g["PRUNE_ENTRIES"] = 2
+            try:
+                os.mkdir(self.sdir, 0o700)
+                for i in range(3):
+                    os.mkdir(os.path.join(self.sdir, f"{i:064x}.d"), 0o700)
+                self.write([self.user("go"), self.asst("clean")])
+                notes = []
+                self.assertIsNone(evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                                            "stop_hook_active": False, "last_assistant_message": "clean"},
+                                           self.now, self.start, self.sdir, notes=notes))
+                self.assertEqual(notes, [_prune_full_note(self.sdir)])
+                self.assertEqual(len(os.listdir(self.sdir)), 4)  # nothing removed
+            finally:
+                g["PRUNE_ENTRIES"] = old
 
         # -- the fleet copy's table, suffix, past-event and footer-prose exemptions are not adopted --
         def test_fleet_exemptions_not_adopted(self):
@@ -3350,24 +3420,52 @@ def _self_test():
                                               "not-before", "eta", "planned", "target date", "target:", "by ",
                                               "through", "valid"))
 
-        # -- a clean pass outside the loop seeds the counter and boundary, so another hook's loop is capped --
-        def test_clean_pass_seeds_counter_and_boundary(self):
+        # -- a clean pass outside the loop seeds the counter ONLY, so another hook's loop is capped --
+        def test_clean_pass_seeds_counter_only(self):
             self.write([self.asst("clean") for _ in range(300)])
             self.assertIsNone(self.ev(last_assistant_message="clean"))
             extra = {}
-            offset, tail, _pending, ok = load_state(self.sdir, self.tr, extra)
+            offset, tail, pending, ok = load_state(self.sdir, self.tr, extra)
             self.assertTrue(ok)
             self.assertEqual(extra["blocks"], 0)
-            self.assertEqual(offset, os.path.getsize(self.tr))
-            result, read, parsed = work(turn_messages, self.tr, offset, tail)
-            self.assertEqual(result["msgs"], [])
-            self.assertLessEqual(read, 2 * TAIL_BYTES + 1)
-            self.assertEqual(parsed, [])
+            # the boundary stays the one loaded with no state, so the next Stop re-reads the turn as without state
+            self.assertEqual((offset, tail, pending), (0, None, []))
+            self.assertFalse(extra["reset"] or extra["unknown"])
             for count in range(1, BLOCK_CAP + 1):
                 self.assertIsNotNone(self.ev(stop_hook_active=True,
                                             last_assistant_message="heartbeat: 2099-01-01T00:00Z"))
             self.assertIsNone(self.ev(stop_hook_active=True,
                                      last_assistant_message="heartbeat: 2099-01-01T00:00Z"))
+
+        # -- the seed keeps every block the no-state path makes (QA finding: a seeded END boundary dropped one) --
+        def test_clean_pass_seed_keeps_no_state_recheck(self):
+            # the final is 20 minutes behind: inside the 30-minute final tolerance at Stop 1, but at a later Stop
+            # of the same turn it is an earlier message with the 10-minute tolerance, which the hook with NO
+            # saved state re-reads from offset 0 and blocks; the seed written at Stop 1 must keep that block
+            m1 = "[2026-09-23 13:25 EDT] outcome: done"
+            feedback = self.user("Stop hook feedback:\nstatus-header hook: your summary lacks a status header")
+            for first in (None, False):  # Stop 1 omits the field, or sends an explicit false
+                with self.subTest(first=first):
+                    self.write([self.user("go", self.now - datetime.timedelta(minutes=40)), self.asst(m1)])
+                    p1 = {"transcript_path": self.tr, "hook_event_name": "Stop", "last_assistant_message": m1}
+                    if first is not None:
+                        p1["stop_hook_active"] = first
+                    self.assertIsNone(evaluate(p1, self.now, self.start, self.sdir))
+                    extra = {}
+                    self.assertEqual(load_state(self.sdir, self.tr, extra)[:3], (0, None, []))
+                    self.assertEqual(extra["blocks"], 0)
+                    self.write([feedback, self.asst("summary fixed")], mode="a")
+                    p2 = {"transcript_path": self.tr, "hook_event_name": "Stop",
+                          "last_assistant_message": "summary fixed"}  # Stop 2 omits the field
+                    r = evaluate(p2, self.now, self.start, self.sdir)
+                    self.assertIsNotNone(r)
+                    self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 13:25 EDT` -20m"), r)
+            # the same two Stops with no state saved between them (the base path) block identically
+            self.write([self.user("go", self.now - datetime.timedelta(minutes=40)), self.asst(m1), feedback,
+                        self.asst("summary fixed")])
+            r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop",
+                          "last_assistant_message": "summary fixed"}, self.now, self.start, self.sdir)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 13:25 EDT` -20m"), r)
 
         # -- the bracketed header stamp: zero AHEAD tolerance --
         def test_header_stamp_ahead_by_any_amount_blocks(self):
