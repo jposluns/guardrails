@@ -110,9 +110,12 @@ last_assistant_message. Recovery boundary: a private per-session state file reco
 just past the last COMPLETE transcript record evaluated (a trailing record with no newline yet that does not
 parse is unfinished, and OFFSET never passes it, so it is evaluated once complete), with a SHA-256 of up to
 256 bytes before OFFSET. The next Stop (with stop_hook_active or not) evaluates only records starting at or
-after OFFSET. The file is written when this hook blocks, and on a pass once a state file exists or was
-unavailable, when the state is absent under an explicit stop_hook_active true, and, with no state, on an
-observed new turn (the counter-only seed: counter 0 and OFFSET 0; see BLOCK CAP). LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
+after OFFSET. The file is written when this hook blocks, and on a pass when the loaded state records an
+OFFSET past 0, a pending entry, a nonzero counter or a reset or unknown marker, or was unavailable, when the
+state is absent under an explicit stop_hook_active true, and, when the state records none of those, on an
+observed new turn (the counter-only seed: counter 0 and OFFSET 0; see BLOCK CAP). A state file that records
+none of those (the seed itself) does not count: a clean pass over it that is not an observed new turn (an
+explicit true, for example) writes nothing, so OFFSET stays 0. LATE-ARRIVAL EXCEPTION: at a block, when the blocked final message is NOT yet in the transcript,
 its SHA-256 is recorded as pending (at most MAX_PENDING, 8, the OLDEST hash evicted when a ninth is
 stored); a later record with that text is skipped ONCE (the pending entry is consumed) because it arrived
 after OFFSET only through transcript lag. Only a Stop that actually BLOCKS records an entry: a capped or
@@ -197,7 +200,13 @@ clean pass on an observed new turn saves the state even when none existed, so a 
 Stop hook starts after it finds an established count, not an absent state, and this hook's refusals inside
 that loop are capped as usual; that seed records counter 0 with the boundary it loaded (offset 0, no
 pending entry), never the scanned end, so the next Stop reads and checks the same messages, from offset 0, as
-it would with no saved state, and only the counter differs (an established 0, not an absent state); where
+it would with no saved state, and only the counter differs (an established 0, not an absent state). That
+difference can still refuse a message every earlier Stop passed: a clean explicit-true pass over the seed
+writes nothing (see WHICH MESSAGES), so OFFSET stays 0 and a later Stop of the same turn, the field omitted
+or explicitly false, re-reads the seeding Stop's final message as an earlier message and refuses it past the
+10-minute tolerance, whereas with no state that explicit-true pass saves the scanned end (with the unknown
+marker below) and the later Stop never re-reads it (in this sequence a refusal where no state passes;
+test_clean_true_pass_over_seed_keeps_offset_0); where
 the host omits the field, a NEW user-role entry read as a genuine user message can still restart the count,
 and an externally deleted state file reads as an established 0 and erases the recorded reset history (the
 count protections above need the explicit true, and even under it an earlier version read such a deletion as
@@ -467,7 +476,7 @@ zone in prose must not be ahead of when it was written; a [bracketed] stamp that
 must also be recent, and never later than when it was written at all: truncate to the minute (or second),
 never round up (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
 must match the lease. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only
-when a schedule or validity word immediately precedes it, ending at most three words before it (due,
+when a schedule or validity word closely precedes it (ending at most three words before it) (due,
 deadline, expires, until, through, valid, next run at, scheduled for, not before, by, ...) or when it is in a
 `code span`; a line-leading stamp is always
 checked for being ahead. To quote the rejected value in a correction, put it in a `code span` or a `>` line,
@@ -1284,7 +1293,8 @@ def _minutes(off_us):
 
 def _check_claim(m, status, sched, ref, behind, where, cache=None, header=None):
     """A violation string for one claim, or None. `status`: the claim is a line-leading status stamp.
-    `sched`: a scheduling keyword immediately precedes it (never set for a status stamp). `header`: the claim
+    `sched`: a scheduling keyword ends at most SCHED_GAP_TOKENS word tokens before it (sched_exempter; never
+    set for a status stamp). `header`: the claim
     is the message's HEADER stamp, its first line-leading stamp, the only one checked for BEHIND (None means
     the same as `status`). `cache` maps a literal to its converted value so a repeated literal is converted
     once."""
@@ -3468,6 +3478,48 @@ def _self_test():
                           "last_assistant_message": "summary fixed"}, self.now, self.start, self.sdir)
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 13:25 EDT` -20m"), r)
 
+        # -- a clean explicit-true pass over the seed writes nothing, so a later Stop re-reads from 0 (QA minor) --
+        def test_clean_true_pass_over_seed_keeps_offset_0(self):
+            # pins the docstring's statement: Stop 1 seeds (counter 0, OFFSET 0); Stop 2, a clean explicit-true
+            # pass, saves nothing over that seed, so Stop 3 (the field omitted or explicitly false) re-reads
+            # Stop 1's final message as an earlier message and refuses it (-20m); with NO state before Stop 2
+            # its pass saves the scanned end instead, and Stop 3 passes
+            m1 = "[2026-09-23 13:25 EDT] outcome: done"
+            feedback = self.user("Stop hook feedback:\nstatus-header hook: your summary lacks a status header")
+            for seeded in (True, False):
+                for first in (None, False):
+                    for third in (None, False):
+                        with self.subTest(seeded=seeded, first=first, third=third):
+                            self.write([self.user("go", self.now - datetime.timedelta(minutes=40)), self.asst(m1)])
+                            p1 = {"transcript_path": self.tr, "hook_event_name": "Stop",
+                                  "last_assistant_message": m1}
+                            if first is not None:
+                                p1["stop_hook_active"] = first
+                            self.assertIsNone(evaluate(p1, self.now, self.start, self.sdir))
+                            if not seeded:
+                                os.remove(self.key())
+                            self.write([feedback, self.asst("summary fixed")], mode="a")
+                            p2 = {"transcript_path": self.tr, "hook_event_name": "Stop",
+                                  "stop_hook_active": True, "last_assistant_message": "summary fixed"}
+                            self.assertIsNone(evaluate(p2, self.now, self.start, self.sdir))
+                            extra = {}
+                            loaded = load_state(self.sdir, self.tr, extra)
+                            if seeded:
+                                self.assertEqual(loaded[:3], (0, None, []))
+                                self.assertEqual(extra["blocks"], 0)
+                            else:
+                                self.assertGreater(loaded[0], 0)
+                            p3 = {"transcript_path": self.tr, "hook_event_name": "Stop",
+                                  "last_assistant_message": "summary fixed"}
+                            if third is not None:
+                                p3["stop_hook_active"] = third
+                            r = evaluate(p3, self.now, self.start, self.sdir)
+                            if seeded:
+                                self.assertIsNotNone(r)
+                                self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23 13:25 EDT` -20m"), r)
+                            else:
+                                self.assertIsNone(r)
+
         # -- the bracketed header stamp: zero AHEAD tolerance --
         def test_header_stamp_ahead_by_any_amount_blocks(self):
             # a minute-precision header one minute later than the clock passed while the slack was 1 minute
@@ -4414,7 +4466,7 @@ def _self_test():
             # the reason quotes the rejected literal in a code span; the remedy lives in the docstring
             self.assertIn("`2027-08-02T18:00:00Z`", r)
             self.assertIn("`code span`", __doc__)
-            self.assertIn("immediately precedes", " ".join(__doc__.split()))
+            self.assertIn("closely precedes it (ending at most three words before it)", " ".join(__doc__.split()))
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert is valid through `2027-01-01T00:00:00Z`."))
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert expires 2027-01-01T00:00:00Z."))
 

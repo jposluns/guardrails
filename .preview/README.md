@@ -250,7 +250,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `067f92297dc9d03f709f9d59a6c9cfe0d86586a044285d6ad17136ea757d8d53` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `1b99b66eab3f20311a4dc5bf5c13f6a38077fc415abab6bab1953b8fcf51ff30` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 

@@ -85,7 +85,8 @@ form git commit -m "$(cat <<'EOF' ... EOF)", a single-quoted delimiter, nothing 
 substitution and no $ or backquote in the body), as does a double-quoted word that is glued, unterminated or
 spans a newline, and a git whose subcommand cannot be resolved, while an
 off-roster verb and data an accepted scan consumed stay allowed; a checker-shaped segment whose failure is swallowed
-(|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
+(|| true, || :) or piped into an adjacent head or tail allows with a note (unless an interim deny below refuses
+the command, as the check-then-git narrowing does when it also names git), except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
 push/merge -n edges stay allowed; and the parse-error fallback fails safe. The interim narrowing (gcg-* rows): a
@@ -41535,7 +41536,15 @@ def _main_isolated(monitor):
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
           "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "
-          "truncated (| head/tail) - the broad heuristic is too broad to deny. sectvl "
+          "truncated (| head/tail) - the broad heuristic is too broad to deny - unless the command meets "
+          "one of the guard's interim denies, which run after every deny above: the check-then-git "
+          "narrowing DENIES a command that runs a check and names git (or holds a '$' or backquote after "
+          "the check) unless it is exactly one shape of the list (CHECK [> ABS 2>&1] && GIT), so a "
+          "swallowed or truncated check followed by git in one command (pytest || true; git push origin "
+          "feat) denies; the plumbing deny DENIES a command naming git commit-tree, send-pack or "
+          "http-push; and the push-redirect deny DENIES a git push naming --receive-pack or --exec, a "
+          "PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable; the last two except "
+          "in a quoted literal git commit, tag or merge message. sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS"
