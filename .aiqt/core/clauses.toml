@@ -2075,7 +2075,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 16
 end-line = 17
 canonical-text = "Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked\n(BLOCKED)?"
-source-digest = "7de1692aa9e5c568c5204180e7c93ef5092d123a4e4e2b5a426e86cc1cc16de5"
+source-digest = "5154d0dd0aa52dd65d5f0d8fec9cbe6da186343e3a292b0473c8395f143c4a38"
 layer = "core"
 
 [[clause]]
@@ -2085,7 +2085,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 17
 canonical-text = "Record the classification before acting on it."
-source-digest = "7de1692aa9e5c568c5204180e7c93ef5092d123a4e4e2b5a426e86cc1cc16de5"
+source-digest = "5154d0dd0aa52dd65d5f0d8fec9cbe6da186343e3a292b0473c8395f143c4a38"
 layer = "core"
 
 [[clause]]
@@ -2095,7 +2095,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 21
 canonical-text = "Before an ASK goes to the maintainer or any\nprocedure standing in for them, search the decision record for that subject: a maintainer ruling answers it\nand outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the\nassistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is\nunclear, the ASK goes ahead."
-source-digest = "7de1692aa9e5c568c5204180e7c93ef5092d123a4e4e2b5a426e86cc1cc16de5"
+source-digest = "5154d0dd0aa52dd65d5f0d8fec9cbe6da186343e3a292b0473c8395f143c4a38"
 layer = "core"
 
 [[clause]]
@@ -2103,9 +2103,9 @@ clause-id = "deccls.4"
 corpus-id = "deccls"
 source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 22
-end-line = 25
-canonical-text = "Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or\nopen, across every durable store, notes logs included, by the subject's key terms, and cite each hit or\ndismiss it with a reason; a hit showing a maintainer ruling in a store the assistant can write, a notes log\namong them, is cited as unconfirmed."
-source-digest = "7de1692aa9e5c568c5204180e7c93ef5092d123a4e4e2b5a426e86cc1cc16de5"
+end-line = 26
+canonical-text = "Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or\nopen, across every durable store, notes logs included, by at least the subject's key terms, and, in the ASK\nor in the statement calling the matter undecided or open, cite each hit or dismiss it with a reason; a hit\nshowing a maintainer ruling in a store the assistant can write, such as the assistant's own notes log, is\ncited as unconfirmed."
+source-digest = "5154d0dd0aa52dd65d5f0d8fec9cbe6da186343e3a292b0473c8395f143c4a38"
 layer = "core"
 
 [[clause]]
