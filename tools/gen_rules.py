@@ -874,13 +874,17 @@ def _valued_option_failures():
 # --cached and --stage before an optional `--` and its pathspecs, launched as git with no GIT_* variable in its
 # environment but GIT_NO_LAZY_FETCH. The second is the read tools/gen_rules_core.py makes of its budget at the
 # merge base with main: `git -C <dir>`, then exactly the pins `-c gc.auto=0 -c gc.autoDetach=false -c
-# maintenance.auto=false -c core.commitGraph=false`, then `rev-parse`, `merge-base` or `ls-tree`, or `cat-file
-# blob <hex id>`, launched as git with no GIT_* variable but those that read sets (GIT_CONFIG_GLOBAL,
-# GIT_CONFIG_NOSYSTEM, GIT_GRAFT_FILE, GIT_NO_LAZY_FETCH, GIT_NO_REPLACE_OBJECTS, GIT_OPTIONAL_LOCKS,
-# GIT_TERMINAL_PROMPT). rev-parse, merge-base and ls-tree write nothing whatever their arguments, which are not
-# judged; cat-file is held to that one form, so no --textconv or --filters driver runs. Its controls: a generator
-# making such a read passes, the same read with the allowance switched off is reported, and a generator running
-# `update-ref` behind the same pins is reported, its ref never made. Any other git command is blocked. A write
+# maintenance.auto=false -c core.commitGraph=false -c protocol.allow=never`, then `rev-parse`, `merge-base` or
+# `ls-tree`, or `cat-file blob <hex id>`, launched as git whose GIT_* variables are exactly the seven that read
+# sets, each at its pinned value (GIT_CONFIG_GLOBAL and GIT_GRAFT_FILE the null device, GIT_CONFIG_NOSYSTEM,
+# GIT_NO_LAZY_FETCH and GIT_NO_REPLACE_OBJECTS 1, GIT_OPTIONAL_LOCKS and GIT_TERMINAL_PROMPT 0), so a read with one
+# left out or set otherwise is blocked. rev-parse, merge-base and ls-tree write nothing whatever their arguments,
+# which are not judged; cat-file is held to that one form, so no --textconv or --filters driver runs. Its controls
+# (_gen_argv_base_read_failures): a generator making such a read passes, the same read with the allowance switched
+# off is reported, a generator running `update-ref` behind the same pins is reported, its ref never made, and one
+# with GIT_NO_LAZY_FETCH at 0, GIT_CONFIG_GLOBAL naming a file, GIT_NO_REPLACE_OBJECTS left out or the protocol pin
+# left off is reported, each passing with that value or pin check switched off. Any other git command is blocked.
+# A write
 # here is an open for writing, a directory creation, a delete, a rename or a truncation whose path lies in the
 # child's working directory (the copy); the hook marks such a block, so a process event, an os.chmod, or a
 # directory tempfile.mkdtemp makes outside the copy is not a write. On the current tree, with no argument the
@@ -998,24 +1002,34 @@ def _git_listing(args):
     rest = argv[i + 1:]
     return all(tok in ("-z", "--cached", "--stage") for tok in (rest[:rest.index("--")] if "--" in rest else rest))
 _BASE_READS_ON = True
+_BASE_PROTOCOL_PINNED = True
+_BASE_ENV_PINNED = True
 _BASE_PINS = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false", "-c",
-              "core.commitGraph=false"]
-_BASE_ENV = ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_GRAFT_FILE", "GIT_NO_LAZY_FETCH",
-             "GIT_NO_REPLACE_OBJECTS", "GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT")
+              "core.commitGraph=false", "-c", "protocol.allow=never"]
+_BASE_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_GRAFT_FILE": os.devnull,
+             "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_OPTIONAL_LOCKS": "0",
+             "GIT_TERMINAL_PROMPT": "0"}
 def _git_base_read(args):
     if not (_BASE_READS_ON and accept) or len(args) < 4 or not isinstance(args[1], (list, tuple)):
         return False
     try:
         exe = None if args[0] is None else os.fsdecode(args[0])
         argv = [os.fsdecode(a) for a in args[1]]
-        env = [os.fsdecode(k) for k in (os.environ if args[3] is None else args[3])]
-    except TypeError:
+        source = os.environ if args[3] is None else args[3]
+        git_env = {os.fsdecode(k): os.fsdecode(source[k]) for k in source if os.fsdecode(k).startswith("GIT_")}
+    except (TypeError, KeyError, AttributeError):
         return False
-    if (exe is not None and os.path.basename(exe) != "git") or len(argv) < 12 or os.path.basename(argv[0]) != "git":
+    pins = _BASE_PINS if _BASE_PROTOCOL_PINNED else _BASE_PINS[:8]
+    if (exe is not None and os.path.basename(exe) != "git") or len(argv) < 4 + len(pins) \\
+            or os.path.basename(argv[0]) != "git":
         return False
-    if argv[1] != "-C" or argv[3:11] != _BASE_PINS or any(k.startswith("GIT_") and k not in _BASE_ENV for k in env):
+    if _BASE_ENV_PINNED:
+        env_ok = git_env == _BASE_ENV
+    else:
+        env_ok = all(k in _BASE_ENV for k in git_env)
+    if argv[1] != "-C" or argv[3:3 + len(pins)] != pins or not env_ok:
         return False
-    sub, rest = argv[11], argv[12:]
+    sub, rest = argv[3 + len(pins)], argv[4 + len(pins):]
     if sub == "cat-file":
         return len(rest) == 2 and rest[0] == "blob" and rest[1] != "" and set(rest[1]) <= set("0123456789abcdef")
     return sub in ("rev-parse", "merge-base", "ls-tree")
@@ -1544,7 +1558,10 @@ _GEN_ARGV_CHECK_IGNORER = _GEN_ARGV_RECONCILE_MODES.format(name="gen_checkignore
 # Guards its arguments, then runs one git command behind the pins and environment of tools/gen_rules_core.py's
 # merge-base read (exit 2 when git fails), then writes with no argument and only checks under --check:
 # gen_basereader.py runs `rev-parse --show-toplevel` (it must pass, and be reported with the base-read allowance
-# switched off), gen_refwriter.py runs `update-ref` (it must be reported, and the ref never made).
+# switched off), gen_refwriter.py runs `update-ref` (it must be reported, and the ref never made). The other
+# variants make the same rev-parse read with one setting off its pinned value, each of which must be reported:
+# GIT_NO_LAZY_FETCH set to 0, GIT_CONFIG_GLOBAL naming a file rather than the null device, GIT_NO_REPLACE_OBJECTS
+# left out of the environment, and the protocol.allow=never pin left off the argv.
 _GEN_ARGV_BASE_GIT = ("import os, subprocess, sys\nfrom pathlib import Path\n"
                       "if sys.argv[1:] not in ([], ['--check']):\n"
                       "    print('usage: {name}', file=sys.stderr)\n"
@@ -1553,17 +1570,75 @@ _GEN_ARGV_BASE_GIT = ("import os, subprocess, sys\nfrom pathlib import Path\n"
                       "env.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_LAZY_FETCH='1',\n"
                       "           GIT_TERMINAL_PROMPT='0', GIT_OPTIONAL_LOCKS='0', GIT_NO_REPLACE_OBJECTS='1',\n"
                       "           GIT_GRAFT_FILE=os.devnull)\n"
+                      "{tweak}\n"
                       "done = subprocess.run(['git', '-C', os.getcwd(), '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',\n"
-                      "                       '-c', 'maintenance.auto=false', '-c', 'core.commitGraph=false', {sub}],\n"
+                      "                       '-c', 'maintenance.auto=false', '-c', 'core.commitGraph=false',\n"
+                      "                       {protocol}{sub}],\n"
                       "                      capture_output=True, env=env)\n"
                       "if done.returncode != 0:\n"
                       "    sys.exit(2)\n"
                       "if not sys.argv[1:]:\n"
                       "    Path(__file__).with_name('written.txt').write_text('x')\n"
                       "sys.exit(0)\n")
-_GEN_ARGV_BASE_READER = _GEN_ARGV_BASE_GIT.format(name="gen_basereader.py", sub="'rev-parse', '--show-toplevel'")
-_GEN_ARGV_REF_WRITER = _GEN_ARGV_BASE_GIT.format(name="gen_refwriter.py",
+_GEN_ARGV_PROTOCOL_PIN = "'-c', 'protocol.allow=never', "
+_GEN_ARGV_SHOW_TOPLEVEL = "'rev-parse', '--show-toplevel'"
+_GEN_ARGV_BASE_READER = _GEN_ARGV_BASE_GIT.format(name="gen_basereader.py", tweak="pass",
+                                                  protocol=_GEN_ARGV_PROTOCOL_PIN, sub=_GEN_ARGV_SHOW_TOPLEVEL)
+_GEN_ARGV_REF_WRITER = _GEN_ARGV_BASE_GIT.format(name="gen_refwriter.py", tweak="pass",
+                                                 protocol=_GEN_ARGV_PROTOCOL_PIN,
                                                  sub="'update-ref', 'refs/heads/aiqt-control', 'HEAD'")
+# (name, the line that sets one value off its pin, the protocol pin as written)
+_GEN_ARGV_BASE_OFF_PIN = (
+    ("gen_lazyfetch.py", "env['GIT_NO_LAZY_FETCH'] = '0'", _GEN_ARGV_PROTOCOL_PIN),
+    ("gen_globalcfg.py", "env['GIT_CONFIG_GLOBAL'] = os.path.join(os.getcwd(), 'absent-global.cfg')",
+     _GEN_ARGV_PROTOCOL_PIN),
+    ("gen_replaceobj.py", "del env['GIT_NO_REPLACE_OBJECTS']", _GEN_ARGV_PROTOCOL_PIN),
+    ("gen_noprotocol.py", "pass", ""))
+
+
+def _gen_argv_base_read_failures(tmp):
+    """The controls for the class check's allowance of tools/gen_rules_core.py's merge-base read, each in a git
+    repository under tmp: one failure line per control that does not discriminate. A generator making that read
+    (rev-parse behind its pins and environment) must pass; with the base-read allowance switched off (the flip) it
+    must be reported for exactly its no-argument and --check cases, the git launch blocked; one running update-ref
+    behind the same pins must be reported so too, and its ref never made. Each _GEN_ARGV_BASE_OFF_PIN variant (one
+    git variable off its pinned value or left out, or the protocol.allow=never pin left off) must be reported the
+    same way, and must pass with the matching check switched off in the child (the flips: the variable values
+    then judged by name only, or the protocol pin not required), so each check is shown to carry weight."""
+    failures = []
+    saved_child = _GEN_ARGV_CHILD
+    values_off = ("_BASE_ENV_PINNED = True", "_BASE_ENV_PINNED = False")
+    protocol_off = ("_BASE_PROTOCOL_PINNED = True", "_BASE_PROTOCOL_PINNED = False")
+    controls = [("gen_basereader.py", _GEN_ARGV_BASE_READER, None, False),
+                ("gen_basereader.py", _GEN_ARGV_BASE_READER, ("_BASE_READS_ON = True", "_BASE_READS_ON = False"), True),
+                ("gen_refwriter.py", _GEN_ARGV_REF_WRITER, None, True)]
+    for name, tweak, protocol in _GEN_ARGV_BASE_OFF_PIN:
+        source = _GEN_ARGV_BASE_GIT.format(name=name, tweak=tweak, protocol=protocol, sub=_GEN_ARGV_SHOW_TOPLEVEL)
+        controls.append((name, source, None, True))
+        controls.append((name, source, protocol_off if not protocol else values_off, False))
+    for number, (name, source, switch, want) in enumerate(controls):
+        label = "on" if switch is None else "with {}".format(switch[1])
+        repo = tmp / "repo-base-{}-{}".format(number, name[:-3])
+        (repo / "tools").mkdir(parents=True)
+        (repo / "tools" / name).write_text(source, encoding="utf-8")
+        problem = _gen_argv_commit(repo)
+        if switch is not None and switch[0] not in saved_child:
+            problem = problem or "the child holds no {!r} to switch".format(switch[0])
+        if switch is not None:
+            globals()["_GEN_ARGV_CHILD"] = saved_child.replace(switch[0], switch[1])
+        try:
+            got = [problem] if problem else _gen_argv_class_failures(repo / "tools", repo)
+        finally:
+            globals()["_GEN_ARGV_CHILD"] = saved_child
+        launch_blocked = [line for line in got if "subprocess.Popen" in line
+                          and (line.startswith(name + " (no argument): ") or line.startswith(name + " --check: "))]
+        made = _gen_argv_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/aiqt-control").returncode == 0
+        if problem or made or ((len(launch_blocked) != 2 or len(got) != 2) if want else got):
+            failures.append("class-check control: in a git repository, {} with the base-read allowance {} must {}; "
+                            "got {}, refs/heads/aiqt-control {}".format(
+                                name, label, "be reported for its no-argument and --check cases, the git launch "
+                                "blocked" if want else "pass", got, "made" if made else "absent"))
+    return failures
 
 
 def _gen_argv_class_check_failures():
@@ -1628,33 +1703,7 @@ def _gen_argv_class_check_failures():
             if problem or ((len(got) != 1 or not reported) if want else got):
                 failures.append("class-check control: in a git repository, {} must {}; got {}".format(
                     name, "be reported only for its plain-form write" if want else "pass", got))
-        # In a git repository: a generator making tools/gen_rules_core.py's merge-base read (rev-parse behind its
-        # pins) must pass; with the base-read allowance switched off (the flip) it must be reported for exactly its
-        # no-argument and --check cases, the git launch blocked; one running update-ref behind the same pins must
-        # be reported so too, and its ref never made.
-        saved_child = _GEN_ARGV_CHILD
-        for name, source, allowance, want in (("gen_basereader.py", _GEN_ARGV_BASE_READER, True, False),
-                                              ("gen_basereader.py", _GEN_ARGV_BASE_READER, False, True),
-                                              ("gen_refwriter.py", _GEN_ARGV_REF_WRITER, True, True)):
-            repo = tmp / "repo-{}-{}".format(name[:-3], "on" if allowance else "off")
-            (repo / "tools").mkdir(parents=True)
-            (repo / "tools" / name).write_text(source, encoding="utf-8")
-            problem = _gen_argv_commit(repo)
-            if not allowance:
-                globals()["_GEN_ARGV_CHILD"] = saved_child.replace("_BASE_READS_ON = True", "_BASE_READS_ON = False")
-            try:
-                got = [problem] if problem else _gen_argv_class_failures(repo / "tools", repo)
-            finally:
-                globals()["_GEN_ARGV_CHILD"] = saved_child
-            launch_blocked = [line for line in got if "subprocess.Popen" in line
-                              and (line.startswith(name + " (no argument): ") or line.startswith(name + " --check: "))]
-            made = _gen_argv_git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/aiqt-control").returncode == 0
-            if problem or made or ((len(launch_blocked) != 2 or len(got) != 2) if want else got):
-                failures.append("class-check control: in a git repository, {} with the base-read allowance {} must "
-                                "{}; got {}, refs/heads/aiqt-control {}".format(
-                                    name, "on" if allowance else "off",
-                                    "be reported for its no-argument and --check cases, the git launch blocked"
-                                    if want else "pass", got, "made" if made else "absent"))
+        failures.extend(_gen_argv_base_read_failures(tmp))
         # In a git repository whose registry declares out.txt, current at the commit: a generator that writes it on
         # a difference before its argument guard must be reported for the refusal cases (the write blocked) and for
         # the plain form (the stale file rewritten), with out.txt back as committed; one that does so only after

@@ -20,7 +20,8 @@ paragraph sorted as tools/gen_agents.py sort_key sorts it:
 
 BUDGET (.aiqt/core/core-budget.toml). Exactly two top-level keys: format-version (1) and accepted, a
 non-empty array of tables, the log of every accepted budget in order. Each entry has exactly these keys:
-kind ("seed" for the first entry and only the first, then "shrink" or "raise"); note, a non-empty string
+kind ("seed" for the first entry and only the first, then "shrink"; there is no other kind, so a log that
+names one, such as "raise", is off the schema); note, a non-empty string
 saying why; entry-cap, the largest joined layer an entry may carry, in UTF-16 units, title and id excluded;
 trigger-cap, the longest detail-trigger in characters; file-cap, the largest CORE render in UTF-16 units;
 and pending, the sorted list of corpus-ids over entry-cap that are not split yet. Each cap is a positive
@@ -31,19 +32,21 @@ and the measured size is printed against it.
 
 HISTORY. The budget is judged against the log as committed at the merge base of HEAD with main, read from
 git (read only: rev-parse, merge-base, ls-tree and cat-file, with replacement refs ignored, the graft file
-pinned to the empty null device, the commit-graph not consulted, and no caller GIT_ variable, global or
-system config). main is refs/remotes/origin/main when it resolves to a commit, else refs/heads/main. Where
-that commit holds a budget file:
+pinned to the empty null device, the commit-graph not consulted, every transport refused by
+protocol.allow=never, and no caller GIT_ variable, global or system config). main is refs/remotes/origin/main
+when it resolves to a commit, else refs/heads/main. Where that commit holds a budget file:
   - every entry committed there must be held here unchanged, in place, every key compared (the note and the
     kind included), so deleting or rewriting an entry committed at the merge base is a finding;
   - the budget in force here may not hold a pending id that is not on the budget in force there, or a cap
-    above it, unless a raise entry appended after the entries committed there names it (lists that id while
-    the entry before it does not, or raises that cap above the entry before it).
-Where that commit holds no budget file (the change that adds one), nothing is compared there, and the seed
-and the pin below bound the log. Where the base cannot be read (git cannot run, the root is not the top of
-a git work tree, the repository is shallow, neither main ref resolves, HEAD is not a commit, there is no
-merge base or more than one, or the budget there is not a regular file, not UTF-8, not TOML or off the
-schema), the result is cannot-evaluate (exit 2), never a pass. An entry appended since the merge base is
+    above it, with no exception: the pending list and the caps only shrink. This comparison reads nothing
+    from CAP_SEED, PENDING_SEED or ACCEPTED, so adding an id to pending fails whatever else changes, an edit
+    to those pins included.
+Where that commit holds no budget file (the change that adds one), nothing is compared there: there is no
+list yet to grow, and the seed, the pin and the per-entry rules below bound the log. Where the base cannot
+be read (git cannot run, the root is not the top of a git work tree, the repository is shallow, neither
+main ref resolves, HEAD is not a commit, there is no merge base or more than one, or the budget there is
+not a regular file, not UTF-8, not TOML or off the schema), the result is cannot-evaluate (exit 2), never
+a pass. An entry appended since the merge base is
 not history yet: until it is on main, these two checks do not cover it, and the per-entry rules below do.
 Where HEAD is on main (a repository of one commit on main, such as the fresh one the release reproduce step
 builds, or a run on main itself), the merge base is HEAD: the log is compared with itself, these two checks
@@ -51,33 +54,30 @@ find nothing, and the per-entry rules below decide. A repository whose only bran
 to read: cannot-evaluate, as above.
 What this does not show: that main itself was reviewed, or anything about an entry before it reached main.
 
-THE RATCHET (per entry, within the log here):
-  - ACCEPTED here pins one accepted entry: its number in the log, its caps and its pending. The log must
-    hold that entry and it must equal the pin. The pin proves no history (HISTORY does). What it adds: a
-    raise is in force only once ACCEPTED is moved to it, so a raise is a reviewed edit of this file as well
-    as an entry in the log; and where main holds no budget file yet, it is what keeps every later entry
-    shrink-only;
-  - every entry after the pinned one, of any kind, may only lower a cap or drop a pending id, never raise a
-    cap or list an id the entry before it does not, so no entry can lift the budget in force above the pin;
+THE RATCHET (per entry, within the log here). The pending list and the caps only shrink; there is no raise:
   - the seed entry must equal the budget as this renderer was added (CAP_SEED and PENDING_SEED here);
-  - up to the pin, a shrink entry may only lower a cap or drop a pending id, as above, and a raise entry is
-    the only kind that may raise a cap or put an id on pending;
-  - every entry after the seed must change something, so consecutive entries always differ.
-Every passing run prints the pinned entry number, how many raise entries the log holds and the merge base
-it compared with. An id on the budget in force that no longer needs to be there (now split, now within
-entry-cap, or the apex) is a finding until a shrink entry drops it. Every logged pending id must fully
+  - every entry after the seed may only lower a cap or drop a pending id, never raise a cap or list an id
+    the entry before it does not, whatever ACCEPTED says, so no entry can lift the budget above the seed;
+  - every entry after the seed must change something, so consecutive entries always differ;
+  - ACCEPTED here pins one accepted entry: its number in the log, its caps and its pending. The log must
+    hold that entry and it must equal the pin. Moving the pin admits nothing (the rule above holds for
+    every entry, and HISTORY reads no pin). The pin proves no history (HISTORY does); what it adds is that
+    where the merge base holds no budget file, or is HEAD itself, a pinned shrink entry cannot be deleted or
+    rewritten unseen.
+Every passing run prints the pinned entry number and the merge base it compared with. An id on the budget
+in force that no longer needs to be there (now split, now within entry-cap, or the apex) is a finding
+until a shrink entry drops it. Every logged pending id must fully
 match the corpus-id pattern (an id with a trailing newline is refused) in every entry, here and at the
 merge base, and the corpus must hold each id of the budget in force.
 
 EXIT. 0 clean. 1 on drift (--check) or on a finding, and a finding in write mode writes nothing:
   - a non-apex rule over entry-cap with no split and not on pending; a split rule whose core layer is over
     entry-cap; a detail-trigger over trigger-cap; a seed entry that differs from CAP_SEED and PENDING_SEED;
-    a log that does not hold the entry ACCEPTED pins, or holds it with other values; a shrink entry, or
-    any entry after the pinned one, that lists a pending id the entry before it does not or raises a cap;
-    an entry after the seed that changes nothing; an entry committed at the merge base with main that is
-    deleted or rewritten here; a pending id or a cap in force above the budget in force there that no raise
-    entry appended since names; a pending id that no longer needs to be there; the render over file-cap
-    while pending is empty;
+    a log that does not hold the entry ACCEPTED pins, or holds it with other values; any entry after the
+    seed that lists a pending id the entry before it does not or raises a cap; an entry after the seed that
+    changes nothing; an entry committed at the merge base with main that is deleted or rewritten here; a
+    pending id in force that is not on the budget in force there, or a cap in force above it; a pending id
+    that no longer needs to be there; the render over file-cap while pending is empty;
   - in the fresh render, and in --check also in the committed file when it differs from the fresh render:
     a frontmatter block; an `@` anywhere (the instruction-budget gate reads an `@` as an import even inside a
     code span, so no `@` is allowed at all); a corpus-id with no entry; a corpus-id with more than one entry;
@@ -99,7 +99,8 @@ source or a duplicate corpus-id (gen_rules.load_corpus); a source with no '# ' t
 GROUPS, whose body is empty, or whose split leaves an empty core layer; a core-budget.toml that is absent,
 not a regular file (a symlink or a directory), unreadable, not UTF-8, not TOML, or off the schema above (an
 unknown or missing key, an empty or missing log, a kind out of place or unknown, an empty note, a cap that
-is not a positive integer, a format-version other than 1, a pending entry that is not an id, an unsorted or
+is not a positive integer, a format-version other than 1, a kind other than seed or shrink (a raise entry
+among them), a pending entry that is not an id, an unsorted or
 repeated pending list, or a pending id in force the corpus does not hold); a committed render that is not
 UTF-8, or is there but is not a regular file (a symbolic link, wherever it points, a directory or another
 kind), which neither mode reads or writes through; a .aiqt/renders/ that cannot be read as a directory
@@ -162,7 +163,7 @@ REFERENCE_PREFIX = ".aiqt/reference/rules/"
 BUDGET_KEYS = ("format-version", "accepted")
 ENTRY_KEYS = ("kind", "note", "entry-cap", "trigger-cap", "file-cap", "pending")
 CAP_KEYS = ("entry-cap", "trigger-cap", "file-cap")
-KINDS = ("seed", "shrink", "raise")
+KINDS = ("seed", "shrink")
 PREAMBLE_CAP = 1000
 GENERATED_COMMENT = ("<!-- GENERATED by tools/gen_rules_core.py from .aiqt/core/rules/; do not hand-edit. A "
                      "preview no file imports, outside .claude/ and the paths the instruction-budget gate models "
@@ -189,12 +190,13 @@ PENDING_SEED = frozenset((
     "secspr", "secsup", "sectok", "secunt", "secupl", "septsk", "setcmp", "stgprm",
     "tmrrst", "trkasy", "tstamp", "tsthrm", "vfxcmt", "vrfdiv", "vrfdlv", "wowo01",
 ))
-# The last accepted entry of core-budget.toml (THE RATCHET): its number in the log ("entries") and its caps
-# and pending. The log must hold that entry with exactly these values, and no entry after it may raise a cap
-# or list a pending id the entry before it does not. A raise entry takes moving this pin to it, here, with
-# the values that entry holds. The pinned entry is the seed today. The pin proves no history (the merge-base
-# read below does that); what it adds is that a raise is a reviewed edit of this file as well as of the log,
-# and that where main holds no budget file yet, the entries after it may still only shrink.
+# One accepted entry of core-budget.toml (THE RATCHET): its number in the log ("entries") and its caps and
+# pending. The log must hold that entry with exactly these values. The pinned entry is the seed today; it may
+# be moved forward to a later shrink entry. Moving it admits nothing: every entry after the seed may only
+# shrink whatever the pin says, and against main the budget is judged by the log committed at the merge base,
+# which reads neither this pin nor the seed. The pin proves no history (the merge-base read below does that);
+# what it adds is that where the merge base holds no budget file, or is HEAD itself, a pinned shrink entry
+# cannot be deleted or rewritten unseen.
 ACCEPTED = dict(CAP_SEED, entries=1, pending=PENDING_SEED)
 # The refs read as main, in order: the first that resolves to a commit is used (HISTORY in the docstring).
 MAIN_REFS = ("refs/remotes/origin/main", "refs/heads/main")
@@ -378,7 +380,8 @@ def _base_git(root, *args):
         # tools/gen_rules.py's class check, running every generator under a hook that blocks such an open,
         # would otherwise end.
         return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
-                               "-c", "maintenance.auto=false", "-c", "core.commitGraph=false", *args],
+                               "-c", "maintenance.auto=false", "-c", "core.commitGraph=false",
+                               "-c", "protocol.allow=never", *args],
                               capture_output=True, timeout=GIT_TIMEOUT, env=_base_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("git {} could not run ({}), so the budget at the merge base with main cannot be "
@@ -518,38 +521,32 @@ def _seed_altered(_rules, budget, _text, pins):
     if set(first["pending"]) != set(seed["pending"]):
         changed.append("pending")
     return ["accepted entry 1 (the seed): {} differ(s) from CAP_SEED and PENDING_SEED in "
-            "tools/gen_rules_core.py; append a shrink or raise entry instead".format(", ".join(changed))
+            "tools/gen_rules_core.py; append a shrink entry instead".format(", ".join(changed))
             ] if changed else []
 
 
-def _shrink_only_entries(budget, pins):
-    """(entry number, entry, the entry before it, why it may not grow) for every entry of the log that may
-    only shrink: a shrink entry, and every entry of any kind after the one ACCEPTED pins."""
-    log, pinned = budget["log"], pins["accepted"]["entries"]
-    found = []
-    for number in range(2, len(log) + 1):
-        if number > pinned:
-            why = ("it follows the accepted pin (entry {}); a raise takes a raise entry and moving ACCEPTED in "
-                   "tools/gen_rules_core.py to it".format(pinned))
-        elif log[number - 1]["kind"] == "shrink":
-            why = "it is a shrink entry; a raise takes a raise entry"
-        else:
-            continue
-        found.append((number, log[number - 1], log[number - 2], why))
-    return found
+def _shrink_only_entries(budget):
+    """(entry number, entry, the entry before it) for every entry of the log after the seed: each may only
+    shrink, whatever its kind and wherever ACCEPTED pins (THE RATCHET in the module docstring)."""
+    log = budget["log"]
+    return [(number, log[number - 1], log[number - 2]) for number in range(2, len(log) + 1)]
 
 
-def _pending_grew(_rules, budget, _text, pins):
-    return ["accepted entry {}: {} on pending but not on the entry before it, and the entry may not grow "
-            "pending: {}".format(number, cid, why)
-            for number, entry, before, why in _shrink_only_entries(budget, pins)
+_SHRINK_ONLY = ("every entry after the seed may only lower a cap or drop a pending id, whatever its kind or "
+                "the accepted pin")
+
+
+def _pending_grew(_rules, budget, _text, _pins):
+    return ["accepted entry {}: {} on pending but not on the entry before it, and the pending list may only "
+            "shrink: {}".format(number, cid, _SHRINK_ONLY)
+            for number, entry, before in _shrink_only_entries(budget)
             for cid in entry["pending"] if cid not in before["pending"]]
 
 
-def _cap_raised(_rules, budget, _text, pins):
-    return ["accepted entry {}: {} {} is above {} on the entry before it, and the entry may not raise a cap: "
-            "{}".format(number, key, entry[key], before[key], why)
-            for number, entry, before, why in _shrink_only_entries(budget, pins)
+def _cap_raised(_rules, budget, _text, _pins):
+    return ["accepted entry {}: {} {} is above {} on the entry before it, and no cap may be raised: "
+            "{}".format(number, key, entry[key], before[key], _SHRINK_ONLY)
+            for number, entry, before in _shrink_only_entries(budget)
             for key in CAP_KEYS if entry[key] > before[key]]
 
 
@@ -572,8 +569,7 @@ def _accepted_pin(_rules, budget, _text, pins):
     if set(entry["pending"]) != set(pin["pending"]):
         changed.append("pending")
     return ["accepted entry {}: {} differ(s) from the accepted pin (ACCEPTED in tools/gen_rules_core.py); an "
-            "accepted entry was deleted or rewritten, or a raise was made without moving the pin".format(
-                number, ", ".join(changed))] if changed else []
+            "accepted entry was deleted or rewritten".format(number, ", ".join(changed))] if changed else []
 
 
 def _base_where(base):
@@ -602,22 +598,17 @@ def _base_rewritten(_rules, budget, _text, pins):
 
 def _base_grew(_rules, budget, _text, pins):
     """Against the budget in force at the merge base with main, the budget in force here may not hold an
-    id that is not there or a cap above it, unless a raise entry appended after the entries committed
-    there names it: lists the id while the entry before it does not, or raises that cap above it."""
+    id that is not there or a cap above it, with no exception: the pending list and the caps only shrink.
+    It reads nothing the pins (CAP_SEED, PENDING_SEED, ACCEPTED) hold, so no edit to them changes it."""
     base = pins["base"]
     if base["log"] is None:
         return []
-    log, held = budget["log"], base["log"]
-    before = held[-1]
-    raises = [(log[index - 1], log[index]) for index in range(max(len(held), 1), len(log))
-              if log[index]["kind"] == "raise"]
-    findings = ["{}: on pending in force but not on pending at {}, and no raise entry appended since names "
-                "it".format(cid, _base_where(base)) for cid in budget["pending"]
-                if cid not in before["pending"]
-                and not any(cid in entry["pending"] and cid not in prior["pending"] for prior, entry in raises)]
-    findings += ["{} {} is above {} at {}, and no raise entry appended since raises it".format(
-        key, budget[key], before[key], _base_where(base)) for key in CAP_KEYS
-        if budget[key] > before[key] and not any(entry[key] > prior[key] for prior, entry in raises)]
+    before = base["log"][-1]
+    findings = ["{}: on pending in force but not on pending at {}, and the pending list may only "
+                "shrink".format(cid, _base_where(base)) for cid in budget["pending"]
+                if cid not in before["pending"]]
+    findings += ["{} {} is above {} at {}, and no cap may be raised".format(
+        key, budget[key], before[key], _base_where(base)) for key in CAP_KEYS if budget[key] > before[key]]
     return findings
 
 
@@ -818,10 +809,10 @@ def run(root, check_mode, seed=None, accepted=None, base=None):
     split = sum(rule.split for rule in rules)
     log = budget["log"]
     print("rules-core: {} entries ({} whole, {} split, {} pending); {} units against file-cap {} ({}); budget "
-          "log {} accepted entries, {} of them raise entries, accepted pin at entry {}; {}: {}".format(
+          "log {} accepted entries, shrink only, accepted pin at entry {}; {}: {}".format(
               len(rules), len(rules) - split, split, len(budget["pending"]), units(text), budget["file-cap"],
               "reported only while pending is not empty" if budget["pending"] else "enforced",
-              len(log), sum(entry["kind"] == "raise" for entry in log), pins["accepted"]["entries"],
+              len(log), pins["accepted"]["entries"],
               _base_where(base), "no budget file committed there" if base["log"] is None else
               "{} accepted entries committed there, held unchanged".format(len(base["log"]))))
     return 0
@@ -902,11 +893,12 @@ def _entry_text(kind, entry_cap=80, trigger_cap=60, file_cap=100000, pending=("l
 
 
 def _budget_text(entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longaa1",), extra="", kind=None,
-                 entries=None):
-    """A budget: the fixture seed entry (_SEED), then, when any value differs from the seed or kind is
-    given, one more entry of kind (shrink by default) holding the values; or, given entries, the seed
-    entry followed by those _entry_text keyword dicts in order. extra is appended last."""
-    text = "format-version = 1\n" + _entry_text("seed")
+                 entries=None, seed_entry=None):
+    """A budget: the fixture seed entry (_SEED, or _SEED with the _entry_text keywords seed_entry gives),
+    then, when any value differs from the seed or kind is given, one more entry of kind (shrink by default)
+    holding the values; or, given entries, the seed entry followed by those _entry_text keyword dicts in
+    order. extra is appended last."""
+    text = "format-version = 1\n" + _entry_text("seed", **(seed_entry or {}))
     values = {"entry_cap": entry_cap, "trigger_cap": trigger_cap, "file_cap": file_cap, "pending": pending}
     if entries is None:
         entries = []
@@ -941,6 +933,29 @@ def _pin(entries, entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longa
 
 
 _PIN = _pin(1)
+
+
+def _with_second_long(sources=None):
+    """The fixture sources (or sources) plus a second rule over the fixture entry cap, longbb1, that is on no
+    pending list: the id a change would add to grow pending."""
+    grown = dict(_fixture_sources() if sources is None else sources)
+    grown["long2.md"] = _source("longbb1", "long-rule-two", "tier: 10\nfacet: INTEG\n",
+                                "# Long rule two\n\n" + _LONG_BODY)
+    return grown
+
+
+@contextmanager
+def _raise_kind_restored():
+    """KINDS with the removed "raise" kind put back for the block: the schema then reads a raise entry, so a
+    row shows the shrink-only guards themselves, not only the schema, refuse what a raise entry adds."""
+    saved = globals()["KINDS"]
+    globals()["KINDS"] = tuple(dict.fromkeys(saved + ("raise",)))
+    try:
+        yield
+    finally:
+        globals()["KINDS"] = saved
+
+
 # The stand-in base for a synthetic tree that is not a git repository: main holds no budget file, so only
 # the seed and the accepted pin bound the log. READ_BASE makes run() read the base from git instead.
 _NO_BASE = {"ref": "refs/heads/main", "commit": "0" * 40, "log": None}
@@ -1089,23 +1104,26 @@ def self_test_main():
           "the groups in index order; an over-cap entry not on pending, an '@' and a dangling pointer each exit "
           "1 and exit 0 with their guard switched off; a missing, duplicate or unknown id, an entry differing "
           "from its source layer and frontmatter in the committed file are each named, and lose only that "
-          "name with their guard switched off (drift still exits 1); a CRLF or lone CR is drift; a pending id "
-          "returning after a shrink, a cap raised by a shrink entry, an altered seed, a shrink or raise entry "
-          "that changes nothing, an accepted shrink entry deleted or rewritten, and a raise entry after the "
-          "accepted pin (pending or cap) each exit 1 and exit 0 with their guard switched off, as do a stale "
-          "pending id, a long trigger, a core over the cap and the file over its cap, and a raise entry the pin "
-          "records is accepted; every malformed or missing input is cannot-evaluate, exit 2, with nothing "
+          "name with their guard switched off (drift still exits 1); a CRLF or lone CR is drift; a raise entry "
+          "is off the schema (exit 2) even with the pin moved to it, and with the raise kind put back it is "
+          "still exit 1; a pending id returning after a shrink, a cap raised by a shrink entry, an altered "
+          "seed, a shrink entry that changes nothing, an accepted shrink entry deleted or rewritten, and an "
+          "entry growing pending or a cap with the pin moved to it each exit 1 and exit 0 with their guard "
+          "switched off, as do a stale pending id, a long trigger, a core over the cap and the file over its "
+          "cap; every malformed or missing input is cannot-evaluate, exit 2, with nothing "
           "written, among them a logged id with a trailing newline and a committed render that is a symbolic "
           "link (in --check, and in write mode with nothing written through it), each exit 0 with its check "
           "switched off; .aiqt/renders/ linked outside the tree is exit 2 and inside it is rewritten, the "
           "shared cases going red with the probe switched off; in real git repositories, a shrink merged to "
           "main and then undone (its entry deleted, its rule regrown) is refused by each history guard alone "
-          "and passes with both switched off, a rewritten cap, kind or note of an entry committed at the merge "
-          "base exits 1 and exit 0 with its guard switched off, a replacement ref or a grafts line cannot move "
-          "the merge base (exit 0 once honoured), a shrink or a named raise appended since main and a main with "
-          "no budget pass, one commit on main passes against the merge base HEAD while its per-entry rules still "
-          "refuse an over-cap entry (exit 0 with that guard off) and the same commit on master is exit 2, and "
-          "no git, no repository, a shallow clone, no main, no merge base and a budget at "
+          "and passes with both switched off, a rewritten cap or note of an entry committed at the merge "
+          "base exits 1 and exit 0 with its guard switched off, an id put back on pending since main is "
+          "refused whatever else changes (a raise entry exit 2; with the raise kind put back, each of two "
+          "guards alone; the seed entry, the seed and the pin all rewritten), a replacement ref or a grafts "
+          "line cannot move the merge base (exit 0 once honoured), a shrink appended since main and a main "
+          "with no budget pass, one commit on main passes against the merge base HEAD while its per-entry "
+          "rules still refuse an over-cap entry (exit 0 with that guard off) and the same commit on master is "
+          "exit 2, and no git, no repository, a shallow clone, no main, no merge base and a budget at "
           "the merge base off the schema or not a regular file are each exit 2 with nothing written, an "
           "unreadable base read as absent letting the undo pass; each config lane's real roster keeps the "
           "--self-test launch and the suite step and leaves the bare launch out)".format(len(EXECUTED)))
@@ -1242,14 +1260,28 @@ def _self_test_cases(tmp):
     with _without(SOURCE_GUARDS, "pending-grew"):
         flipped = _write_then_check(root)
     check("flip/pending-regrow-after-shrink", flipped == (0, 0), flipped)
-    # A raise entry is accepted once the accepted pin records it (the pin moves to it in this file).
-    root = _tree(tmp / "raise", budget=_budget_text(entries=[shrunk, {"kind": "raise", "entry_cap": 90}]))
-    raised = _pin(3, entry_cap=90)
-    check("ratchet/raise-entry-accepted", _write_then_check(root, accepted=raised) == (0, 0),
-          _run(root, True, accepted=raised))
-    # The reviewed defects: against the accepted pin, deleting or rewriting an accepted
-    # shrink entry, or appending a raise entry the pin does not record, gave exit 0 with an id back on
-    # pending or a cap above the accepted one.
+    # The reviewed defect (the pending list must only shrink): a raise entry that put an id back on pending,
+    # with the accepted pin moved to it, gave exit 0. There is no raise kind now, so such an entry is off the
+    # schema: cannot evaluate (exit 2) in both modes, nothing written.
+    raise_budget = _budget_text(entries=[shrunk, {"kind": "raise"}])
+    root = _tree(tmp / "raise", budget=raise_budget)
+    code, out = _run(root, True, accepted=_pin(3))
+    check("ratchet/raise-kind-refused", _both(root, accepted=_pin(3)) == (2, 2, True)
+          and 'kind must be "shrink"' in out, out)
+    # The guards refuse the growth on their own as well: with the raise kind put back into the schema, the
+    # same entry with the pin moved to it is exit 1 (every entry after the seed may only shrink, whatever the
+    # pin), and exit 0 with that guard switched off.
+    with _raise_kind_restored():
+        written, out = _run(root, False, accepted=_pin(3))
+        got = (written, _run(root, True, accepted=_pin(3))[0], (root / CORE_REL).exists())
+        with _without(SOURCE_GUARDS, "pending-grew"):
+            flipped = _write_then_check(root, accepted=_pin(3))
+    check("ratchet/raise-restored-pin-moved-growth", got == (1, 1, False)
+          and "accepted entry 3: longaa1 on pending but not on the entry before it" in out, (got, out))
+    check("flip/raise-restored-pin-moved-growth", flipped == (0, 0), flipped)
+    # The reviewed defects: against the accepted pin, deleting or rewriting an accepted shrink entry gave exit 0
+    # with an id back on pending or a cap above the accepted one; and moving the pin to an entry that grows the
+    # budget admits nothing (pending or cap).
     after_shrink = _pin(2, pending=())
 
     def refused(root, accepted, reason):
@@ -1257,22 +1289,22 @@ def _self_test_cases(tmp):
         written, out = _run(root, False, accepted=accepted)
         return (written, _run(root, True, accepted=accepted)[0], (root / CORE_REL).exists(), reason in out), out
 
-    for case_id, flip_id, guard, label, sources, entries, reason in (
+    for case_id, flip_id, guard, label, sources, entries, pin, reason in (
             ("ratchet/accepted-shrink-deleted", "flip/accepted-shrink-deleted", "accepted-pin", "deleted", None,
-             [], "accepted pin"),
+             [], after_shrink, "accepted pin"),
             ("ratchet/accepted-shrink-rewritten", "flip/accepted-shrink-rewritten", "accepted-pin", "rewritten",
-             None, [{"kind": "shrink", "entry_cap": 70}], "accepted pin"),
-            ("ratchet/raise-after-pin-pending", "flip/raise-after-pin-pending", "pending-grew", "raise-unpinned",
-             None, [shrunk, {"kind": "raise"}],
+             None, [{"kind": "shrink", "entry_cap": 70}], after_shrink, "accepted pin"),
+            ("ratchet/pin-moved-pending-growth", "flip/pin-moved-pending-growth", "pending-grew", "pin-pending",
+             None, [shrunk, {"kind": "shrink"}], _pin(3),
              "accepted entry 3: longaa1 on pending but not on the entry before it"),
-            ("ratchet/raise-after-pin-cap", "flip/raise-after-pin-cap", "cap-raised", "raise-cap-unpinned",
-             shortened, [shrunk, {"kind": "raise", "entry_cap": 90, "pending": ()}],
-             "accepted entry 3: entry-cap 90 is above 80")):
+            ("ratchet/pin-moved-cap-growth", "flip/pin-moved-cap-growth", "cap-raised", "pin-cap",
+             shortened, [shrunk, {"kind": "shrink", "entry_cap": 90, "pending": ()}],
+             _pin(3, entry_cap=90, pending=()), "accepted entry 3: entry-cap 90 is above 80")):
         root = _tree(tmp / label, sources=sources, budget=_budget_text(entries=entries))
-        got, out = refused(root, after_shrink, reason)
+        got, out = refused(root, pin, reason)
         check(case_id, got == (1, 1, False, True), (got, out))
         with _without(SOURCE_GUARDS, guard):
-            flipped = _write_then_check(root, accepted=after_shrink)
+            flipped = _write_then_check(root, accepted=pin)
         check(flip_id, flipped == (0, 0), flipped)
     root = _tree(tmp / "capraise", budget=_budget_text(entries=[shrunk, {"kind": "shrink", "entry_cap": 1000,
                                                                          "pending": ()}]))
@@ -1296,25 +1328,18 @@ def _self_test_cases(tmp):
     with _without(SOURCE_GUARDS, "shrink-no-change"):
         flipped = _write_then_check(root)
     check("flip/shrink-no-change", flipped == (0, 0), flipped)
-    # A raise entry that changes nothing is refused too, so consecutive entries always differ and deleting
-    # an entry before the pin always moves or changes the pinned one.
-    root = _tree(tmp / "raise-nochange", budget=_budget_text(entries=[{"kind": "raise"}]))
-    code, out = _run(root, True, accepted=_pin(2))
-    check("ratchet/raise-no-change", code == 1 and "accepted entry 2: a raise entry that changes nothing" in out,
-          out)
-    with _without(SOURCE_GUARDS, "shrink-no-change"):
-        flipped = _write_then_check(root, accepted=_pin(2))
-    check("flip/raise-no-change", flipped == (0, 0), flipped)
 
     _history_cases(tmp, shortened, shrunk)
 
-    # --- the other findings ---
-    root = _tree(tmp / "stale", budget=_budget_text(pending=("longaa1", "shrtaa1"), kind="raise"))
-    stale_pin = _pin(2, pending=("longaa1", "shrtaa1"))
-    code, out = _run(root, True, accepted=stale_pin)
+    # --- the other findings. A list or cap no shrink entry can reach is set on the seed entry itself, with
+    # the fixture seed and pin (the stand-ins for CAP_SEED, PENDING_SEED and ACCEPTED) set to match ---
+    stale = ("longaa1", "shrtaa1")
+    root = _tree(tmp / "stale", budget=_budget_text(seed_entry={"pending": stale}))
+    stale_seed, stale_pin = dict(_SEED, pending=frozenset(stale)), _pin(1, pending=stale)
+    code, out = _run(root, True, seed=stale_seed, accepted=stale_pin)
     check("finding/pending-stale", code == 1 and "shrtaa1: on pending but within entry-cap now" in out, out)
     with _without(SOURCE_GUARDS, "pending-stale"):
-        flipped = _write_then_check(root, accepted=stale_pin)
+        flipped = _write_then_check(root, seed=stale_seed, accepted=stale_pin)
     check("flip/pending-stale", flipped == (0, 0), flipped)
     root = _tree(tmp / "trigger", budget=_budget_text(trigger_cap=5))
     code, out = _run(root, True)
@@ -1322,13 +1347,14 @@ def _self_test_cases(tmp):
     with _without(SOURCE_GUARDS, "trigger-over-cap"):
         flipped = _write_then_check(root)
     check("flip/trigger-over-cap", flipped == (0, 0), flipped)
-    root = _tree(tmp / "corecap", budget=_budget_text(entry_cap=5, pending=("longaa1", "secaa11", "shrtaa1"),
-                                                      kind="raise"))
-    corecap_pin = _pin(2, entry_cap=5, pending=("longaa1", "secaa11", "shrtaa1"))
-    code, out = _run(root, True, accepted=corecap_pin)
+    tight = ("longaa1", "secaa11", "shrtaa1")
+    root = _tree(tmp / "corecap", budget=_budget_text(seed_entry={"entry_cap": 5, "pending": tight}))
+    corecap_seed = dict(_SEED, pending=frozenset(tight), **{"entry-cap": 5})
+    corecap_pin = _pin(1, entry_cap=5, pending=tight)
+    code, out = _run(root, True, seed=corecap_seed, accepted=corecap_pin)
     check("finding/core-over-cap", code == 1 and "splita1: the core layer is 18 units" in out, out)
     with _without(SOURCE_GUARDS, "core-over-cap"):
-        flipped = _write_then_check(root, accepted=corecap_pin)
+        flipped = _write_then_check(root, seed=corecap_seed, accepted=corecap_pin)
     check("flip/core-over-cap", flipped == (0, 0), flipped)
     sources = _fixture_sources()
     sources["long.md"] = sources["long.md"].replace(_LONG_BODY, "A long rule, now short.\n")
@@ -1455,17 +1481,18 @@ def _self_test_cases(tmp):
     (root / ".aiqt" / "renders").write_text("not a directory\n", encoding="utf-8")
     check("cannot-evaluate/renders-not-a-directory", _both(root)[:2] == (2, 2))
     # The reviewed defect: a logged id with a trailing newline passed the id pattern ($ matches
-    # before a final LF), here in an earlier raise entry that a later shrink entry drops.
-    newline_budget = _budget_text(entries=[{"kind": "raise", "pending": ("longaa1", "zzzzzz9\\n")},
-                                           {"kind": "shrink"}])
-    newline_pin = _pin(3)
+    # before a final LF), here on the seed entry (the fixture seed matching it) that a later shrink entry drops.
+    newline_budget = _budget_text(seed_entry={"pending": ("longaa1", "zzzzzz9\\n")},
+                                  entries=[{"kind": "shrink"}])
+    newline_seed, newline_pin = dict(_SEED, pending=frozenset(("longaa1", "zzzzzz9\n"))), _pin(2)
     root = _tree(tmp / "b-newline-id", budget=newline_budget)
-    check("cannot-evaluate/budget-pending-id-trailing-newline", _both(root, accepted=newline_pin) == (2, 2, True),
-          _run(root, True, accepted=newline_pin))
+    check("cannot-evaluate/budget-pending-id-trailing-newline",
+          _both(root, seed=newline_seed, accepted=newline_pin) == (2, 2, True),
+          _run(root, True, seed=newline_seed, accepted=newline_pin))
     saved = globals()["_is_cid"]
     globals()["_is_cid"] = lambda cid: CID_RE.match(cid) is not None
     try:
-        flipped = _write_then_check(root, accepted=newline_pin)
+        flipped = _write_then_check(root, seed=newline_seed, accepted=newline_pin)
     finally:
         globals()["_is_cid"] = saved
     check("flip/budget-pending-id-trailing-newline", flipped == (0, 0), flipped)
@@ -1563,12 +1590,12 @@ def _history_cases(tmp, shortened, shrunk):
         except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
             return None, "fixture: {}".format(exc)
 
-    def judged(root, accepted=_PIN):
+    def judged(root, accepted=_PIN, seed=_SEED):
         """((write exit, check exit, render written), output) with the base read from git."""
         if root is None:
             return None, "no fixture"
-        written, out_w = _run(root, False, accepted=accepted, base=READ_BASE)
-        checked, out_c = _run(root, True, accepted=accepted, base=READ_BASE)
+        written, out_w = _run(root, False, seed=seed, accepted=accepted, base=READ_BASE)
+        checked, out_c = _run(root, True, seed=seed, accepted=accepted, base=READ_BASE)
         return (written, checked, (root / CORE_REL).exists()), out_w + out_c
 
     # The reviewed defect: a shrink is accepted and merged (main holds the shortened rule and the shrink
@@ -1593,14 +1620,12 @@ def _history_cases(tmp, shortened, shrunk):
     check("flip/shrink-merged-then-undone", flipped[0] == (0, 0, True), flipped)
 
     # The reviewed defect: the public text said deleting or rewriting an accepted entry is a finding, but
-    # with the pin at the seed a rewrite of a later entry's cap or kind, or of the seed's note, passed.
-    # Against the merge base every key of every entry committed there is compared.
+    # with the pin at the seed a rewrite of a later entry's cap, or of the seed's note, passed. Against the
+    # merge base every key of every entry committed there is compared.
     three = _budget_text(entries=[{"kind": "shrink", "file_cap": 90000}, {"kind": "shrink", "file_cap": 80000}])
     for label, case_id, flip_id, edit in (
             ("h-cap", "history/entry-cap-rewritten", "flip/entry-cap-rewritten",
              lambda text: text.replace("file-cap = 90000", "file-cap = 85000")),
-            ("h-kind", "history/entry-kind-rewritten", "flip/entry-kind-rewritten",
-             lambda text: text.replace('kind = "shrink"', 'kind = "raise"', 1)),
             ("h-note", "history/seed-note-rewritten", "flip/seed-note-rewritten",
              lambda text: text.replace('note = "why"', 'note = "reworded"', 1))):
         root, why = git_case(label, None, three, None, edit(three))
@@ -1611,16 +1636,47 @@ def _history_cases(tmp, shortened, shrunk):
             flipped = judged(root)
         check(flip_id, flipped[0] == (0, 0, True), flipped)
 
-    # What history still accepts: a shrink appended since main, a raise appended since main that names the
-    # id it puts back (with the pin moved to it), and a log on a branch whose main holds no budget file yet
-    # (the seed and the pin then bound it).
+    # The reviewed defect (the pending list must only shrink): main holds a shrink that dropped longaa1; a raise
+    # entry appended since puts it back, with the pin moved to it, and passed (exit 0). With no raise kind it is
+    # off the schema (exit 2). With the raise kind put back into the schema, each of the two guards refuses it
+    # on its own (every entry after the seed may only shrink; nothing on pending in force may be missing from
+    # pending at the merge base), and it passes only with both switched off.
+    root, why = git_case("h-raise", shortened, shrunk_budget, _fixture_sources(),
+                         _budget_text(entries=[shrunk, {"kind": "raise"}]))
+    got = (None, why) if root is None else (_both(root, accepted=_pin(3), base=READ_BASE),
+                                            _run(root, True, accepted=_pin(3), base=READ_BASE)[1])
+    check("history/raise-entry-refused", got[0] == (2, 2, True) and 'kind must be "shrink"' in got[1], got)
+    with _raise_kind_restored():
+        with _without(SOURCE_GUARDS, "base-grew"):
+            by_entry = judged(root, accepted=_pin(3))
+        with _without(SOURCE_GUARDS, "pending-grew"):
+            by_base = judged(root, accepted=_pin(3))
+        with _without(SOURCE_GUARDS, "pending-grew"), _without(SOURCE_GUARDS, "base-grew"):
+            flipped = judged(root, accepted=_pin(3))
+    check("history/raise-restored-growth-refused-by-pending-grew-alone", by_entry[0] == (1, 1, False)
+          and "accepted entry 3: longaa1 on pending but not on the entry before it" in by_entry[1], by_entry)
+    check("history/raise-restored-growth-refused-by-base-grew-alone", by_base[0] == (1, 1, False)
+          and "longaa1: on pending in force but not on pending at the merge base" in by_base[1], by_base)
+    check("flip/raise-restored-growth", flipped[0] == (0, 0, True), flipped)
+    # Whatever else changes: the seed entry, the seed (PENDING_SEED) and the pin (ACCEPTED) all rewritten to
+    # add longbb1 still fail against the list at the merge base, and pass only with both history guards off.
+    grown = ("longaa1", "longbb1")
+    root, why = git_case("h-reseed", None, seed_budget, _with_second_long(),
+                         _budget_text(seed_entry={"pending": grown}))
+    reseed = dict(_SEED, pending=frozenset(grown))
+    got = judged(root, accepted=_pin(1, pending=grown), seed=reseed)
+    check("history/seed-and-pin-edited-growth-refused", got[0] == (1, 1, False)
+          and "longbb1: on pending in force but not on pending at the merge base" in got[1]
+          and "from the entry committed at the merge base" in got[1], (got, why))
+    with _without(SOURCE_GUARDS, "base-rewritten"), _without(SOURCE_GUARDS, "base-grew"):
+        flipped = judged(root, accepted=_pin(1, pending=grown), seed=reseed)
+    check("flip/seed-and-pin-edited-growth", flipped[0] == (0, 0, True), flipped)
+
+    # What history still accepts: a shrink appended since main, and a log on a branch whose main holds no
+    # budget file yet (the seed, the pin and the per-entry rules then bound it).
     root, why = git_case("h-shrink", None, seed_budget, shortened, shrunk_budget)
     got = judged(root)
     check("history/shrink-appended-accepted", got[0] == (0, 0, True), (got, why))
-    root, why = git_case("h-raise", shortened, shrunk_budget, _fixture_sources(),
-                         _budget_text(entries=[shrunk, {"kind": "raise"}]))
-    got = judged(root, accepted=_pin(3))
-    check("history/raise-appended-naming-the-id-accepted", got[0] == (0, 0, True), (got, why))
     root, why = git_case("h-absent", None, False, None, seed_budget)
     got = judged(root)
     check("history/no-budget-at-merge-base-accepted", got[0] == (0, 0, True)

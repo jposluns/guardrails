@@ -9,3 +9,73 @@ id = "refuse/moved-suite-counts"
 state = "unreachable"
 capability-removed = "the move rule of tools/check_selftest_removal.py, introduced in the change series that also adds this record: a check id newly registered in another suite with the same launch (runner path and args) and the same check() body, not generic, is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
 observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t, one runner) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal, refuse/move-other-body, refuse/move-other-runner, refuse/move-other-args, refuse/move-body-generic and refuse/move-live-generic-twin assert the refusals that remain"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "ratchet/raise-entry-accepted"
+state = "unreachable"
+capability-removed = "the raise kind of the CORE budget log in tools/gen_rules_core.py, removed in the change that adds this entry (KINDS is seed and shrink), so the pending list and the caps only shrink and no raise entry is accepted, with the accepted pin moved to it or not"
+observed = "ratchet/raise-kind-refused runs a raise entry with the pin moved to it and asserts exit 2 in both modes with nothing written; ratchet/raise-restored-pin-moved-growth asserts that with the raise kind put back into the schema the same entry is still exit 1"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "ratchet/raise-after-pin-pending"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "ratchet/pin-moved-pending-growth"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "flip/raise-after-pin-pending"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "flip/pin-moved-pending-growth"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "ratchet/raise-after-pin-cap"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "ratchet/pin-moved-cap-growth"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "flip/raise-after-pin-cap"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "flip/pin-moved-cap-growth"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "ratchet/raise-no-change"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "ratchet/shrink-no-change"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "flip/raise-no-change"
+state = "covered"
+covered-by-suite = "rules-core-selftest"
+covered-by-id = "flip/shrink-no-change"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "history/entry-kind-rewritten"
+state = "unreachable"
+capability-removed = "the raise kind of the CORE budget log in tools/gen_rules_core.py, removed in the change that adds this entry: with only seed (the first entry) and shrink (every later one), an entry's kind cannot be rewritten within the schema, and any other kind is refused before any comparison"
+observed = "cannot-evaluate/budget-kind-out-of-place asserts a shrink first entry, a seed later entry and an unknown kind are each exit 2; history/raise-entry-refused asserts a raise entry appended since main is exit 2 against a real merge base; history/entry-cap-rewritten and history/seed-note-rewritten still assert a rewritten entry committed there is exit 1"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "flip/entry-kind-rewritten"
+state = "unreachable"
+capability-removed = "the raise kind of the CORE budget log in tools/gen_rules_core.py, removed in the change that adds this entry, so there is no schema valid kind rewrite for the base-rewritten guard to be switched off on"
+observed = "flip/entry-cap-rewritten and flip/seed-note-rewritten still show the base-rewritten guard carries weight (exit 0 with it switched off)"
+
+[[removal]]
+suite = "rules-core-selftest"
+id = "history/raise-appended-naming-the-id-accepted"
+state = "unreachable"
+capability-removed = "the raise entry exception of the merge-base comparison in tools/gen_rules_core.py, removed in the change that adds this entry: a pending id or cap above the budget in force at the merge base is refused with no exception"
+observed = "history/raise-entry-refused runs the same repository (main holds the shrink, the topic appends a raise entry with the pin moved to it) and asserts exit 2; history/raise-restored-growth-refused-by-pending-grew-alone and history/raise-restored-growth-refused-by-base-grew-alone assert exit 1 with the raise kind put back"

@@ -7814,45 +7814,53 @@ expected-check-ids = [
   "flip/frontmatter",
   "case/dangling-pointer",
   "flip/dangling-pointer",
-  # ratchet: each accepted budget entry against the one before it, each guard with its flip
+  # ratchet: each accepted budget entry against the one before it, each guard with its flip; the pending
+  # list only shrinks: a raise entry is off the schema (exit 2), and with the raise kind put back into the
+  # schema the same entry with the pin moved to it is exit 1, exit 0 with its guard switched off
   "ratchet/shrink-entry-accepted",
   "ratchet/pending-regrow-after-shrink",
   "flip/pending-regrow-after-shrink",
-  "ratchet/raise-entry-accepted",
-  # ratchet against the accepted pin (ACCEPTED): a deleted or rewritten accepted shrink entry, and a raise
-  # entry after the pin (pending or cap), each exit 1 and exit 0 with its guard switched off
+  "ratchet/raise-kind-refused",
+  "ratchet/raise-restored-pin-moved-growth",
+  "flip/raise-restored-pin-moved-growth",
+  # ratchet against the accepted pin (ACCEPTED): a deleted or rewritten accepted shrink entry, and an entry
+  # that grows pending or a cap with the pin moved to it, each exit 1 and exit 0 with its guard switched off
   "ratchet/accepted-shrink-deleted",
   "flip/accepted-shrink-deleted",
   "ratchet/accepted-shrink-rewritten",
   "flip/accepted-shrink-rewritten",
-  "ratchet/raise-after-pin-pending",
-  "flip/raise-after-pin-pending",
-  "ratchet/raise-after-pin-cap",
-  "flip/raise-after-pin-cap",
+  "ratchet/pin-moved-pending-growth",
+  "flip/pin-moved-pending-growth",
+  "ratchet/pin-moved-cap-growth",
+  "flip/pin-moved-cap-growth",
   "ratchet/cap-raised",
   "flip/cap-raised",
   "ratchet/seed-altered",
   "flip/seed-altered",
   "ratchet/shrink-no-change",
   "flip/shrink-no-change",
-  "ratchet/raise-no-change",
-  "flip/raise-no-change",
   # history: in real git repositories, against the budget committed at the merge base with main. A shrink
   # merged and then undone is refused by each history guard alone and passes with both switched off; a
-  # rewritten cap, kind or note of an entry committed there exits 1 and exit 0 with its guard switched off
+  # rewritten cap or note of an entry committed there exits 1 and exit 0 with its guard switched off
   "history/shrink-merged-then-undone",
   "history/shrink-undone-refused-by-base-grew-alone",
   "history/shrink-undone-refused-by-base-rewritten-alone",
   "flip/shrink-merged-then-undone",
   "history/entry-cap-rewritten",
   "flip/entry-cap-rewritten",
-  "history/entry-kind-rewritten",
-  "flip/entry-kind-rewritten",
   "history/seed-note-rewritten",
   "flip/seed-note-rewritten",
-  # history still accepts a shrink or a naming raise appended since main, and a main with no budget file
+  # history: an id put back on pending since main is refused whatever else changes: a raise entry is exit 2;
+  # with the raise kind put back into the schema each of two guards refuses it alone, exit 0 with both off;
+  # the seed entry, the seed and the pin all rewritten to add an id exit 1, exit 0 with both history guards off
+  "history/raise-entry-refused",
+  "history/raise-restored-growth-refused-by-pending-grew-alone",
+  "history/raise-restored-growth-refused-by-base-grew-alone",
+  "flip/raise-restored-growth",
+  "history/seed-and-pin-edited-growth-refused",
+  "flip/seed-and-pin-edited-growth",
+  # history still accepts a shrink appended since main, and a main with no budget file
   "history/shrink-appended-accepted",
-  "history/raise-appended-naming-the-id-accepted",
   "history/no-budget-at-merge-base-accepted",
   # one commit with HEAD on main (as the release reproduce step builds): the merge base is HEAD and passes,
   # the per-entry rules still refuse an over-cap entry (exit 0 with that guard off), and the same commit on

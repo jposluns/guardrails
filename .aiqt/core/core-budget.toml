@@ -4,7 +4,7 @@
 # accepted is the log of every accepted budget, oldest first; the LAST entry is the budget in force. Each
 # entry holds:
 # kind: "seed" (the first entry only; it must equal CAP_SEED and PENDING_SEED in tools/gen_rules_core.py),
-#   "shrink" or "raise".
+#   then "shrink". There is no other kind: the pending list and the caps only shrink.
 # note: why the entry was made.
 # entry-cap: the largest joined layer one entry may carry (the whole body of an unsplit rule, or the core layer
 #   of a split one), in UTF-16 units, title and corpus-id excluded. The apex is never split and is exempt.
@@ -15,15 +15,16 @@
 # The gate reads this file as committed at the merge base of HEAD with main (origin/main, else main; read
 # only, replacement refs and grafts ignored). Every entry committed there must stay here unchanged, every key
 # compared, so deleting or rewriting an entry already on main is a finding. Against the budget in force
-# there, an id back on pending or a cap raised is a finding unless a raise entry appended since names it.
+# there, any id on pending that is not there, or any cap above it, is a finding, with no exception and
+# whatever else changes (that comparison reads neither the seed nor the pin in the generator).
 # Where that read fails (no git, a shallow clone, no main, no merge base) the gate cannot evaluate (exit 2).
-# An entry not yet on main is covered by the per-entry rules only. To change a cap or pending, append an
-# entry; the gate compares each entry with the one before it. ACCEPTED in tools/gen_rules_core.py pins one
-# entry (its position here, its caps and its pending), which this log must hold unchanged; every entry
-# after it, of any kind, may only lower a cap or drop a pending id, and every entry after the seed must
-# change something. Raising a cap or putting an id back on pending takes a raise entry here and moving
-# ACCEPTED to it. An id that is split, now within entry-cap or the apex is a finding until a shrink entry
-# drops it.
+# An entry not yet on main is covered by the per-entry rules only. To lower a cap or drop a pending id,
+# append a shrink entry; the gate compares each entry with the one before it, and every entry after the
+# seed may only lower a cap or drop a pending id, and must change something. ACCEPTED in
+# tools/gen_rules_core.py pins one entry (its position here, its caps and its pending), which this log must
+# hold unchanged; moving it admits nothing. Once this file is on main, no later change can raise a cap or
+# put an id on pending. An id that is split, now within entry-cap or the apex is a finding until a shrink
+# entry drops it.
 
 format-version = 1
 
