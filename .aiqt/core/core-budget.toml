@@ -12,11 +12,15 @@
 # file-cap: the largest CORE render, in UTF-16 units; enforced once pending is empty, printed against until then.
 # pending: the sorted corpus-ids of the rules over entry-cap that are not split yet.
 #
-# To change a cap or pending, append an entry; the gate compares each entry with the one before it. A shrink
-# entry may only lower a cap or drop a pending id, and must change something. Raising a cap or putting an id
-# back on pending takes a raise entry, and every passing run prints how many raise entries this log holds.
-# An id that is split, now within entry-cap or the apex is a finding until a shrink entry drops it. The gate
-# reads this file only, not git history: deleting or rewriting an entry already here is not caught by it.
+# ACCEPTED in tools/gen_rules_core.py pins the last accepted entry (its position here, its caps and its
+# pending); this log must hold that entry unchanged, so deleting or rewriting an accepted entry is a finding.
+# To change a cap or pending, append an entry; the gate compares each entry with the one before it. Every
+# entry after the pinned one, of any kind, may only lower a cap or drop a pending id, and every entry after
+# the seed must change something. Raising a cap or putting an id back on pending takes a raise entry here
+# and moving ACCEPTED to it; every passing run prints the pinned entry and how many raise entries this log
+# holds. An id that is split, now within entry-cap or the apex is a finding until a shrink entry drops it.
+# The gate reads this file and the generator, not git history: an entry appended after the pin is protected
+# once ACCEPTED moves to it, and an edit made to both together is not caught by the gate.
 
 format-version = 1
 

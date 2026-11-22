@@ -2,8 +2,9 @@
 """Render the CORE preview of the rule corpus: one file, .aiqt/renders/aiqt-core.md, holding one entry per rule.
 
 The CORE render is the second render of the one rule source (gen_rules writes the first, the full render, to
-.claude/rules/). This step writes it to a PREVIEW path that nothing loads: it is not under .claude/, it is not
-named like CLAUDE.md, and no loaded file imports it. Nothing about what a session loads changes here.
+.claude/rules/). This step writes it to a PREVIEW path that no file imports: it is not under .claude/, it is
+not named like CLAUDE.md, and it is outside the paths the instruction-budget gate models as loaded. That no
+client loads it is inferred from those facts, not observed on a client.
 
 FORMAT. No frontmatter. The file opens with a whole-line generated-file comment, a blank line, the title
 `# AIQT core rules`, a blank line and the preamble paragraph (at most PREAMBLE_CAP UTF-16 units). Then one
@@ -28,23 +29,33 @@ it is always kept whole and no cap applies to its entry. A pending rule is rende
 split. file-cap is enforced once pending is empty; until then the render is larger than it by construction,
 and the measured size is printed against it.
 
-THE RATCHET. Caps and pending change only by appending an entry, each compared with the entry before it:
+THE RATCHET. The budget in force is shrink-only against the last accepted entry, by construction:
+  - ACCEPTED here pins the last accepted entry: its number in the log, its caps and its pending. The log
+    must hold that entry and it must equal the pin, so deleting or rewriting an accepted entry, which moves
+    or changes the pinned one, is a finding;
+  - every entry after the pinned one, of any kind, may only lower a cap or drop a pending id, never raise a
+    cap or list an id the entry before it does not, so no entry can lift the budget in force above the pin;
   - the seed entry must equal the budget as this renderer was added (CAP_SEED and PENDING_SEED here);
-  - a shrink entry may only lower a cap or drop a pending id, never raise a cap or list an id the entry
-    before it does not, and must change something, so a shrink cannot be undone by a second shrink entry;
-  - a raise entry is the only way to raise a cap or put an id back on pending (or add a new one); its kind
-    and note make the raise visible in the file, and every passing run prints how many raise entries the log
-    holds.
-An id on the budget in force that no longer needs to be there (now split, now within entry-cap, or the
-apex) is a finding until a shrink entry drops it. The gate reads only the committed file, not git history:
-deleting or rewriting an entry already in the log is not caught here and shows only as removed lines in
-review. A pending id must be a corpus-id in every entry, and one the corpus holds in the budget in force.
+  - up to the pin, a shrink entry may only lower a cap or drop a pending id, as above, and a raise entry is
+    the only kind that may raise a cap or put an id on pending; a raise is in force only once ACCEPTED here
+    is moved to it, so it is recorded twice, as a raise entry in the log and as a reviewed edit of this file;
+  - every entry after the seed must change something, so consecutive entries always differ.
+Every passing run prints the pinned entry number and how many raise entries the log holds. An id on the
+budget in force that no longer needs to be there (now split, now within entry-cap, or the apex) is a
+finding until a shrink entry drops it. The gate reads the committed budget and this file, not git history:
+an entry appended after the pin is protected once ACCEPTED moves to it (until then, removing it returns
+the budget to the accepted one, never above it), and an edit of the log made together with an edit of
+ACCEPTED here is not caught by this gate; it shows as a changed pin in review. Every logged pending id must
+fully match the corpus-id pattern (an id with a trailing newline is refused) in every entry, and the
+corpus must hold each id of the budget in force.
 
 EXIT. 0 clean. 1 on drift (--check) or on a finding, and a finding in write mode writes nothing:
   - a non-apex rule over entry-cap with no split and not on pending; a split rule whose core layer is over
     entry-cap; a detail-trigger over trigger-cap; a seed entry that differs from CAP_SEED and PENDING_SEED;
-    a shrink entry that lists a pending id the entry before it does not, raises a cap, or changes nothing;
-    a pending id that no longer needs to be there; the render over file-cap while pending is empty;
+    a log that does not hold the entry ACCEPTED pins, or holds it with other values; a shrink entry, or
+    any entry after the pinned one, that lists a pending id the entry before it does not or raises a cap;
+    an entry after the seed that changes nothing; a pending id that no longer needs to be there; the render
+    over file-cap while pending is empty;
   - in the fresh render, and in --check also in the committed file when it differs from the fresh render:
     a frontmatter block; an `@` anywhere (the instruction-budget gate reads an `@` as an import even inside a
     code span, so no `@` is allowed at all); a corpus-id with no entry; a corpus-id with more than one entry;
@@ -68,13 +79,16 @@ not a regular file (a symlink or a directory), unreadable, not UTF-8, not TOML, 
 unknown or missing key, an empty or missing log, a kind out of place or unknown, an empty note, a cap that
 is not a positive integer, a format-version other than 1, a pending entry that is not an id, an unsorted or
 repeated pending list, or a pending id in force the corpus does not hold); a committed render that is not
-UTF-8; and a .aiqt/renders/ that cannot be read as a directory inside the repository. A committed render
-that is absent is drift (exit 1), as for every generated file.
+UTF-8, or is there but is not a regular file (a symbolic link, wherever it points, a directory or another
+kind), which neither mode reads or writes through; and a .aiqt/renders/ that cannot be read as a directory
+inside the repository. A committed render that is absent is drift (exit 1), as for every generated file.
+Write mode opens the render without following a symbolic link in its last component.
 
   gen_rules_core.py               regenerate .aiqt/renders/aiqt-core.md
   gen_rules_core.py --check       exit 1 on drift or a finding, 2 when it cannot evaluate; write nothing
   gen_rules_core.py --self-test   synthetic trees: every finding and every cannot-evaluate input; a flip
-                                  for every guard, for the byte comparison and for the config-lane
+                                  for every guard, for the byte comparison, the id pattern, the render
+                                  target check, the linked-directory probe and the config-lane
                                   registration of this file's bare launch, showing its case changes outcome
                                   with it switched off (the exit, or for a diagnostic guard only its named
                                   reason); and a backstop row for each load check (no-title, empty-layer,
@@ -101,7 +115,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import load_toml, reconcile, repo_root, target_dir_present, unknown_args_refused  # noqa: E402
+from _gen_common import load_toml, repo_root, target_dir_present, unknown_args_refused  # noqa: E402
 from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import CID_RE, body_first_line, core_layer, load_corpus, read_rule_source  # noqa: E402
 from gen_claude import GROUP_LABEL, GROUP_ORDER, GROUPS, _group_key  # noqa: E402
@@ -124,7 +138,8 @@ CAP_KEYS = ("entry-cap", "trigger-cap", "file-cap")
 KINDS = ("seed", "shrink", "raise")
 PREAMBLE_CAP = 1000
 GENERATED_COMMENT = ("<!-- GENERATED by tools/gen_rules_core.py from .aiqt/core/rules/; do not hand-edit. A "
-                     "preview that nothing loads. -->")
+                     "preview no file imports, outside .claude/ and the paths the instruction-budget gate models "
+                     "as loaded (not observed on a client). -->")
 TITLE = "# AIQT core rules"
 PREAMBLE = ("Every rule below is in force, whether its entry holds the whole rule or only its core. Where an "
             "entry ends in a pointer, the full rule at that path is authoritative: read it before the "
@@ -147,6 +162,11 @@ PENDING_SEED = frozenset((
     "secspr", "secsup", "sectok", "secunt", "secupl", "septsk", "setcmp", "stgprm",
     "tmrrst", "trkasy", "tstamp", "tsthrm", "vfxcmt", "vrfdiv", "vrfdlv", "wowo01",
 ))
+# The last accepted entry of core-budget.toml (THE RATCHET): its number in the log ("entries") and its caps
+# and pending. The log must hold that entry with exactly these values, and no entry after it may raise a cap
+# or list a pending id the entry before it does not. A raise entry takes moving this pin to it, here, with
+# the values that entry holds. The pinned entry is the seed today.
+ACCEPTED = dict(CAP_SEED, entries=1, pending=PENDING_SEED)
 
 
 def units(text):
@@ -277,8 +297,7 @@ def load_budget(root, rules):
             if type(entry[key]) is not int or entry[key] <= 0:
                 raise ValueError("{}: {} must be a positive integer, got {!r}".format(where, key, entry[key]))
         pending = entry["pending"]
-        if not isinstance(pending, list) or not all(isinstance(cid, str) and CID_RE.match(cid)
-                                                    for cid in pending):
+        if not isinstance(pending, list) or not all(isinstance(cid, str) and _is_cid(cid) for cid in pending):
             raise ValueError("{}: pending must be a list of corpus-ids, got {!r}".format(where, pending))
         if len(set(pending)) != len(pending):
             raise ValueError("{}: pending repeats an id".format(where))
@@ -292,6 +311,12 @@ def load_budget(root, rules):
     budget = {key: log[-1][key] for key in CAP_KEYS + ("pending",)}
     budget["log"] = log
     return budget
+
+
+def _is_cid(cid):
+    """True when the whole of cid is a corpus-id: a full match, so an id with a trailing newline (which `$`
+    alone accepts) is refused. A name-keyed function, so the self-test can swap in the prefix match."""
+    return CID_RE.fullmatch(cid) is not None
 
 
 def _exact_keys(table, keys, where):
@@ -340,7 +365,8 @@ def _trigger_over_cap(rules, budget, _text, _seed):
         if rule.split and len(rule.trigger) > budget["trigger-cap"]]
 
 
-def _seed_altered(_rules, budget, _text, seed):
+def _seed_altered(_rules, budget, _text, pins):
+    seed = pins["seed"]
     first = budget["log"][0]
     changed = [key for key in CAP_KEYS if first[key] != seed[key]]
     if set(first["pending"]) != set(seed["pending"]):
@@ -350,31 +376,58 @@ def _seed_altered(_rules, budget, _text, seed):
             ] if changed else []
 
 
-def _shrink_entries(budget):
-    """(entry number, entry, the entry before it) for every shrink entry of the log."""
-    log = budget["log"]
-    return [(number, log[number - 1], log[number - 2]) for number in range(2, len(log) + 1)
-            if log[number - 1]["kind"] == "shrink"]
+def _shrink_only_entries(budget, pins):
+    """(entry number, entry, the entry before it, why it may not grow) for every entry of the log that may
+    only shrink: a shrink entry, and every entry of any kind after the one ACCEPTED pins."""
+    log, pinned = budget["log"], pins["accepted"]["entries"]
+    found = []
+    for number in range(2, len(log) + 1):
+        if number > pinned:
+            why = ("it follows the accepted pin (entry {}); a raise takes a raise entry and moving ACCEPTED in "
+                   "tools/gen_rules_core.py to it".format(pinned))
+        elif log[number - 1]["kind"] == "shrink":
+            why = "it is a shrink entry; a raise takes a raise entry"
+        else:
+            continue
+        found.append((number, log[number - 1], log[number - 2], why))
+    return found
 
 
-def _pending_grew(_rules, budget, _text, _seed):
-    return ["accepted entry {}: {} on pending but not on the entry before it; a shrink entry may not grow "
-            "pending, which takes a raise entry".format(number, cid)
-            for number, entry, before in _shrink_entries(budget)
+def _pending_grew(_rules, budget, _text, pins):
+    return ["accepted entry {}: {} on pending but not on the entry before it, and the entry may not grow "
+            "pending: {}".format(number, cid, why)
+            for number, entry, before, why in _shrink_only_entries(budget, pins)
             for cid in entry["pending"] if cid not in before["pending"]]
 
 
-def _cap_raised(_rules, budget, _text, _seed):
-    return ["accepted entry {}: {} {} is above {} on the entry before it; a shrink entry may not raise a cap, "
-            "which takes a raise entry".format(number, key, entry[key], before[key])
-            for number, entry, before in _shrink_entries(budget)
+def _cap_raised(_rules, budget, _text, pins):
+    return ["accepted entry {}: {} {} is above {} on the entry before it, and the entry may not raise a cap: "
+            "{}".format(number, key, entry[key], before[key], why)
+            for number, entry, before, why in _shrink_only_entries(budget, pins)
             for key in CAP_KEYS if entry[key] > before[key]]
 
 
-def _shrink_no_change(_rules, budget, _text, _seed):
-    return ["accepted entry {}: a shrink entry that changes nothing from the entry before it".format(number)
-            for number, entry, before in _shrink_entries(budget)
-            if all(entry[key] == before[key] for key in CAP_KEYS + ("pending",))]
+def _shrink_no_change(_rules, budget, _text, _pins):
+    log = budget["log"]
+    return ["accepted entry {}: a {} entry that changes nothing from the entry before it".format(
+        number, log[number - 1]["kind"]) for number in range(2, len(log) + 1)
+        if all(log[number - 1][key] == log[number - 2][key] for key in CAP_KEYS)
+        and set(log[number - 1]["pending"]) == set(log[number - 2]["pending"])]
+
+
+def _accepted_pin(_rules, budget, _text, pins):
+    pin, log = pins["accepted"], budget["log"]
+    number = pin["entries"]
+    if len(log) < number:
+        return ["the log holds {} accepted entries, fewer than the {} the accepted pin (ACCEPTED in "
+                "tools/gen_rules_core.py) records; an accepted entry was deleted".format(len(log), number)]
+    entry = log[number - 1]
+    changed = [key for key in CAP_KEYS if entry[key] != pin[key]]
+    if set(entry["pending"]) != set(pin["pending"]):
+        changed.append("pending")
+    return ["accepted entry {}: {} differ(s) from the accepted pin (ACCEPTED in tools/gen_rules_core.py); an "
+            "accepted entry was deleted or rewritten, or a raise was made without moving the pin".format(
+                number, ", ".join(changed))] if changed else []
 
 
 def _pending_stale(rules, budget, _text, _seed):
@@ -396,8 +449,9 @@ def _file_over_cap(_rules, budget, text, _seed):
 
 SOURCE_GUARDS = {"over-cap-not-pending": _over_cap_not_pending, "core-over-cap": _core_over_cap,
                  "trigger-over-cap": _trigger_over_cap, "seed-altered": _seed_altered,
-                 "pending-grew": _pending_grew, "cap-raised": _cap_raised, "shrink-no-change": _shrink_no_change,
-                 "pending-stale": _pending_stale, "file-over-cap": _file_over_cap}
+                 "accepted-pin": _accepted_pin, "pending-grew": _pending_grew, "cap-raised": _cap_raised,
+                 "shrink-no-change": _shrink_no_change, "pending-stale": _pending_stale,
+                 "file-over-cap": _file_over_cap}
 
 
 def _entries(text):
@@ -473,8 +527,8 @@ RENDER_GUARDS = {"frontmatter": _frontmatter, "at-import": _at_import, "missing-
                  "dangling-pointer": _dangling_pointer}
 
 
-def source_findings(rules, budget, text, seed):
-    return [line for name in SOURCE_GUARDS for line in SOURCE_GUARDS[name](rules, budget, text, seed)]
+def source_findings(rules, budget, text, pins):
+    return [line for name in SOURCE_GUARDS for line in SOURCE_GUARDS[name](rules, budget, text, pins)]
 
 
 def render_findings(text, rules, root):
@@ -487,23 +541,58 @@ def _same_bytes(raw, text):
     return raw == text.encode("utf-8")
 
 
-def run(root, check_mode, seed=None):
+def _render_target_problem(target):
+    """None when the committed render at target is absent or a regular file; otherwise why it cannot be
+    evaluated (a symbolic link, wherever it points, or another kind), judged by lstat so nothing is read or
+    written through a link. A name-keyed function, so the self-test can switch it off (the flip)."""
+    try:
+        mode = os.lstat(target).st_mode
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return "{} cannot be examined ({})".format(CORE_REL, exc)
+    if stat.S_ISREG(mode):
+        return None
+    return "{} is not a regular file (a symbolic link, a directory or another kind)".format(CORE_REL)
+
+
+def _write_render(target, text):
+    """Write text to target, creating its absent directories, without following a symbolic link in the last
+    component (O_NOFOLLOW). Exit 2 with a message on an OSError."""
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+    except OSError as exc:
+        print("error: cannot write {} ({}); fail-closed".format(target, exc), file=sys.stderr)
+        raise SystemExit(2)
+
+
+def run(root, check_mode, seed=None, accepted=None):
     """Reconcile root's CORE render. Exit 0 clean, 1 on drift (check mode) or a finding, 2 when it cannot
     evaluate (see the module docstring). seed stands in for CAP_SEED and PENDING_SEED, a dict of the three
+    caps and pending, and accepted for ACCEPTED, a dict of the pinned entry number ("entries"), the three
     caps and pending (the self-test's synthetic trees)."""
     seed = dict(CAP_SEED, pending=PENDING_SEED) if seed is None else seed
+    pins = {"seed": seed, "accepted": ACCEPTED if accepted is None else accepted}
     try:
         rules = load_rules(root)
         budget = load_budget(root, rules)
     except (ValueError, OSError) as exc:
         print("error: {} (cannot evaluate)".format(exc), file=sys.stderr)
         return 2
-    text = render(rules)
-    findings = source_findings(rules, budget, text, seed) + render_findings(text, rules, root)
     target = root / CORE_REL
+    # The directory chain first (exit 2 on a link out of the tree), then the render itself, in both modes.
+    target_dir_present(target, root)
+    problem = _render_target_problem(target)
+    if problem is not None:
+        print("error: {} (cannot evaluate)".format(problem), file=sys.stderr)
+        return 2
+    text = render(rules)
+    findings = source_findings(rules, budget, text, pins) + render_findings(text, rules, root)
     drift = []
     if check_mode:
-        target_dir_present(target, root)
         try:
             raw = target.read_bytes() if target.exists() else None
             current = None if raw is None else raw.decode("utf-8")
@@ -524,14 +613,22 @@ def run(root, check_mode, seed=None):
     if findings or drift:
         return 1
     if not check_mode:
-        reconcile(target, text, False, root, make_parents=True)
+        # As the shared reconcile does, a committed render that cannot be read as UTF-8 is cannot-evaluate
+        # in write mode too, never overwritten unseen.
+        try:
+            if target.exists():
+                target.read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            print("error: cannot read {} ({}) (cannot evaluate)".format(target, exc), file=sys.stderr)
+            return 2
+        _write_render(target, text)
     split = sum(rule.split for rule in rules)
     log = budget["log"]
     print("rules-core: {} entries ({} whole, {} split, {} pending); {} units against file-cap {} ({}); budget "
-          "log {} accepted entries, {} of them raise entries".format(
+          "log {} accepted entries, {} of them raise entries, accepted pin at entry {}".format(
               len(rules), len(rules) - split, split, len(budget["pending"]), units(text), budget["file-cap"],
               "reported only while pending is not empty" if budget["pending"] else "enforced",
-              len(log), sum(entry["kind"] == "raise" for entry in log)))
+              len(log), sum(entry["kind"] == "raise" for entry in log), pins["accepted"]["entries"]))
     return 0
 
 
@@ -640,14 +737,23 @@ def _tree(base, sources=None, budget=None, reference=True):
     return base
 
 
-def _run(root, check_mode, seed=_SEED):
+def _pin(entries, entry_cap=80, trigger_cap=60, file_cap=100000, pending=("longaa1",)):
+    """A fixture accepted pin: entry number entries of the log holds these values."""
+    return {"entries": entries, "entry-cap": entry_cap, "trigger-cap": trigger_cap, "file-cap": file_cap,
+            "pending": frozenset(pending)}
+
+
+_PIN = _pin(1)
+
+
+def _run(root, check_mode, seed=_SEED, accepted=_PIN):
     """(exit, captured stdout and stderr) of run(root, check_mode), SystemExit read as its code."""
     import io
     from contextlib import redirect_stderr, redirect_stdout
     out = io.StringIO()
     with redirect_stdout(out), redirect_stderr(out):
         try:
-            code = run(root, check_mode, seed)
+            code = run(root, check_mode, seed, accepted)
         except SystemExit as exc:
             code = exc.code
     return code, out.getvalue()
@@ -676,18 +782,18 @@ def _committed_case(tmp, label, mutate):
     return root
 
 
-def _both(root, seed=_SEED):
+def _both(root, seed=_SEED, accepted=_PIN):
     """(check exit, write exit, render unchanged) for a tree that may already hold a render."""
     target = root / CORE_REL
     before = target.read_bytes() if target.exists() else None
-    codes = (_run(root, True, seed)[0], _run(root, False, seed)[0])
+    codes = (_run(root, True, seed, accepted)[0], _run(root, False, seed, accepted)[0])
     after = target.read_bytes() if target.exists() else None
     return codes[0], codes[1], before == after
 
 
-def _write_then_check(root, seed=_SEED):
+def _write_then_check(root, seed=_SEED, accepted=_PIN):
     """(write exit, check exit) for a tree: the check sees the render the write made, if it made one."""
-    return _run(root, False, seed)[0], _run(root, True, seed)[0]
+    return _run(root, False, seed, accepted)[0], _run(root, True, seed, accepted)[0]
 
 
 def _argv_failures():
@@ -736,11 +842,16 @@ def self_test_main():
           "1 and exit 0 with their guard switched off; a missing, duplicate or unknown id, an entry differing "
           "from its source layer and frontmatter in the committed file are each named, and lose only that "
           "name with their guard switched off (drift still exits 1); a CRLF or lone CR is drift; a pending id "
-          "returning after a shrink, a cap raised by a shrink entry, an altered seed and a shrink that changes "
-          "nothing each exit 1 and exit 0 with their guard switched off, as do a stale pending id, a long "
-          "trigger, a core over the cap and the file over its cap, and a raise entry is accepted; every "
-          "malformed or missing input is cannot-evaluate, exit 2, with nothing written; the config-lane tables "
-          "exclude the bare launch and keep the --self-test launch)".format(len(EXECUTED)))
+          "returning after a shrink, a cap raised by a shrink entry, an altered seed, a shrink or raise entry "
+          "that changes nothing, an accepted shrink entry deleted or rewritten, and a raise entry after the "
+          "accepted pin (pending or cap) each exit 1 and exit 0 with their guard switched off, as do a stale "
+          "pending id, a long trigger, a core over the cap and the file over its cap, and a raise entry the pin "
+          "records is accepted; every malformed or missing input is cannot-evaluate, exit 2, with nothing "
+          "written, among them a logged id with a trailing newline and a committed render that is a symbolic "
+          "link (in --check, and in write mode with nothing written through it), each exit 0 with its check "
+          "switched off; .aiqt/renders/ linked outside the tree is exit 2 and inside it is rewritten, the "
+          "shared cases going red with the probe switched off; the config-lane tables exclude the bare launch "
+          "and keep the --self-test launch)".format(len(EXECUTED)))
     return 0
 
 
@@ -874,8 +985,38 @@ def _self_test_cases(tmp):
     with _without(SOURCE_GUARDS, "pending-grew"):
         flipped = _write_then_check(root)
     check("flip/pending-regrow-after-shrink", flipped == (0, 0), flipped)
+    # A raise entry is accepted once the accepted pin records it (the pin moves to it in this file).
     root = _tree(tmp / "raise", budget=_budget_text(entries=[shrunk, {"kind": "raise", "entry_cap": 90}]))
-    check("ratchet/raise-entry-accepted", _write_then_check(root) == (0, 0), _run(root, True))
+    raised = _pin(3, entry_cap=90)
+    check("ratchet/raise-entry-accepted", _write_then_check(root, accepted=raised) == (0, 0),
+          _run(root, True, accepted=raised))
+    # The reviewed defects: against the accepted pin, deleting or rewriting an accepted
+    # shrink entry, or appending a raise entry the pin does not record, gave exit 0 with an id back on
+    # pending or a cap above the accepted one.
+    after_shrink = _pin(2, pending=())
+
+    def refused(root, accepted, reason):
+        """(write exit, check exit, render written, reason named by the write) against accepted."""
+        written, out = _run(root, False, accepted=accepted)
+        return (written, _run(root, True, accepted=accepted)[0], (root / CORE_REL).exists(), reason in out), out
+
+    for case_id, flip_id, guard, label, sources, entries, reason in (
+            ("ratchet/accepted-shrink-deleted", "flip/accepted-shrink-deleted", "accepted-pin", "deleted", None,
+             [], "accepted pin"),
+            ("ratchet/accepted-shrink-rewritten", "flip/accepted-shrink-rewritten", "accepted-pin", "rewritten",
+             None, [{"kind": "shrink", "entry_cap": 70}], "accepted pin"),
+            ("ratchet/raise-after-pin-pending", "flip/raise-after-pin-pending", "pending-grew", "raise-unpinned",
+             None, [shrunk, {"kind": "raise"}],
+             "accepted entry 3: longaa1 on pending but not on the entry before it"),
+            ("ratchet/raise-after-pin-cap", "flip/raise-after-pin-cap", "cap-raised", "raise-cap-unpinned",
+             shortened, [shrunk, {"kind": "raise", "entry_cap": 90, "pending": ()}],
+             "accepted entry 3: entry-cap 90 is above 80")):
+        root = _tree(tmp / label, sources=sources, budget=_budget_text(entries=entries))
+        got, out = refused(root, after_shrink, reason)
+        check(case_id, got == (1, 1, False, True), (got, out))
+        with _without(SOURCE_GUARDS, guard):
+            flipped = _write_then_check(root, accepted=after_shrink)
+        check(flip_id, flipped == (0, 0), flipped)
     root = _tree(tmp / "capraise", budget=_budget_text(entries=[shrunk, {"kind": "shrink", "entry_cap": 1000,
                                                                          "pending": ()}]))
     code, out = _run(root, True)
@@ -884,11 +1025,12 @@ def _self_test_cases(tmp):
         flipped = _write_then_check(root)
     check("flip/cap-raised", flipped == (0, 0), flipped)
     root = _tree(tmp / "seedalt", budget=_budget_text().replace("file-cap = 100000", "file-cap = 200000"))
-    code, out = _run(root, True)
-    check("ratchet/seed-altered", (code, _run(root, False)[0], (root / CORE_REL).exists()) == (1, 1, False)
-          and "accepted entry 1 (the seed): file-cap differ(s)" in out, out)
+    altered = _pin(1, file_cap=200000)
+    code, out = _run(root, True, accepted=altered)
+    check("ratchet/seed-altered", (code, _run(root, False, accepted=altered)[0], (root / CORE_REL).exists())
+          == (1, 1, False) and "accepted entry 1 (the seed): file-cap differ(s)" in out, out)
     with _without(SOURCE_GUARDS, "seed-altered"):
-        flipped = _write_then_check(root)
+        flipped = _write_then_check(root, accepted=altered)
     check("flip/seed-altered", flipped == (0, 0), flipped)
     root = _tree(tmp / "nochange", budget=_budget_text(entries=[{"kind": "shrink"}]))
     code, out = _run(root, True)
@@ -897,13 +1039,23 @@ def _self_test_cases(tmp):
     with _without(SOURCE_GUARDS, "shrink-no-change"):
         flipped = _write_then_check(root)
     check("flip/shrink-no-change", flipped == (0, 0), flipped)
+    # A raise entry that changes nothing is refused too, so consecutive entries always differ and deleting
+    # an entry before the pin always moves or changes the pinned one.
+    root = _tree(tmp / "raise-nochange", budget=_budget_text(entries=[{"kind": "raise"}]))
+    code, out = _run(root, True, accepted=_pin(2))
+    check("ratchet/raise-no-change", code == 1 and "accepted entry 2: a raise entry that changes nothing" in out,
+          out)
+    with _without(SOURCE_GUARDS, "shrink-no-change"):
+        flipped = _write_then_check(root, accepted=_pin(2))
+    check("flip/raise-no-change", flipped == (0, 0), flipped)
 
     # --- the other findings ---
     root = _tree(tmp / "stale", budget=_budget_text(pending=("longaa1", "shrtaa1"), kind="raise"))
-    code, out = _run(root, True)
+    stale_pin = _pin(2, pending=("longaa1", "shrtaa1"))
+    code, out = _run(root, True, accepted=stale_pin)
     check("finding/pending-stale", code == 1 and "shrtaa1: on pending but within entry-cap now" in out, out)
     with _without(SOURCE_GUARDS, "pending-stale"):
-        flipped = _write_then_check(root)
+        flipped = _write_then_check(root, accepted=stale_pin)
     check("flip/pending-stale", flipped == (0, 0), flipped)
     root = _tree(tmp / "trigger", budget=_budget_text(trigger_cap=5))
     code, out = _run(root, True)
@@ -913,10 +1065,11 @@ def _self_test_cases(tmp):
     check("flip/trigger-over-cap", flipped == (0, 0), flipped)
     root = _tree(tmp / "corecap", budget=_budget_text(entry_cap=5, pending=("longaa1", "secaa11", "shrtaa1"),
                                                       kind="raise"))
-    code, out = _run(root, True)
+    corecap_pin = _pin(2, entry_cap=5, pending=("longaa1", "secaa11", "shrtaa1"))
+    code, out = _run(root, True, accepted=corecap_pin)
     check("finding/core-over-cap", code == 1 and "splita1: the core layer is 18 units" in out, out)
     with _without(SOURCE_GUARDS, "core-over-cap"):
-        flipped = _write_then_check(root)
+        flipped = _write_then_check(root, accepted=corecap_pin)
     check("flip/core-over-cap", flipped == (0, 0), flipped)
     sources = _fixture_sources()
     sources["long.md"] = sources["long.md"].replace(_LONG_BODY, "A long rule, now short.\n")
@@ -1038,10 +1191,88 @@ def _self_test_cases(tmp):
     root = _tree(tmp / "t-notutf8")
     _run(root, False)
     (root / CORE_REL).write_bytes(b"\xff\n")
-    check("cannot-evaluate/render-not-utf8", _run(root, True)[0] == 2, _run(root, True))
+    check("cannot-evaluate/render-not-utf8", _both(root) == (2, 2, True), _run(root, True))
     root = _tree(tmp / "t-renders-file")
     (root / ".aiqt" / "renders").write_text("not a directory\n", encoding="utf-8")
     check("cannot-evaluate/renders-not-a-directory", _both(root)[:2] == (2, 2))
+    # The reviewed defect: a logged id with a trailing newline passed the id pattern ($ matches
+    # before a final LF), here in an earlier raise entry that a later shrink entry drops.
+    newline_budget = _budget_text(entries=[{"kind": "raise", "pending": ("longaa1", "zzzzzz9\\n")},
+                                           {"kind": "shrink"}])
+    newline_pin = _pin(3)
+    root = _tree(tmp / "b-newline-id", budget=newline_budget)
+    check("cannot-evaluate/budget-pending-id-trailing-newline", _both(root, accepted=newline_pin) == (2, 2, True),
+          _run(root, True, accepted=newline_pin))
+    saved = globals()["_is_cid"]
+    globals()["_is_cid"] = lambda cid: CID_RE.match(cid) is not None
+    try:
+        flipped = _write_then_check(root, accepted=newline_pin)
+    finally:
+        globals()["_is_cid"] = saved
+    check("flip/budget-pending-id-trailing-newline", flipped == (0, 0), flipped)
+    # The reviewed defect: a committed render that is a symbolic link passed the check (here a link
+    # to identical bytes inside the tree), and write mode wrote through a link to a file outside the tree.
+    root = _tree(tmp / "t-link-check")
+    _run(root, False)
+    held = root / "held-render.md"
+    (root / CORE_REL).rename(held)
+    (root / CORE_REL).symlink_to(held)
+    check("cannot-evaluate/render-symlink-check", _run(root, True)[0] == 2, _run(root, True))
+    @contextmanager
+    def swapped(check_off=False, following_write=False):
+        """The lstat check switched off and/or a link-following write swapped in, for the block."""
+        saved = globals()["_render_target_problem"], globals()["_write_render"]
+        if check_off:
+            globals()["_render_target_problem"] = lambda _target: None
+        if following_write:
+            globals()["_write_render"] = lambda target, text: target.write_text(text, encoding="utf-8")
+        try:
+            yield
+        finally:
+            globals()["_render_target_problem"], globals()["_write_render"] = saved
+
+    with swapped(check_off=True):
+        flipped = _run(root, True)
+    check("flip/render-symlink-check", flipped[0] == 0, flipped)
+    root = _tree(tmp / "t-link-write")
+    outside = tmp / "outside-render.md"
+    (root / ".aiqt" / "renders").mkdir()
+    (root / CORE_REL).symlink_to(outside)
+
+    def write_through(check_off=False, following_write=False):
+        """(write exit, the outside file left as it was) with swapped(...) in force for the run."""
+        outside.write_text("stale\n", encoding="utf-8")
+        with swapped(check_off, following_write):
+            code = _run(root, False)[0]
+        return code, outside.read_text(encoding="utf-8") == "stale\n"
+
+    got = write_through()
+    check("cannot-evaluate/render-symlink-write", got == (2, True), got)
+    # Either barrier holds alone: with the lstat check off, the write's O_NOFOLLOW still refuses the link;
+    # with both off (a link-following write swapped in), the write goes through to the outside file.
+    got = write_through(check_off=True)
+    check("cannot-evaluate/render-symlink-write-nofollow", got == (2, True), got)
+    got = write_through(check_off=True, following_write=True)
+    check("flip/render-symlink-write", got == (0, False), got)
+    # The shared linked-directory cases: .aiqt/renders/ linked outside the tree is exit 2 in both
+    # modes with nothing written there; linked inside the tree it is written and re-checks clean.
+    from _gen_common import linked_dir_failures
+    linked = linked_dir_failures(tmp / "linked", "renders", _tree,
+                                 lambda base, check_mode: run(base, check_mode, _SEED, _PIN), ".aiqt/renders",
+                                 CORE_REL)
+    check("linked-dir/renders", not linked, linked)
+    # The flip: with the directory-chain probe switched off (here and in the shared module), the outside
+    # case reads through the link and the shared cases go red.
+    import _gen_common
+    saved = globals()["target_dir_present"], _gen_common.target_dir_present
+    globals()["target_dir_present"] = _gen_common.target_dir_present = lambda *_args, **_kwargs: True
+    try:
+        flipped = linked_dir_failures(tmp / "linked-flip", "renders", _tree,
+                                      lambda base, check_mode: run(base, check_mode, _SEED, _PIN),
+                                      ".aiqt/renders", CORE_REL)
+    finally:
+        globals()["target_dir_present"], _gen_common.target_dir_present = saved
+    check("flip/linked-dir-renders", bool(flipped), flipped)
     failures = _argv_failures()
     check("cannot-evaluate/unknown-argument", not failures, failures)
 

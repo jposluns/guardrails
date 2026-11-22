@@ -263,7 +263,7 @@ note = "The generated worker-pack read surface (tools/gen_worker_pack.py); the d
 [[release-class]]
 path = ".aiqt/renders/aiqt-core.md"
 class = "pack-immutable"
-note = "The CORE render preview (tools/gen_rules_core.py), generated from .aiqt/core/rules/ and drift-gated; a path nothing loads (outside .claude/, not named like CLAUDE.md, imported by no file)."
+note = "The CORE render preview (tools/gen_rules_core.py), generated from .aiqt/core/rules/ and drift-gated; a path no file imports (outside .claude/, not named like CLAUDE.md, outside the paths the instruction-budget gate models as loaded); that no client loads it is inferred, not observed on a client."
 
 [[release-class]]
 path = ".claude/rules/README.md"
