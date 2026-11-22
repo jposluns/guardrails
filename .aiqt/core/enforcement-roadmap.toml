@@ -2,7 +2,8 @@
 #
 # One [[rule]] per corpus-id, in ascending corpus-id order. `status` is enforced, partial, none, or
 # pending. enforced: the enforceability ledger links at least one shipped control to the rule;
-#   `mechanisms` RESTATES that linkage (namespaced gate:/hook: refs, unique and sorted) so this file is
+#   `mechanisms` RESTATES that linkage (namespaced gate:/githook:/hook: refs, unique and sorted; a githook:
+#   ref is a git hook from .aiqt/core/githooks/manifest.toml, installed per clone) so this file is
 #   reviewable standalone, and tools/gen_enforcement_register.py CROSS-VALIDATES it against the ledger, so
 #   the two can never fork. A rule whose only linked controls are preview-channel hooks (the [[hook]] rows of
 #   .aiqt/core/hooks/preview.toml: standalone .preview/ files installed by hand, not in the plugin) is still
@@ -200,7 +201,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "gatdis"
 status = "enforced"
-mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "gate:selftest-removal", "hook:gate-weakening-guard"]
+mechanisms = ["gate:ci-parity", "gate:relied-exit-pipes", "gate:selftest-removal", "githook:gate-record", "hook:gate-weakening-guard"]
 
 [[rule]]
 corpus-id = "gensrc"

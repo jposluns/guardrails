@@ -61,6 +61,10 @@ path = ".aiqt/newtab.toml"
 reason = "Repository-local NEWTAB coverage declaration; tracked, not shipped. Adopters own their roots, like .aiqt/derived-command-parameters.toml; this tracked file belongs to concern 1, not the untracked concern-2 namespace."
 
 [[exclusion]]
+path = ".aiqt/gate-record.toml"
+reason = "Repository-local required check sets of the git-side gate record (rule gatdis), read by the gate-record recorder and by the pre-commit and pre-push stubs from the commit a change is built on; tracked, not shipped, like .aiqt/newtab.toml. An adopter writes its own, naming its own check command, before running gate-record install."
+
+[[exclusion]]
 path = ".aiqt/python-host.toml"
 reason = "Repository-local CI configuration: the exact CPython patch release the maintainer host runs, read by tools/check_python_host_pin.py and tools/check_python_floor.py to hold the host-patch CI jobs to it; tracked, not shipped, like .aiqt/newtab.toml. An adopter has no such jobs."
 

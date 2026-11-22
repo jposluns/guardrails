@@ -2075,7 +2075,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 16
 end-line = 17
 canonical-text = "Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked\n(BLOCKED)?"
-source-digest = "dca72839a7fe7b94f069da56b8609da3f30581c0a931ae1f4def3b0898d50673"
+source-digest = "97513a6f2b8b2066c42c0becdbb113b8ac16911c58970ccb29ac8cbaf1e58004"
 layer = "core"
 
 [[clause]]
@@ -2085,7 +2085,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 17
 canonical-text = "Record the classification before acting on it."
-source-digest = "dca72839a7fe7b94f069da56b8609da3f30581c0a931ae1f4def3b0898d50673"
+source-digest = "97513a6f2b8b2066c42c0becdbb113b8ac16911c58970ccb29ac8cbaf1e58004"
 layer = "core"
 
 [[clause]]
@@ -2095,7 +2095,17 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 21
 canonical-text = "Before an ASK goes to the maintainer or any\nprocedure standing in for them, search the decision record for that subject: a maintainer ruling answers it\nand outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the\nassistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is\nunclear, the ASK goes ahead."
-source-digest = "dca72839a7fe7b94f069da56b8609da3f30581c0a931ae1f4def3b0898d50673"
+source-digest = "97513a6f2b8b2066c42c0becdbb113b8ac16911c58970ccb29ac8cbaf1e58004"
+layer = "core"
+
+[[clause]]
+clause-id = "deccls.4"
+corpus-id = "deccls"
+source-path = ".aiqt/core/rules/progr-decision.md"
+start-line = 22
+end-line = 29
+canonical-text = "Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or\nopen, across every durable store, notes logs included, by at least the subject's key terms; in the ASK or the\nstatement calling the matter undecided or open, or, when neither is made, in the recorded classification, name\nthe stores and terms searched and cite each hit or dismiss it with a reason. Whether the assistant can write a\nstore decides whether a ruling in it can count, for a notes log as for any other store, and is judged when the\nstore is read, from its actual permissions, not its name or usual role. A hit showing a maintainer ruling\nanywhere but an artefact the maintainer controls and the assistant cannot write is cited as unconfirmed: a\nlead to confirm in such an artefact before the matter is treated as decided, never silently ignored."
+source-digest = "97513a6f2b8b2066c42c0becdbb113b8ac16911c58970ccb29ac8cbaf1e58004"
 layer = "core"
 
 [[clause]]
