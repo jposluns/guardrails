@@ -199,7 +199,7 @@ review-round = 16
 
 [[path]]
 path = "tools/check_release_build.py"
-review-round = 126
+review-round = 125
 
 [[path]]
 path = "tools/check_release_delta.py"

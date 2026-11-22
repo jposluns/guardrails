@@ -45,6 +45,10 @@ a git work tree, the repository is shallow, neither main ref resolves, HEAD is n
 merge base or more than one, or the budget there is not a regular file, not UTF-8, not TOML or off the
 schema), the result is cannot-evaluate (exit 2), never a pass. An entry appended since the merge base is
 not history yet: until it is on main, these two checks do not cover it, and the per-entry rules below do.
+Where HEAD is on main (a repository of one commit on main, such as the fresh one the release reproduce step
+builds, or a run on main itself), the merge base is HEAD: the log is compared with itself, these two checks
+find nothing, and the per-entry rules below decide. A repository whose only branch is not main has no main
+to read: cannot-evaluate, as above.
 What this does not show: that main itself was reviewed, or anything about an entry before it reached main.
 
 THE RATCHET (per entry, within the log here):
@@ -368,10 +372,14 @@ def _base_git(root, *args):
     try:
         # The auto-maintenance pins ride the argv in option position, so no read here can start a detached
         # gc or maintenance child; the commit-graph is not consulted, so a crafted one cannot rewrite parents.
+        # Standard input is inherited: none of these reads takes input, and GIT_TERMINAL_PROMPT=0 keeps git
+        # from prompting. Neither the null device (opened for reading and writing) nor a stdin pipe (whose
+        # end subprocess opens for writing) is used, so the read opens nothing for writing, which
+        # tools/gen_rules.py's class check, running every generator under a hook that blocks such an open,
+        # would otherwise end.
         return subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
                                "-c", "maintenance.auto=false", "-c", "core.commitGraph=false", *args],
-                              capture_output=True, timeout=GIT_TIMEOUT, env=_base_git_env(),
-                              stdin=subprocess.DEVNULL)
+                              capture_output=True, timeout=GIT_TIMEOUT, env=_base_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("git {} could not run ({}), so the budget at the merge base with main cannot be "
                          "read".format(args[0], exc)) from None
@@ -843,7 +851,9 @@ def main():
 
 
 # --- self-test ----------------------------------------------------------------------------------------
-# Synthetic trees in a temporary directory only, never the real tree. The registered execution-suite
+# Synthetic trees and git repositories in a temporary directory, never written to the real tree; the one
+# read of the real tree is the config-lane rows, which launch each lane runner to list its real roster
+# (--list-shard 1/1, read only). The registered execution-suite
 # identity (tools/selftest_checks.toml) and the executed-check-id record the check() helper appends to.
 SUITE_ID = "rules-core-selftest"
 EXECUTED = []
@@ -1093,7 +1103,9 @@ def self_test_main():
           "and passes with both switched off, a rewritten cap, kind or note of an entry committed at the merge "
           "base exits 1 and exit 0 with its guard switched off, a replacement ref or a grafts line cannot move "
           "the merge base (exit 0 once honoured), a shrink or a named raise appended since main and a main with "
-          "no budget pass, and no git, no repository, a shallow clone, no main, no merge base and a budget at "
+          "no budget pass, one commit on main passes against the merge base HEAD while its per-entry rules still "
+          "refuse an over-cap entry (exit 0 with that guard off) and the same commit on master is exit 2, and "
+          "no git, no repository, a shallow clone, no main, no merge base and a budget at "
           "the merge base off the schema or not a regular file are each exit 2 with nothing written, an "
           "unreadable base read as absent letting the undo pass; each config lane's real roster keeps the "
           "--self-test launch and the suite step and leaves the bare launch out)".format(len(EXECUTED)))
@@ -1613,6 +1625,39 @@ def _history_cases(tmp, shortened, shrunk):
     got = judged(root)
     check("history/no-budget-at-merge-base-accepted", got[0] == (0, 0, True)
           and "no budget file committed there" in got[1], (got, why))
+
+    # A repository of one commit with HEAD on main, as the release reproduce step builds: the merge base is
+    # HEAD, the log is compared with itself, and the per-entry rules decide. The same commit on a branch that
+    # is not main (a bare `git init` with no default branch configured gives master) has no main to read.
+    def one_commit(label, budget, branch):
+        """(a repository at tmp/label holding the fixture tree and budget in one commit on branch, HEAD
+        there, or None, why it could not be built)."""
+        try:
+            root = _tree(tmp / label, budget=budget)
+            (root / ".git").rmdir()
+            _fx_git(root, "init", "-q", "-b", branch)
+            _fx_git(root, "add", "-A")
+            _fx_git(root, "commit", "-q", "--no-verify", "-m", "one commit")
+            return root, _fx_git(root, "rev-parse", "HEAD")
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            return None, "fixture: {}".format(exc)
+
+    root, head = one_commit("h-one", seed_budget, "main")
+    got = judged(root)
+    check("history/one-commit-on-main-accepted", got[0] == (0, 0, True)
+          and "the merge base {} with refs/heads/main".format(head[:12]) in got[1]
+          and "1 accepted entries committed there, held unchanged" in got[1], (got, head))
+    root, why = one_commit("h-one-master", seed_budget, "master")
+    got = (None, why) if root is None else (_both(root, base=READ_BASE), _run(root, True, base=READ_BASE)[1])
+    check("cannot-evaluate/one-commit-not-on-main", got[0] == (2, 2, True) and "resolves to a commit" in got[1],
+          got)
+    root, why = one_commit("h-one-overcap", _budget_text(pending=()), "main")
+    got = judged(root)
+    check("history/one-commit-per-entry-rules-apply", got[0] == (1, 1, False) and "longaa1: the entry is" in got[1],
+          (got, why))
+    with _without(SOURCE_GUARDS, "over-cap-not-pending"):
+        flipped = judged(root)
+    check("flip/one-commit-per-entry-rules-apply", flipped[0] == (0, 0, True), flipped)
 
     # Replacement refs and grafts are ignored: main is C1 (seed only) then C2 (the shrink), the topic
     # branch starts at C2 and undoes the shrink. A replacement ref C2 -> C1, or a grafts line giving the

@@ -7854,6 +7854,13 @@ expected-check-ids = [
   "history/shrink-appended-accepted",
   "history/raise-appended-naming-the-id-accepted",
   "history/no-budget-at-merge-base-accepted",
+  # one commit with HEAD on main (as the release reproduce step builds): the merge base is HEAD and passes,
+  # the per-entry rules still refuse an over-cap entry (exit 0 with that guard off), and the same commit on
+  # master has no main to read (exit 2)
+  "history/one-commit-on-main-accepted",
+  "cannot-evaluate/one-commit-not-on-main",
+  "history/one-commit-per-entry-rules-apply",
+  "flip/one-commit-per-entry-rules-apply",
   # a replacement ref or a grafts line cannot move the merge base; exit 0 once git is let honour them
   "history/replace-ref-ignored",
   "flip/replace-ref-ignored",

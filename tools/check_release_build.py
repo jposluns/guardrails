@@ -424,6 +424,16 @@ def _fresh_git_env():
     return env
 
 
+# Every fresh repository this tool creates, the reproduce and branch-integrity checkouts and the self-test
+# fixtures alike, is made by `git -c init.defaultBranch=main init -q`, spelled out at each site so the
+# repo-wide maintenance-pin scan resolves it: its first branch is main, as tools/check_gensrc_failclose.py's
+# template names it. _fresh_git_env() reads no global or system config, so a bare `git init` takes git's
+# built-in default (master on git 2.53), and a replayed generator that reads main (gen_rules_core.py reads
+# its merge base with refs/heads/main) would find none and exit 2. With main named, a materialized checkout
+# is one commit on main: its merge base with main is HEAD, so gen_rules_core.py compares the budget log
+# with itself and its per-entry rules decide.
+
+
 def _pin_fixture_version(repo, failures, env, version="1.0.0"):
     """Shared normalization for the archive-extracting self-test fixtures: pin an `git archive HEAD`-
     extracted tree to a CHOSEN release-version (default "1.0.0") so its committed manifest release-version
@@ -441,7 +451,7 @@ def _pin_fixture_version(repo, failures, env, version="1.0.0"):
     success, with the tree staged and the regenerated manifest ready for the caller to commit."""
     (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
     (repo / "changelog.toml").write_text('[[release]]\nversion = "{}"\n'.format(version), encoding="utf-8")
-    for a in (["init", "-q"], ["add", "-A"]):
+    for a in (["-c", "init.defaultBranch=main", "init", "-q"], ["add", "-A"]):
         if subprocess.run(["git", "-C", str(repo), *a], capture_output=True, env=env).returncode != 0:
             failures.append("fixture setup ({}): could not init/stage the archive-extracted tree for "
                             "version pinning; the archive-backed case cannot be normalized".format(repo.name))
@@ -529,8 +539,9 @@ def _materialized_check(root, sha, commands_fn, what):
     returns inside it. The tree is materialized from RAW blob bytes (git ls-tree + cat-file, round-4 finding
     1: NO worktree checkout, so no smudge/clean filter can restore old bytes and hide a change), then
     re-init'd as a FRESH git repo (empty config, so the source repo's filter drivers cannot run) purely so
-    the git-based commands have a repository. A command exit 1 is a drift/content finding; a launch failure
-    or a child exit outside {0,1} is cannot-evaluate and raises GateError -> exit 2 (round-4 finding 4),
+    the git-based commands have a repository: one commit on a branch named main (init.defaultBranch), so a command
+    that reads main finds it and its merge base with main is HEAD. A command exit 1 is a drift/content
+    finding; a launch failure or a child exit outside {0,1} is cannot-evaluate and raises GateError -> exit 2,
     never downgraded to a finding. Returns findings."""
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-{}-".format(what)))
@@ -550,7 +561,7 @@ def _materialized_check(root, sha, commands_fn, what):
         # wrapper, so an unpinned commit could detach a `git maintenance run --auto` child into
         # the very tree the finally-rmtree below is about to delete. The three pins ride the
         # maintenance-capable add and commit argvs as literal `-c` pairs in option position
-        # (the bare `git init -q` is not maintenance-triggering and carries none), and the
+        # (the init, which names main, is not maintenance-triggering and carries none), and the
         # launches are spelled out one by one (never through a loop variable) so the
         # repo-wide maintenance-pin scan can resolve and enforce them.
         def _staged(r):
@@ -558,7 +569,7 @@ def _materialized_check(root, sha, commands_fn, what):
                 raise GateError("cannot stage the tree for {}: {}".format(
                     what, r.stderr.decode("utf-8", "replace").strip()))
         try:
-            _staged(subprocess.run(["git", "-C", str(co), "init", "-q"],
+            _staged(subprocess.run(["git", "-C", str(co), "-c", "init.defaultBranch=main", "init", "-q"],
                                    capture_output=True, env=env))
             _staged(subprocess.run(
                 ["git", "-C", str(co), "-c", "user.name=aiqt", "-c", "user.email=a@b.invalid",
@@ -1568,7 +1579,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
 
         def _init(path):
             path.mkdir(parents=True, exist_ok=True)
-            for args in (["init", "-q"], ["config", "user.name", "AIQT Self-Test"],
+            for args in (["-c", "init.defaultBranch=main", "init", "-q"], ["config", "user.name", "AIQT Self-Test"],
                          ["config", "user.email", "selftest@example.invalid"]):
                 subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
 
@@ -2031,7 +2042,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     gcut = None
                     ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
                                             env=_fresh_git_env()).returncode == 0
-                             for a in (["init", "-q"],
+                             for a in (["-c", "init.defaultBranch=main", "init", "-q"],
                                        ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"]))
                     if ok:
                         gver = _regen_fixture_version_outputs(gcand, "genesis cut candidate", failures,
@@ -2045,7 +2056,7 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     if ok and gcut is not None:
                         ok = all(subprocess.run(["git", "-C", str(gcand), *a], capture_output=True,
                                                 env=_fresh_git_env()).returncode == 0
-                                 for a in (["init", "-q"],
+                                 for a in (["-c", "init.defaultBranch=main", "init", "-q"],
                                            ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "add", "-A"],
                                            ["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit",
                                             "-q", "-m", "genesis", "--no-verify"]))
@@ -2120,6 +2131,38 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                     errors.append("(finding 2) the genesis run_pre_tag archive-backed case raised and "
                                   "could not be verified ({}); the self-test is cannot-evaluate (exit 2) "
                                   "rather than silently skipping it".format(exc))
+
+            # (fresh-repository branch) The reproduce step replays every registry generator's --check in a
+            # fresh repository, and tools/gen_rules_core.py --check reads its merge base with main there,
+            # exiting 2 (cannot evaluate) when no main ref resolves. So the fresh repository must name its
+            # branch main (git -c init.defaultBranch=main init): a probe of refs/heads/main in it exits 0, no
+            # finding. The flip moves the same fresh repository's branch off main first (git branch -m, as a
+            # bare `git init` under _fresh_git_env()'s empty config left it on master with git 2.53): the
+            # same probe then exits 1, one drift finding. It shows the row reads the branch name; it does not
+            # revert the init argv, which stays literal so the maintenance-pin scan resolves it.
+            fb = tmp / "fresh-branch"
+            _init(fb)
+            (fb / "marker.txt").write_text("one commit\n", encoding="utf-8")
+            _commit(fb, "one commit")
+            fb_sha = subprocess.run(["git", "-C", str(fb), "rev-parse", "HEAD"],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+            fb_probe = ["git", "rev-parse", "--verify", "--quiet", "--end-of-options", "refs/heads/main^{commit}"]
+            fb_move = ["git", "branch", "-m", "aiqt-not-main"]
+
+            def _fresh_branch_findings(commands):
+                try:
+                    return _materialized_check(fb, fb_sha, lambda _co: commands, "fresh-branch")
+                except GateError as exc:
+                    return ["GateError: {}".format(exc)]
+            fb_got = _fresh_branch_findings([fb_probe])
+            if fb_got:
+                failures.append("(fresh-branch) the reproduce step's fresh repository must name its branch "
+                                "main, so a replayed generator that reads main finds it; the probe of "
+                                "refs/heads/main gave {}".format(fb_got))
+            fb_flip = _fresh_branch_findings([fb_move, fb_probe])
+            if fb_flip != ["fresh-branch drift: {!r} rc=1".format(" ".join(fb_probe))]:
+                failures.append("(fresh-branch flip) with the fresh repository's branch moved off main, the "
+                                "probe of refs/heads/main must exit 1 (one drift finding); got {}".format(fb_flip))
 
             # (round-4 finding 4) a first-pin candidate whose check_clauses --genesis is CANNOT-EVALUATE
             # (a corrupt inventory, child exit 2) must raise GateError -> exit 2, not append a finding. The
@@ -3096,7 +3139,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "check on every tagged/candidate manifest (round-4 finding 3), _show_bytes absent-vs-git-error "
               "(None vs GateError), a genesis run_pre_tag on a cut candidate auto-requiring first-pin evidence "
               "as its only finding and refusing the same tree reopened for development "
-              "exit 2, and a first-pin cannot-evaluate raising exit 2, all over "
+              "exit 2, the reproduce step's fresh repository holding refs/heads/main (one drift finding "
+              "with its branch moved off main), and a first-pin cannot-evaluate raising exit 2, all over "
               "RAW-materialized (no-worktree) candidate trees (round-4 finding 1); and the round-5 cases "
               "(dormancy needs zero tags AND zero rows with a lightweight/unrecorded tag flagged (finding "
               "2), a raw invalid-UTF-8 release tag exit 2 plus a _git_out decode boundary (finding 3), a "

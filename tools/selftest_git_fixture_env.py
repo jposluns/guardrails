@@ -5521,8 +5521,9 @@ _SCAN_ALLOWED_UNPINNED = (
      " materialized checkout; this entry covers ONLY that replayed-command launch - the"
      " checkout's own staging launches beside it are resolved and enforced by this scan,"
      " never absorbed here: the maintenance-capable add and commit argvs carry the three"
-     " F-367 pins as literal `-c` pairs in option position, and the bare `git init -q`"
-     " carries none (init is not maintenance-triggering)"),
+     " F-367 pins as literal `-c` pairs in option position, and the init (`git -c"
+     " init.defaultBranch=main init -q`, which names main) carries none (init is not"
+     " maintenance-triggering)"),
     ("tools/measure_hook_latency.py", "_sample", ("unresolved",),
      "cannot-evaluate head: the timing funnel launches the command each hooks.json PreToolUse"
      " entry declares (python3 running the dispatcher, or the self-test's stub dispatcher)"
