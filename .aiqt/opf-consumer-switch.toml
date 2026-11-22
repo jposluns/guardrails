@@ -426,6 +426,12 @@ disposition = "not-a-reader"
 reason = "Its mode reads are a file mode in a pin operation, not the registry's mode key."
 
 [[reader]]
+path = "tools/selftest_gate_record.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file only to copy it into the throwaway git fixtures it builds and run the gate-record recorder, verifiers and installer there; it reads no project record."
+
+[[reader]]
 path = "tools/selftest_git_fixture_env.py"
 records = ["none"]
 disposition = "not-a-reader"

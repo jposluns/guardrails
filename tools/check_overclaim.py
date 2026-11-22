@@ -427,8 +427,12 @@ THIRD_PARTY_TITLES = (
 # opf/spec/OPF-IMPLEMENTATION-PROMPT.md is rostered on the same ground: it is hand-authored, not
 # gensrc-registered, ships with the specification under opf/spec/, is linked from the hooks preview page,
 # and restates the specification's release identity and record integrity text for an implementer.
+# The git-side hooks manifest .aiqt/core/githooks/manifest.toml is rostered on the same ground as the gates
+# manifest: it is a hand-authored source (not a gensrc target) whose githook RESIDUE strings ship verbatim
+# into the ledger and the enforcement register, so it is scanned as raw text here too.
 REPO_PROSE_ROSTER = ("README.md", "INSTRUCTION-BUDGET.md", "SCOPE.md", "SYSTEM-HARDENING.md",
-                     "aiqt-barebones.md", ".aiqt/core/gates/manifest.toml", "opf/spec/OPF-SPEC.md",
+                     "aiqt-barebones.md", ".aiqt/core/gates/manifest.toml",
+                     ".aiqt/core/githooks/manifest.toml", "opf/spec/OPF-SPEC.md",
                      "opf/spec/OPF-IMPLEMENTATION-PROMPT.md")
 
 # (name, pattern, guard): guard is "" (none), "neg" (skip when a negator is in the pre-match clause
@@ -2989,6 +2993,17 @@ def _collector_self_test():
         f = _collect(r, [], set())
         if not any("opf/spec/OPF-IMPLEMENTATION-PROMPT.md" in x for x in f):
             failures.append("COLLECTOR: an overclaim appended to opf/spec/OPF-IMPLEMENTATION-PROMPT.md must be a finding")
+
+        # (b5) the roster covers the git-side hooks manifest (its githook residues ship verbatim): an
+        # overclaim appended to it is a finding with an EMPTY registry. MUTATION: dropping
+        # .aiqt/core/githooks/manifest.toml from REPO_PROSE_ROSTER leaves the file unscanned and this fails.
+        r = _make_root("githooks-roster")
+        (r / ".aiqt" / "core" / "githooks").mkdir(parents=True, exist_ok=True)
+        with (r / ".aiqt" / "core" / "githooks" / "manifest.toml").open("a", encoding="utf-8") as fh:
+            fh.write("The release is tamper-evident.\n")
+        f = _collect(r, [], set())
+        if not any(".aiqt/core/githooks/manifest.toml" in x for x in f):
+            failures.append("COLLECTOR: an overclaim appended to .aiqt/core/githooks/manifest.toml must be a finding")
 
         # (c) a registered file target absent -> _FailClosed.
         r = _make_root("absentfile")
