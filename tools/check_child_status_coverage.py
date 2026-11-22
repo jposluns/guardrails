@@ -562,6 +562,13 @@ DYNAMIC_LOADS_REVIEWED = (
      ("importlib.util.spec_from_file_location('_crosswalk_fdopen_flip_' + flip_path.stem, flip_path)",
       "spec.loader.exec_module(reverted)"),
      ("tools/gen_crosswalk.py",), "its own source with one writer flipped, loaded in its self-test"),
+    ("tools/nrd_differential.py",
+     ("importlib.util.spec_from_file_location(name, str(path))", "spec.loader.exec_module(module)"),
+     (),
+     "the core hook source or its plugin copy, and the fbdff942 hook module the operator passes (refused before "
+     "loading unless its sha256 is the pinned one), each loaded only to call its deliverable-exec scope scan "
+     "(_nrd_scope_scan and the lexer and _nrd_ helpers it calls, which launch no child process), never run as a "
+     "hook; both hook copies are entry points classified on their own, so the row follows nothing"),
 )
 
 CannotEvaluate = check_entry_guard.CannotEvaluate

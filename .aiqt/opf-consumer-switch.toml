@@ -52,6 +52,7 @@ yield_tools = "A list of tool names the yield guard scopes to, not a record path
 dispatch_tools = "A list of tool names the dispatch ledger guard scopes to, not a record path."
 review_dispatch = "The review dispatch binding object, not a record path."
 companion_stores = "The declared companion store roots the write guard admits, not a project record the switch would flip."
+deliverable_dirs = "The list of absolute deliverable directories (the draft staging and hand-back directories) the deliverable-exec guard scopes to, not a project record the switch would flip."
 
 [[detect.registry-use]]
 line-anchor = "        if not rec or len(rec) < 3:"
@@ -196,6 +197,24 @@ line-anchor = "    if reg_status != \"ok\" or not isinstance(reg, dict):"
 reason = "An isinstance test that reads no value."
 keys-read = []
 uses = ["isinstance(reg, dict)"]
+
+[[detect.registry-use]]
+line-anchor = "                malformed = \"the orchestration registry is unreadable: {}\".format(reg)"
+reason = "Here reg holds the registry read-error detail string (the status is \"bad\"), not the registry; formatting it reads no key."
+keys-read = []
+uses = ["\"the orchestration registry is unreadable: {}\".format(reg)"]
+
+[[detect.registry-use]]
+line-anchor = "        if _NRD_KEY not in reg:"
+reason = "A key-presence test (in) that reads no value; _NRD_KEY is the module constant \"deliverable_dirs\"."
+keys-read = []
+uses = ["_NRD_KEY not in reg"]
+
+[[detect.registry-use]]
+line-anchor = "        root_dirs = _nrd_dirs(reg.get(_NRD_KEY), root)"
+reason = "A .get read whose key is the module constant _NRD_KEY (bound once, to \"deliverable_dirs\", and rebound by nothing), which the accepted forms do not resolve; it reads that one key."
+keys-read = ["deliverable_dirs"]
+uses = ["reg.get"]
 
 [[reader]]
 path = "tools/aei_backlog_md.py"
@@ -418,6 +437,12 @@ path = "tools/migrate.py"
 records = ["none"]
 disposition = "not-a-reader"
 reason = "Its mode reads are a file mode in a migration operation, not the registry's mode key."
+
+[[reader]]
+path = "tools/nrd_differential.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file and its plugin copy only to import each and call the deliverable-exec guard's scope scan over a generated command corpus in a temporary fixture tree; it never reads an orchestration registry or a project record, and the scan finds no record name, registry key or record-path flag in it."
 
 [[reader]]
 path = "tools/pin.py"

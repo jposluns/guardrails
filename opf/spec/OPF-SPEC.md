@@ -656,20 +656,25 @@ conflicted store files and redo the authoring operation on that base, which clai
 afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
 only a store file whose bytes are not the canonical serialization of its content, such as one
 carrying comments or non-canonical formatting. The canonical serialization writes U+2028 LINE
-SEPARATOR and U+2029 PARAGRAPH SEPARATOR inside a string as the escapes `\u2028` and `\u2029`; a
-file that differs from it only by holding either character literally inside a basic string, as files
-written by earlier tooling do, still passes, reads back as the same values, and is re-spelled with
-the escapes by its next write. A write that would grow a store file past the store reader's size cap
+SEPARATOR, U+2029 PARAGRAPH SEPARATOR and U+00AD SOFT HYPHEN inside a string as six-character
+backslash-u escapes with uppercase hexadecimal digits; a file that differs from it only by holding
+any of these characters literally inside a basic string, as files written by earlier tooling do,
+still passes, reads back as the same values, and is re-spelled with the escapes by its next write.
+The allowance runs one way only: tooling from before the U+00AD escape reports a file that later
+tooling re-spelled with it as not in canonical form, so every system that writes one store needs to
+run the same tooling version. A write that would grow a store file past the store reader's size cap
 refuses instead, before anything is written, so an upgrade or record operation never rewrites a
 readable store into one the reader refuses. The `DECISIONS.toml` machine projection (section 10.5)
 takes the same re-spelling without a generator-version bump: a projection an earlier tool rendered
-from a record holding either character differs from the current render in exactly that spelling, and
-the byte-level view-drift gate reports it as drifted until one re-render re-spells it. A projection
-over records holding neither character renders byte-identically, so a store without these characters
-sees no drift. `opf doctor`, and the pre-commit hook that runs it, also refuses a machine-store TOML
-file that is not in canonical form, at every run rather than only before a write: such a file is a
-C-CONTAINMENT finding, with the same allowance for a literal U+2028 or U+2029. It leaves out a path
-under a valid `[unmanaged]` declaration (the containment walk grades the declaration, never the
+from a record holding any of these characters differs from the current render in exactly that
+spelling, and the byte-level view-drift gate reports it as drifted until one re-render re-spells it.
+Until then `opf doctor` reports a C-VIEW-DRIFT finding and `opf render --check` reports drift;
+`opf render --write`, or the re-render a record write performs, clears it. A projection over records
+holding none of these characters renders byte-identically, so a store without these characters sees
+no drift. `opf doctor`, and the pre-commit hook that runs it, also refuses a machine-store TOML file
+that is not in canonical form, at every run rather than only before a write: such a file is a
+C-CONTAINMENT finding, with the same allowance for a literal U+2028, U+2029 or U+00AD. It leaves out
+a path under a valid `[unmanaged]` declaration (the containment walk grades the declaration, never the
 files under it), the legacy import staging area, which the containment walk grades, and a file it
 cannot read or parse, which the check that reads it grades (except `init.toml`, which no other check
 reads, so an unreadable one cannot be evaluated and an unparseable one is a finding). During a

@@ -953,6 +953,7 @@ tools/internal-name-hashes.txt text eol=lf
 tools/leak-hashes.txt text eol=lf
 tools/measure_hook_latency.py text eol=lf
 tools/migrate.py text eol=lf
+tools/nrd_differential.py text eol=lf
 tools/og-cards/aiqt-og.html text eol=lf
 tools/og-cards/card.css text eol=lf
 tools/og-cards/opfiles-og.html text eol=lf
