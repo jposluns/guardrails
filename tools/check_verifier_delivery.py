@@ -26,7 +26,8 @@ with no numbered question, an unresolvable SHA or one that names no commit, a de
 closed shape below, a construct that can hide text from rendered view, a line that reads as an answer
 marker without being one, an unclosed fenced block, an indented code block, a line outside fenced
 blocks and blockquotes that holds a double quote mark (straight or curly) and is not of the certain
-quote shape below (unless a quote or an answer fails: then FAIL wins, see Output), more than
+quote shape below (unless a quote or an answer fails or a NO_VOTE rule applies: then FAIL or
+NO_VOTE wins, see Output), more than
 MAX_QUOTES quotes,
 a blob that does not hash to its id and every git failure are CANNOT_EVALUATE (exit 2), never a pass.
 
@@ -214,12 +215,17 @@ line); a hidden construct found only because a code span the bf7d72db reading ma
 here (by the autolink test below, on its line or earlier in its paragraph; one the bf7d72db code
 spans also leave visible is raised as before); and the head reading's own quote cap (LIMITS). The
 delivery's quotes and answers are checked first, a refused line's quotes included as two readings
-find them (below), and when one fails the result is FAIL (exit 1), its reasons listing the
-failures, then up to MAX_LISTED deferred refusals, so both are reported; when none fails it is
-CANNOT_EVALUATE naming the first deferred refusal, in line order (_raised_refusal). FAIL
-wins because a quote shown absent
-from the reviewed tree fails the delivery whatever else it holds; a refusal in its place would hide
-that failure behind "cannot evaluate". Neither result is a pass.
+find them (below), each reading's quotes held to the files that reading names, and when one fails
+the result is FAIL (exit 1), its reasons listing the failures, then up to MAX_LISTED deferred
+refusals, so both are reported; when none fails but a NO_VOTE rule applies (its answer count read
+as the bf7d72db reading reads the answers, which a head reading quote on a refused line never
+raises) the result is NO_VOTE (exit 1), its reasons listing the NO_VOTE reasons, then up to
+MAX_LISTED deferred refusals; only when neither applies is it CANNOT_EVALUATE naming the first
+deferred refusal, in line order (_raised_refusal). FAIL and NO_VOTE win because a deferred refusal
+is one bf7d72db did not raise, so it never turns that reading's FAIL or NO_VOTE (exit 1) into
+CANNOT_EVALUATE (exit 2): a quote shown absent from the reviewed tree fails the delivery whatever
+else it holds, and a refusal in its place would hide that failure, or that no vote, behind "cannot
+evaluate". No such result is a pass.
 
 The grammar read (a declared subset of Markdown, not a general parser; every scanner is linear in its
 line, with no backtracking pattern):
@@ -259,14 +265,19 @@ line, with no backtracking pattern):
     and the second closing-shaped only, with text between that is not blank, and no curly mark; or
     (c) one straight mark right after an ASCII digit 0-9 and not opening-shaped (an inch or seconds
     mark, _inch_mark, before a line end, whitespace, punctuation or a symbol), and no other mark.
-    Shape is _flanks, CommonMark's flanking read of a mark's two neighbours, so in (b) the first mark
-    follows a line start or whitespace, or punctuation or a symbol before a letter or digit ('("a'),
-    and the second precedes a line end or whitespace after a character that is no whitespace, or
-    precedes punctuation or a symbol after a letter or digit ('a",'). On such a line the quote is
+    Shape is _flanks, CommonMark's flanking read of a mark's two neighbours (_flank_kind: whitespace
+    or a line edge; punctuation or a symbol, Unicode P or S; or any other character, which is a
+    letter or a digit but also a format, control or combining character such as U+200B, U+00AD,
+    U+0001 or U+0301), so in (b) the first mark follows a line start or whitespace, or punctuation
+    or a symbol before any character that is not whitespace, punctuation or a symbol ('("a'), and
+    the second precedes a line end or whitespace after a character that is no whitespace, or
+    precedes punctuation or a symbol after any character that is not whitespace, punctuation or a
+    symbol ('a",'). On such a line the quote is
     the text between the pair (none for an inch mark), each pair closes on its own line, and no line
     of the shape ends on a straight mark that may open, so no mark pairs with one on another line.
   * Every other line holding a double quote mark is CANNOT_EVALUATE naming the line and its first
-    double quote mark with its column (unless a quote or an answer fails, see Output): refused by
+    double quote mark with its column (unless a quote or an answer fails or a NO_VOTE rule
+    applies, see Output): refused by
     construction, not by a list of ambiguous shapes, so a quote that breaks across lines, a line of
     several quotes and a quote beside a code span or an example are all refused (put a multi-line
     excerpt in a fenced block or a blockquote, and write one quote per line). A refused line's
@@ -275,8 +286,14 @@ line, with no backtracking pattern):
     outside a parenthetical example, "(e.g." or "(for example" up to and including the next ")", an
     opener with no ")" after it masking nothing and "(i.e." opening no example; a straight double
     quote right after an ASCII digit 0-9 opens nothing), and the bf7d72db reading
-    (_base_reading_quotes: every per-line code span and every example masked, a straight double
-    quote after any str.isdigit digit, a superscript included, opening nothing).
+    (_base_reading_spans: every per-line code span and every example masked, a straight double
+    quote after any str.isdigit digit, a superscript included, opening nothing). Each reading's
+    quotes are held to the files that reading names: the file references of an answer (or the
+    findings section) are read from its text with that reading's quote spans blanked, so a token a
+    head reading quote covers still binds the bf7d72db reading's quotes, and an absent reference
+    either reading names fails the answer. Each occurrence the bf7d72db reading finds is one of
+    its quotes (an occurrence of the same text the head reading also finds is checked once); an
+    occurrence only the head reading finds is that reading's own.
   * The brief's questions are its first run of column-0 numbered lines counting 1, 2, 3 and so on
     ("1.", "Q1:", "**2.**", "### 3)" and "Item 4." forms; after a line reading QUESTIONS: when the
     brief has one); a number out of sequence ends the run, so a later numbered list that restarts at 1
@@ -307,14 +324,17 @@ every "](") on the "](" run). Each reading decodes each distinct character refer
 so a line of one repeated reference costs one decode per reading and a line of distinct references
 one decode per reference; the link-target scan reads no "]" past the line's last ")" or "][", so a
 run of "](" with no ")" after it costs no destination read, while a run that does end in ")" is still
-read one "](" at a time. More than MAX_QUOTES quotes as the bf7d72db reading counts them (a
-refused line's _base_reading_quotes, any other line's own quotes) is CANNOT_EVALUATE, raised as
-there; beside them at most MAX_QUOTES quotes that only the head reading of refused lines finds are
-checked, any past that dropped with a deferred refusal, so at most twice MAX_QUOTES quotes are
-checked; each costs at most one pass over the tree's blobs, which are read into memory (bounded at
-MAX_TREE_BYTES) only when a quote needs a tree-wide search or a failure
-needs its diagnostic. The brief's question text is joined line by line, which is not linear in a very
-long question.
+read one "](" at a time. More than MAX_QUOTES quotes as the bf7d72db reading counts them (every
+occurrence of each line's _base_reading_quotes, and each fenced block and blockquote run) is
+CANNOT_EVALUATE, raised as there; beside them at most MAX_QUOTES quote occurrences that only the
+head reading of refused lines finds (counted occurrence by occurrence: an occurrence beyond the
+bf7d72db reading's occurrences of the same text on its line is the head reading's own, so a
+repeated text is never exempt) are checked, any past that dropped with a deferred refusal, so at
+most twice MAX_QUOTES quotes are checked (quotes_checked); each costs at most two passes over the
+tree's blobs (the second only for a quote of the bf7d72db reading on an item whose two readings
+name different files), which are read into memory (bounded at MAX_TREE_BYTES) only when a quote
+needs a tree-wide search or a failure needs its diagnostic. The brief's question text is joined
+line by line, which is not linear in a very long question.
 
 DISCLOSED RESIDUAL. C2 proves a quote EXISTS in a file the answer, its question or the findings section
 names at the pinned SHA, not that it supports the grade the verifier gave; a grade resting on an earlier
@@ -359,7 +379,10 @@ the tree; on a refused line both readings' quotes are held to the tree (the line
 quote or answer fails), so text between two straight double quotes that each follow a superscript or
 another script's digit ('x²"text x²"', no inch marks to the head reading), text inside a code span
 the head reading does not mask (where the backtick pairing is uncertain) and text that the
-bf7d72db reading pairs across a masked code span fail when absent from the tree; a quote between
+bf7d72db reading pairs across a masked code span fail when absent from the tree, a quote of the
+bf7d72db reading fails when absent from the files either reading names (each reading's names are
+read outside its own quote spans, so they differ only on a refused line), and an absent file
+reference either reading names fails the answer; a quote between
 backslash-escaped straight marks ('\\"return 0\\"', shown as "return 0") is read with the closing
 mark's backslash as its last character, so it fails though the tree holds the text shown (CommonMark
 escapes are not removed from inline quote text); a quote of the brief's own text is
@@ -373,7 +396,8 @@ rendered view is safe but whose text this grammar cannot prove safe: a "<" then 
 reference in marker form ("- Q2. missed"), a fence right after a blockquote line, a closing fence
 indented otherwise than its opening fence, a raw-HTML-shaped text inside a multi-line code span, a
 raw-HTML-shaped text inside a code span on a line holding a backtick inside a CommonMark autolink or
-later in its paragraph ('`<b>` sits by <https://x/`>', a deferred refusal: a failed quote wins), a
+later in its paragraph ('`<b>` sits by <https://x/`>', a deferred refusal: a failed quote or a
+NO_VOTE wins), a
 line outside fenced blocks and blockquotes holding a double quote mark that is not of the certain
 quote shape (the grammar above), which refuses many lines a reader pairs one way (an accepted
 over-refusal, the quote shape refusal): two or more quotes on one line ('"a" and "b"'); a quote
@@ -382,7 +406,9 @@ quote mark inside a code span ('`"`'), a stray backtick or a parenthetical examp
 reads "x"', '(e.g. a " mark)'); a quote that breaks across lines, a lone scare quote opened and
 never closed and a ditto mark; a first mark after a letter, a digit of any script or a mark ('x"
 "y"', 'r"(x)"' and other string prefixes, a mark after a superscript, subscript, fraction or CJK
-numeral such as 'x²"a x²"'); a closing mark after whitespace ('"    if "', a quote of code ending
+numeral such as 'x²"a x²"'); a mark beside a format, control or combining character (a genuine
+'"    return 0"' then U+200B, U+00AD, U+0001 or U+0301), which _flank_kind reads as it reads a
+letter, so the closing mark is shaped for both roles; a closing mark after whitespace ('"    if "', a quote of code ending
 in a space), a closing mark before a letter or digit ('"word"s') or between two punctuation marks
 or symbols ('"(see x)".'), an opening mark between two punctuation marks or symbols ('("(ready):")',
 whose closing mark is also between two), and an opening mark after punctuation before a space
@@ -459,9 +485,21 @@ FAILs and the genuine answers pass; its flip/ check restores the d3d06d0b autoli
 genuine delivery is CANNOT_EVALUATE), the deferred hidden-construct refusal (beside a real autolink
 holding a backtick, a fabricated quote FAILs with the raw HTML refusal listed and the genuine
 answers are CANNOT_EVALUATE; its flip/ check has the bf7d72db code spans mask nothing, so the
-refusal is raised in the FAIL's place), and the quote cap counted as the bf7d72db reading counts it
+refusal is raised in the FAIL's place), the quote cap counted as the bf7d72db reading counts it
 (with MAX_QUOTES at 5, five quotes of that reading and six that only the head reading finds, one of
-them dropped with a deferred refusal, FAIL on the fabricated quote; CANNOT_EVALUATE at d3d06d0b)),
+them dropped with a deferred refusal, FAIL on the fabricated quote; CANNOT_EVALUATE at d3d06d0b),
+the head reading's own quotes counted occurrence by occurrence (the f9c3161f review's finding 3:
+with MAX_QUOTES at 5, thirteen occurrences of one text the bf7d72db reading finds once check ten
+quotes, not seventeen), the bf7d72db reading's file names on a refused line (the review's finding
+4: a file name or an absent reference inside a quote only the head reading finds still binds the
+bf7d72db reading's quote, so each of three fixtures FAILs; its flip/ check reads the head
+reading's names alone, and each is CANNOT_EVALUATE), the NO_VOTE that wins over a deferred refusal
+(the review's finding 5: every answer UNVERIFIABLE beside a quote shape refusal or a deferred
+hidden construct, and an UNVERIFIABLE answer over a declared input beside a quote shape refusal,
+each NO_VOTE with the refusal listed; its flip/ check raises the refusal in the NO_VOTE's place)
+and the bf7d72db reading's answer count (a quote question answered only by a head reading quote
+is NO_VOTE; its flip/ check counts the head reading's quotes, and it is CANNOT_EVALUATE), and an
+over-refusal row of a mark beside a format character (a genuine quote then U+200B)),
 the closed shape (a heading inside a fence, the fence-close length and indentation, the harness's
 first and last lines, a WORKER_STATUS-prefixed line read as content), hidden text (raw HTML, inline
 code spans read across lines, the content of a fence indented four or more columns, link reference
@@ -532,6 +570,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import collections
 import hashlib
 import html
 import html.entities
@@ -962,7 +1001,8 @@ def _code_masks(line, carried):
 def _base_code_masks(line, carried):
     """_code_masks as bf7d72db read it, with no autolink test: the code spans the bf7d72db
     hidden-construct scan masked. The parser reads it only to tell whether a hidden-construct
-    refusal is one bf7d72db raised too; one it did not raise is deferred, so a FAIL wins."""
+    refusal is one bf7d72db raised too; one it did not raise is deferred, so a FAIL or a NO_VOTE
+    wins."""
     if "`" not in line:
         return [], carried
     if carried or "\\`" in line:
@@ -1363,7 +1403,8 @@ def _inch_mark(text, at):
 
 def _flank_kind(char):
     """0 for a line edge ("") or whitespace, 1 for punctuation or a symbol (Unicode P or S), 2 for any
-    other character (a letter, a digit, a masked character)."""
+    other character (a letter, a digit, a masked character, and also a format, control or combining
+    character such as U+200B, U+00AD, U+0001 or U+0301)."""
     if not char or char.isspace():
         return 0
     return 1 if unicodedata.category(char)[0] in "PS" else 2
@@ -1428,13 +1469,24 @@ def _inline_quote_spans(line, code, inch=None):
     return spans
 
 
-def _base_reading_quotes(line):
-    """The double-quoted texts of one line as the bf7d72db scan read them: every per-line code span
-    (_code_spans, whether or not the paragraph's backtick pairing is sure) and every example masked,
-    and a straight double quote after any str.isdigit character (_any_digit_mark) taken as an inch
-    mark. Read only on a line _quote_shape_refusal refuses, beside the head reading, so a quote
-    either reading finds absent from the tree still FAILs the delivery: never weaker than either."""
-    return _inline_quotes(line, _inline_quote_spans(line, _code_spans(line), _any_digit_mark))
+def _base_reading_spans(line):
+    """(start, end) of each double-quoted span of one line as the bf7d72db scan read them: every
+    per-line code span (_code_spans, whether or not the paragraph's backtick pairing is sure) and every
+    example masked, and a straight double quote after any str.isdigit character (_any_digit_mark)
+    taken as an inch mark. The parser reads it on every line beside the head reading: its quotes
+    (_base_reading_quotes) are checked and counted as bf7d72db counted them, and the line with these
+    spans blanked is the text whose tokens name files for that reading (_names_text), so a quote
+    either reading finds absent from the files its own reading names still FAILs the delivery:
+    never weaker than either. On a line of the certain quote shape the two readings agree."""
+    if not any(opener in line for opener, _ in INLINE_QUOTE_PAIRS):
+        return []
+    return _inline_quote_spans(line, _code_spans(line), _any_digit_mark)
+
+
+def _base_reading_quotes(line, spans=None):
+    """The double-quoted texts of one line as the bf7d72db scan read them (_base_reading_spans, or
+    spans when given)."""
+    return _inline_quotes(line, _base_reading_spans(line) if spans is None else spans)
 
 
 def _quote_shape_refusal(line):
@@ -1450,7 +1502,8 @@ def _quote_shape_refusal(line):
     ends on a straight mark that may open, so none pairs with a mark on another line, and the scan's
     one pairing (_inline_quote_spans) is the reader's. Every other such line is refused, by
     construction rather than by a list of ambiguous shapes: the parser records the refusal and
-    evaluate raises it unless a quote or an answer failed (_raised_refusal). Linear in the line."""
+    evaluate raises it unless a quote or an answer failed or a NO_VOTE rule applies
+    (_raised_refusal). Linear in the line."""
     straight, left, right = line.count('"'), line.count("\u201c"), line.count("\u201d")
     if not straight + left + right:
         return None
@@ -1799,7 +1852,7 @@ def _indented_code_start(previous, line):
 
 def _new_item(number, line, heading, kind="item"):
     return {"item": number, "line": line, "heading": heading, "body": [], "quotes": [], "kind": kind,
-            "names_text": []}
+            "names_text": [], "base_names_text": []}
 
 
 def _names_text(line, spans):
@@ -1870,7 +1923,10 @@ def _parse_delivery(lines, question_count):
     quotes under the head reading and the bf7d72db reading (_base_reading_quotes) are added for
     checking; a hidden construct that the bf7d72db code spans (_base_code_masks) mask; and quotes past
     the head reading's own cap. Their texts are recorded in the fourth value, in line order, and
-    evaluate raises the first unless a quote or an answer failed (_raised_refusal)."""
+    evaluate raises the first unless a quote or an answer failed or a NO_VOTE rule applies
+    (_raised_refusal). Each inline quote is marked "base" when it is an occurrence the bf7d72db
+    reading finds, and each item keeps the text naming files under each reading ("names_text" with
+    the head reading's quote spans blanked, "base_names_text" with the bf7d72db reading's)."""
     last = next((number for number, text in reversed(lines) if text.strip()), None)
     answers, sections = [], []
     current = None
@@ -1915,15 +1971,17 @@ def _parse_delivery(lines, question_count):
     segments = _segments(lines, strict=True)
 
     def tally(found):
-        # The quote cap counts the quotes the bf7d72db reading finds (a refused line's
-        # _base_reading_quotes, any other line's own quotes, which the two readings share), as
+        # The quote cap counts the quotes the bf7d72db reading finds (each line's
+        # _base_reading_quotes, every occurrence, and each fenced block and blockquote run), as
         # bf7d72db counted them, so it is raised where bf7d72db raised it and nowhere else.
         count[0] += found
         if count[0] > MAX_QUOTES:
             raise CannotEvaluate("the delivery carries more than {} quotes; it is not evaluated".format(MAX_QUOTES))
 
     def add(quote):
+        # a fenced block or a blockquote run: one quote both readings find
         tally(1)
+        quote["base"] = True
         current["quotes"].append(quote)
 
     def flush():
@@ -2010,6 +2068,9 @@ def _parse_delivery(lines, question_count):
         head = ANSWER_HEAD_RE.match(payload) if payload.startswith("Q") else None
         value = _verdict_of(payload)
         spans = _inline_quote_spans(payload, masks)
+        # The bf7d72db reading's spans: its quotes are checked beside the head reading's, and its
+        # file names (the line with these spans blanked) bind those quotes as they bound them there.
+        base_spans = _base_reading_spans(payload)
         if head:
             if phase == "findings":
                 refuse(number, "an answer heading inside the findings section")
@@ -2019,6 +2080,7 @@ def _parse_delivery(lines, question_count):
                 refuse(number, "answer heading {} where Q{}. is expected".format(head.group(0), expected))
             current = _new_item(expected, number, payload)
             current["names_text"].append(_names_text(payload, spans)[head.end():])
+            current["base_names_text"].append(_names_text(payload, base_spans)[head.end():])
             answers.append(current)
             expected += 1
         elif value is not None or _is_findings_heading(payload) or payload.rstrip(" \t") == COMPLETE_LINE:
@@ -2048,34 +2110,40 @@ def _parse_delivery(lines, question_count):
         else:
             current["body"].append(payload)
             current["names_text"].append(_names_text(payload, spans))
+            current["base_names_text"].append(_names_text(payload, base_spans))
         # A line holding a double quote mark is read for quotes only when it has the certain quote
         # shape; any other such line is refused at the line (fail closed), never passed on one
         # reading. The refusal is recorded, not raised here, so the quotes the line holds under the
         # head reading and the bf7d72db reading are still checked: evaluate raises the refusal
-        # unless a quote or an answer failed, and then lists it among the FAIL reasons.
-        texts = _inline_quotes(payload, spans)
-        found = texts
+        # unless a quote or an answer failed or a NO_VOTE rule applies, and then lists it.
         why = _quote_shape_refusal(payload)
         if why:
             unread_lines.append(refusal(number, _quote_line_refusal(payload, why)))
-            found = _base_reading_quotes(payload)
-            seen = set(texts)
-            texts = texts + [text for text in found if not (text in seen or seen.add(text))]
+        found = _base_reading_quotes(payload, base_spans)
         tally(len(found))
-        # A quote only the head reading finds (on a refused line) is checked up to a cap of its own,
-        # so those quotes cost a bounded number of tree passes; past it they are dropped and a refusal
-        # recorded, never raised in place of a FAIL the bf7d72db reading's quotes give.
-        shared = set(found)
-        for text in texts:
-            if text not in shared:
-                if head_only[0] == MAX_QUOTES:
-                    unread_lines.append(refusal(number, "more than {} quotes only the head reading of refused "
-                                                        "lines finds; the rest are not checked".format(MAX_QUOTES)))
-                if head_only[0] >= MAX_QUOTES:
-                    head_only[0] += 1
-                    continue
-                head_only[0] += 1
-            current["quotes"].append({"kind": "inline", "line": number, "text": text})
+        # Each occurrence the bf7d72db reading finds is checked once, as there (marked "base": its
+        # files are those that reading names); a head reading occurrence beyond those (only on a
+        # refused line, the readings agreeing on any other) is the head reading's own, matched
+        # occurrence by occurrence so a repeated text is never taken as shared, and checked up to a
+        # cap of its own: past it they are dropped and a refusal recorded, never raised in place of
+        # a FAIL or a NO_VOTE the bf7d72db reading's quotes give. So at most MAX_QUOTES quotes of
+        # each kind are checked.
+        unmatched = collections.Counter(found)
+        for text in _inline_quotes(payload, spans):
+            if unmatched[text]:
+                unmatched[text] -= 1
+                current["quotes"].append({"kind": "inline", "line": number, "text": text, "base": True})
+                continue
+            if head_only[0] == MAX_QUOTES:
+                unread_lines.append(refusal(number, "more than {} quotes only the head reading of refused "
+                                                    "lines finds; the rest are not checked".format(MAX_QUOTES)))
+            head_only[0] += 1
+            if head_only[0] <= MAX_QUOTES:
+                current["quotes"].append({"kind": "inline", "line": number, "text": text, "base": False})
+        for text in found:
+            if unmatched[text]:
+                unmatched[text] -= 1
+                current["quotes"].append({"kind": "inline", "line": number, "text": text, "base": True})
     flush()
     end = lines[-1][0] if lines else 1
     if expected <= question_count:
@@ -2207,27 +2275,30 @@ def _basename_bindings(token, tree):
     return sorted(tree.by_basename.get(token, ()), key=lambda path: ("/" in path, path))
 
 
-def _answer_names(item, tree):
-    """The files an answer names anywhere in its own text (its QN. line and body, outside quotes)."""
-    return _named_paths("\n".join(item["names_text"]), tree)
+def _answer_names(item, tree, key="names_text"):
+    """The files an answer names anywhere in its own text (its QN. line and body, outside quotes as
+    the reading key names them: "names_text" the head reading's, "base_names_text" bf7d72db's)."""
+    return _named_paths("\n".join(item[key]), tree)
 
 
-def _findings_names(section, tree):
-    """The files the findings section names anywhere in its text, outside quotes."""
-    return _named_paths("\n".join(section["names_text"]), tree)
+def _findings_names(section, tree, key="names_text"):
+    """The files the findings section names anywhere in its text, outside quotes (key as above)."""
+    return _named_paths("\n".join(section[key]), tree)
 
 
-def _quote_targets(item, questions, tree):
+def _quote_targets(item, questions, tree, key="names_text"):
     """(files the item's quotes must match in, named files absent from the tree, what named them, the
-    answer's own absent file references that its question does not name). An answer that names a
-    file binds to the files it names, never to the whole tree; one that names none binds to its
-    question's files; the whole tree only when neither names a file."""
+    answer's own absent file references that its question does not name), read from the item's text
+    outside the quotes of one reading (key: "names_text" for the head reading, "base_names_text"
+    for the bf7d72db reading). An answer that names a file binds to the files it names, never to the
+    whole tree; one that names none binds to its question's files; the whole tree only when neither
+    names a file."""
     if item["kind"] == "verdict":
         return [], [], "none (the VERDICT line)", []
     if item["kind"] == "finding":
-        found, unresolved = _findings_names(item, tree)
+        found, unresolved = _findings_names(item, tree, key)
         return (found, unresolved, "findings section", []) if found or unresolved else ([], [], "none", [])
-    found, unresolved = _answer_names(item, tree)
+    found, unresolved = _answer_names(item, tree, key)
     question = questions.get(item["item"])
     asked = _named_paths(question["text"], tree) if question is not None else ([], [])
     if found or unresolved:
@@ -2466,15 +2537,25 @@ def _rule_unread_input(verdict, answers, inputs):
 # Evaluation
 # ---------------------------------------------------------------------------------------------------
 
-def _raised_refusal(unread_lines, failures):
+def _base_view(item):
+    """item as the bf7d72db reading reads it, for its answer state: only the quotes that reading
+    finds (quote["base"]), the head reading's own quotes on refused lines left out, so an answer
+    that only a head reading quote answers is unanswered there, as it was at bf7d72db."""
+    return dict(item, quotes=[quote for quote in item["quotes"] if quote["base"]])
+
+
+def _raised_refusal(unread_lines, outranking):
     """The deferred refusal evaluate raises as CANNOT_EVALUATE (the first of unread_lines, which
     _parse_delivery recorded in line order: quote shape refusals, hidden constructs only the
-    autolink test unmasks, and the head reading's quote cap), or None: None whenever a quote or an answer failed (failures), so
-    a FAIL wins and lists the refusals among its reasons. Either result keeps the delivery from
-    passing; FAIL wins because it is the stronger finding: a quote shown absent from the reviewed tree
-    is a failed delivery whatever else the delivery holds, and a refusal raised in its place would
-    report the delivery as unreadable and hide that failure."""
-    return unread_lines[0] if unread_lines and not failures else None
+    autolink test unmasks, and the head reading's quote cap), or None: None whenever a quote or an
+    answer failed or a NO_VOTE rule applies (outranking: the failures, then the NO_VOTE reasons), so a
+    FAIL or a NO_VOTE wins and lists the refusals among its reasons. Every result keeps the delivery
+    from passing; FAIL and NO_VOTE win because a deferred refusal is one bf7d72db did not raise, so it
+    must not turn that reading's FAIL or NO_VOTE (exit 1) into CANNOT_EVALUATE (exit 2): a quote shown
+    absent from the reviewed tree is a failed delivery whatever else the delivery holds, and a verdict
+    with no answered item, or a clean verdict over an unread declared input, is no vote; a refusal
+    raised in its place would report the delivery as unreadable and hide that finding."""
+    return unread_lines[0] if unread_lines and not outranking else None
 
 
 def evaluate(brief_path, delivery_path, repo):
@@ -2499,6 +2580,13 @@ def evaluate(brief_path, delivery_path, repo):
         failures = []
         for item in items + sections + [verdict_line]:
             targets, unresolved, named_by, stray = _quote_targets(item, by_number, tree)
+            # The files the bf7d72db reading names (its quote spans blanked, not the head reading's)
+            # differ only on a refused line; then that reading's quotes are also held to them, and
+            # its absent references also fail, so a binding that reading had is never dropped.
+            base_targets = None
+            if item["base_names_text"] != item["names_text"]:
+                base_targets = _quote_targets(item, by_number, tree, "base_names_text")
+                stray = stray + [name for name in base_targets[3] if name not in stray]
             unverifiable = bool(UNVERIFIABLE_RE.search("\n".join([item["heading"]] + item["body"])))
             item["unverifiable"] = unverifiable
             if stray:
@@ -2509,6 +2597,10 @@ def evaluate(brief_path, delivery_path, repo):
             results = []
             for quote in item["quotes"]:
                 result = _check_quote(tree, quote, targets, unresolved, named_by, diagnose=len(failures) < MAX_LISTED)
+                if result["ok"] and quote["base"] and base_targets is not None:
+                    result = _check_quote(tree, quote, base_targets[0], base_targets[1],
+                                          base_targets[2] + " (the bf7d72db reading's file names)",
+                                          diagnose=len(failures) < MAX_LISTED)
                 results.append(result)
                 if not result["ok"]:
                     failures.append("{} line {} {} quote: {}".format(
@@ -2516,8 +2608,13 @@ def evaluate(brief_path, delivery_path, repo):
                         result["line"], result["kind"], result["reason"]))
             state = None
             if item["kind"] == "item":
-                state = _answer_state(item, by_number.get(item["item"]), tree)
+                question = by_number.get(item["item"])
+                state = _answer_state(item, question, tree)
                 item["state"] = state
+                # the answer state as the bf7d72db reading reads the item (its quotes only)
+                base_view = _base_view(item)
+                item["base_state"] = (state if len(base_view["quotes"]) == len(item["quotes"])
+                                      else _answer_state(base_view, question, tree))
             if item["kind"] == "item" or results:
                 report["items"].append({"item": item["item"] if item["kind"] == "item" else item["kind"],
                                         "line": item["line"], "heading": item["heading"][:400],
@@ -2525,22 +2622,32 @@ def evaluate(brief_path, delivery_path, repo):
                                         "answer": state, "absent_references": stray[:MAX_LISTED], "quotes": results})
             report["quotes_checked"] += len(results)
             report["quotes_failed"] += sum(1 for result in results if not result["ok"])
-        # A deferred refusal (_parse_delivery) is CANNOT_EVALUATE unless a quote or answer failed:
-        # a FAIL wins, and the refusal is listed among its reasons, so both are reported.
-        raised = _raised_refusal(unread_lines, failures)
+        delivery_verdict = _verdict_value(verdict_line["value"])
+        total = len(questions)
+        answered = sum(1 for item in items if item["state"] == "answered")
+        # The bf7d72db reading answers no more items than the head reading (its quotes are a part of
+        # the head reading's), so its count decides the no-answer rule: an answer only a head reading
+        # quote answers, on a refused line, never lifts a NO_VOTE the bf7d72db reading gives.
+        base_answered = sum(1 for item in items if item["base_state"] == "answered")
+        all_unverifiable = _rule_all_unverifiable(delivery_verdict, base_answered, total)
+        if all_unverifiable and base_answered != answered:
+            all_unverifiable += (" (as the bf7d72db reading of a refused line reads the answers; the head reading "
+                                 "answers {}/{})".format(answered, total))
+        no_vote = [reason for reason in (all_unverifiable, _rule_unread_input(delivery_verdict, items, inputs))
+                   if reason]
+        # A deferred refusal (_parse_delivery) is CANNOT_EVALUATE unless a quote or answer failed or
+        # a NO_VOTE rule applies: a FAIL or a NO_VOTE wins, and the refusal is listed among its
+        # reasons, so both are reported.
+        raised = _raised_refusal(unread_lines, failures + no_vote)
         if raised:
             raise CannotEvaluate(raised)
     except CannotEvaluate as exc:
         report["verdict"] = "CANNOT_EVALUATE"
         report["reasons"].append(str(exc))
         return report, 2
-    report["delivery_verdict"] = _verdict_value(verdict_line["value"])
+    report["delivery_verdict"] = delivery_verdict
     report["clean"] = report["delivery_verdict"] == CLEAN_VERDICT
-    total = len(questions)
-    answered = sum(1 for item in items if item["state"] == "answered")
     report["coverage"] = {"answered": answered, "total": total, "text": "{}/{}".format(answered, total)}
-    no_vote = [reason for reason in (_rule_all_unverifiable(report["delivery_verdict"], answered, total),
-                                     _rule_unread_input(report["delivery_verdict"], items, inputs)) if reason]
     if failures:
         report["verdict"] = "FAIL"
         report["reasons"] = failures + ["also refused (CANNOT_EVALUATE had nothing failed): " + reason
@@ -2548,7 +2655,8 @@ def evaluate(brief_path, delivery_path, repo):
         return report, 1
     if no_vote:
         report["verdict"] = "NO_VOTE"
-        report["reasons"] = no_vote
+        report["reasons"] = no_vote + ["also refused (CANNOT_EVALUATE had no NO_VOTE rule applied): " + reason
+                                       for reason in unread_lines[:MAX_LISTED]]
         return report, 1
     report["verdict"] = "PASS"
     return report, 0
@@ -2583,6 +2691,10 @@ FIXTURE_FILES = {
     "docs/marks.md": "Use `a` or `b` or `c`.\nPlot x² or y².\nNest “ a “ b ” c ” here.\n",
     "docs/encoded.md": "QA&#45;COMPLETE\nfinal = verdict(x)\n[QA-COMPLETE]: https://example.invalid\n"
                        "[VERDICT: HOLD]: https://example.invalid\n[VE<y>R<DICT]:z>\n",
+    # Binding fixtures: texts a head reading quote holds (a file name inside it), so only the file
+    # names each reading reads outside its own quotes tell the two bindings apart.
+    "docs/binding.md": "Names docs/gamma.md x² and docs/retired.md x² inline.\nTicks: ` docs/gamma.md ` here.\n"
+                       "The bound sentence.\n",
     "VERSION": "0.0.1-fixture\n",
 }
 BRIEF_MIXED = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
@@ -2614,6 +2726,8 @@ BRIEF_QUOTE_TWO = ("Synthetic review brief.\nBRIEF-PIN: {pin}\n\n"
 BRIEF_ABSENT_ASKED = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Does docs/retired/alpha.md still exist?\n"
 BRIEF_VERSION = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the VERSION line as written.\n"
 BRIEF_BARE_ABSENT = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the first rule from alpha_old.md.\n"
+BRIEF_BINDING = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the bound sentence from docs/binding.md.\n"
+BRIEF_PLOT = "Synthetic review brief.\nBRIEF-PIN: {pin}\n\n1. Quote the plot line from docs/marks.md.\n"
 # question 3 names an input outside the repository, so an answer naming it is no absent reference of its own
 BRIEF_INPUT = BRIEF_MIXED.replace("3. Quote the sentence in docs/gamma.md.", "3. Quote the sentence in /abs/in.md.")
 BRIEF_INPUT_DECLARED = BRIEF_INPUT.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: /abs/in.md\n")
@@ -3527,6 +3641,68 @@ def _self_test_cases(fx):
                               + '\nIt reads "return FABRICATED" in src/beta.py.'})
     check("c2/quote-cap-counts-base-reading-fails", refusal(_patched("MAX_QUOTES", 5, lambda: fx.run(over_cap)),
                                                             "more than 5 quotes only the head reading"), ("FAIL", True))
+    # The f9c3161f review's finding 3: a head reading occurrence of a text the bf7d72db reading also
+    # finds on its line is matched occurrence by occurrence, so of thirteen copies of one text (twelve
+    # in code spans, one bare, which the bf7d72db reading finds once) one is that reading's and twelve
+    # the head reading's own: with MAX_QUOTES at 5, ten quotes are checked (at most twice MAX_QUOTES),
+    # where f9c3161f took every copy as shared and checked seventeen.
+    repeated = _mixed(sha, {4: A4 + "\nThe guard `if\n" + '`"    return 0"` ' * 12 + '"    return 0" ends it.'})
+    report = _patched("MAX_QUOTES", 5, lambda: fx.run(repeated))
+    check("c2/quote-cap-counts-every-occurrence-cannot-evaluate",
+          (verdict(report), report["quotes_checked"], report["quotes_checked"] <= 2 * 5), ("CANNOT_EVALUATE", 10, True))
+    # The f9c3161f review's finding 4: on a refused line, a token inside a quote only the head reading
+    # finds still names a file for the bf7d72db reading, whose quote is held to it as at bf7d72db, so a
+    # quote absent from that file, or an absent file that reading names, FAILs, the refusal listed.
+    # Each was CANNOT_EVALUATE at f9c3161f, the quote bound to the question's file alone.
+    binding_answers = ('Q1. x²"docs/gamma.md x²" says "The bound sentence."',
+                       'Q1. `"` docs/gamma.md "The bound sentence." `"` and \\` here.',
+                       'Q1. x²"docs/retired.md x²" says "The bound sentence."')
+
+    def binding_row(answer, words):
+        """(verdict, whether a reason names the answer's line with shape_words, whether one holds words)."""
+        delivery = _delivery(sha, answer)
+        report = fx.run(delivery, BRIEF_BINDING)
+        reasons = " ".join(report["reasons"])
+        at_line = delivery.split("\n").index(answer) + 1
+        return verdict(report), "delivery line {}: {}".format(at_line, shape_words) in reasons, words in reasons
+    check("c2/refused-line-base-file-name-binds-fails",
+          binding_row(binding_answers[0], "not verbatim in the named file docs/gamma.md"), ("FAIL", True, True))
+    check("c2/refused-line-base-file-name-in-code-span-binds-fails",
+          binding_row(binding_answers[1], "not verbatim in the named file docs/gamma.md"), ("FAIL", True, True))
+    check("c2/refused-line-base-absent-name-fails",
+          binding_row(binding_answers[2], "names docs/retired.md, absent from the pinned tree"), ("FAIL", True, True))
+    head_targets = _quote_targets
+    check("flip/c2-refused-line-base-file-names", tuple(verdict(_patched(
+        "_quote_targets", lambda item, questions, tree, key="names_text": head_targets(item, questions, tree),
+        lambda: fx.run(_delivery(sha, answer), BRIEF_BINDING))) for answer in binding_answers),
+        ("CANNOT_EVALUATE",) * 3)
+    # The f9c3161f review's finding 5: a NO_VOTE outranks a deferred refusal as a FAIL does (a
+    # deferred refusal is one bf7d72db did not raise, so it never turns that reading's NO_VOTE, exit
+    # 1, into CANNOT_EVALUATE, exit 2), the refusal listed. Each was CANNOT_EVALUATE at f9c3161f.
+    no_vote_deliveries = (
+        (_delivery(sha, *(_unverifiable(n) for n in range(1, 4)),
+                   'Q4. UNVERIFIABLE: the file could not be read; a stray " mark here.'), BRIEF_MIXED, shape_words),
+        (_mixed(sha, {3: A3_UNREAD, 4: A4 + '\nA stray " mark.'}), BRIEF_INPUT_DECLARED, shape_words),
+        (_delivery(sha, *(_unverifiable(n) for n in range(1, 5))).replace(
+            _unverifiable(4), _unverifiable(4) + "\n" + beside_autolink), BRIEF_MIXED, "raw HTML"))
+    no_vote_row = lambda index: refusal(fx.run(*no_vote_deliveries[index][:2]), no_vote_deliveries[index][2])
+    check("c1/all-unverifiable-beside-quote-refusal-no-vote", no_vote_row(0), ("NO_VOTE", True))
+    check("c1/declared-input-beside-quote-refusal-no-vote", no_vote_row(1), ("NO_VOTE", True))
+    check("c1/all-unverifiable-beside-hidden-construct-no-vote", no_vote_row(2), ("NO_VOTE", True))
+    check("flip/c1-no-vote-wins-over-deferred-refusal", tuple(verdict(_patched(
+        "_raised_refusal", lambda unread, outranking: unread[0] if unread else None,
+        lambda: fx.run(delivery, brief))) for delivery, brief, _ in no_vote_deliveries), ("CANNOT_EVALUATE",) * 3)
+    # A quote question answered only by a quote the head reading finds on a refused line is
+    # unanswered as the bf7d72db reading reads it, so the verdict over no answered item stays NO_VOTE
+    # (CANNOT_EVALUATE at f9c3161f); its flip/ check counts the head reading's quotes.
+    head_answered = _delivery(sha, 'Q1. docs/marks.md x²"Plot x² or y²" here.')
+    check("c1/head-reading-quote-only-answer-no-vote", refusal(fx.run(head_answered, BRIEF_PLOT), shape_words),
+          ("NO_VOTE", True))
+    check("flip/c1-base-reading-answer-state", verdict(_patched(
+        "_base_view", lambda item: item, lambda: fx.run(head_answered, BRIEF_PLOT))), "CANNOT_EVALUATE")
+    # An over-refusal: a closing mark before a format character (U+200B) is shaped for both roles.
+    check("c2/mark-beside-format-character-cannot-evaluate", verdict(fx.run(_mixed(sha, {
+        4: 'Q4. Yes: "    return 0"' + chr(0x200B) + ' ends beta().'}))), "CANNOT_EVALUATE")
     check("c2/code-span-quote-masked-cannot-evaluate", verdict(fx.run(
         _mixed(sha, {4: A4 + '\nThe guard `if` reads `"return FABRICATED` when not ready.'}))), "CANNOT_EVALUATE")
     # The certain shape is built, not a list of ambiguous shapes. In each fixture below a reader may
@@ -3607,7 +3783,7 @@ def _self_test_cases(fx):
     check("c2/quote-mark-after-superscript-digit-fails", base_row(
         'In src/beta.py and docs/marks.md x²" or "return FABRICATED" or y²" here.'), ("FAIL", True))
     check("flip/c2-refused-line-base-reading", tuple(verdict(_patched(
-        "_base_reading_quotes", lambda line: [], lambda: fx.run(delivery))) for delivery in base_deliveries),
+        "_base_reading_quotes", lambda line, spans=None: [], lambda: fx.run(delivery))) for delivery in base_deliveries),
         ("CANNOT_EVALUATE",) * len(base_deliveries))
     # Over-refusals of the certain shape, each a line a reader pairs one way: refused, never read
     # another way (two quotes on one line, a quote beside a code span or an example).
