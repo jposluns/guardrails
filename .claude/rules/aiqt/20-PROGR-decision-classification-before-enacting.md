@@ -13,9 +13,13 @@ map-iso-23894-broad: [A.2, B.4]
 
 # Decision classification before enacting
 
-Classify a decision before enacting it as yours (ACT), the maintainer's (ASK) or blocked (BLOCKED). Record the
-classification before acting on it. Before recording or sending an ASK, or telling anyone a matter is
-undecided or open, search every durable store by key terms: a maintainer ruling answers it and outranks any
-predicted one, but counts only in an artefact the maintainer controls and you cannot write; a notes log never
-settles it nor is skipped. If such rulings conflict the later recorded one governs or, if order is unclear,
-the ASK goes ahead.
+Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked
+(BLOCKED)? Record the classification before acting on it. Before an ASK goes to the maintainer or any
+procedure standing in for them, search the decision record for that subject: a maintainer ruling answers it
+and outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the
+assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
+unclear, the ASK goes ahead.
+Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or
+open, across every durable store by the subject's key terms, and cite each hit or dismiss it with a reason; a
+hit in a notes log that shows a maintainer ruling is cited as unconfirmed, since a notes log never settles a
+maintainer's matter on its own.

@@ -208,12 +208,24 @@
 #                        122548; managed block 360 and file headers 16263 unchanged. The ratchet rises by the
 #                        measured delta, 138734 + 437 = 139171, within the maintainer's authorization of
 #                        2026-11-08 for raises up to 148000.
+#                        Raised 139171 -> 139528 on 2026-11-22 under the maintainer's standing ruling of
+#                        2026-11-08 to raise the ratchet by exactly the measured delta, up to 148000, when
+#                        decision-classification-before-enacting kept its earlier text word for word and gained
+#                        its sentence that the decision-record search, and the same search before an ASK is
+#                        recorded or sent or a matter is called undecided or open, covers every durable store
+#                        by the subject's key terms, citing each hit or dismissing it with a reason, and that a
+#                        notes-log hit showing a maintainer ruling is cited as unconfirmed, since a notes log
+#                        never settles a maintainer's matter on its own (deccls.1 to deccls.3 restored,
+#                        deccls.4 added): measured PACK 139171 at the merge base 1666dfcb (also 139171 at
+#                        73d88b1f) -> 139528 (+357 units); rule files 122548 -> 122905; managed block 360 and
+#                        file headers 16263 unchanged. The ratchet rises by the measured delta,
+#                        139171 + 357 = 139528, within that ruling's limit of 148000.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 139171
+ratchet = 139528
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
