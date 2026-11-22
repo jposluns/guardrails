@@ -175,7 +175,7 @@ mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 [[rule]]
 corpus-id = "evgcmp"
 status = "enforced"
-mechanisms = ["gate:selftest-execution"]
+mechanisms = ["gate:selftest-execution", "hook:review-dispatch-pin"]
 
 [[rule]]
 corpus-id = "exauth"
