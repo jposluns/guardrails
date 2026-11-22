@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "4aba29f3b0677239a1de7c0ce6f8f07fe82228401ac53a0101a3da0181e97b33"
+tree-sha256 = "4eefbced2d0755585d407c5de53356fe9c0d34d7cf7c69e8af631f9ce2558556"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -72,18 +72,18 @@ sha256 = "f794d4c700f075431b73f317078b4a26948f6d234e222623db7dc5c94399a793"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
-bytes = 2749
-sha256 = "3198ad276944fc7035166b5168a96bfcd81fd26e8554f61d06b52b47b4ca038a"
+bytes = 2777
+sha256 = "7f2bc9acc98e102cea02d0b0f18384a31554221799611f968bcdfad7b4d2aced"
 
 [[sources]]
 path = ".aiqt/core/gates/canon-vectors/vectors.toml"
-bytes = 2146
-sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
+bytes = 2296
+sha256 = "7bd754409d0087a6e78f89d7c2a1c7cd1c158cd1055ec3b9c50193daf3bd9f2e"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 663989
-sha256 = "8d847119d7a8cb0d0b4ca88a705b720a52c0197d9679c5350cadb04e3be62294"
+bytes = 665284
+sha256 = "6de1bce324db8e9012ab811f77ccd8f39bfda1b8a767fec0e5e631b620dbf4e0"
 
 [[sources]]
 path = ".aiqt/core/githooks/manifest.toml"
@@ -3117,8 +3117,8 @@ sha256 = "a9a0875231ec264ebc2c9ad04d3ebb91fe63197b1a0f04fbca155ca225c43527"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
-bytes = 255363
-sha256 = "a223b1b47e786e58d74bf7ab4f72d1cef0822e774a32ef53f609ea3a5af1e105"
+bytes = 255492
+sha256 = "0747915e8b9aadf48fd15d3975f016a278985b235ebff4bedfb346c9cd4138a5"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
@@ -3137,13 +3137,13 @@ sha256 = "3323a9af51993fdf7080091dad5510bd6df26acb82c109c0624b05714a680dcd"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 195033
-sha256 = "c7ecbf9cc61529a604e627a0f0142dd2001656a7f3520fd4b1bb87db650c5942"
+bytes = 195513
+sha256 = "a482fa511fa4a1b1642d8d695fa3aefb8a3df7da84e8f3e1abf02a0c8018f35f"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
-bytes = 4690
-sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
+bytes = 5373
+sha256 = "4e704c01b84460fc19fbc6f137f1d18d50c855b0e606b57795453973ab066db6"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
@@ -3177,8 +3177,8 @@ sha256 = "2efb26e11dcc25049792ce7f0a2adaf4dccef94caa888390b69875f32983068a"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 1576165
-sha256 = "6f2b4c8a2e1c1ff20e2c7ac633e31380a3b4c01cbcbfc8629b0fff94657a16e0"
+bytes = 1580134
+sha256 = "2128ca4ecf551642a8bff0c0bfea7455f02ff556752e204d6539ca275222e9bc"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
@@ -3217,8 +3217,8 @@ sha256 = "46fc281172a82ade8fe5915f6b3a4db47e3929f05efef1ea4964bb97553b0e7d"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 914427
-sha256 = "c9348f32bce46de23199dbc2bdc65154a2156a71a8b0c54573e9a04f5c5baaaa"
+bytes = 921351
+sha256 = "3ba3531ff6586450d3b4b059e1546a4265f153d3280dc6c1ace781d27ba14bc8"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
@@ -3227,8 +3227,8 @@ sha256 = "164be3d565e77824f69d310ca1feeebd4711d4ea5fe215668ff8db8f91582eb1"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
-bytes = 330235
-sha256 = "1dd23ac7d372c50b6fc96f8b4c8260cc8c5550225827e26d0fc88568e7e2595a"
+bytes = 337679
+sha256 = "dd02e731301531bf94bb9ed230b21deb1c8c479b7ae06a23e928070fda7c1be5"
 
 [[sources]]
 path = "opf/tools/_opf_fuzz.py"
@@ -3302,8 +3302,8 @@ sha256 = "e71fe1d4f3c8a0d38039022336fcafaac16d22b248e1868e2856094ad8c4637c"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 369329
-sha256 = "fa88978ab5640cb65dce971e293b39cb571cd81a845415aee4afba36ef3fceb9"
+bytes = 369337
+sha256 = "5d9649b87c732c77317056fb4969a950edb6f404944d91abb4dcaebbca8ca5fc"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -3327,8 +3327,8 @@ sha256 = "029da13a6a0bdddf590bc19d4b09e5a6a358ac9e196a3e9a16aa65729ac65c6c"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 417115
-sha256 = "58000c1e689346dc15317752d04b54f00e7f3b03ab045643e019a41101effb6a"
+bytes = 420292
+sha256 = "47fb3575b78cb411eefb65e1544e4058f9755e92e5454bfe6545ec524874eab0"
 
 [[sources]]
 path = "opf/tools/_opf_worklog.py"
@@ -3517,8 +3517,8 @@ sha256 = "6ad4c80a38549a287e6f2f0fb913566c07a5f239c093995daed7f0a1fb8baaa1"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 747414
-sha256 = "b0fb31bb7eb31e616abd93e7cd531a1a77ab6e135d226caa6f18808df46b9faa"
+bytes = 747920
+sha256 = "40b6075d07f88da261a1087d67d1488bbebb9ae87b6b9ae6722639e9c69caf76"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
@@ -3552,8 +3552,8 @@ sha256 = "511af4986dccfa2d425c144b1a7c72a0d539548f43ca16e26e80683fb8c27ecd"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 647128
-sha256 = "dd031f0f75629c4eeca26d53edb56be8b660a70c2d313b2973632d5483c9c74d"
+bytes = 652081
+sha256 = "6a5fb931a3eceffe1923b5043fef3c5e8ae8347d12b3783e637893ad5f2227db"
 
 [[sources]]
 path = "opf/tools/check_opf_selftest_execution.py"
@@ -4277,8 +4277,8 @@ sha256 = "92153b428dcfcb12b60262e46bf382e87dcf7ccd60fdcff8b8e5333de0b229eb"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 49303
-sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
+bytes = 57918
+sha256 = "a0d089fcb48f7132a476a70e541b600d61535ec113f7322bfb10e6dbc8ff214f"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
@@ -4812,8 +4812,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 36730
-sha256 = "c37abd7d2a2451d5588012ddce9156fa988ee03a54cf19033fca15c726eee953"
+bytes = 36847
+sha256 = "f81ebbd0df4276ab300e2ef49cf411c9d5bb4b58712b21567874cd770fa34164"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4827,8 +4827,8 @@ sha256 = "7d1b7ea926570aa38d80823faf007a148ec659640b17eaf2579c4f471ca5bf58"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 334840
-sha256 = "0a4140d982856ff2bea0856dfbc447db3d5bbffa1fa8a8e76fb4e077d13746a5"
+bytes = 335555
+sha256 = "dc1f28aa38a2f8acc9b453981efd7f6923686ee6d2e818e63d30f6831ff229c9"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4892,8 +4892,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 29966
-sha256 = "e6772e2935b78c56eee653275a022211f116568484d93b6645434e3ebba9a972"
+bytes = 30109
+sha256 = "ccc1a165df30dc3574cbdcc2ef97de33429a0d85484abb81f37782f3cc43f41c"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

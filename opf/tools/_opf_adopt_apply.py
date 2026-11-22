@@ -440,7 +440,9 @@ import _opf_adopt_hook as hook  # noqa: E402
 import _opf_init_operation as init_op  # noqa: E402
 import _opf_store as store   # noqa: E402
 import _optlevel             # noqa: E402
-from _opf_emit import EmitError, _model_equal, emit_checked  # noqa: E402
+from _opf_emit import (  # noqa: E402
+    EmitError, _model_equal, emit_checked, matches_recorded_digest, matches_store_bytes,
+)
 
 KIND = "adoption"
 SESSION_ID = "opf-adopt"
@@ -6104,7 +6106,9 @@ def _canonical_model(rel, data):
     except EmitError as exc:
         raise AdoptApplyError("{!r} does not round-trip through the canonical emitter ({}); "
                               "fail-closed".format(rel, exc))
-    if canonical != data:
+    # A file an earlier emitter wrote (a literal U+2028, U+2029 or U+00AD inside a basic string) reproduces
+    # as the record writer accepts it (matches_store_bytes); the whole-file re-emit re-spells it.
+    if not matches_store_bytes(data, canonical):
         raise AdoptApplyError("{!r} is not in canonical new-document form (it carries comments or "
                               "non-canonical serialization); a whole-file re-emit could lose content, so "
                               "nothing is rewritten (fail-closed)".format(rel))
@@ -7479,7 +7483,9 @@ def _require_archived_once(ops, plan_doc):
 
 def _canonical_toml(data, label):
     """Parse `data` as TOML that is byte-identical to its own emit_checked rendering, or refuse: a frozen
-    artefact admits no second spelling (a comment, a reordering or a whitespace change is a hand edit)."""
+    artefact admits no second spelling (a comment, a reordering or a whitespace change is a hand edit). The
+    one exception is the spelling an earlier emitter froze, a literal U+2028, U+2029 or U+00AD inside a basic
+    string where the current emitter writes its escape (matches_store_bytes): the same model, never edited."""
     if not isinstance(data, bytes):
         raise AdoptApplyError("{} must be bytes".format(label))
     try:
@@ -7487,7 +7493,7 @@ def _canonical_toml(data, label):
         canonical = emit_checked(doc).encode("utf-8")
     except (ValueError, RecursionError, MemoryError, EmitError) as exc:   # UnicodeDecodeError, TOMLDecodeError included
         raise AdoptApplyError("{} is unreadable or malformed TOML ({}); fail-closed".format(label, exc))
-    if canonical != data:
+    if not matches_store_bytes(data, canonical):
         raise AdoptApplyError("{} is not in its canonical emitted form (a hand edit, comment or reordering); "
                               "only the exact frozen bytes are admitted (fail-closed)".format(label))
     return doc
@@ -7510,10 +7516,12 @@ def frozen_plan(plan_bytes):
     body = dict(doc)
     claimed = body.pop("plan_digest")
     try:
-        sealed = "sha256:" + _sha256(emit_checked(body).encode("utf-8"))
+        # The seal over the current spelling, or over the spelling an earlier emitter froze the plan in
+        # (matches_recorded_digest): the same model either way.
+        sealed = matches_recorded_digest(emit_checked(body), claimed)
     except EmitError as exc:
         raise AdoptApplyError("the adoption plan cannot be re-sealed ({}); fail-closed".format(exc))
-    if sealed != claimed:
+    if not sealed:
         raise AdoptApplyError("the adoption plan's plan_digest does not seal its own bytes (an edited plan); a "
                               "fresh plan with its own approval is the remedy (spec 14.1, fail-closed)")
     return doc
@@ -18072,6 +18080,8 @@ def _self_test_checks():
 
     _self_test_fence(check)
 
+    _self_test_earlier_spelling(check)
+
     if census:
         left_open = sorted(descriptors() - entry_descriptors)
         check("self-test-leaves-no-descriptor-open", not left_open,
@@ -19094,7 +19104,62 @@ def _self_test_outcome(failures, failure_details, checked, bound_expired, skippe
 
 # The self-test sections `--self-test-section NAME` runs alone, each a suite of _self_test_checks that builds
 # its own fixtures and takes only the check recorder.
-_SELF_TEST_SECTIONS = {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence}
+def _self_test_earlier_spelling(check):
+    """The three byte-reproduction sites that re-emit a parsed file (_canonical_model, _canonical_toml, and
+    frozen_plan's seal) accept the spelling an earlier emitter wrote, a literal U+00AD (and U+2028) inside a
+    basic string, as the record writer does (matches_store_bytes, matches_recorded_digest), and nothing
+    wider: another byte difference, or a seal over no emitter's spelling, still refuses. frozen_plan's
+    schema validation is stubbed VALID here so its seal leg is judged alone; the VALID canonical plan carries
+    no free-text field to hold the character."""
+    from types import SimpleNamespace
+    from unittest import mock
+    shy, ls = chr(0x00AD), chr(0x2028)
+
+    def spell_g1(data):     # the emitter between the separator and soft-hyphen escapes
+        return data.replace(b"\\u00AD", shy.encode("utf-8"))
+
+    def spell_g0(data):     # the emitter before the separator escape: all three literal
+        return spell_g1(data).replace(b"\\u2028", ls.encode("utf-8"))
+
+    def outcome(fn, *args):
+        try:
+            return fn(*args), None
+        except AdoptApplyError as exc:
+            return None, str(exc)
+
+    model = {"schema": 1, "note": "co" + shy + "op" + ls + "x"}
+    now = emit_checked(model).encode("utf-8")
+    for label, raw in (("current", now), ("before-soft-hyphen-escape", spell_g1(now)),
+                       ("before-separator-escape", spell_g0(now))):
+        check("earlier-spelling-canonical-model-" + label, outcome(_canonical_model, "f.toml", raw)[0] == model,
+              outcome(_canonical_model, "f.toml", raw))
+        check("earlier-spelling-canonical-toml-" + label, outcome(_canonical_toml, raw, "f")[0] == model,
+              outcome(_canonical_toml, raw, "f"))
+    edited = spell_g1(now).replace(b"note = ", b"note  = ")
+    check("earlier-spelling-canonical-model-other-byte-refused",
+          "canonical new-document form" in (outcome(_canonical_model, "f.toml", edited)[1] or ""))
+    check("earlier-spelling-canonical-toml-other-byte-refused",
+          "canonical emitted form" in (outcome(_canonical_toml, edited, "f")[1] or ""))
+
+    plan = dict(schema.canonical_plan(), product="co" + shy + "op")
+    body = dict(plan)
+    body.pop("plan_digest")
+    body_now = emit_checked(body).encode("utf-8")
+    valid = SimpleNamespace(status=store.VALID, findings=[])
+    with mock.patch.object(schema, "validate_plan", lambda doc: valid):
+        for label, spell in (("current", lambda d: d), ("before-soft-hyphen-escape", spell_g1)):
+            sealed = dict(plan, plan_digest="sha256:" + _sha256(spell(body_now)))
+            raw = spell(emit_checked(sealed).encode("utf-8"))
+            check("earlier-spelling-frozen-plan-" + label, outcome(frozen_plan, raw)[0] == sealed,
+                  outcome(frozen_plan, raw))
+        foreign = dict(plan, plan_digest="sha256:" + _sha256(spell_g1(body_now) + b"x"))
+        check("earlier-spelling-frozen-plan-foreign-seal-refused",
+              "does not seal its own bytes" in (outcome(frozen_plan, emit_checked(foreign).encode("utf-8"))[1]
+                                                 or ""))
+
+
+_SELF_TEST_SECTIONS = {"kill-matrix": _kill_matrix_self_test, "fence": _self_test_fence,
+                       "earlier-spelling": _self_test_earlier_spelling}
 
 
 def _self_test_section(name):
