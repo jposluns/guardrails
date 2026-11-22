@@ -458,7 +458,11 @@ def c_dispatch_null(d, bad):
 
 
 def c_report_hex(d, bad):
-    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_REPORT), "a1" * 31, None)
+    return _obj(d, bad, (2, org.F_LEGS, 0, org.F_REPORT), "a1" * 31, "a1" * 32)
+
+
+def c_complete_null_report(d, bad):
+    return _obj(d, bad, (3, org.F_LEGS, 0, org.F_REPORT), None, "a1" * 32)
 
 
 def c_bad_state(d, bad):
@@ -551,8 +555,16 @@ def c_followup_shape(d, bad):
     return _obj(d, bad, (3, org.F_GRADES, 1, org.F_FOLLOWUP), "", "ITEM-0051")
 
 
+def c_followup_own_item(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 1, org.F_FOLLOWUP), ITEM, "ITEM-0051")
+
+
 def c_source_empty(d, bad):
     return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE), "", "fam-a report, entry three")
+
+
+def c_source_whitespace(d, bad):
+    return _obj(d, bad, (3, org.F_GRADES, 0, org.F_SOURCE), "  　", "fam-a report, entry three")
 
 
 def c_source_control(d, bad):
@@ -588,6 +600,11 @@ def c_withdraw_ungraded(d, bad):
 
 def c_withdraw_basis(d, bad):
     return _extra_round(d, bad, _withdraw({org.F_ID: "F-7", org.F_BASIS: ""},
+                                          {org.F_ID: "F-7", org.F_BASIS: "duplicate of F-4"}))
+
+
+def c_withdraw_basis_whitespace(d, bad):
+    return _extra_round(d, bad, _withdraw({org.F_ID: "F-7", org.F_BASIS: " "},
                                           {org.F_ID: "F-7", org.F_BASIS: "duplicate of F-4"}))
 
 
@@ -697,6 +714,113 @@ def c_line_cap(d, bad):
         org.MAX_LINE_BYTES = old
 
 
+def _nest(depth):
+    """A JSON list nested depth levels deep, as text (built as text: the encoder itself recurses)."""
+    return "[" * depth + "]" * depth
+
+
+def _deep_schema(depth):
+    return lambda t: t.replace('"schema":"' + org.SCHEMA + '"', '"schema":' + _nest(depth), 1)
+
+
+def c_nested_deep(d, bad):
+    # 50,000 levels: under the line cap and the decoder's own limit, and deep enough that quoting the
+    # value with plain repr in a reason overflowed the stack.
+    return _edit(d, bad, 0, _deep_schema(50000))
+
+
+def c_nested_past_decoder(d, bad):
+    # 500,000 levels (1,000,000 bytes, under the 1 MiB line cap): past the decoder's own recursion limit
+    # where it has one; refused either way.
+    return _edit(d, bad, 0, _deep_schema(500000))
+
+
+def c_nested_bound(d, bad):
+    # One level past MAX_DEPTH, inside a grade's impact (the line is level one, grades two, the grade
+    # three, impact four), so the depth rule, not a later field rule, names the refusal.
+    value = _nest(org.MAX_DEPTH - 3)
+    return _edit(d, bad, 3, lambda t: t.replace('"verdict_change":false', '"verdict_change":' + value, 1))
+
+
+def _cli_framed(argv):
+    """main(argv) in process, judged on its framing: ("ok", object) for exit 0 with one VALID object then
+    one line and an empty stderr; ("cannot", reason) for exit 2 with one CANNOT_EVALUATE object then one
+    line and one stderr line; ("unframed", outputs) otherwise."""
+    code, out, err = _cli(argv)
+    rows = out.split("\n")
+    try:
+        head = json.loads(rows[0])
+    except ValueError:
+        head = None
+    framed = len(rows) == 3 and rows[2] == "" and isinstance(head, dict) and out.isascii() and err.isascii()
+    if framed and code == 0 and err == "" and head.get("decision") == "VALID":
+        return "ok", head
+    if (framed and code == 2 and head.get("decision") == "CANNOT_EVALUATE"
+            and rows[1].startswith("CANNOT_EVALUATE ") and err.startswith("CANNOT EVALUATE: ")
+            and err.count("\n") == 1 and err.endswith("\n")):
+        return "cannot", head.get("reason", "")
+    return "unframed", (code, out[:300], err[:300])
+
+
+def c_cli_deep(d, bad):
+    lines = _lines(_golden(), edit={0: _deep_schema(50000)} if bad else None)
+    return _cli_framed(["validate", "--record", _write(d, lines)])
+
+
+def c_unexpected_error(d, bad):
+    path = _write(d, _lines(_golden()))
+    if not bad:
+        return _cli_framed(["validate", "--record", path])
+
+    def boom(*args, **kwargs):
+        raise RecursionError("synthetic overflow\nwith a second line")
+
+    saved = org.validate_record
+    org.validate_record = boom
+    try:
+        return _cli_framed(["validate", "--record", path])
+    finally:
+        org.validate_record = saved
+
+
+class _CountingDict(dict):
+    """A dict that counts how often it is iterated whole."""
+    iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+    def keys(self):
+        self.iterations += 1
+        return super().keys()
+
+
+def c_linear(d, bad):
+    """One round line checked against 4096 earlier grades: refused (bad, an id no grade covers) or valid
+    (flip, that id graded on the line), and either way the earlier grades are looked up, never copied,
+    so a line's cost does not grow with the record's length."""
+    graded = _CountingDict(("G-{}".format(n), "LOW") for n in range(org.MAX_ENTRIES))
+    graded["F-4"] = "HIGH"
+    grades = [] if bad else [_grade("F-40", "LOW", "fam-a report, entry two")]
+    obj = {org.F_SEQ: 4, org.F_PREV: org.ZERO_DIGEST}
+    obj.update(_r3([("F-4", "open"), ("F-40", "open")], [("F-4", "open")], grades))
+    try:
+        got = "ok", org._check_round(obj, "line 5", ITEM, frozenset({FAM_A, FAM_B}), graded, set(), (2, 1))
+    except org.CannotEvaluate as exc:
+        got = "cannot", str(exc)
+    if graded.iterations:
+        return "copied", "the earlier grades were iterated {} time(s)".format(graded.iterations)
+    return got
+
+
+def c_bounded_reason(d, bad):
+    got = _obj(d, bad, (2, org.F_KIND), "v" * 100000, "round")
+    if got[0] == "cannot" and len(got[1]) > 1000:
+        return "unbounded", "a {}-character reason".format(len(got[1]))
+    return got
+
+
 def _self_test():
     with tempfile.TemporaryDirectory(prefix="round-gate-selftest-") as tmp:
         base = os.path.realpath(tmp)
@@ -744,8 +868,18 @@ def _self_test():
         got = _validate(_write(d, _lines(objs)))
         check("accept/partial-or-true-impact-is-structurally-valid", got[0] == "ok", got)
         d = fresh()
-        objs = _set(_golden(), (3, org.F_LEGS, 0, org.F_REPORT), None)
-        check("accept/null-report-on-complete-leg", _validate(_write(d, _lines(objs)))[0] == "ok")
+        objs = _golden()
+        objs.append(_round(3, 1, HEADS[3], PERMITS[3],
+                           [_leg(FAM_A, [("F-4", "open")], "a3", state="degraded"),
+                            _leg(FAM_B, [], "b3", state="empty")], []))
+        _set(objs, (4, org.F_LEGS, 0, org.F_REPORT), None)
+        _set(objs, (4, org.F_LEGS, 1, org.F_REPORT), None)
+        got = _validate(_write(d, _lines(objs)))
+        check("accept/null-report-on-degraded-or-empty-leg", got[0] == "ok", got)
+        d = fresh()
+        objs = _set(_golden(), (3, org.F_GRADES, 0, org.F_SOURCE), "fam-a report,　entry three")
+        got = _validate(_write(d, _lines(objs)))
+        check("accept/space-separator-beside-text", got[0] == "ok", got)
         d = fresh()
         relinked = []
         digest = org.ZERO_DIGEST
@@ -844,6 +978,17 @@ def _self_test():
                 ("fc/invalid-json", "flip/invalid-json", c_invalid_json, "invalid JSON"),
                 ("fc/non-object-line", "flip/non-object-line", c_non_object, "one JSON object"),
                 ("fc/dup-key", "flip/dup-key", c_dup_key, "duplicate key"),
+                ("fc/nested-too-deep", "flip/nested-too-deep", c_nested_deep, "nested too deeply"),
+                ("fc/nested-past-decoder", "flip/nested-past-decoder", c_nested_past_decoder,
+                 "nested too deeply"),
+                ("fc/nested-bound", "flip/nested-bound", c_nested_bound, "nested too deeply"),
+                ("fc/cli-deep-nesting-one-refusal", "flip/cli-deep-nesting-one-refusal", c_cli_deep,
+                 "nested too deeply"),
+                ("fc/unexpected-error-one-refusal", "flip/unexpected-error-one-refusal",
+                 c_unexpected_error, "unexpected RecursionError"),
+                ("fc/reason-quotes-bounded-value", "flip/reason-quotes-bounded-value", c_bounded_reason,
+                 "is not one of"),
+                ("fc/linear-ungraded-check", "flip/linear-ungraded-check", c_linear, "have no grade"),
                 ("fc/nan", "flip/nan", c_nan, "non-finite"),
                 ("fc/infinity", "flip/infinity", c_infinity, "non-finite"),
                 ("fc/bool-as-int", "flip/bool-as-int", c_bool_as_int, "boolean or float"),
@@ -902,6 +1047,8 @@ def _self_test():
                 ("fc/dispatch-id-not-hex", "flip/dispatch-id-not-hex", c_dispatch_hex, "32 lowercase hex"),
                 ("fc/dispatch-id-null", "flip/dispatch-id-null", c_dispatch_null, "32 lowercase hex"),
                 ("fc/report-not-hex", "flip/report-not-hex", c_report_hex, "64 lowercase hex"),
+                ("fc/complete-leg-null-report", "flip/complete-leg-null-report", c_complete_null_report,
+                 "a complete leg carries its report_sha256"),
                 ("fc/missing-leg-findings", "flip/missing-leg-findings", c_missing_findings,
                  "carries no findings"),
                 ("fc/missing-leg-report", "flip/missing-leg-report", c_missing_report,
@@ -918,11 +1065,16 @@ def _self_test():
                 ("fc/replaces-unknown", "flip/replaces-unknown", c_replaces_unknown, "graded before"),
                 ("fc/replaces-self", "flip/replaces-self", c_replaces_self, "graded before"),
                 ("fc/followup-shape", "flip/followup-shape", c_followup_shape, "an id"),
+                ("fc/followup-own-item", "flip/followup-own-item", c_followup_own_item, "own item"),
                 ("fc/source-ref-empty", "flip/source-ref-empty", c_source_empty, "characters of text"),
+                ("fc/source-ref-whitespace", "flip/source-ref-whitespace", c_source_whitespace,
+                 "at least one not whitespace"),
                 ("fc/source-ref-control", "flip/source-ref-control", c_source_control,
                  "characters of text"),
                 ("fc/withdraw-ungraded", "flip/withdraw-ungraded", c_withdraw_ungraded, "never graded"),
                 ("fc/withdraw-basis", "flip/withdraw-basis", c_withdraw_basis, "characters of text"),
+                ("fc/withdraw-basis-whitespace", "flip/withdraw-basis-whitespace",
+                 c_withdraw_basis_whitespace, "at least one not whitespace"),
                 ("fc/withdraw-twice", "flip/withdraw-twice", c_withdraw_twice, "already withdrawn"),
         ):
             got = run(build, fresh(), True)

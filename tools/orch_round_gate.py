@@ -12,18 +12,28 @@ The self-test is its own runner, tools/selftest_orch_round_gate.py (suite round-
 
 OUTPUT. stdout carries one JSON object (decision VALID or CANNOT_EVALUATE, with the item, line count, tip
 seq and last round on VALID, or the reason on CANNOT_EVALUATE), then one human-readable line. On exit 2
-stderr carries one line starting "CANNOT EVALUATE:". A caller must treat any exit other than 0, a missing
-or unparseable stdout object, or a decision that disagrees with the exit, as not valid. Everything the
-reader prints is printable ASCII, so no value it reports (a path holding an LF, say) can add or split a
-line: the JSON object is written with JSON escapes and carries the reason exactly, and every
-human-readable line, the fallback error line included, writes a backslash as two backslashes and every
-other character outside printable ASCII as \\xNN, \\uNNNN or \\UNNNNNNNN.
+stderr carries one line starting "CANNOT EVALUATE:". Every input the reader cannot evaluate, an error the
+reader did not foresee included, gives that one CANNOT_EVALUATE object and exit 2: main routes any
+unexpected exception through the same refusal, and a record value is quoted in a reason only in a
+bounded form (reprlib), so no value can overflow the stack while a reason is written. A caller must treat
+any exit other than 0, a missing or unparseable stdout object, or a decision that disagrees with the exit,
+as not valid. Everything the reader prints is printable ASCII, so no value it reports (a path holding an
+LF, say) can add or split a line: the JSON object is written with JSON escapes and carries the reason
+exactly, and every human-readable line, the fallback error line included, writes a backslash as two
+backslashes and every other character outside printable ASCII as \\xNN, \\uNNNN or \\UNNNNNNNN.
+
+Two cases fall outside that framing, and both exit 2 with no complete stdout object, which the rule above
+reads as not valid. Under a Python older than 3.14 the pack's shared version guard (one template, held by
+tools/check_python_floor.py) runs before anything else: it writes its refusal to stderr and names the
+interpreter path as the platform gives it, unescaped, so that path can hold any character and span lines.
+And if stdout itself cannot be written or flushed, the process entry writes one escaped stderr line.
 
 THE RECORD. One file per item, runtime state, never tracked in the repository. Append-only JSONL: UTF-8
 with no byte order mark, every line ended by LF (a final line without LF is truncated), no carriage return
 anywhere, no blank line, at most MAX_LINE_BYTES per line and MAX_RECORD_BYTES per file. Each line is one
-JSON object with no duplicate key, no NaN or Infinity, no field beyond the ones listed, and no boolean or
-float where an integer is expected.
+JSON object with no duplicate key, no NaN or Infinity, no value nested more than MAX_DEPTH levels deep
+(the line's object is level one; the form below reaches level five), no field beyond the ones listed, and
+no boolean or float where an integer is expected.
 
 Chain. Every line carries seq (0 on the first line, then each line's seq is its line index, no gaps) and
 prev (the lowercase sha256 hex of the previous line's raw bytes without its LF; 64 zeros on line 0).
@@ -49,29 +59,33 @@ legs: exactly one entry per family of the header roster, no other family and no 
 {family, state, head, dispatch_id, report_sha256, findings}. state is complete, degraded, empty or
 missing. head is the head that leg reviewed: 40 lowercase hex on every leg that is not missing, and null
 on a missing leg (it reviewed nothing). dispatch_id is 32 lowercase hex, or null only on a missing leg.
-report_sha256 is 64 lowercase hex or null, and null on a missing leg. findings is a list of {id,
-status}, status open or closed, each id once per leg, and empty on an empty or missing leg. A leg
-finding carries no severity: a reviewer family's own grade is not part of the record. A leg whose head
-differs from the line's head (or from another leg's) is recorded as it happened, not refused here: the
-gate (a later release) refuses to count a round unless every leg is complete and reviewed the line's
-head, and this reader guarantees that every leg head it compares is present and well formed.
+report_sha256 is 64 lowercase hex on a complete leg (complete means a usable report exists, so it has a
+digest), 64 lowercase hex or null on a degraded or empty leg, and null on a missing leg. findings is a
+list of {id, status}, status open or closed, each id once per leg, and empty on an empty or missing
+leg. A leg finding carries no severity: a reviewer family's own grade is not part of the record. A leg
+whose head differs from the line's head (or from another leg's) is recorded as it happened, not refused
+here: the gate (a later release) refuses to count a round unless every leg is complete and reviewed the
+line's head, and this reader guarantees that every leg head it compares is present and well formed.
 
 grades: the orchestrator's severity, graded at source. One entry per id first graded on that line:
 {id, severity, source_ref} plus optional replaces, followup and impact. severity is HIGH, MEDIUM or
 LOW. The id must be reported by a leg on the same line and must never have been graded before (a regrade
 is cannot-evaluate, whatever severity it names; a changed grade is a new id that replaces the old one).
 replaces names an id graded on an earlier line or earlier on the same line, never the id itself.
-followup is an item id. impact is an object holding any of verdict_change, user_visible_change and
-security_effect, each a JSON boolean (a key left out is allowed here; what it means is decided by the
-gate, not by this reader). source_ref is non-empty text. After a line's grades, every id any leg reports
+followup is an item id other than the record's own item (a follow-up defers a finding to another
+item, never to the item that is landing). impact is an object holding any of verdict_change,
+user_visible_change and security_effect, each a JSON boolean (a key left out is allowed here; what it
+means is decided by the gate, not by this reader). source_ref is non-empty text (see text fields below). After a line's grades, every id any leg reports
 on that line must have a grade on that line or an earlier one.
 
 withdrawn: a list of {id, basis}: the id must already be graded (on this line or earlier) and is
 withdrawn at most once in the whole record; basis is non-empty text.
 
 Ids (item, family, finding and follow-up ids) are 1 to 64 ASCII characters: a letter or digit, then
-letters, digits, '.', '_' and '-'. Text fields are 1 to MAX_TEXT characters with no control, format,
-separator or surrogate character.
+letters, digits, '.', '_' and '-'. Text fields are 1 to MAX_TEXT characters, at least one of them not
+whitespace (str.isspace), and none of Unicode category Cc (control), Cf (format), Cs (surrogate), Zl
+(line separator) or Zp (paragraph separator). A space separator (Zs, such as U+0020, U+00A0 or U+3000)
+is allowed beside other text, and a private-use or unassigned character is not refused.
 
 FILE ACCESS. The record path is absolute and normalized. Every directory on it is opened without
 following a symlink (O_NOFOLLOW at each component, from /), and the record and anchor must each be a
@@ -104,6 +118,7 @@ import hashlib
 import json
 import os
 import re
+import reprlib
 import stat
 import unicodedata
 
@@ -120,6 +135,7 @@ MAX_ENTRIES = 4096
 MAX_ROUND = 100000
 MAX_ATTEMPT = 1000
 MAX_TEXT = 1024
+MAX_DEPTH = 8
 
 STATES = frozenset({"complete", "degraded", "empty", "missing"})
 STATUSES = frozenset({"open", "closed"})
@@ -156,6 +172,20 @@ BOM = b"\xef\xbb\xbf"
 
 class CannotEvaluate(Exception):
     """The record cannot be evaluated: unreadable, malformed or contradictory. Always exit 2."""
+
+
+# A record value quoted in a reason: reprlib bounds its nesting level and its length, so no value can
+# overflow the stack or swell the reason.
+_SHOW = reprlib.Repr(maxlevel=3, maxdict=4, maxlist=6, maxtuple=6, maxset=6, maxfrozenset=6,
+                     maxstring=80, maxlong=40, maxother=80)
+
+
+def _show(value):
+    """value for a reason: bounded by _SHOW, or its type alone when even that fails."""
+    try:
+        return _SHOW.repr(value)
+    except Exception:
+        return "<a {} value>".format(type(value).__name__)
 
 
 # ---------- file access ----------
@@ -249,9 +279,24 @@ def _pairs(pairs):
     obj = {}
     for key, value in pairs:
         if key in obj:
-            raise CannotEvaluate("duplicate key {!r}".format(key))
+            raise CannotEvaluate("duplicate key {}".format(_show(key)))
         obj[key] = value
     return obj
+
+
+def _too_deep(value, limit):
+    """True when a list or object in value sits more than limit levels deep (value itself is level one).
+    Iterative, so a value of any depth the decoder returned is measured without recursion."""
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        children = node.values() if isinstance(node, dict) else node
+        if depth > limit:
+            return True
+        for child in children:
+            if isinstance(child, (dict, list)):
+                stack.append((child, depth + 1))
+    return False
 
 
 def _constant(name):
@@ -259,7 +304,9 @@ def _constant(name):
 
 
 def strict_json(text, where):
-    """One JSON object from text, refusing duplicate keys, NaN and Infinity; CannotEvaluate otherwise."""
+    """One JSON object from text, refusing duplicate keys, NaN, Infinity and nesting deeper than
+    MAX_DEPTH; CannotEvaluate otherwise. The depth is checked before any check reads the value, so no
+    later check meets a value nested deeper than the record's form allows."""
     try:
         value = json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
     except CannotEvaluate as exc:
@@ -270,6 +317,9 @@ def strict_json(text, where):
         raise CannotEvaluate("{}: invalid JSON ({})".format(where, exc))
     if not isinstance(value, dict):
         raise CannotEvaluate("{}: a line must be one JSON object".format(where))
+    if _too_deep(value, MAX_DEPTH):
+        raise CannotEvaluate("{}: nested too deeply (a list or object more than {} levels deep)".format(
+            where, MAX_DEPTH))
     return value
 
 
@@ -290,13 +340,13 @@ def _keys(obj, required, optional, where):
 def _int(value, low, high, where):
     if type(value) is not int or not low <= value <= high:
         raise CannotEvaluate("{}: must be an integer from {} to {} (a boolean or float is refused), "
-                             "got {!r}".format(where, low, high, value))
+                             "got {}".format(where, low, high, _show(value)))
     return value
 
 
 def _match(value, pattern, where, shape):
     if type(value) is not str or not pattern.fullmatch(value):
-        raise CannotEvaluate("{}: must be {}, got {!r}".format(where, shape, value))
+        raise CannotEvaluate("{}: must be {}, got {}".format(where, shape, _show(value)))
     return value
 
 
@@ -311,16 +361,17 @@ def _hex(value, pattern, width, where, nullable=False):
 
 
 def _text(value, where):
-    if type(value) is not str or not 1 <= len(value) <= MAX_TEXT or any(
+    if type(value) is not str or not 1 <= len(value) <= MAX_TEXT or value.isspace() or any(
             unicodedata.category(ch) in ("Cc", "Cf", "Cs", "Zl", "Zp") for ch in value):
-        raise CannotEvaluate("{}: must be 1 to {} characters of text with no control, format, separator "
-                             "or surrogate character".format(where, MAX_TEXT))
+        raise CannotEvaluate("{}: must be 1 to {} characters of text, at least one not whitespace, with "
+                             "no control (Cc), format (Cf), surrogate (Cs), line separator (Zl) or "
+                             "paragraph separator (Zp) character".format(where, MAX_TEXT))
     return value
 
 
 def _closed(value, vocabulary, where):
     if type(value) is not str or value not in vocabulary:
-        raise CannotEvaluate("{}: {!r} is not one of {}".format(where, value, sorted(vocabulary)))
+        raise CannotEvaluate("{}: {} is not one of {}".format(where, _show(value), sorted(vocabulary)))
     return value
 
 
@@ -336,7 +387,7 @@ def _check_header(obj, where):
     _keys(obj, HEADER_KEYS, frozenset(), where)
     _closed(obj[F_KIND], frozenset({"header"}), where + " kind")
     if obj[F_SCHEMA] != SCHEMA or type(obj[F_SCHEMA]) is not str:
-        raise CannotEvaluate("{} schema: must be {!r}, got {!r}".format(where, SCHEMA, obj[F_SCHEMA]))
+        raise CannotEvaluate("{} schema: must be {!r}, got {}".format(where, SCHEMA, _show(obj[F_SCHEMA])))
     _ident(obj[F_ITEM], where + " item")
     roster = _list(obj[F_ROSTER], where + " families_required", MAX_FAMILIES)
     if not roster:
@@ -348,8 +399,8 @@ def _check_header(obj, where):
             raise CannotEvaluate("{} families_required: family {!r} is listed twice".format(where, family))
         seen.add(family)
     if type(obj[F_PLAN]) is not int or obj[F_PLAN] != PLAN_ROUNDS:
-        raise CannotEvaluate("{} plan_rounds: must be the integer {}, got {!r}".format(
-            where, PLAN_ROUNDS, obj[F_PLAN]))
+        raise CannotEvaluate("{} plan_rounds: must be the integer {}, got {}".format(
+            where, PLAN_ROUNDS, _show(obj[F_PLAN])))
     _hex(obj[F_POLICY], HEX64_RE, 64, where + " policy_sha256")
     return obj[F_ITEM], frozenset(roster)
 
@@ -400,6 +451,9 @@ def _check_round(obj, where, item, roster, graded, withdrawn_ever, previous):
             raise CannotEvaluate("{}: a missing leg carries no head (it reviewed nothing)".format(lw))
         _hex(leg[F_DISPATCH], HEX32_RE, 32, lw + " dispatch_id", nullable=(state == "missing"))
         _hex(leg[F_REPORT], HEX64_RE, 64, lw + " report_sha256", nullable=True)
+        if state == "complete" and leg[F_REPORT] is None:
+            raise CannotEvaluate("{}: a complete leg carries its report_sha256 (complete means a usable "
+                                 "report exists)".format(lw))
         if state == "missing" and leg[F_REPORT] is not None:
             raise CannotEvaluate("{}: a missing leg carries no report_sha256".format(lw))
         findings = _list(leg[F_FINDINGS], lw + " findings")
@@ -438,16 +492,20 @@ def _check_round(obj, where, item, roster, graded, withdrawn_ever, previous):
                 raise CannotEvaluate("{} replaces: {!r} must name an id graded before this one, not the "
                                      "id itself".format(gw, target))
         if F_FOLLOWUP in grade:
-            _ident(grade[F_FOLLOWUP], gw + " followup")
+            if _ident(grade[F_FOLLOWUP], gw + " followup") == item:
+                raise CannotEvaluate("{} followup: {!r} is the record's own item (a follow-up names "
+                                     "another item)".format(gw, item))
         if F_IMPACT in grade:
             impact = grade[F_IMPACT]
             _keys(impact, frozenset(), IMPACT_KEYS, gw + " impact")
             for key in sorted(impact):
                 if type(impact[key]) is not bool:
-                    raise CannotEvaluate("{} impact {}: must be a JSON boolean, got {!r}".format(
-                        gw, key, impact[key]))
+                    raise CannotEvaluate("{} impact {}: must be a JSON boolean, got {}".format(
+                        gw, key, _show(impact[key])))
         graded[gid] = severity
-    ungraded = sorted(reported - set(graded))
+    # Each reported id is looked up in graded; copying graded on every line would make a record's run
+    # time grow with the square of its length.
+    ungraded = sorted(fid for fid in reported if fid not in graded)
     if ungraded:
         raise CannotEvaluate("{}: reported finding(s) {} have no grade on this line or an earlier one "
                              "(severity is the orchestrator's grade, set at source)".format(where, ungraded))
@@ -564,6 +622,15 @@ def _emit(decision, fields, human):
     sys.stdout.write(printable(human) + "\n")
 
 
+def _describe(exc):
+    """An unforeseen exception for a reason: its type name and its message, bounded by _show."""
+    try:
+        text = str(exc)
+    except Exception:
+        text = ""
+    return "{}: {}".format(type(exc).__name__, _show(text))
+
+
 def _refuse(reason):
     _emit("CANNOT_EVALUATE", {"reason": reason}, "CANNOT_EVALUATE " + reason)
     sys.stderr.write("CANNOT EVALUATE: {}\n".format(printable(reason)))
@@ -578,6 +645,10 @@ def main(argv):
         summary = validate_record(argv[2])
     except CannotEvaluate as exc:
         return _refuse(str(exc))
+    except Exception as exc:
+        # An error the checks above did not foresee (a RecursionError or MemoryError, say) is still one
+        # refusal object on stdout and exit 2, never a crash with an empty stdout.
+        return _refuse("the reader could not evaluate the record: unexpected {}".format(_describe(exc)))
     _emit("VALID", summary, "VALID item={} lines={} tip seq={} last round={} attempt={}".format(
         summary["item"], summary["lines"], summary["tip_seq"], summary["last_round"],
         summary["last_attempt"]))
