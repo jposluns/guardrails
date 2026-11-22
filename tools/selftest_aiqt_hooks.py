@@ -86,7 +86,8 @@ substitution and no $ or backquote in the body), as does a double-quoted word th
 spans a newline, and a git whose subcommand cannot be resolved, while an
 off-roster verb and data an accepted scan consumed stay allowed; a checker-shaped segment whose failure is swallowed
 (|| true, || :) or piped into an adjacent head or tail allows with a note (unless an interim deny below refuses
-the command, as the check-then-git narrowing does when it also names git), except that a narrow
+the command: the check-then-git narrowing when the command also names git or holds a $ or backquote after the
+check, or the plumbing or push-redirect deny), except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
 push/merge -n edges stay allowed; and the parse-error fallback fails safe. The interim narrowing (gcg-* rows): a
@@ -94,11 +95,13 @@ command that runs a check and names git (or holds a $ or backquote after the che
 shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which keeps its message; each flip row is
 red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
 (gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
-reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
-reverted); the interim push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
+reverted, except in a quoted literal git commit, tag or merge message on a command the guard parses (data
+rows, red with that reading reverted; the parse-failure fallbacks read the whole raw text); the interim
+push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
 accepts), a PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable denies, each flip row red with
-that deny reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
-reverted); and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
+that deny reverted, except in a quoted literal git commit, tag or merge message on a command the guard parses
+(data rows, red with that reading reverted; the parse-failure fallbacks read the whole raw text); and the
+write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -41544,7 +41547,8 @@ def _main_isolated(monitor):
           "feat) denies; the plumbing deny DENIES a command naming git commit-tree, send-pack or "
           "http-push; and the push-redirect deny DENIES a git push naming --receive-pack or --exec, a "
           "PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable; the last two except "
-          "in a quoted literal git commit, tag or merge message. sectvl "
+          "in a quoted literal git commit, tag or merge message on a command the guard parses (the "
+          "parse-failure fallbacks read the whole raw text). sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "
           "argument (re-issue single-quoted, in ANSI-C $'...' quoting, escaped, or via -F <file>); a "
           "literal marker inside single-quoted or ANSI-C $'...' quoting is NOT a substitution and ALLOWS"

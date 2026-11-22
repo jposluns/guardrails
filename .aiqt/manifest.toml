@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "626e7730bd3ccdf4089c2e17423db1dd50c665b69d20e8ecc7168cb8034ef762"
+tree-sha256 = "ef0a8bb251f172023c3b6e4667458971817964fc2824ca2ae065efa8a1afc966"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2387,13 +2387,13 @@ sha256 = "8a974e4bdfb90410bc659aef1419a764cbf0232bdfd5687deabede8b0319ee0a"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 78944
-sha256 = "9fe4599fc4ecd01e02428e18d42fd2ffb4227ad0ee7c02ddb9767be47b3c2670"
+bytes = 78971
+sha256 = "a6ce391a64d69ab90a3efca28ee01ce2679d46af0e3e3a076cc3976ff6840ae0"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "510c6c76d5bd1b3d779c113412ad93e869d2f5a9a6fee564b56ae2f838d3126e"
+sha256 = "7213736be236302c74f5c7c6370baa99663c7be7916c31b772bec1dff7af27c1"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2432,8 +2432,8 @@ sha256 = "319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 566057
-sha256 = "1b99b66eab3f20311a4dc5bf5c13f6a38077fc415abab6bab1953b8fcf51ff30"
+bytes = 566509
+sha256 = "56178cef3968e1825e9ac77f6b7886360f9bceb1c3ceb2552e3e96cd70670fff"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -4822,8 +4822,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 3039821
-sha256 = "cdd7fbeca659d2aab710afd37ad13aa8f1117f085905f73edf5272444c494934"
+bytes = 3040166
+sha256 = "8c94c86ae55d05abec0ca76d174de0680d1ebaed9211025f9f765d5a92bf0616"
 
 [[sources]]
 path = "tools/selftest_checks.toml"

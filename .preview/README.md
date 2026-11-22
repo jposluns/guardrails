@@ -250,7 +250,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `1b99b66eab3f20311a4dc5bf5c13f6a38077fc415abab6bab1953b8fcf51ff30` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `56178cef3968e1825e9ac77f6b7886360f9bceb1c3ceb2552e3e96cd70670fff` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
@@ -587,7 +587,7 @@ section of its opening docstring. Read that section before relying on a hook; in
 - **`stamp-truth-stop.py`** checks only timestamps written with an explicit zone; an unzoned, 12-hour, or
   natural-language time is not checked. A fabricated time in a code span, a code block, a `>` quote line,
   or within three words after a scheduling word passes. A genuinely future time mentioned in plain prose without a
-  scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
+  scheduling word ending at most three words before it is blocked; the remedy is to add the word or put the time in a code span.
   An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
   offset, or run the hook under the same `TZ`. `EST` and `EDT` are the exception: they are read as
   America/Toronto unless the process zone itself uses that abbreviation at that time (its reading then
