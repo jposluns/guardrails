@@ -8067,4 +8067,36 @@ expected-check-ids = [
   "flip/path-bounded",
   "fc/reason-cut-at-max",
   "flip/reason-cut-at-max",
+  # a retry carries an earlier attempt's leg of its round only unchanged (head, report digest and the rest)
+  "fc/carried-leg-report-changed",
+  "flip/carried-leg-report-changed",
+  "fc/carried-leg-head-changed",
+  "flip/carried-leg-head-changed",
+  "fc/carried-leg-findings-changed",
+  "flip/carried-leg-findings-changed",
+  "fc/carried-leg-in-next-round",
+  "flip/carried-leg-in-next-round",
+  # a withdrawn id may be listed within its withdrawing round, a retry included, and never after it
+  "fc/withdrawn-reported-in-next-round",
+  "flip/withdrawn-reported-in-next-round",
+  # a permit digest is the record bytes before its round's first line; a retry carries it again
+  "fc/permit-not-record-prefix",
+  "flip/permit-not-record-prefix",
+  "fc/retry-permit-changed",
+  "flip/retry-permit-changed",
+  # a report digest belongs to one dispatch in the whole record
+  "fc/report-digest-shared-on-one-line",
+  "flip/report-digest-shared-on-one-line",
+  "fc/report-digest-replayed-across-rounds",
+  "flip/report-digest-replayed-across-rounds",
+  # a withdrawn id is never the target of a replaces link, in either order
+  "fc/replaces-withdrawn-id",
+  "flip/replaces-withdrawn-id",
+  "fc/withdraw-replaced-id",
+  "flip/withdraw-replaced-id",
+  # imported history is out of scope: no null gate values and no import marker
+  "fc/imported-history-without-gate-values",
+  "flip/imported-history-without-gate-values",
+  "fc/imported-marker-is-unknown-field",
+  "flip/imported-marker-is-unknown-field",
 ]

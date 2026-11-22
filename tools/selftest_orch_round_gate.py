@@ -48,7 +48,10 @@ FAILURES = []
 FAM_A, FAM_B = "fam-a", "fam-b"
 ITEM = "ITEM-0042"
 HEADS = ("1a" * 20, "2b" * 20, "3c" * 20, "4d" * 20)
-PERMITS = (None, "7d" * 32, "8e" * 32, "9f" * 32)
+# A fix round's permit digest is the sha256 of the record bytes before its round's first line, so it is
+# known only when the record is serialized: _lines fills AUTO_PERMIT in (a retry gets its round's digest).
+AUTO_PERMIT = "<the round's permit digest, filled in by _lines>"
+PERMITS = (None, AUTO_PERMIT, AUTO_PERMIT, AUTO_PERMIT)
 DELETE = object()
 
 
@@ -99,7 +102,8 @@ def _round(number, attempt, head, permit, legs, grades, withdrawn=()):
 
 def _golden():
     """The plan's filled example (section 1) as a whole record: the header, the baseline, the first fix
-    round, and the second fix round exactly as the example shows it, with full-length hashes."""
+    round, and the second fix round exactly as the example shows it, with full-length hashes (each fix
+    round's permit digest is the one _lines computes from the record bytes before it)."""
     return [
         {org.F_SCHEMA: org.SCHEMA, org.F_KIND: "header", org.F_ITEM: ITEM,
          org.F_ROSTER: [FAM_A, FAM_B], org.F_PLAN: 9, org.F_POLICY: "c3" * 32},
@@ -139,16 +143,24 @@ def _set(objs, path, value):
 def _lines(objs, seq=None, prev=None, edit=None):
     """Serialize objs as chained lines: seq and prev lead each line; seq/prev map a line index to a
     forced value, and edit maps a line index to a function over that line's text, applied before the
-    next line chains to it, so a case carries exactly its one defect."""
-    out, digest = [], org.ZERO_DIGEST
+    next line chains to it, so a case carries exactly its one defect. A permit_sha256 of AUTO_PERMIT
+    becomes the sha256 of the bytes written before the line on attempt one, and its round's attempt-one
+    digest on a retry."""
+    out, digest, prefix, permits = [], org.ZERO_DIGEST, hashlib.sha256(), {}
     for index, body in enumerate(objs):
         line_obj = {org.F_SEQ: (seq or {}).get(index, index), org.F_PREV: (prev or {}).get(index, digest)}
         line_obj.update(body)
+        if line_obj.get(org.F_PERMIT) == AUTO_PERMIT:
+            number = line_obj.get(org.F_ROUND)
+            if line_obj.get(org.F_ATTEMPT) == 1 or number not in permits:
+                permits[number] = prefix.hexdigest()
+            line_obj[org.F_PERMIT] = permits[number]
         text = json.dumps(line_obj, separators=(",", ":"))
         if edit and index in edit:
             text = edit[index](text)
         out.append(text)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        prefix.update(text.encode("utf-8") + b"\n")
     return out
 
 
@@ -367,7 +379,9 @@ def c_attempt_gap(d, bad):
     _set(objs, (3, org.F_LEGS, 1, org.F_FINDINGS), [{org.F_ID: "F-4", org.F_STATUS: "open"}])
     retry[org.F_ATTEMPT] = 3 if bad else 2
     for index, leg in enumerate(retry[org.F_LEGS]):
-        leg[org.F_DISPATCH] = _tag_hex("dretry{}".format(index), 32)  # a retry is a new dispatch
+        # Both legs run again (each differs from its attempt-one leg): a new dispatch and a new report.
+        leg[org.F_DISPATCH] = _tag_hex("dretry{}".format(index), 32)
+        leg[org.F_REPORT] = _tag_hex("rretry{}".format(index), 64)
     objs.append(retry)
     return _validate(_write(d, _lines(objs)))
 
@@ -817,7 +831,9 @@ def c_linear(d, bad):
     graded["F-4"] = "HIGH"
     grades = [] if bad else [_grade("F-40", "LOW", "fam-a report, entry two")]
     obj = {org.F_SEQ: 4, org.F_PREV: org.ZERO_DIGEST}
-    obj.update(_r3([("F-4", "open"), ("F-40", "open")], [("F-4", "open")], grades))
+    # A fresh ledger has read no bytes, so the permit due on this attempt-one line is the sha256 of none.
+    obj.update(_r3([("F-4", "open"), ("F-40", "open")], [("F-4", "open")], grades,
+                   permit=hashlib.sha256(b"").hexdigest()))
     try:
         got = "ok", org._check_round(obj, "line 5", ITEM, frozenset({FAM_A, FAM_B}), org.Ledger(graded),
                                      (2, 1))
@@ -851,7 +867,8 @@ def c_dispatch_replayed(d, bad):
 
 def c_permit_reused(d, bad):
     # The first fix round's permit carried again on the second fix round.
-    return _obj(d, bad, (3, org.F_PERMIT), PERMITS[1], PERMITS[3])
+    first = json.loads(_lines(_golden())[2])[org.F_PERMIT]
+    return _obj(d, bad, (3, org.F_PERMIT), first, PERMITS[3])
 
 
 def c_verdict_absent(d, bad):
@@ -893,6 +910,120 @@ def c_withdrawn_reported_again(d, bad):
     objs[3][org.F_WITHDRAWN] = [{org.F_ID: "F-7", org.F_BASIS: "duplicate of F-4"}]
     objs.append(_r3([("F-4", "open")], [("F-4", "open")] + ([("F-7", "open")] if bad else [])))
     return _validate(_write(d, _lines(objs)))
+
+
+# ---------- a retry carries unchanged legs; id rules read the whole record (round gate 9) ----------
+
+def _round_three(legs, withdrawn=()):
+    """Round three, attempt one: fam-a complete (tag a3) and fam-b degraded (tag b3) unless legs says."""
+    return _round(3, 1, HEADS[3], PERMITS[3], legs, [], withdrawn)
+
+
+def _carry(bad, change):
+    """The golden record, round three attempt one, then a retry that carries fam-a's attempt-one leg
+    forward (its dispatch_id) and runs fam-b again; on the bad side change edits the carried leg."""
+    objs = _golden()
+    kept = _leg(FAM_A, [("F-4", "open")], "a3")
+    objs.append(_round_three([kept, _leg(FAM_B, [("F-4", "open")], "b3", state="degraded")]))
+    carried = copy.deepcopy(kept)
+    if bad:
+        change(carried)
+    objs.append(_round(3, 2, HEADS[3], PERMITS[3], [carried, _leg(FAM_B, [("F-4", "open")], "b4")], []))
+    return objs
+
+
+def c_carried_leg_report_changed(d, bad):
+    return _validate(_write(d, _lines(_carry(bad, lambda leg: leg.update({org.F_REPORT: "ab" * 32})))))
+
+
+def c_carried_leg_head_changed(d, bad):
+    return _validate(_write(d, _lines(_carry(bad, lambda leg: leg.update({org.F_HEAD: HEADS[2]})))))
+
+
+def c_carried_leg_findings_changed(d, bad):
+    return _validate(_write(d, _lines(_carry(bad, lambda leg: leg.update(
+        {org.F_FINDINGS: [{org.F_ID: "F-4", org.F_STATUS: "closed"}], org.F_VERDICT: "no-blockers"})))))
+
+
+def c_carried_leg_next_round(d, bad):
+    # The second fix round's fam-a leg, unchanged, on a line after it: a retry of that round (flip) may
+    # carry it; round three (bad) is a new round, so the same leg there is a replayed dispatch.
+    objs = _golden()
+    kept = copy.deepcopy(objs[3][org.F_LEGS][0])
+    objs.append(_round(3 if bad else 2, 1 if bad else 2, HEADS[2], PERMITS[3],
+                       [kept, _leg(FAM_B, [("F-4", "open")], "b3")], []))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_withdrawn_reported_next_round(d, bad):
+    # F-7 is withdrawn on round three attempt one; the next line reports it again: a retry of round
+    # three (flip) may, round four (bad) may not.
+    objs = _golden()
+    objs.append(_round_three([_leg(FAM_A, [("F-4", "open")], "a3"),
+                              _leg(FAM_B, [("F-4", "open"), ("F-7", "open")], "b3")],
+                             [{org.F_ID: "F-7", org.F_BASIS: "duplicate of F-4"}]))
+    objs.append(_round(4 if bad else 3, 1 if bad else 2, HEADS[3], PERMITS[3],
+                       [_leg(FAM_A, [("F-4", "open")], "a4"),
+                        _leg(FAM_B, [("F-4", "open"), ("F-7", "open")], "b4")], []))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_permit_not_prefix(d, bad):
+    # Sixty-four zeros are well formed and bound to no other round, but are not the record bytes the
+    # round was permitted on.
+    return _obj(d, bad, (2, org.F_PERMIT), "0" * 64, PERMITS[1])
+
+
+def c_retry_permit_changed(d, bad):
+    objs = _carry(False, None)
+    objs[5][org.F_PERMIT] = "ef" * 32 if bad else PERMITS[3]
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_report_shared(d, bad):
+    # fam-a's report digest on fam-b's leg of the same line.
+    shared = _golden()[2][org.F_LEGS][0][org.F_REPORT]
+    return _obj(d, bad, (2, org.F_LEGS, 1, org.F_REPORT), shared, "a1" * 32)
+
+
+def c_report_replayed(d, bad):
+    # The first fix round's fam-a report digest on the second fix round's fam-a leg (a new dispatch).
+    replay = _golden()[2][org.F_LEGS][0][org.F_REPORT]
+    return _obj(d, bad, (3, org.F_LEGS, 0, org.F_REPORT), replay, "a1" * 32)
+
+
+def c_replaces_withdrawn(d, bad):
+    # F-20 is withdrawn on round three; round four grades F-40 replacing F-20 (bad) or F-15 (flip).
+    objs = _golden()
+    objs.append(_round_three([_leg(FAM_A, [("F-4", "open")], "a3"), _leg(FAM_B, [("F-4", "open")], "b3")],
+                             [{org.F_ID: "F-20", org.F_BASIS: "out of scope"}]))
+    objs.append(_round(4, 1, HEADS[3], PERMITS[3],
+                       [_leg(FAM_A, [("F-4", "open"), ("F-40", "open")], "a4"),
+                        _leg(FAM_B, [("F-4", "open")], "b4")],
+                       [_grade("F-40", "MEDIUM", "fam-a report, entry two",
+                               replaces="F-20" if bad else "F-15")]))
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_withdraw_replaced(d, bad):
+    # F-15 replaces F-9 on the second fix round; withdrawing F-9 afterwards (bad) is refused.
+    return _extra_round(d, bad, _withdraw({org.F_ID: "F-9", org.F_BASIS: "out of scope"},
+                                          {org.F_ID: "F-7", org.F_BASIS: "out of scope"}))
+
+
+def c_imported_history(d, bad):
+    # A fix round as history from before the gate would hold it: no permit and no dispatch ids.
+    objs = _golden()
+    if bad:
+        objs[2][org.F_PERMIT] = None
+        for leg in objs[2][org.F_LEGS]:
+            leg[org.F_DISPATCH] = None
+    return _validate(_write(d, _lines(objs)))
+
+
+def c_imported_marker(d, bad):
+    # The form has no import marker: one on an otherwise valid line is an unknown field.
+    return _obj(d, bad, (2, "imported"), True, DELETE)
 
 
 HANGUL_FILLER, COMBINING_ACUTE, BRAILLE_BLANK = chr(0x3164), chr(0x0301), chr(0x2800)
@@ -1033,13 +1164,17 @@ def _self_test():
         check("accept/no-blockers-beside-open-finding-and-none-on-degraded-leg", got[0] == "ok", got)
         d = fresh()
         relinked = []
-        digest = org.ZERO_DIGEST
+        digest, prefix = org.ZERO_DIGEST, hashlib.sha256()
         for line in _lines(_golden()):
             obj = json.loads(line)
             obj[org.F_PREV] = digest
+            if obj.get(org.F_PERMIT) is not None:
+                # Every golden fix round is an attempt one: its permit names the respaced bytes before it.
+                obj[org.F_PERMIT] = prefix.hexdigest()
             text = json.dumps(obj, separators=(", ", ": "))
             relinked.append(text)
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            prefix.update(text.encode("utf-8") + b"\n")
         check("accept/any-json-spacing", _validate(_write(d, relinked))[0] == "ok")
         d = fresh()
         objs = _set(_golden(), (3, org.F_LEGS, 1, org.F_HEAD), HEADS[1])
@@ -1247,7 +1382,7 @@ def _self_test():
                 ("fc/missing-leg-verdict", "flip/missing-leg-verdict", c_verdict_missing_leg,
                  "state missing states no verdict"),
                 ("fc/withdrawn-reported-again", "flip/withdrawn-reported-again",
-                 c_withdrawn_reported_again, "was withdrawn on an earlier line"),
+                 c_withdrawn_reported_again, "was withdrawn in round 2"),
                 ("fc/source-ref-hangul-filler", "flip/source-ref-hangul-filler", c_source_hangul_filler,
                  "visible"),
                 ("fc/source-ref-combining-mark-alone", "flip/source-ref-combining-mark-alone",
@@ -1263,6 +1398,32 @@ def _self_test():
                 ("fc/argv-bounded", "flip/argv-bounded", c_argv_bounded, "usage"),
                 ("fc/path-bounded", "flip/path-bounded", c_path_bounded, "path component"),
                 ("fc/reason-cut-at-max", "flip/reason-cut-at-max", c_reason_cut, "reason cut at"),
+                ("fc/carried-leg-report-changed", "flip/carried-leg-report-changed",
+                 c_carried_leg_report_changed, "this leg differs from it"),
+                ("fc/carried-leg-head-changed", "flip/carried-leg-head-changed",
+                 c_carried_leg_head_changed, "this leg differs from it"),
+                ("fc/carried-leg-findings-changed", "flip/carried-leg-findings-changed",
+                 c_carried_leg_findings_changed, "this leg differs from it"),
+                ("fc/carried-leg-in-next-round", "flip/carried-leg-in-next-round", c_carried_leg_next_round,
+                 "already carried by another leg, in round 2"),
+                ("fc/withdrawn-reported-in-next-round", "flip/withdrawn-reported-in-next-round",
+                 c_withdrawn_reported_next_round, "was withdrawn in round 3"),
+                ("fc/permit-not-record-prefix", "flip/permit-not-record-prefix", c_permit_not_prefix,
+                 "is not the sha256 of the record bytes before this line"),
+                ("fc/retry-permit-changed", "flip/retry-permit-changed", c_retry_permit_changed,
+                 "is not the digest round 3 attempt 1 carries"),
+                ("fc/report-digest-shared-on-one-line", "flip/report-digest-shared-on-one-line",
+                 c_report_shared, "already carried by the leg of another dispatch"),
+                ("fc/report-digest-replayed-across-rounds", "flip/report-digest-replayed-across-rounds",
+                 c_report_replayed, "already carried by the leg of another dispatch"),
+                ("fc/replaces-withdrawn-id", "flip/replaces-withdrawn-id", c_replaces_withdrawn,
+                 "a withdrawn id is never replaced"),
+                ("fc/withdraw-replaced-id", "flip/withdraw-replaced-id", c_withdraw_replaced,
+                 "an id another grade replaces is never withdrawn"),
+                ("fc/imported-history-without-gate-values", "flip/imported-history-without-gate-values",
+                 c_imported_history, "a fix round"),
+                ("fc/imported-marker-is-unknown-field", "flip/imported-marker-is-unknown-field",
+                 c_imported_marker, "unknown field"),
         ):
             got = run(build, fresh(), True)
             check(cid, got[0] == "cannot" and want in got[1], got)

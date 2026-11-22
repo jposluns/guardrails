@@ -53,18 +53,18 @@ integer 9) and policy_sha256 (64 lowercase hex, the pinned policy's digest).
 Every later line, one round attempt: seq, prev, kind ("round"), item (equal to the header's), round (the
 round number: zero is the baseline review, and fix rounds count up from one), attempt (from one), head
 (40 lowercase hex, the head the round was dispatched to review), permit_sha256 (null on the baseline
-round, otherwise a 64 lowercase hex digest bound to that one round number: a retry of the round may carry
-it again, and any other round line that carries it is cannot-evaluate),
-legs, grades and withdrawn. The first round line is the baseline round, attempt one; each next line is either
-the same round with its attempt number plus one (a retry) or the next round number with attempt one. Any
-other step is a round or attempt gap.
+round; on a fix round 64 lowercase hex, the record bytes the gate permitted the round on: on attempt
+one, the sha256 of the record's bytes before that line, every earlier line with its LF; on a retry,
+exactly the digest attempt one of its round carries. So a permit digest names one round, and any other
+round line that carries it is cannot-evaluate), legs, grades and withdrawn. The first round line is the
+baseline round, attempt one; each next line is either the same round with its attempt number plus one (a
+retry) or the next round number with attempt one. Any other step is a round or attempt gap.
 
 legs: exactly one entry per family of the header roster, no other family and no repeat. Each leg is
 {family, state, head, dispatch_id, report_sha256, verdict, findings}. state is complete, degraded, empty
 or missing. head is the head that leg reviewed: 40 lowercase hex on every leg that is not missing, and
 null on a missing leg (it reviewed nothing). dispatch_id is 32 lowercase hex, or null only on a missing
-leg; a non-null dispatch_id appears on one leg of the whole record only (two legs on one line, a retry
-or a later round that repeat one are cannot-evaluate: each dispatch is its own id). report_sha256 is 64
+leg (see retries and carried legs below for when one may repeat). report_sha256 is 64
 lowercase hex on a complete leg (complete means a usable report exists, so it has a digest), 64
 lowercase hex or null on a degraded or empty leg, and null on a missing leg. verdict is the family's own
 verdict as its report states it: blockers, no-blockers or none. It is blockers or no-blockers on a
@@ -72,26 +72,45 @@ complete leg (a usable report states its verdict), any of the three on a degrade
 empty or missing leg; blockers needs at least one open finding on that leg, and no-blockers beside an
 open finding is allowed (a family may report a finding it does not block on). findings is a list of {id,
 status}, status open or closed, each id once per leg, and empty on an empty or missing leg; an id
-withdrawn on an earlier line is never reported by a leg again (a finding raised again is a new id). A
+withdrawn in an earlier round is never reported by a leg again (a finding raised again is a new id),
+while any line of the round that withdrew it, a retry included, may still list it. A
 leg finding carries no severity: a reviewer family's own grade is not part of the record. A leg
 whose head differs from the line's head (or from another leg's) is recorded as it happened, not refused
 here: the gate (a later release) refuses to count a round unless every leg is complete and reviewed the
 line's head, and this reader guarantees that every leg head it compares is present and well formed.
 
+Retries and carried legs. A retry is a new attempt of the same round. Each of its legs is either a new
+dispatch (a dispatch_id no earlier line carries) or carried forward from an earlier attempt of the same
+round: the same dispatch_id, with the whole leg (family, state, head, report_sha256, verdict and
+findings) equal to the leg that first carried that id, so only a leg whose recorded head and report
+digest are unchanged is carried. Any other repeat of a non-null dispatch_id is cannot-evaluate: two legs
+on one line, a carried leg that differs from the first, and a leg of a later round (a later round is
+always a new dispatch). A non-null report_sha256 belongs to one dispatch_id in the whole record: a leg
+whose report digest another dispatch_id carried, on that line or an earlier one, is cannot-evaluate,
+so only a carried leg repeats its own digest.
+
 grades: the orchestrator's severity, graded at source. One entry per id first graded on that line:
 {id, severity, source_ref} plus optional replaces, followup and impact. severity is HIGH, MEDIUM or
 LOW. The id must be reported by a leg on the same line and must never have been graded before (a regrade
 is cannot-evaluate, whatever severity it names; a changed grade is a new id that replaces the old one).
-replaces names an id graded on an earlier line or earlier on the same line, never the id itself.
-followup is an item id other than the record's own item (a follow-up defers a finding to another
-item, never to the item that is landing). impact is an object holding any of verdict_change,
+replaces names an id graded on an earlier line or earlier on the same line, never the id itself and
+never an id withdrawn on an earlier line. followup is an item id other than the record's own item (a
+follow-up defers a finding to another item, never to the item that is landing). impact is an object holding any of verdict_change,
 user_visible_change and security_effect, each a JSON boolean (a key left out is allowed here; what it
 means is decided by the gate, not by this reader). source_ref is non-empty text (see text fields below). After a line's grades, every id any leg reports
 on that line must have a grade on that line or an earlier one.
 
-withdrawn: a list of {id, basis}: the id must already be graded (on this line or earlier) and is
-withdrawn at most once in the whole record; basis is non-empty text. A leg on the withdrawing line may
-still list the id; no leg on a later line may.
+withdrawn: a list of {id, basis}: the id must already be graded (on this line or earlier), is
+withdrawn at most once in the whole record, and is never an id that a grade's replaces names (on this
+line or earlier); basis is non-empty text. So a withdrawn id is never the target of a replaces link,
+whichever of the two comes first. A leg on any line of the withdrawing round may still list the id; no
+leg of a later round may.
+
+Imported history is out of scope for this release. The record holds rounds as the gate dispatched them:
+history from before the gate has no permit digest and no dispatch ids, so a fix round without a permit
+and a leg that is not missing without a dispatch_id are cannot-evaluate, and the form has no import
+marker (a field such as imported is an unknown field). Recording such history needs a later release
+that defines how it is marked and how the gate counts it.
 
 Ids (item, family, finding and follow-up ids) are 1 to 64 ASCII characters: a letter or digit, then
 letters, digits, '.', '_' and '-'. Text fields are 1 to MAX_TEXT characters, none of Unicode category Cc
@@ -113,12 +132,18 @@ the account may search but not list is walked. An unreadable path, a missing fil
 RESIDUALS. A same-account writer can rewrite a record and its anchor together; the reader detects
 nothing then. The line and leg head fields are checked for shape only (that a head exists in a
 repository or descends from the previous head is not checked here, and that a leg really reviewed the
-head it names rests on the orchestrator that wrote the line). A dispatch_id is unique within the one
-record it is read from; that a dispatch with that id was ever claimed, or that another item's record
-does not hold it too, is not checked here. A leg's verdict is checked against its own findings only;
+head it names rests on the orchestrator that wrote the line). A dispatch_id names one leg within the
+one record it is read from (a carried leg repeats it unchanged); that a dispatch with that id was ever
+claimed, that a carried leg's family was not dispatched again, or that another item's record does not
+hold the id too, is not checked here. A report digest belongs to one dispatch_id within the record;
+that it is the digest of a real report, or that another item's record does not hold it, is not checked
+here. A leg's verdict is checked against its own findings only;
 that it is the verdict the report states rests on the orchestrator that wrote the line, and what a
-verdict means for counting is decided by the gate. A permit digest is bound to one round number within
-the record; that it names a real permit is not checked here. A text field that holds a visible
+verdict means for counting is decided by the gate. A permit digest is checked against the record bytes
+before its round's first line; that a gate really permitted the round on those bytes is not checked
+here (this release decides no permit), and a writer who can append a line can compute it. Two ids may
+replace one id, and an id that replaces another may itself be withdrawn; what such a lineage counts as
+is decided by the gate, not refused here. A text field that holds a visible
 character can still be meaningless (BLANK_LOOKING names the known blank-looking fillers, not every
 glyph a font may draw blank). Whether the record is complete with respect to the reviews that
 actually ran is outside what a reader can see.
@@ -472,16 +497,24 @@ def _check_header(obj, where):
 
 class Ledger:
     """What the lines before the current one established, each looked up, never copied: graded (id ->
-    severity), withdrawn (ids), dispatches (every non-null dispatch_id) and permits (permit digest -> the
-    round number it is bound to)."""
+    severity), withdrawn (id -> the round number that withdrew it), replaced (every id a grade's replaces
+    names), dispatches (dispatch_id -> (round number, the leg that first carried it)), reports (report
+    digest -> the dispatch_id that carried it), permits (permit digest -> the round number it is bound
+    to), round_permits (round number -> the permit digest of its attempt one) and prefix (a running
+    sha256 of the record bytes before the current line, every line with its LF)."""
 
-    __slots__ = ("graded", "withdrawn", "dispatches", "permits")
+    __slots__ = ("graded", "withdrawn", "replaced", "dispatches", "reports", "permits", "round_permits",
+                 "prefix")
 
     def __init__(self, graded=None):
         self.graded = {} if graded is None else graded
-        self.withdrawn = set()
-        self.dispatches = set()
+        self.withdrawn = {}
+        self.replaced = set()
+        self.dispatches = {}
+        self.reports = {}
         self.permits = {}
+        self.round_permits = {}
+        self.prefix = hashlib.sha256()
 
 
 def _check_round(obj, where, item, roster, ledger, previous):
@@ -516,10 +549,20 @@ def _check_round(obj, where, item, roster, ledger, previous):
             raise CannotEvaluate("{} permit_sha256: {} is bound to round {} already (a permit digest "
                                  "names one round; only that round's retries carry it again)".format(
                                      where, _show(permit), bound))
+        if attempt == 1:
+            due, named = ledger.prefix.hexdigest(), "the sha256 of the record bytes before this line"
+        else:
+            due, named = ledger.round_permits.get(rnd), "the digest round {} attempt 1 carries".format(rnd)
+        if permit != due:
+            raise CannotEvaluate("{} permit_sha256: {} is not {} (a permit digest is the sha256 of the "
+                                 "record bytes before its round's first line, every earlier line with "
+                                 "its LF, and a retry carries its round's digest again)".format(
+                                     where, _show(permit), named))
         ledger.permits[permit] = rnd
+        ledger.round_permits[rnd] = permit
 
     legs = _list(obj[F_LEGS], where + " legs", MAX_FAMILIES)
-    families, reported = set(), set()
+    families, reported, line_dispatches = set(), set(), set()
     for index, leg in enumerate(legs):
         lw = "{} legs[{}]".format(where, index)
         _keys(leg, LEG_KEYS, frozenset(), lw)
@@ -538,17 +581,37 @@ def _check_round(obj, where, item, roster, ledger, previous):
             raise CannotEvaluate("{}: a missing leg carries no head (it reviewed nothing)".format(lw))
         dispatch = _hex(leg[F_DISPATCH], HEX32_RE, 32, lw + " dispatch_id", nullable=(state == "missing"))
         if dispatch is not None:
-            if dispatch in ledger.dispatches:
+            if dispatch in line_dispatches:
                 raise CannotEvaluate("{} dispatch_id: {} is already carried by another leg, on this line "
-                                     "or an earlier one (each dispatch has its own id: a retry or a later "
-                                     "round is a new dispatch)".format(lw, _show(dispatch)))
-            ledger.dispatches.add(dispatch)
-        _hex(leg[F_REPORT], HEX64_RE, 64, lw + " report_sha256", nullable=True)
-        if state == "complete" and leg[F_REPORT] is None:
+                                     "(each leg on a line is its own dispatch)".format(lw, _show(dispatch)))
+            line_dispatches.add(dispatch)
+            first = ledger.dispatches.get(dispatch)
+            if first is None:
+                ledger.dispatches[dispatch] = (rnd, leg)
+            elif first[0] != rnd:
+                raise CannotEvaluate("{} dispatch_id: {} is already carried by another leg, in round {} "
+                                     "(only a retry of that round may carry the leg forward; a later round "
+                                     "is a new dispatch)".format(lw, _show(dispatch), first[0]))
+            elif leg != first[1]:
+                raise CannotEvaluate("{} dispatch_id: {} is already carried by another leg of round {}, and "
+                                     "this leg differs from it (a retry carries a leg forward only "
+                                     "unchanged: the same family, state, head, report_sha256, verdict and "
+                                     "findings; a leg run again is a new dispatch)".format(
+                                         lw, _show(dispatch), rnd))
+        report = _hex(leg[F_REPORT], HEX64_RE, 64, lw + " report_sha256", nullable=True)
+        if state == "complete" and report is None:
             raise CannotEvaluate("{}: a complete leg carries its report_sha256 (complete means a usable "
                                  "report exists)".format(lw))
-        if state == "missing" and leg[F_REPORT] is not None:
+        if state == "missing" and report is not None:
             raise CannotEvaluate("{}: a missing leg carries no report_sha256".format(lw))
+        if report is not None:
+            owner = ledger.reports.get(report)
+            if owner is not None and owner != dispatch:
+                raise CannotEvaluate("{} report_sha256: {} is already carried by the leg of another "
+                                     "dispatch, on this line or an earlier one (a report belongs to one "
+                                     "dispatch; only a carried leg repeats its digest)".format(
+                                         lw, _show(report)))
+            ledger.reports[report] = dispatch
         findings = _list(leg[F_FINDINGS], lw + " findings")
         if state in ("empty", "missing") and findings:
             raise CannotEvaluate("{}: an {} leg carries no findings".format(lw, state))
@@ -561,10 +624,12 @@ def _check_round(obj, where, item, roster, ledger, previous):
                 has_open = True
             if fid in leg_ids:
                 raise CannotEvaluate("{}: finding {} is reported twice by one leg".format(fw, _show(fid)))
-            if fid in ledger.withdrawn:
-                raise CannotEvaluate("{}: finding {} was withdrawn on an earlier line and is reported "
-                                     "again (a withdrawn id stays withdrawn; a finding raised again is a "
-                                     "new id)".format(fw, _show(fid)))
+            withdrawn_in = ledger.withdrawn.get(fid)
+            if withdrawn_in is not None and withdrawn_in != rnd:
+                raise CannotEvaluate("{}: finding {} was withdrawn in round {} and is reported again in "
+                                     "round {} (a withdrawn id stays withdrawn after the round that "
+                                     "withdrew it; a finding raised again is a new id)".format(
+                                         fw, _show(fid), withdrawn_in, rnd))
             leg_ids.add(fid)
         if state in ("empty", "missing") and verdict != "none":
             raise CannotEvaluate("{} verdict: a leg in state {} states no verdict (none), got {}".format(
@@ -598,6 +663,10 @@ def _check_round(obj, where, item, roster, ledger, previous):
             if target == gid or target not in graded:
                 raise CannotEvaluate("{} replaces: {} must name an id graded before this one, not the "
                                      "id itself".format(gw, _show(target)))
+            if target in ledger.withdrawn:
+                raise CannotEvaluate("{} replaces: {} was withdrawn in round {} (a withdrawn id is never "
+                                     "replaced)".format(gw, _show(target), ledger.withdrawn[target]))
+            ledger.replaced.add(target)
         if F_FOLLOWUP in grade:
             if _ident(grade[F_FOLLOWUP], gw + " followup") == item:
                 raise CannotEvaluate("{} followup: {} is the record's own item (a follow-up names "
@@ -627,7 +696,10 @@ def _check_round(obj, where, item, roster, ledger, previous):
             raise CannotEvaluate("{}: {} is withdrawn but was never graded".format(ww, _show(wid)))
         if wid in ledger.withdrawn:
             raise CannotEvaluate("{}: {} is already withdrawn".format(ww, _show(wid)))
-        ledger.withdrawn.add(wid)
+        if wid in ledger.replaced:
+            raise CannotEvaluate("{}: {} is named by a grade's replaces, on this line or an earlier one "
+                                 "(an id another grade replaces is never withdrawn)".format(ww, _show(wid)))
+        ledger.withdrawn[wid] = rnd
     return rnd, attempt
 
 
@@ -669,6 +741,7 @@ def validate_bytes(data, anchor_data):
         else:
             previous = _check_round(obj, where, item, roster, ledger, previous)
         prev_digest = hashlib.sha256(raw).hexdigest()
+        ledger.prefix.update(raw + b"\n")
 
     tip = len(raws) - 1
     if not anchor_data or b"\r" in anchor_data or not anchor_data.endswith(b"\n") or \
