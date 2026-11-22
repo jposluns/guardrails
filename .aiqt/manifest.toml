@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "74fa3a4ca78ac0ee932288abb099f0da5b63d057c19f27d1a7d3bc0fc64621e5"
+tree-sha256 = "46e5af4d6063e02c0020cd329e5d29b08e0de1de0aac359f5498e447d9a3a496"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -872,8 +872,8 @@ sha256 = "9eda9dab6652dd2208b72dd68d2dfc794ff5d2762cf4102ba975f07c73792697"
 
 [[sources]]
 path = ".aiqt/renders/aiqt-core.md"
-bytes = 123415
-sha256 = "1c2373adda0d7b4ccfd0b171864504d60f74e5e049b996e1664244be1fac2898"
+bytes = 124278
+sha256 = "9391bad386c2326d7f553c7a45c7a41168fea48054600d816e724a7b4d987899"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -4914,7 +4914,7 @@ sha256 = "e6772e2935b78c56eee653275a022211f116568484d93b6645434e3ebba9a972"
 artifact-id = "rules-core:.aiqt/renders/aiqt-core.md"
 path = ".aiqt/renders/aiqt-core.md"
 kind = "file"
-sha256 = "1c2373adda0d7b4ccfd0b171864504d60f74e5e049b996e1664244be1fac2898"
+sha256 = "9391bad386c2326d7f553c7a45c7a41168fea48054600d816e724a7b4d987899"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
