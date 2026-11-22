@@ -1168,9 +1168,9 @@ and outranks any predicted one, but counts only when recorded in an artefact the
 assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
 unclear, the ASK goes ahead.
 Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or
-open, across every durable store by the subject's key terms, and cite each hit or dismiss it with a reason; a
-hit in a notes log that shows a maintainer ruling is cited as unconfirmed, since a notes log never settles a
-maintainer's matter on its own.
+open, across every durable store, notes logs included, by the subject's key terms, and cite each hit or
+dismiss it with a reason; a hit showing a maintainer ruling in a store the assistant can write, a notes log
+among them, is cited as unconfirmed.
 
 ## Repeated failure triggers premise review
 
