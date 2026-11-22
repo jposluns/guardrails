@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "cf901b5fab793ff42e379b1b039f9e0d9b11f8d17ae2955cef859d10c84605a0"
+tree-sha256 = "c3be6e815d761eb42ab0d060299089bf610627683aee407d59a12f1015e8e4e9"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -158,7 +158,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3408
-sha256 = "e5988437b7dc98b56234511013ffff8636c99f0e457866d9ae32ed77315992d9"
+sha256 = "c7b0691ee3bd8870e91e71359435aafded871e65d26fa775ed1cee3ac954d595"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4592,8 +4592,8 @@ sha256 = "b0fa40d1f94ac44b818660015db141d889882c48c31f3576994f9083dc1e8bcc"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 150051
-sha256 = "10bd9a881df965a0db49c55fe2622bc5ce90b78698f4399c3fdf3e32357243c8"
+bytes = 151886
+sha256 = "609bcf77d88789e1b25178c95b3e7a807e3cd4e5860d4ed5e0aa3ae0023164b8"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4607,8 +4607,8 @@ sha256 = "14a55dc1739b456d0f69803a0a20b8e7543ff735770a7bf1febc717d9557ce9a"
 
 [[sources]]
 path = "tools/gen_agents.py"
-bytes = 164679
-sha256 = "13df92221f1c942163b5d6324a99d178d4a78d947817e9b655c5e470d486da13"
+bytes = 169362
+sha256 = "a8fc2455e43c7bb7b4f39b00e2cc19a8c6e1ba4485a62a2c5de1b878117c30f5"
 
 [[sources]]
 path = "tools/gen_changelog.py"
@@ -4632,8 +4632,8 @@ sha256 = "7c10ff3445f1e2525fa01bc23d4dce6a93b67ebd8feccf36db27c43ba9d1bfb3"
 
 [[sources]]
 path = "tools/gen_cursor.py"
-bytes = 20704
-sha256 = "2a2908d6433cf56b09ee66f66032b3c7d243735a7a574138a167baa91819f802"
+bytes = 23028
+sha256 = "c08d6d0ff75eaa424492a2cf4152930312355daefe2c691b5cbbf332d2bf5588"
 
 [[sources]]
 path = "tools/gen_disclosure.py"
@@ -4717,13 +4717,13 @@ sha256 = "da46591c5eb6070ac9cf404c3a0680b8266b003a27ebfe625f5013575e569101"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 216667
-sha256 = "5bb90f015948c56fb76da62a4e1f0592364fc4adf54c827c76255fd768cc6e81"
+bytes = 219475
+sha256 = "9042a5ca32d07dd6e58c77bb7800d1e121ce0d87898f6dbc885630aa476bf1b8"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
-bytes = 14963
-sha256 = "b5d225d986fc9f7d77c6092c6396cb072d69d67965540d7ea3ad500d24e3d9e3"
+bytes = 16860
+sha256 = "38ca9e8089ff8afefd489ba3284c2a2d6e4bdeca2625542202ac83d789dc7a6f"
 
 [[sources]]
 path = "tools/import_cwe.py"
