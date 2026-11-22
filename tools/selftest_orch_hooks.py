@@ -2815,6 +2815,51 @@ def _rwh_cases(tmp):
     check("rwh/split-git-word-held-denies-red-on-revert",
           [[k != "allow" for k in split_kinds()], raw_gate_only(split_kinds)],
           [[True] * (len(split_cmds) + 2), ["allow"] * (len(split_cmds) + 2)])
+    # the braced \x{...} hex form bash decodes as it decodes \xHH (gi$'\x{74}' is git) is read through the hooks'
+    # one escape table (_gate_bash_escape); with that table's braced form read as written, as the table before the
+    # shared one left it (\x and {74}), every one is allowed (red on revert)
+    braced_cmds = ["gi$'\\x{74}' -C " + str(held) + " checkout " + seed,
+                   "$'\\x{67}'it -C " + str(held) + " reset --hard " + seed,
+                   "g$'\\x{0069}'t -C " + str(held) + " switch main"]
+
+    def braced_kinds():
+        return [kind(base, c) for c in braced_cmds] + [kind(held, "gi$'\\x{74}' checkout " + seed)]
+
+    # each flip reads its name with getattr, so against a tree without the shared table (the revert) the row
+    # reports its failure instead of raising
+    def braced_as_written(fn):
+        saved = getattr(aiqt_hooks, "_gate_bash_escape", None)
+        if saved is None:
+            return fn()
+        aiqt_hooks._gate_bash_escape = lambda m: m.group(0) if m.group(2) is not None else saved(m)
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._gate_bash_escape = saved
+    check("rwh/braced-hex-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in braced_kinds()], braced_as_written(braced_kinds)],
+          [[True] * (len(braced_cmds) + 1), ["allow"] * (len(braced_cmds) + 1)])
+    # a \c\\ pair, which bash reads as one escape, is also read split (_ansi_c_pair_split_body) as the table before
+    # the shared one read it ($'\c\\x67'it as a control character and git), so a command that table held stays
+    # held; with the split reading read as the shared one each is allowed (red on revert)
+    pair_cmds = ["$'\\c\\\\x67'it -C " + str(held) + " checkout " + seed,
+                 "$'\\c\\\\c\\\\x67'it -C " + str(held) + " reset --hard " + seed]
+
+    def pair_kinds():
+        return [kind(base, c) for c in pair_cmds]
+
+    def pair_unsplit(fn):
+        saved = getattr(aiqt_hooks, "_ANSI_C_PAIR_SPLIT_ESCAPE_RE", None)
+        if saved is None:
+            return fn()
+        aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = aiqt_hooks._GATE_BASH_ESCAPE_RE
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = saved
+    check("rwh/c-pair-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in pair_kinds()], pair_unsplit(pair_kinds)],
+          [[True] * len(pair_cmds), ["allow"] * len(pair_cmds)])
     # the static reading adds no match to text carrying no git word, so ordinary commands run inside the held
     # worktree stay allowed; with the gate reading every command as a git word each is withheld (the
     # over-broad gate this row catches)

@@ -2349,55 +2349,54 @@ def _dequoted_text(command):
     return joined.replace("'", "").replace('"', "").replace(chr(92), "")
 
 
-# An ANSI-C $'...' quote, its body running to the first single quote no backslash escapes, and one backslash
-# escape inside such a body, in the forms bash decodes there (_ansi_c_decoded).
+# An ANSI-C $'...' quote, its body running to the first single quote no backslash escapes (_ansi_c_decoded). The
+# escapes inside such a body are read through the hooks' one escape table, the no-verify gate's: _GATE_BASH_ESCAPE_RE
+# finds each escape in every form bash 5.3.9 decodes (octal, \x with one or two hex digits, braced \x{...}, \u, \U,
+# \c with \c\\ as one pair, the letter escapes) and _gate_bash_escape decodes it, so the static decoded reading and
+# the gate's decoder (_gate_ansi_c_text) cannot read an escape differently.
 _ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
-_ANSI_C_ESCAPE_RE = re.compile(
-    r"\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c(.)|(.))", re.DOTALL)
-_ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
-                 "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
-
-
-def _ansi_c_escape(match):
-    """The text one ANSI-C escape (_ANSI_C_ESCAPE_RE) stands for, as bash decodes it: the character of a hex,
-    Unicode or octal value (an octal value keeps its low eight bits, as bash does; a code point past
-    U+10FFFF reads as nothing), the control character of \\cX, a named escape's character, and the escape
-    itself where bash keeps it unchanged (an unknown letter)."""
-    hex_value, short_point, long_point, octal, control, other = match.groups()
-    if hex_value is not None:
-        return chr(int(hex_value, 16))
-    if short_point is not None or long_point is not None:
-        point = int(short_point or long_point, 16)
-        return chr(point) if point <= 0x10FFFF else ""
-    if octal is not None:
-        return chr(int(octal, 8) & 0xFF)
-    if control is not None:
-        return "\x7f" if control == "?" else chr(ord(control) & 0x1F)
-    return _ANSI_C_NAMED.get(other, match.group(0))
 
 
 def _ansi_c_body(match):
-    """The decoded body of one ANSI-C quote (_ANSI_C_QUOTE_RE), with no quote characters around it."""
-    return _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, match.group(1))
+    """The decoded body of one ANSI-C quote (_ANSI_C_QUOTE_RE), with no quote characters around it: each escape
+    (_GATE_BASH_ESCAPE_RE) decoded by _gate_bash_escape, with no cut at a NUL (_decoded_readings reads the letters
+    after one too, which can only add a match; _ansi_c_static_quote cuts there as bash does)."""
+    return _GATE_BASH_ESCAPE_RE.sub(_gate_bash_escape, match.group(1))
 
 
 def _ansi_c_decoded(command):
     """command with each ANSI-C $'...' quote replaced by its body decoded the way bash decodes it
-    (_ansi_c_escape), so a spelling bash assembles from escapes (--no-$'\\x76'erify) reads as that spelling.
+    (_ansi_c_body, _gate_bash_escape), so a spelling bash assembles from escapes (--no-$'\\x76'erify,
+    --no-$'\\x{76}'erify) reads as that spelling.
     The quote is found in the raw text without tracking the quoting around it, so a $' inside other quotes
     is decoded too: it is read only beside the raw text and its plain de-quoted copy (_decoded_readings),
     where an extra reading can only add a match. Linear, never raises."""
     return _ANSI_C_QUOTE_RE.sub(_ansi_c_body, command)
 
 
+def _ansi_c_pair_split_body(match):
+    """The body of one ANSI-C quote (_ANSI_C_QUOTE_RE) with each escape decoded by the shared table
+    (_gate_bash_escape) but found by _ANSI_C_PAIR_SPLIT_ESCAPE_RE, which reads \\c and the one character after it,
+    so a \\c\\\\ pair is split (\\c\\\\x67 as \\c\\ and \\x67): the letters the escape table before the one shared
+    table read from it. bash reads the pair as one escape (_ansi_c_body); this reading is read only beside that
+    one."""
+    return _ANSI_C_PAIR_SPLIT_ESCAPE_RE.sub(_gate_bash_escape, match.group(1))
+
+
 def _decoded_readings(command):
     """The de-quoted readings a parse-failure fallback reads BESIDE the raw text: _dequoted_text(command)
     and, when command holds an ANSI-C $'...' quote, _dequoted_text of command with each such quote's escapes
-    decoded first (_ansi_c_decoded). A probe that matches any reading matches, so each reading can only add
-    a match to the raw text's probes, never clear one."""
+    decoded first (_ansi_c_decoded). When command also holds the text \\c\\\\, a third reading decodes each quote
+    with every \\c\\\\ pair split (_ansi_c_pair_split_body, _ANSI_C_PAIR_SPLIT_ESCAPE_RE): the escape table before the one shared table read the
+    pair as \\c\\ and an escape after it ($'\\c\\\\x67'it as a control character and git), so a command that reading
+    matched still matches. A probe that matches any reading matches, so each reading can only add a match to the raw
+    text's probes, never clear one."""
     if "$'" not in command:
         return (_dequoted_text(command),)
-    return (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
+    readings = (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
+    if "\\c\\\\" not in command:
+        return readings
+    return readings + (_dequoted_text(_ANSI_C_QUOTE_RE.sub(_ansi_c_pair_split_body, command)),)
 
 
 # The characters an ANSI-C quote's decoded body may hold and still be written back unquoted with the same meaning
@@ -2408,12 +2407,13 @@ _ANSI_C_PLAIN_RE = re.compile(r"[A-Za-z0-9_./,:@%+-]+")
 
 def _ansi_c_static_quote(match):
     """One ANSI-C quote (_ANSI_C_QUOTE_RE) written back as the literal word text bash makes of it: unchanged when its
-    body holds no backslash (the lexer already reads such a body literally), else its body decoded (_ansi_c_body)
-    and cut at a NUL (bash ends the string there), written unquoted when every character is in _ANSI_C_PLAIN_RE
-    and single-quoted otherwise (a single quote in it as '\\'')."""
+    body holds no backslash (the lexer already reads such a body literally), else its body as the no-verify gate's
+    decoder reads it (_gate_ansi_c_text: every escape form bash decodes, cut at the first escape that yields a NUL)
+    and cut at any NUL left (bash ends the string there), written unquoted when every character is in
+    _ANSI_C_PLAIN_RE and single-quoted otherwise (a single quote in it as '\\'')."""
     if "\\" not in match.group(1):
         return match.group(0)
-    body = _ansi_c_body(match).split("\x00", 1)[0]
+    body = _gate_ansi_c_text(match.group(1)).split("\x00", 1)[0]
     if _ANSI_C_PLAIN_RE.fullmatch(body):
         return body
     return "'" + body.replace("'", "'\\''") + "'"
@@ -2423,8 +2423,8 @@ def _ansi_c_static_reading(command):
     """The STATIC DECODED READING: command with every quote bash decodes from the command text alone written as the
     literal word text bash assembles from it, so a git word, subcommand or option spelled that way lexes as its
     plain spelling: an ANSI-C $'...' quote whose body holds an escape ($'\\x67'it, git $'\\x63'ommit, git log
-    $'\\x2d'p) is decoded (_ansi_c_static_quote, the escapes read as _ansi_c_escape reads them for
-    _decoded_readings), and the '$' of a locale $"..." quote is dropped (gi$"t"), the string bash reads when no
+    $'\\x2d'p, $'\\x{67}'it) is decoded (_ansi_c_static_quote, the escapes read by the no-verify gate's decoder,
+    _gate_ansi_c_text, through the one escape table _decoded_readings reads too), and the '$' of a locale $"..." quote is dropped (gi$"t"), the string bash reads when no
     message catalogue translates it, as _dequoted_text drops it. It is the lexable counterpart of
     _decoded_readings' readings, which remove every quote and so cannot be lexed. Unlike them it tracks quoting
     as bash does, so a $' or $" inside single quotes, or inside double quotes outside a '$(...)' or backquote
@@ -2452,15 +2452,41 @@ def _ansi_c_static_reading(command):
     in a command whose text names neither git nor an AI identity). A '$' followed by a line continuation before a
     quote ($<backslash-newline>'\\x67'it), which bash joins into an ANSI-C or locale quote, makes the command
     relevant and is refused (_StaticReadingUncertain), since the scan reads the quote after the continuation as a
-    plain one. Otherwise the scan reads the whole command as above, and returns the rest of the text unchanged from
-    an ANSI-C quote that never closes. Linear; raises only _StaticReadingUncertain."""
+    plain one. An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
+    escape, as this reading does, but the escape table before the one shared table read it as \\c\\ and an escape
+    after it ($'\\c\\\\x20Claude' as a control character, a blank and Claude), so a command that reading denied is
+    still denied (the no-reduction rule). Otherwise the scan reads the whole command as above, and returns the rest
+    of the text unchanged from an ANSI-C quote that never closes. Linear; raises only _StaticReadingUncertain."""
     if not _ansi_c_static_relevant(command):
         return command
     continued = _ANSI_C_CONTINUED_QUOTE_RE.search(command)
     if continued is not None:
         raise _StaticReadingUncertain("a '$' and a line continuation before a quote, which bash joins into an ANSI-C "
                                       "or locale quote this reading does not decode", continued.start())
+    paired = _ansi_c_pair_index(command)
+    if paired >= 0:
+        raise _StaticReadingUncertain("an ANSI-C quote holding a \\c\\\\ pair, which the escape table before the one "
+                                      "shared table read as two escapes", paired)
     return _ansi_c_static_scan(command)
+
+
+def _ansi_c_pair_index(command):
+    """The index of the first $' from which an ANSI-C quote (_ANSI_C_QUOTE_RE) holding a \\c\\\\ pair escape
+    (_GATE_BASH_ESCAPE_RE) is matched, in command as written or with every backslash-newline removed, matched from
+    every index that holds $' as _ansi_c_static_relevant matches; -1 when there is none (and at once when the text
+    \\c\\\\ is in neither). Linear for the reason _ansi_c_static_relevant is; never raises."""
+    joined = command.replace("\\\n", "")
+    for text in ((command, joined) if joined != command else (command,)):
+        if "\\c\\\\" not in text:
+            continue
+        at = text.find("$'")
+        while at >= 0:
+            match = _ANSI_C_QUOTE_RE.match(text, at)
+            if match is not None and any(escape.group(6) == "\\\\"
+                                         for escape in _GATE_BASH_ESCAPE_RE.finditer(match.group(1))):
+                return at
+            at = text.find("$'", at + 1)
+    return -1
 
 
 # The characters an ANSI-C escape may decode to and spell part of a word a guard tests (_ansi_c_static_relevant):
@@ -2473,7 +2499,7 @@ _ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - 
 # eval $'g\x27\x27it log -p' runs git log -p), U+0001 and U+007F (the CTLESC and CTLNUL characters bash uses
 # internally to mark quoting), a NUL (bash ends the string there, so the letters after it in the quote drop out:
 # --author=$'Cl\0zz'aude is --author=Claude), non-ASCII text (a letter Python's case-insensitive match folds to an
-# ASCII one), nothing in _ansi_c_escape's decoding (a code point past U+10FFFF) and any other text.
+# ASCII one), nothing in _gate_bash_escape's decoding (a code point past U+10FFFF) and any other text.
 _ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
 # A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
 # the quote (_ansi_c_static_reading refuses it).
@@ -2492,13 +2518,13 @@ _ANSI_C_SUBJECT_STRIP_RE = re.compile(r"\\\n|[\\'\"$`]")
 
 
 def _ansi_c_inert_dropped(match):
-    """match (_ANSI_C_ESCAPE_RE) removed when it is an inert escape (_ANSI_C_INERT_CHARS), else kept as written."""
-    return "" if _ansi_c_escape(match) in _ANSI_C_INERT_CHARS else match.group(0)
+    """match (_GATE_BASH_ESCAPE_RE) removed when it is an inert escape (_ANSI_C_INERT_CHARS), else kept as written."""
+    return "" if _gate_bash_escape(match) in _ANSI_C_INERT_CHARS else match.group(0)
 
 
 def _ansi_c_inert_quote(match):
     """One ANSI-C quote (_ANSI_C_QUOTE_RE) with its inert escapes removed (_ansi_c_inert_dropped)."""
-    return "$'" + _ANSI_C_ESCAPE_RE.sub(_ansi_c_inert_dropped, match.group(1)) + "'"
+    return "$'" + _GATE_BASH_ESCAPE_RE.sub(_ansi_c_inert_dropped, match.group(1)) + "'"
 
 
 def _ansi_c_static_subject(command):
@@ -2513,19 +2539,22 @@ def _ansi_c_static_subject(command):
     backslash before its newline makes a line continuation). The letters and digits of an escape that is not
     removed (x20) can only add a match. Linear, never raises."""
     texts = (command, _ANSI_C_QUOTE_RE.sub(_ansi_c_inert_quote, command),
-             _ANSI_C_ESCAPE_RE.sub(_ansi_c_inert_dropped, command))
+             _GATE_BASH_ESCAPE_RE.sub(_ansi_c_inert_dropped, command))
     return any(_ANSI_C_SUBJECT_RE.search(_ANSI_C_SUBJECT_STRIP_RE.sub("", text)) for text in texts)
 
 
 def _ansi_c_static_relevant(command):
     """GATE G of the static decoded reading (_ansi_c_static_reading), which needs no grammar: True when command
-    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an escape (_ANSI_C_ESCAPE_RE)
+    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an escape (_GATE_BASH_ESCAPE_RE)
     that can change a value one of the four guards that read the reading tests (words, identity values, trailers
     and paths), read as the guards' own lexer reads it (the escape's letter kept: $'\\x20' as x20) rather than as
-    bash does: one whose decoding (_ansi_c_escape) holds a character in _ANSI_C_RELEVANT_CHARS (it spells part of a git
-    word, subcommand, option or path) or is not a single inert character (_ANSI_C_INERT_CHARS: a NUL, non-ASCII
+    bash does: one whose decoding (_gate_bash_escape) holds a character in _ANSI_C_RELEVANT_CHARS (it spells part of a
+    git word, subcommand, option or path) or is not a single inert character (_ANSI_C_INERT_CHARS: a NUL, non-ASCII
     text, nothing, or more than one character), or an inert escape in a command whose text names git or an AI
-    identity (_ansi_c_static_subject). An inert escape there can split, end or join the value around it: a blank
+    identity (_ansi_c_static_subject). A braced \\x{...} escape and a \\c\\\\ pair are relevant whatever they decode
+    to: the escape table before the one shared table read each as other escapes ($'\\x{20}' as \\x and {20},
+    $'\\c\\\\x67' as \\c\\ and \\x67), each relevant, so no command that reading refused is now read as irrelevant
+    (the no-reduction rule). An inert escape there can split, end or join the value around it: a blank
     or control character makes a word boundary AI_IDENTITY_RE needs ($'\\x20Claude'), a newline starts a trailer's
     line, and a blank or newline splits words in a body eval or sh -c reads again (eval $'git\\x20log -p'), where
     a newline after a backslash is a line continuation. False otherwise, and then the guards read no static decoded
@@ -2556,8 +2585,10 @@ def _ansi_c_static_relevant_text(text, joined):
     while at >= 0:
         match = _ANSI_C_QUOTE_RE.match(text, at)
         if match is not None:
-            for escape in _ANSI_C_ESCAPE_RE.finditer(match.group(1)):
-                decoded = _ansi_c_escape(escape)
+            for escape in _GATE_BASH_ESCAPE_RE.finditer(match.group(1)):
+                if escape.group(2) is not None or escape.group(6) == "\\\\":
+                    return True  # a braced \x{...} escape or a \c\\ pair (_ansi_c_static_relevant)
+                decoded = _gate_bash_escape(escape)
                 if not _ANSI_C_RELEVANT_CHARS.isdisjoint(decoded) or len(decoded) != 1 or (
                         decoded not in _ANSI_C_INERT_CHARS):
                     return True
@@ -20054,10 +20085,15 @@ def _gate_dequoted_words(text):
 # \u and \U take up to four and eight hex digits; \c reads the next character as a control character (\c\\
 # takes both backslashes, \c? is DEL); the letter escapes and \\, \', \" and \? decode; any other escape keeps
 # its backslash, so env -S still sees the \_ of $'git\_commit'. The body of one such quote runs to the first
-# quote no backslash escapes (_GATE_ANSI_C_BODY_RE).
+# quote no backslash escapes (_GATE_ANSI_C_BODY_RE). It and _gate_bash_escape are the hooks' one escape table: the
+# static decoded reading (_ansi_c_body, _ansi_c_static_quote, _ansi_c_static_relevant) reads escapes through them.
 _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
+# _GATE_BASH_ESCAPE_RE with \c reading the one character after it, so a \c\\ pair is read as \c\ and an escape
+# after it, as the escape table before the one shared table read it; built from that pattern, so it differs in
+# nothing else. Read only for the extra pair-split reading of _decoded_readings (_ansi_c_pair_split_body).
+_ANSI_C_PAIR_SPLIT_ESCAPE_RE = re.compile(_GATE_BASH_ESCAPE_RE.pattern.replace("|c(\\\\\\\\|.)|", "|c(.)|"), re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
 # A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
 _GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
@@ -20069,31 +20105,43 @@ _GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 _GATE_WORD_BREAK_RE = re.compile(r"[ \t\n;&|()<>`]+")
 
 
+def _gate_bash_escape(m):
+    """The text bash reads for one escape of an ANSI-C $'...' body (a _GATE_BASH_ESCAPE_RE match), with no NUL cut:
+    the character of an octal, \\x, \\x{...}, \\u or \\U code ('' for a code past U+10FFFF), the control character
+    of \\cX (one byte read: a multibyte character gives its first byte's control character and U+FFFD), a letter
+    escape's character, \\\\, \\', \\" and \\? as that character, and any other escape kept with its backslash. The
+    one escape table of the hooks: _gate_ansi_c_text and the static decoded reading (_ansi_c_body,
+    _ansi_c_static_relevant) both read escapes through it."""
+    octal, braced, hex2, hex4, hex8, control, other = m.groups()
+    if control is not None:
+        # bash reads one byte here: a multibyte character gives its first byte, and the rest stays text
+        first = control[0].encode("utf-8", "surrogatepass")[0]
+        char = "\x7f" if control == "?" else chr(first & 0x1F)
+        if first > 0x7F:
+            char += "\ufffd"
+    elif other is not None:
+        char = _GATE_ANSI_C_LETTERS.get(other, other if other in "\\'\"?" else "\\" + other)
+    elif octal is not None:
+        char = chr(int(octal, 8) & 0xFF)
+    elif braced is not None:
+        char = chr(int(braced[-2:] or "0", 16))
+    elif hex2 is not None:
+        char = chr(int(hex2, 16))
+    else:
+        code = int(hex4 or hex8, 16)
+        char = chr(code) if code <= 0x10FFFF else ""
+    return char
+
+
 def _gate_ansi_c_text(body):
     """The text bash reads for the body of one ANSI-C $'...' quote: each escape decoded as bash decodes it
-    (_GATE_BASH_ESCAPE_RE), and the body cut at the first escape that yields a NUL byte (\\0, \\x00, \\x{},
-    \\u0000, \\c@ and their kin), since bash ends that quote's text there and keeps the rest of the word."""
+    (_GATE_BASH_ESCAPE_RE, _gate_bash_escape), and the body cut at the first escape that yields a NUL byte (\\0,
+    \\x00, \\x{}, \\u0000, \\c@ and their kin), since bash ends that quote's text there and keeps the rest of the
+    word."""
     out = []
     pos = 0
     for m in _GATE_BASH_ESCAPE_RE.finditer(body):
-        octal, braced, hex2, hex4, hex8, control, other = m.groups()
-        if control is not None:
-            # bash reads one byte here: a multibyte character gives its first byte, and the rest stays text
-            first = control[0].encode("utf-8", "surrogatepass")[0]
-            char = "\x7f" if control == "?" else chr(first & 0x1F)
-            if first > 0x7F:
-                char += "\ufffd"
-        elif other is not None:
-            char = _GATE_ANSI_C_LETTERS.get(other, other if other in "\\'\"?" else "\\" + other)
-        elif octal is not None:
-            char = chr(int(octal, 8) & 0xFF)
-        elif braced is not None:
-            char = chr(int(braced[-2:] or "0", 16))
-        elif hex2 is not None:
-            char = chr(int(hex2, 16))
-        else:
-            code = int(hex4 or hex8, 16)
-            char = chr(code) if code <= 0x10FFFF else ""
+        char = _gate_bash_escape(m)
         out.append(body[pos:m.start()])
         if char[:1] == "\x00":
             return "".join(out)

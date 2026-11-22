@@ -6309,6 +6309,7 @@ _STATIC_DECODED_REFUSED = (
     ("sdr-refuse-delim-escaped-quote", "cat <<\"E\\\"F\"\nit's\nE\"F\ngi$'\\x74' log"),
     ("sdr-refuse-heredoc-continuation", "cat <<E\nx\\\nE\nit's\nE\ngi$'\\x74' log"),
     ("sdr-refuse-arith-shift-line", "echo $(( 1 << 2 ))\ngi$'\\x74' log\n2"),
+    ("sdr-refuse-c-pair", "gi$'\\c\\\\x74' log"),
 )
 
 
@@ -6385,6 +6386,125 @@ def _test_static_decoded_reading(failures):
                                 "so it pins the reading; got {}".format(label, old, got))
     finally:
         aiqt_hooks._ansi_c_static_reading = reading
+
+
+# (sdr-brace-*) The braced \x{...} hex form, which bash decodes as it decodes \xHH (bash 5.3.9: $'\x{67}'it is git),
+# read by the four guards through the hooks' one escape table (_gate_bash_escape, the no-verify gate's): each row
+# denies as its plain \xHH twin in _STATIC_DECODED_ROWS does, and takes its decision at 4499130b (the last field)
+# under the flip that reads a braced escape as written, as the escape table before the shared one left it (\x and
+# {67}), so each row is red on revert.
+_STATIC_DECODED_BRACED = (
+    ("sdr-brace-sectvl-git", "commit_msg_subst", "$'\\x{67}'it commit -m \"$(hostname)\"", "deny", "allow"),
+    ("sdr-brace-sectvl-sub", "commit_msg_subst", "git c$'\\x{06f}'mmit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-brace-cmtidn-author", "commit_identity", "git commit --author=$'\\x{43}'laude -m x", "deny", "allow"),
+    ("sdr-brace-cmtidn-sub", "commit_identity", "git $'\\x{63}'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y",
+     "deny", "allow"),
+    ("sdr-brace-cnsdif-sub", "diff_source_pretool", "git $'\\x{64}'iff", "deny", "allow"),
+    ("sdr-brace-cnsdif-opt", "diff_source_pretool", "git log $'\\x{2d}'p", "deny", "allow-note"),
+    ("sdr-brace-expbnd-sub", "git_explicit_binding", "git add --all && git $'\\x{70}'ush", "deny", "allow"),
+    ("sdr-brace-expbnd-opt", "git_explicit_binding", "git add --$'\\x{61}'ll && git push", "deny", "allow"),
+)
+# (sdr-pair-*) A \c\\ pair, which bash reads as one escape and the escape table before the shared one read as \c\ and
+# an escape after it: the static decoded reading refuses a quote that holds one (_ansi_c_pair_index), so the deny
+# that table gave is kept (sdr-pair-cmtidn-author, denied at 4499130b), and each row allows under the flip that
+# refuses no pair.
+_STATIC_DECODED_PAIR = (
+    ("sdr-pair-cmtidn-author", "commit_identity", "git commit --author=$'\\c\\\\x20Claude' -m x", "deny", "allow"),
+    ("sdr-pair-cnsdif-git", "diff_source_pretool", "$'\\c\\\\x67'it log -p", "deny", "allow"),
+)
+# (sdr-gate-brace-*, sdr-gate-pair-*) Gate G reads a braced escape and a \c\\ pair as relevant whatever they decode to
+# (the escape table before the shared one read each as relevant), so these commands, which name neither git nor an
+# AI identity and were denied at 4499130b through the refusal after the construct (_STATIC_GATE_PREFIX, written out
+# here), are still denied.
+_STATIC_GATE_KEPT = (
+    ("sdr-gate-brace-blank", "echo $(date +%F)#nightly; printf $'\\x{20}'"),
+    ("sdr-gate-brace-newline", "echo $(date +%F)#nightly; printf $'done\\x{0a}'"),
+    ("sdr-gate-pair-text", "echo $(date +%F)#nightly; printf $'\\c\\\\x67'"),
+)
+
+
+def _test_static_decoded_braced(failures):
+    """(sdr-brace-*, sdr-pair-*, sdr-gate-brace-*, sdr-gate-pair-*) The static decoded reading and the decoded
+    readings read escapes through the hooks' one escape table: _STATIC_DECODED_BRACED, _STATIC_DECODED_PAIR and
+    _STATIC_GATE_KEPT run as given, the reading itself decodes each braced form ($'\\x{6c}', a long code's low byte,
+    an unclosed brace, \\x{} as the NUL that ends the quote), and _decoded_readings reads gi$'\\x{74}' as git and
+    $'\\c\\\\x67'it as git in its pair-split reading. Then the braced rows and readings run under the flip that reads
+    a braced escape as written (the escape table before the shared one), the pair rows under the flip that refuses
+    no pair, and the pair-split reading under the flip that reads it as the shared table does: each must take its old
+    result, so each row is red on revert."""
+    gate = aiqt_hooks._ansi_c_static_relevant
+    for label, name, command, want, _old in _STATIC_DECODED_BRACED + _STATIC_DECODED_PAIR:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+    for label, command in _STATIC_GATE_KEPT:
+        if not gate(command):
+            failures.append("({}) _ansi_c_static_relevant({!r}) must read a relevant quote".format(label, command))
+        got = _decision(aiqt_hooks.diff_source_pretool, command)
+        if got != "deny":
+            failures.append("({}) diff_source_pretool on {!r}: expected deny, got {}".format(label, command, got))
+    readings = (
+        ("sdr-brace-reading", "git $'\\x{6c}'og -p", "git log -p"),
+        ("sdr-brace-reading-low-byte", "gi$'\\x{174}' log", "git log"),
+        ("sdr-brace-reading-unclosed", "gi$'\\x{74' log", "git log"),
+        ("sdr-brace-reading-nul", "git commit -m $'a\\x{}b'", "git commit -m a"),
+    )
+    for label, command, want in readings:
+        got = aiqt_hooks._ansi_c_static_reading(command)
+        if got != want:
+            failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
+                label, command, want, got))
+    decoded = (("sdr-brace-decoded", "gi$'\\x{74}' log"), ("sdr-pair-decoded", "$'\\c\\\\x67'it log"),
+               ("sdr-pair-decoded-chain", "$'\\c\\\\c\\\\x67'it log"))
+    for label, command in decoded:
+        if not any(re.search(r"\bgit log\b", text) for text in aiqt_hooks._decoded_readings(command)):
+            failures.append("({}) _decoded_readings({!r}) must hold the word git; got {!r}".format(
+                label, command, aiqt_hooks._decoded_readings(command)))
+    # Each flip reads its name with getattr, so against a tree without the shared table (the revert) the rows report
+    # their failures instead of raising.
+    escape = getattr(aiqt_hooks, "_gate_bash_escape", None)
+    if escape is not None:
+        aiqt_hooks._gate_bash_escape = lambda m: m.group(0) if m.group(2) is not None else escape(m)
+    try:
+        for label, name, command, _want, old in _STATIC_DECODED_BRACED:
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != old:
+                failures.append("({}-flip) with a braced escape read as written the row must take its old decision "
+                                "{}, so it pins the braced form; got {}".format(label, old, got))
+        for label, command, want in readings[:3]:
+            if aiqt_hooks._ansi_c_static_reading(command) == want:
+                failures.append("({}-flip) with a braced escape read as written the reading of {!r} must not be "
+                                "{!r}, so it pins the braced form".format(label, command, want))
+        if any(re.search(r"\bgit log\b", text) for text in aiqt_hooks._decoded_readings(decoded[0][1])):
+            failures.append("(sdr-brace-decoded-flip) with a braced escape read as written _decoded_readings({!r}) "
+                            "must hold no git word, so the row pins the braced form".format(decoded[0][1]))
+    finally:
+        if escape is not None:
+            aiqt_hooks._gate_bash_escape = escape
+    paired = getattr(aiqt_hooks, "_ansi_c_pair_index", None)
+    if paired is not None:
+        aiqt_hooks._ansi_c_pair_index = lambda command: -1
+    try:
+        for label, name, command, _want, old in _STATIC_DECODED_PAIR:
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != old:
+                failures.append("({}-flip) with no \\c\\\\ pair refused the row must take {}, so it pins the "
+                                "refusal; got {}".format(label, old, got))
+    finally:
+        if paired is not None:
+            aiqt_hooks._ansi_c_pair_index = paired
+    split = getattr(aiqt_hooks, "_ANSI_C_PAIR_SPLIT_ESCAPE_RE", None)
+    if split is not None:
+        aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = aiqt_hooks._GATE_BASH_ESCAPE_RE
+    try:
+        for label, command in decoded[1:]:
+            if any(re.search(r"\bgit log\b", text) for text in aiqt_hooks._decoded_readings(command)):
+                failures.append("({}-flip) with the pair-split reading read as the shared table reads it "
+                                "_decoded_readings({!r}) must hold no git word, so the row pins that reading".format(
+                                    label, command))
+    finally:
+        if split is not None:
+            aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = split
 
 
 # (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, or an ANSI-C quote
@@ -6523,9 +6643,9 @@ def _test_static_decoded_gate(failures):
     def matched_once(command):
         if '$"' in command:
             return True
-        return any(not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._ansi_c_escape(escape))
+        return any(not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._gate_bash_escape(escape))
                    for match in aiqt_hooks._ANSI_C_QUOTE_RE.finditer(command)
-                   for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1)))
+                   for escape in aiqt_hooks._GATE_BASH_ESCAPE_RE.finditer(match.group(1)))
 
     def gate_before(command):
         # The gate of 72e8287b: from every index, an escape is relevant only when it decodes to a character in
@@ -6536,8 +6656,8 @@ def _test_static_decoded_gate(failures):
         while at >= 0:
             match = aiqt_hooks._ANSI_C_QUOTE_RE.match(command, at)
             if match is not None and any(
-                    not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._ansi_c_escape(escape))
-                    for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1))):
+                    not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._gate_bash_escape(escape))
+                    for escape in aiqt_hooks._GATE_BASH_ESCAPE_RE.finditer(match.group(1))):
                 return True
             at = command.find("$'", at + 1)
         return False
@@ -38856,6 +38976,7 @@ def _main_isolated(monitor):
         _test_wait_loop_deny_text(failures, tmp)
         _test_fallback_views(failures)
         _test_static_decoded_reading(failures)
+        _test_static_decoded_braced(failures)
         _test_static_decoded_gate(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
