@@ -1,20 +1,41 @@
 #!/usr/bin/env python3
 """PostToolUse and PostToolUseFailure hook (all tools): inject the real clock into the assistant's context.
 
+Input bound: at most 8 MiB plus one byte of stdin is read; input over 8 MiB is discarded unparsed and fails
+open like malformed input (the clock is still emitted, with hookEventName PostToolUse, see Coverage).
+
 Motivated by an assistant composing console timestamps and "Session elapsed HH:MM" footers from its own
 sense of time instead of reading the clock, drifting up to 4h40m ahead (timestamp-from-clock;
-claims-rest-on-observation). After a tool call that ran, it emits ONE short additionalContext line read from
-the process clock, for example:
+claims-rest-on-observation). After a tool call that ran, it emits a short additionalContext of two lines from
+ONE reading of the process clock, for example:
 
     CLOCK (read by hook, authoritative): 2026-09-23 13:45:02 EDT | 2026-09-23T17:45:02Z | session elapsed 03:27
+    CONSOLE PREFIX (copy exactly): [2026-09-23 13:45 EDT]
 
-so a fresh authoritative reading is the most recent time value in context.
+so a fresh authoritative clock reading is the most recent time value in context.
+Transcript fallback is labeled "transcript elapsed", not a lease-relative session duration.
+
+Zone. Both lines use ZONE (America/Toronto) from the system zone database whatever the process zone (TZ), so
+the CLOCK line's abbreviation is EST or EDT as valid at that instant, never a fixed offset, and the two lines
+always name the same zone. Only when zoneinfo or that zone database entry is missing or cannot be loaded or
+used (a corrupt, truncated or unreadable zone file can raise any error, not only ZoneInfoNotFoundError) does
+the CLOCK line fall back to the process zone; the CONSOLE PREFIX line is then omitted and the CLOCK line is
+emitted alone, so a damaged zone database never drops the clock line.
+
+Console prefix. The CLOCK line always comes first. The CONSOLE PREFIX line is the console stamp that
+lab_infra's tools/orch-hooks/require-console-timestamp.py accepts, ready to copy: the same instant as the
+CLOCK line, in ZONE, FLOORED to the minute (the seconds are dropped, never rounded up, since that hook refuses
+a stamp later than the entry's own minute), labeled `EDT` when the zone observes daylight saving time at that
+instant and `EST` otherwise (that hook's zone_label). Residual: the prefix is the minute of the tool call, so
+a message composed later passes that hook only within its 10-minute window.
 
 Coverage. Registered under PostToolUse it fires after a tool call that SUCCEEDED; registered under
-PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName matches the
-incoming payload's hook_event_name (PostToolUseFailure when that is the event, otherwise PostToolUse), as the
-hooks contract requires. Both registrations are needed for both outcomes. Neither event fires for a tool
-call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
+PostToolUseFailure it fires after a tool call that started and FAILED. The emitted hookEventName is the
+incoming payload's hook_event_name when that is PostToolUseFailure, otherwise PostToolUse, so it matches the
+event as the hooks contract requires whenever the payload was parsed. Input that was not parsed (over 8 MiB,
+or not a JSON object) carries no event name it can read, so it is answered as PostToolUse, which does not
+match a PostToolUseFailure call (test_oversized_input_answers_as_post_tool_use). Both registrations are
+needed for both outcomes. Neither event fires for a tool call rejected before execution (an unknown tool, input failing validation, or a permission denial), so such
 calls, and any stretch of prose with no tool call, see no fresh reading.
 
 Elapsed resolution. The lease file is env AIQT_LEASE_FILE when it is set to a non-empty value (a legacy
@@ -44,8 +65,8 @@ is read, and its value decides, in this precedence:
   e. Else unknown.
 No Active-session field at all is unknown with no fallback (a project with no lease shows no elapsed). The
 lease file is opened non-blocking, must be a regular file, and at most 1 MiB is read. When the file is absent,
-unreadable, not regular, or the start lies in the future, the elapsed segment is omitted. Local time is the
-process zone.
+unreadable, not regular, or the start lies in the future, the elapsed segment is omitted. Local time is ZONE
+(see Zone above), else the process zone.
 
 Contract: context = hookSpecificOutput {hookEventName, additionalContext} JSON on stdout, exit 0. This hook
 NEVER fails the tool: any error at all exits 0, including an argument, stdin, or JSON error before the
@@ -59,8 +80,7 @@ prints on stdout) can be written and flushed. A failing output stream can change
 output, a decision included; a separate fix in progress addresses this. An older interpreter that cannot start
 the hook never reaches the guard and fails with Python's own error first; .preview/README.md (Installing a
 hook, step 4) describes those cases. The payload is read as BYTES and parsed by json.loads, so its decoding
-does not depend on the process locale.
-Unparseable hook input still emits the clock line under PostToolUse (the clock does not
+does not depend on the process locale. Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
 still exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with
 os._exit(0), so no exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env
@@ -72,7 +92,9 @@ time too, and this hook only adds context, it never blocks.
 
 RESIDUAL COVERAGE. This INFORMS; it enforces nothing. The model can
 still ignore the line or mis-copy it; the companion Stop hook (stamp-truth-stop.py) is the check. The line
-reflects the host clock, so a wrong host clock (no NTP) is reproduced faithfully. Elapsed is only as right
+reflects the host clock and the host zone database, so a wrong host clock (no NTP) or stale zone rules are
+reproduced faithfully; a host without a usable America/Toronto entry shows the process zone instead, with no
+CONSOLE PREFIX line. Elapsed is only as right
 as the lease: a lease id minted from a wrong clock, a stale id after an unclean exit, or a configured lease
 file that belongs to another session yields a wrong or missing elapsed. No session
 ownership of the lease is validated. The Session-start-UTC field is trusted as written: a stale value, or
@@ -88,7 +110,10 @@ Self-test: python3 -I -S -B clock-inject.py --self-test
 Run beside its sibling hooks, the self-test also checks that the code shared verbatim with them is identical.
 Run alone (a single-hook install), those sibling-parity checks are SKIPPED, not passed, each naming the absent
 sibling; with env AIQT_HOOKS_REQUIRE_SIBLINGS=1 an absent sibling FAILS them instead (for a repository gate). A
-sibling that is present but unreadable fails them either way.
+sibling that is present but unreadable fails them either way. The check that the CONSOLE PREFIX line is
+accepted by lab_infra's require-console-timestamp.py (found at ../../tools/orch-hooks/ from this file) is
+SKIPPED when that file is absent; only env AIQT_HOOKS_REQUIRE_CONSOLE_HOOK=1, a separate opt-in for a lab_infra
+gate, makes its absence FAIL. AIQT_HOOKS_REQUIRE_SIBLINGS does not affect it.
 """
 
 import sys
@@ -538,15 +563,83 @@ def fmt_elapsed(delta):
     return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}"
 
 
-def clock_line(now_utc, start=None):
-    local = now_utc.astimezone()
+# The zone of both lines: ZONE in lab_infra's tools/orch-hooks/require-console-timestamp.py.
+ZONE = "America/Toronto"
+PREFIX_LABEL = "CONSOLE PREFIX (copy exactly): "
+# Self-test only: set to 1 by a lab_infra gate to make an absent require-console-timestamp.py FAIL, not skip.
+CONSOLE_HOOK_REQUIRE_ENV = "AIQT_HOOKS_REQUIRE_CONSOLE_HOOK"
+
+
+def _console_zone():
+    """The ZoneInfo for ZONE, or None when zoneinfo or the zone data is unavailable."""
+    try:
+        import zoneinfo
+        return zoneinfo.ZoneInfo(ZONE)
+    except Exception:
+        return None
+
+
+def zone_time(now_utc):
+    """now_utc in ZONE from the system zone database, or None when that entry is missing or cannot be loaded
+    or used (a corrupt, truncated or unreadable zone file can raise any error, struct.error for a half-truncated
+    one, not only ZoneInfoNotFoundError). Every zone call the two lines make is tried here first."""
+    zone = _console_zone()
+    if zone is None:
+        return None
+    try:
+        local = now_utc.astimezone(zone)
+        local.tzname(), local.utcoffset(), local.dst()
+        return local
+    except Exception:
+        return None
+
+
+def local_time(now_utc):
+    """now_utc in ZONE; the process zone when ZONE cannot be loaded or used, so a damaged zone database never
+    drops the clock line."""
+    local = zone_time(now_utc)
+    return now_utc.astimezone() if local is None else local
+
+
+_UNSET = object()  # "not computed yet" for the zoned argument (None means the zone cannot be used)
+
+
+def clock_line(now_utc, start=None, source="session", zoned=_UNSET):
+    """The CLOCK line. `zoned`, when given, is zone_time(now_utc) already computed (None: the process zone)."""
+    if zoned is _UNSET:
+        local = local_time(now_utc)
+    else:
+        local = now_utc.astimezone() if zoned is None else zoned
     line = (f"CLOCK (read by hook, authoritative): {local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()} | "
             f"{now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')}")
     if start is not None:
         el = fmt_elapsed(now_utc - start)
         if el is not None:
-            line += f" | session elapsed {el}"
+            line += f" | {source} elapsed {el}"
     return line
+
+
+def console_prefix(now_utc, zoned=_UNSET):
+    """The console stamp for the aware instant now_utc, for example [2026-11-21 18:33 EST]: ZONE's local date
+    and time FLOORED to the minute (strftime drops the seconds; nothing is rounded), then `EDT` when the zone
+    observes daylight saving time at that instant, else `EST` (require-console-timestamp.py's zone_label and
+    stamp). None when the zone cannot be loaded or used. `zoned`, when given, is zone_time(now_utc) already
+    computed."""
+    local = zone_time(now_utc) if zoned is _UNSET else zoned
+    if local is None:
+        return None
+    return "[%s %s]" % (local.strftime("%Y-%m-%d %H:%M"), "EDT" if local.dst() else "EST")
+
+
+def clock_context(now_utc, start=None, source="session"):
+    """The additionalContext: the CLOCK line, then the CONSOLE PREFIX line for the same instant (omitted when
+    the zone cannot be loaded). The zone is loaded and used ONCE per context, and both lines are built from
+    that one result, so they can never name different zones (a zone file replaced between two loads once
+    could give the CLOCK line the process zone and the prefix Toronto)."""
+    zoned = zone_time(now_utc)
+    text = clock_line(now_utc, start, source, zoned)
+    prefix = console_prefix(now_utc, zoned)
+    return text if prefix is None else text + "\n" + PREFIX_LABEL + prefix
 
 
 def _emit_line(text, *stream):
@@ -579,6 +672,19 @@ def _emit(line, event="PostToolUse"):
     _emit_line(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": line}}))
 
 
+
+STDIN_MAX_BYTES = 8 << 20
+
+
+def _read_payload():
+    """Read at most 8 MiB plus one overflow byte; malformed/oversized input fails open."""
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    raw = stream.read(STDIN_MAX_BYTES + 1)
+    if len(raw) > STDIN_MAX_BYTES:
+        raise ValueError("hook input exceeds 8 MiB")
+    return json.loads(raw)
+
+
 def main(argv):
     try:
         self_test = len(argv) > 1 and argv[1] == "--self-test"
@@ -593,8 +699,8 @@ def main(argv):
                        sys.stderr)
             return 0
         try:
-            buf = getattr(sys.stdin, "buffer", None)  # bytes; a text stream (the self-test) has no buffer
-            payload = json.loads(buf.read() if buf is not None else sys.stdin.read())
+            # Oversized input follows the same fail-open path as malformed JSON.
+            payload = _read_payload()
             if not isinstance(payload, dict):
                 payload = {}
         except Exception:
@@ -603,7 +709,12 @@ def main(argv):
         event = event if event in _EVENTS else "PostToolUse"
         tp = payload.get("transcript_path") if isinstance(payload.get("transcript_path"), str) else None
         now = datetime.datetime.now(datetime.timezone.utc)
-        _emit(clock_line(now, lease_start(lease_file(), tp)), event)
+        path = lease_file()
+        start = lease_start(path)
+        source = "session"
+        if start is None:
+            start, source = lease_start(path, tp), "transcript"
+        _emit(clock_context(now, start, source), event)
     except Exception:
         pass  # never fail the tool
     return 0
@@ -612,18 +723,77 @@ def main(argv):
 def _self_test():
     import io
     import shutil
+    import struct
     import subprocess
     import tempfile
+    import time
     import unittest
+    import unittest.mock
+    import zoneinfo
 
     utc = datetime.timezone.utc
     # a FIFO test's child timeout is a hang guard only (a blocking open never returns), far above the child's own
     # run (well under a second), so the verdict never depends on the host's speed
     HANG_TIMEOUT = 120
     line_re = re.compile(r"^CLOCK \(read by hook, authoritative\): \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \S+ \| "
-                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| session elapsed \d{2,}:\d{2})?$")
+                         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z( \| (?:session|transcript) elapsed \d{2,}:\d{2})?$")
+    prefix_line_re = re.compile(r"^CONSOLE PREFIX \(copy exactly\): \[\d{4}-\d{2}-\d{2} \d{2}:\d{2} (?:EST|EDT)\]$")
+    # PREFIX in lab_infra's tools/orch-hooks/require-console-timestamp.py, copied; the stamp is followed by a space
+    console_re = re.compile(r"\[([0-9]{4})-([0-9]{2})-([0-9]{2}) ([0-9]{2}):([0-9]{2}) (EST|EDT)\] ")
+
+    def clock_of(ctx):
+        """The CLOCK line of an emitted context, after checking the context is that line then exactly one
+        CONSOLE PREFIX line (the CLOCK line alone when the zone cannot be loaded)."""
+        lines = ctx.split("\n")
+        want = 1 if _console_zone() is None else 2
+        if len(lines) != want or (want == 2 and not prefix_line_re.match(lines[1])):
+            raise AssertionError("not a CLOCK line then one CONSOLE PREFIX line: %r" % (ctx,))
+        return lines[0]
+
+    def timestamp_hook():
+        """lab_infra's require-console-timestamp.py, loaded from ../../tools/orch-hooks beside this file; the test
+        is SKIPPED when it is absent (any install outside lab_infra), and FAILS then only under its own opt-in
+        AIQT_HOOKS_REQUIRE_CONSOLE_HOOK=1 (a lab_infra gate). AIQT_HOOKS_REQUIRE_SIBLINGS, which requires the
+        sibling clock hooks, does not require this lab_infra file."""
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "orch-hooks",
+                            "require-console-timestamp.py")
+        if not os.path.exists(path):
+            if os.environ.get(CONSOLE_HOOK_REQUIRE_ENV) == "1":
+                raise AssertionError(f"{path} is absent and {CONSOLE_HOOK_REQUIRE_ENV}=1 requires it")
+            raise unittest.SkipTest(f"{path} is absent (not a lab_infra checkout)")
+        spec = importlib.util.spec_from_file_location("rct_sibling", path)
+        mod = importlib.util.module_from_spec(spec)
+        old_dwb, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.dont_write_bytecode = old_dwb
+        return mod
+
+    # (UTC instant, wanted prefix): 59 seconds and 59.999999 seconds still print their own minute; EST in winter,
+    # EDT in summer; each side of both 2026 transitions; and a floor that stays on the previous day and year
+    prefix_cases = (
+        ((2026, 11, 21, 23, 33, 0, 0), "[2026-11-21 18:33 EST]"),
+        ((2026, 11, 21, 23, 33, 37, 0), "[2026-11-21 18:33 EST]"),
+        ((2026, 11, 21, 23, 33, 59, 0), "[2026-11-21 18:33 EST]"),
+        ((2026, 11, 21, 23, 33, 59, 999999), "[2026-11-21 18:33 EST]"),
+        ((2026, 1, 15, 17, 0, 59, 0), "[2026-01-15 12:00 EST]"),
+        ((2026, 7, 15, 16, 0, 59, 0), "[2026-07-15 12:00 EDT]"),
+        ((2026, 3, 8, 6, 59, 59, 0), "[2026-03-08 01:59 EST]"),
+        ((2026, 3, 8, 7, 0, 0, 0), "[2026-03-08 03:00 EDT]"),
+        ((2026, 11, 1, 5, 59, 59, 0), "[2026-11-01 01:59 EDT]"),
+        ((2026, 11, 1, 6, 0, 0, 0), "[2026-11-01 01:00 EST]"),
+        ((2027, 1, 1, 4, 59, 59, 0), "[2026-12-31 23:59 EST]"),
+    )
+
+    class FixedClock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 23, 17, 45, 30, tzinfo=datetime.timezone.utc).astimezone(tz)
 
     def run_main(stdin_text, env=None, argv=("clock-inject.py",)):
+        old_clock, datetime.datetime = datetime.datetime, FixedClock
         old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
         sys.stdin = io.StringIO(stdin_text) if isinstance(stdin_text, str) else stdin_text
         sys.stdout = io.StringIO()
@@ -635,11 +805,37 @@ def _self_test():
             rc = main(list(argv) if isinstance(argv, tuple) else argv)
             return rc, sys.stdout.getvalue()
         finally:
+            datetime.datetime = old_clock
             sys.stdin, sys.stdout = old_in, old_out
             os.environ.clear()
             os.environ.update(old_env)
 
     class T(unittest.TestCase):
+
+        def test_fleet_stdin_bound(self):
+            class Input:
+                def __init__(self, raw):
+                    self.raw, self.requests = raw, []
+
+                def read(self, size=-1):
+                    self.requests.append(size)
+                    if size < 0:
+                        raise AssertionError("unbounded stdin read")
+                    return self.raw[:size]
+            old = sys.stdin
+            try:
+                for raw in (b"{}", b" " * STDIN_MAX_BYTES + b"{}"):
+                    stream = Input(raw)
+                    sys.stdin = stream
+                    if len(raw) > STDIN_MAX_BYTES:
+                        with self.assertRaises(ValueError):
+                            _read_payload()
+                    else:
+                        self.assertEqual(_read_payload(), {})
+                    self.assertEqual(stream.requests, [STDIN_MAX_BYTES + 1])
+            finally:
+                sys.stdin = old
+
         def setUp(self):
             base = "/dev/shm" if os.path.isdir("/dev/shm") else None
             self.tmp = tempfile.mkdtemp(prefix="clk.", dir=base)
@@ -679,7 +875,7 @@ def _self_test():
             self.assertEqual(lease_start(self.lease), datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc))
 
         def test_inactive_lease_never_reads_history(self):
-            # guards that `none` followed by a history line never resolves to the historical id
+            # finding: `none` followed by a history line used to resolve to the historical id
             with open(self.lease, "w") as f:
                 f.write("Active-session: none\n## History\nActive-session: sess-20200101T000000Z\n")
             self.assertIsNone(lease_start(self.lease))
@@ -733,7 +929,7 @@ def _self_test():
             self.assertEqual(rc, 0)
             obj = json.loads(out)
             self.assertEqual(obj["hookSpecificOutput"]["hookEventName"], "PostToolUse")
-            self.assertRegex(obj["hookSpecificOutput"]["additionalContext"], line_re)
+            self.assertRegex(clock_of(obj["hookSpecificOutput"]["additionalContext"]), line_re)
 
         def test_payload_with_lease_emits_elapsed(self):
             with open(self.lease, "w") as f:
@@ -751,6 +947,18 @@ def _self_test():
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
             rc, out = run_main(json.dumps({"hook_event_name": "Bogus"}))
             self.assertEqual(json.loads(out)["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+
+        def test_oversized_input_answers_as_post_tool_use(self):
+            # input over 8 MiB is discarded unparsed, so its event name is unknown: the reply names PostToolUse,
+            # even for a PostToolUseFailure call (the docstring's Coverage paragraph and the README say so)
+            small = json.dumps({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash"})
+            for text, want in ((small + " " * 16, "PostToolUseFailure"),
+                               (small + " " * STDIN_MAX_BYTES, "PostToolUse")):
+                rc, out = run_main(text)
+                self.assertEqual(rc, 0)
+                obj = json.loads(out)
+                self.assertEqual(obj["hookSpecificOutput"]["hookEventName"], want, len(text))
+                self.assertRegex(clock_of(obj["hookSpecificOutput"]["additionalContext"]), line_re)
 
         def test_worker_kill_switch_silent(self):
             for env in ({"AIQT_HOOKS_WORKER": "1"}, {"ORCH_WORKER": "1"}):
@@ -772,14 +980,14 @@ def _self_test():
             for value in ("0", "", "true", "yes", " 1"):
                 self.assertFalse(_is_worker({"AIQT_HOOKS_WORKER": value}), value)
                 rc, out = run_main(json.dumps({"tool_name": "Bash"}), {"AIQT_HOOKS_WORKER": value})
-                self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], line_re)
+                self.assertRegex(clock_of(json.loads(out)["hookSpecificOutput"]["additionalContext"]), line_re)
             # the legacy spellings still mark a worker whatever AIQT_HOOKS_WORKER says
             self.assertTrue(_is_worker({"AIQT_HOOKS_WORKER": "0", "ORCH_VERIFY_OWNER": ""}))
 
         def test_subagent_still_gets_clock(self):
             # deliberate: in-session subagents are not skipped (context only, never a block)
             rc, out = run_main(json.dumps({"tool_name": "Bash", "agent_id": "a1"}))
-            self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], line_re)
+            self.assertRegex(clock_of(json.loads(out)["hookSpecificOutput"]["additionalContext"]), line_re)
 
         def test_lease_label_portability(self):
             want = datetime.datetime(2026, 9, 23, 14, 17, 10, tzinfo=utc)
@@ -829,11 +1037,12 @@ def _self_test():
             tp = self.transcript("2026-09-23T14:30:00.000Z", "2026-09-23T14:18:00.000Z", "garbage")
             self.assertEqual(lease_start(self.write_lease(ids), tp), datetime.datetime(2026, 9, 23, 14, 18, tzinfo=utc))
             self.assertIsNone(lease_start(self.lease))  # no transcript given: unknown
-            start = datetime.datetime.now(utc) - datetime.timedelta(hours=2, minutes=5, seconds=30)
+            start = FixedClock(2026, 9, 23, 15, 40, tzinfo=utc)
             tp = self.transcript(start.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
             rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": tp}),
                                {"AIQT_LEASE_FILE": self.lease})
-            self.assertRegex(json.loads(out)["hookSpecificOutput"]["additionalContext"], r"session elapsed 02:0[56]$")
+            self.assertRegex(clock_of(json.loads(out)["hookSpecificOutput"]["additionalContext"]),
+                             r"transcript elapsed 02:05$")
             rc, out = run_main(json.dumps({"tool_name": "Bash", "transcript_path": 7}), {"AIQT_LEASE_FILE": self.lease})
             self.assertNotIn("elapsed", json.loads(out)["hookSpecificOutput"]["additionalContext"])
 
@@ -878,6 +1087,264 @@ def _self_test():
             self.assertEqual((mod.LEASE_MAX_BYTES, mod.TRANSCRIPT_PREFIX_BYTES),
                              (LEASE_MAX_BYTES, TRANSCRIPT_PREFIX_BYTES))
 
+
+        # -- console prefix: a ready-to-copy console stamp after the CLOCK line --
+        def test_console_prefix_floored_and_zoned(self):
+            if _console_zone() is None:
+                self.skipTest("zone data for America/Toronto is unavailable")
+            for parts, want in prefix_cases:
+                self.assertEqual(console_prefix(datetime.datetime(*parts, tzinfo=utc)), want, parts)
+
+        def test_console_prefix_matches_timestamp_hook_regex(self):
+            if _console_zone() is None:
+                self.skipTest("zone data for America/Toronto is unavailable")
+            for parts, _want in prefix_cases:
+                got = console_prefix(datetime.datetime(*parts, tzinfo=utc))
+                self.assertTrue(console_re.match(got + " text"), got)
+                self.assertTrue(prefix_line_re.match(PREFIX_LABEL + got), got)
+
+        def test_console_prefix_accepted_by_timestamp_hook(self):
+            if _console_zone() is None:
+                self.skipTest("zone data for America/Toronto is unavailable")
+            rct = timestamp_hook()
+            self.assertEqual((rct.PREFIX.pattern, rct.ZONE), (console_re.pattern, ZONE))
+            zone = rct.zoneinfo.ZoneInfo(rct.ZONE)
+            for parts, want in prefix_cases:
+                now = datetime.datetime(*parts, tzinfo=utc)
+                entry = now.isoformat()
+                self.assertEqual(console_prefix(now), rct.stamp(now, zone), parts)
+                self.assertTrue(rct.compliant(console_prefix(now) + " outcome", entry, zone), parts)
+                # the minute after, which rounding the seconds up gives, is refused for the same entry
+                ahead = rct.stamp(now.replace(second=0, microsecond=0) + datetime.timedelta(minutes=1), zone)
+                self.assertFalse(rct.compliant(ahead + " outcome", entry, zone), parts)
+
+        def test_context_keeps_clock_line_then_prefix(self):
+            if _console_zone() is None:
+                self.skipTest("zone data for America/Toronto is unavailable")
+            rc, out = run_main(json.dumps({"tool_name": "Bash"}))
+            ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            instant = datetime.datetime(2026, 9, 23, 17, 45, 30, tzinfo=utc)  # FixedClock's reading
+            self.assertEqual(ctx, clock_line(instant) + "\nCONSOLE PREFIX (copy exactly): [2026-09-23 13:45 EDT]")
+            for parts, want in prefix_cases:
+                now = datetime.datetime(*parts, tzinfo=utc)
+                self.assertEqual(clock_context(now).split("\n"), [clock_line(now), PREFIX_LABEL + want], parts)
+
+        def test_zone_loaded_once_per_context(self):
+            # both lines come from ONE zone load, so a load that would fail on a second call (a zone file
+            # replaced mid-run) can never give the CLOCK line the process zone and the prefix Toronto
+            real = _console_zone
+            if real() is None:
+                self.skipTest("zone data for America/Toronto is unavailable")
+            calls = []
+
+            def first_only():
+                calls.append(1)
+                return real() if len(calls) == 1 else None
+            now = datetime.datetime(2026, 11, 22, 3, 0, 30, tzinfo=utc)
+            with unittest.mock.patch.dict(globals(), {"_console_zone": first_only}):
+                ctx = clock_context(now)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(ctx, "CLOCK (read by hook, authoritative): 2026-11-21 22:00:30 EST | 2026-11-22T03:00:30Z"
+                             "\n" + PREFIX_LABEL + "[2026-11-21 22:00 EST]")
+            calls.clear()
+
+            def fail_first():
+                calls.append(1)
+                return None if len(calls) == 1 else real()
+            with unittest.mock.patch.dict(globals(), {"_console_zone": fail_first}):
+                ctx = clock_context(now)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(ctx, clock_line(now, zoned=None))  # the process zone, and no prefix line
+
+        def test_console_prefix_omitted_without_zone(self):
+            global _console_zone
+            saved = _console_zone
+            _console_zone = lambda: None
+            try:
+                rc, out = run_main(json.dumps({"tool_name": "Bash"}))
+                now = datetime.datetime(2026, 9, 23, 17, 45, 30, tzinfo=utc)
+                self.assertIsNone(console_prefix(now))
+                self.assertEqual(clock_context(now), clock_line(now))
+                # without the zone the CLOCK line is in the process zone (see the zone fallback tests below)
+                want = clock_line(now)
+            finally:
+                _console_zone = saved
+            self.assertEqual(rc, 0)
+            ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            self.assertEqual(ctx, want)
+
+        def test_console_hook_opt_in_is_separate_from_siblings(self):
+            # the lab_infra file is required only by its own opt-in, never by AIQT_HOOKS_REQUIRE_SIBLINGS
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "orch-hooks",
+                                "require-console-timestamp.py")
+            if os.path.exists(path):
+                self.skipTest(f"{path} is present (a lab_infra checkout)")
+            old_env = dict(os.environ)
+            try:
+                os.environ.pop(CONSOLE_HOOK_REQUIRE_ENV, None)
+                os.environ["AIQT_HOOKS_REQUIRE_SIBLINGS"] = "1"
+                with self.assertRaises(unittest.SkipTest):
+                    timestamp_hook()
+                os.environ[CONSOLE_HOOK_REQUIRE_ENV] = "1"
+                with self.assertRaisesRegex(AssertionError, CONSOLE_HOOK_REQUIRE_ENV):
+                    timestamp_hook()
+                os.environ.pop("AIQT_HOOKS_REQUIRE_SIBLINGS")
+                with self.assertRaisesRegex(AssertionError, CONSOLE_HOOK_REQUIRE_ENV):
+                    timestamp_hook()
+            finally:
+                os.environ.clear()
+                os.environ.update(old_env)
+            self.assertEqual(CONSOLE_HOOK_REQUIRE_ENV, "AIQT_HOOKS_REQUIRE_CONSOLE_HOOK")
+
+        # -- the CLOCK line's zone is ZONE whatever the process zone (from the session copy) --
+        def pin_process_zone(self, tz):
+            # a POSIX TZ string needs no tzdata; the process zone must never leak into the local segment
+            old = os.environ.get("TZ")
+            os.environ["TZ"] = tz
+            time.tzset()
+
+            def restore():
+                os.environ.pop("TZ", None)
+                if old is not None:
+                    os.environ["TZ"] = old
+                time.tzset()
+            self.addCleanup(restore)
+
+        def test_local_segment_is_toronto_across_dst(self):
+            # both 2026 changes (2026-03-08 07:00Z and 2026-11-01 06:00Z), each just before, at, and just after,
+            # plus the repeated hour; the zone database supplies EST or EDT, never a fixed offset; the CONSOLE
+            # PREFIX line names the same zone as the CLOCK line under every process zone
+            self.assertIsNotNone(zoneinfo.ZoneInfo(ZONE))
+            vectors = (((2026, 3, 8, 6, 59, 59), "2026-03-08 01:59:59 EST"),
+                       ((2026, 3, 8, 7, 0, 0), "2026-03-08 03:00:00 EDT"),
+                       ((2026, 3, 8, 7, 0, 1), "2026-03-08 03:00:01 EDT"),
+                       ((2026, 11, 1, 5, 30, 0), "2026-11-01 01:30:00 EDT"),
+                       ((2026, 11, 1, 5, 59, 59), "2026-11-01 01:59:59 EDT"),
+                       ((2026, 11, 1, 6, 0, 0), "2026-11-01 01:00:00 EST"),
+                       ((2026, 11, 1, 6, 0, 1), "2026-11-01 01:00:01 EST"),
+                       ((2026, 11, 1, 6, 30, 0), "2026-11-01 01:30:00 EST"),
+                       ((2026, 11, 4, 21, 14, 35), "2026-11-04 16:14:35 EST"),
+                       ((2026, 9, 23, 17, 45, 2), "2026-09-23 13:45:02 EDT"))
+            for tz in ("UTC0", "<+05>-5", "EST5EDT,M3.2.0,M11.1.0"):
+                self.pin_process_zone(tz)
+                for fields, want in vectors:
+                    now = datetime.datetime(*fields, tzinfo=utc)
+                    ln = clock_line(now)
+                    self.assertRegex(ln, line_re)
+                    # the UTC segment keeps its existing form
+                    self.assertEqual(ln, f"CLOCK (read by hook, authoritative): {want} | "
+                                         f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}", tz)
+                    ctx = clock_context(now).split("\n")
+                    self.assertEqual(ctx[0], ln, tz)
+                    self.assertEqual(ctx[1], f"{PREFIX_LABEL}[{want[:16]} {want[-3:]}]", tz)
+
+        def test_wrong_abbreviation_never_shown(self):
+            self.pin_process_zone("UTC0")
+            for fields, wrong in (((2026, 11, 4, 21, 14, 35), "EDT"), ((2026, 7, 1, 12, 0, 0), "EST"),
+                                  ((2026, 3, 8, 7, 0, 0), "EST"), ((2026, 11, 1, 6, 0, 0), "EDT")):
+                ln = clock_line(datetime.datetime(*fields, tzinfo=utc))
+                zone = ln.split(": ", 1)[1].split(" | ")[0].rsplit(" ", 1)[1]
+                self.assertIn(zone, ("EST", "EDT"))  # never UTC, never a numeric offset
+                self.assertNotEqual(zone, wrong)
+
+        def test_missing_zone_entry_falls_back_to_process_zone(self):
+            self.pin_process_zone("<+05>-5")
+            g = globals()
+            old = g["ZONE"]
+            g["ZONE"] = "Nowhere/Missing_Zone"
+            try:
+                now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=utc)
+                ln = clock_line(now)
+                ctx = clock_context(now)
+            finally:
+                g["ZONE"] = old
+            self.assertRegex(ln, line_re)
+            self.assertIn(": 2026-11-05 02:14:35 +05 | 2026-11-04T21:14:35Z", ln)
+            self.assertEqual(ctx, ln)  # no CONSOLE PREFIX line without the zone
+
+        def damaged_zone(self, exc, method=None):
+            """A stand-in for zoneinfo.ZoneInfo with a present but damaged ZONE file: building the zone
+            raises `exc` (method None), or the named conversion (utcoffset, fromutc or tzname) does."""
+            zone = zoneinfo.ZoneInfo(ZONE)
+
+            class Damaged(datetime.tzinfo):
+                def call(self, name, dt):
+                    if name == method:
+                        raise exc("damaged zone data")
+                    return getattr(zone, name)(dt.replace(tzinfo=zone))
+
+                def utcoffset(self, dt):
+                    return self.call("utcoffset", dt)
+
+                def dst(self, dt):
+                    return self.call("dst", dt)
+
+                def tzname(self, dt):
+                    return self.call("tzname", dt)
+
+                def fromutc(self, dt):
+                    return self.call("fromutc", dt).replace(tzinfo=self)
+
+            def build(key):
+                if method is None:
+                    raise exc("damaged zone data")
+                return Damaged()
+            return build
+
+        def truncated_zone(self):
+            """Point the zone search path at a copy of the ZONE file cut to half its length, a real damaged
+            TZif file (loading it raises struct.error, neither ValueError nor OSError); the search path and the
+            zone cache are restored afterwards."""
+            src = next((os.path.join(d, ZONE) for d in zoneinfo.TZPATH
+                        if os.path.isfile(os.path.join(d, ZONE))), None)
+            self.assertIsNotNone(src, "no ZONE file on the zone search path")
+            with open(src, "rb") as f:
+                data = f.read()
+            zdir = os.path.join(self.tmp, "zoneinfo")
+            os.makedirs(os.path.dirname(os.path.join(zdir, ZONE)))
+            with open(os.path.join(zdir, ZONE), "wb") as f:
+                f.write(data[:len(data) // 2])
+            old = zoneinfo.TZPATH
+
+            def restore():
+                zoneinfo.reset_tzpath(to=old)
+                zoneinfo.ZoneInfo.clear_cache()
+            self.addCleanup(restore)
+            zoneinfo.reset_tzpath(to=[zdir])
+            zoneinfo.ZoneInfo.clear_cache()  # a cached ZONE would hide the damaged file
+            with self.assertRaises(struct.error):
+                zoneinfo.ZoneInfo(ZONE)
+
+        def assert_process_zone_line(self, now):
+            # the clock line is still emitted, in the process zone, with no CONSOLE PREFIX line
+            ln = clock_line(now)
+            self.assertRegex(ln, line_re)
+            self.assertIn(": 2026-11-05 02:14:35 +05 | 2026-11-04T21:14:35Z", ln)
+            self.assertIsNone(console_prefix(now))
+            rc, out = run_main(json.dumps({"tool_name": "Bash", "cwd": "/"}))
+            self.assertEqual(rc, 0)
+            ln = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+            self.assertRegex(ln, line_re)
+            self.assertEqual(ln.split(": ", 1)[1].split(" | ")[0].rsplit(" ", 1)[1], "+05")
+
+        def test_damaged_zone_falls_back_to_process_zone(self):
+            # a corrupt, truncated or unreadable zone file can raise any error, at construction or in a conversion
+            self.pin_process_zone("<+05>-5")
+            now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=utc)
+            self.assertIn(": 2026-11-04 16:14:35 EST | ", clock_line(now))  # the control: an undamaged zone
+            for exc in (ValueError, OSError, struct.error):
+                for method in (None, "utcoffset", "fromutc", "tzname"):
+                    with self.subTest(exc=exc.__name__, method=method), \
+                            unittest.mock.patch.object(zoneinfo, "ZoneInfo", self.damaged_zone(exc, method)):
+                        self.assert_process_zone_line(now)
+
+        def test_truncated_zone_file_falls_back_to_process_zone(self):
+            # a real half-truncated ZONE file, loaded through the zone search path
+            self.pin_process_zone("<+05>-5")
+            now = datetime.datetime(2026, 11, 4, 21, 14, 35, tzinfo=utc)
+            self.assertIn(": 2026-11-04 16:14:35 EST | ", clock_line(now))  # the control: the intact file
+            self.truncated_zone()
+            self.assert_process_zone_line(now)
 
         # -- field validation of the worker skip and the output error path --
         def test_worker_skip_warns_and_output_error_fails_open(self):
@@ -944,7 +1411,7 @@ def _self_test():
                 self.assertEqual(rc, 0, (stdin, argv))
                 obj = json.loads(out)["hookSpecificOutput"]
                 self.assertEqual(obj["hookEventName"], "PostToolUse")
-                self.assertRegex(obj["additionalContext"], line_re)
+                self.assertRegex(clock_of(obj["additionalContext"]), line_re)
             for argv in (None, 7):  # argv that cannot be inspected fails open: exit 0, silent, nothing evaluated
                 self.assertEqual(run_main("{}", argv=argv), (0, ""), argv)
 

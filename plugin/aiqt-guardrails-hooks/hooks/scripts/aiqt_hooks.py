@@ -415,7 +415,7 @@ DENY_CONSTRUCTORS = (
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
-    "_reset_ancestry_deny", "_wrtscp_deny")
+    "_reset_ancestry_deny", "_static_reading_uncertain_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -2569,6 +2569,575 @@ def _decoded_readings(command):
     if "$'" not in command:
         return (_dequoted_text(command),)
     return (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
+
+
+# The characters an ANSI-C quote's decoded body may hold and still be written back unquoted with the same meaning
+# to bash: letters, digits and _ - . / , : @ % + (no blank, quote, backslash, '$', backquote, glob, brace,
+# tilde, '=', '#', '!', or operator character).
+_ANSI_C_PLAIN_RE = re.compile(r"[A-Za-z0-9_./,:@%+-]+")
+
+
+def _ansi_c_static_quote(match):
+    """One ANSI-C quote (_ANSI_C_QUOTE_RE) written back as the literal word text bash makes of it: unchanged when its
+    body holds no backslash (the lexer already reads such a body literally), else its body decoded (_ansi_c_body)
+    and cut at a NUL (bash ends the string there), written unquoted when every character is in _ANSI_C_PLAIN_RE
+    and single-quoted otherwise (a single quote in it as '\\'')."""
+    if "\\" not in match.group(1):
+        return match.group(0)
+    body = _ansi_c_body(match).split("\x00", 1)[0]
+    if _ANSI_C_PLAIN_RE.fullmatch(body):
+        return body
+    return "'" + body.replace("'", "'\\''") + "'"
+
+
+def _ansi_c_static_reading(command):
+    """The STATIC DECODED READING: command with every quote bash decodes from the command text alone written as the
+    literal word text bash assembles from it, so a git word, subcommand or option spelled that way lexes as its
+    plain spelling: an ANSI-C $'...' quote whose body holds an escape ($'\\x67'it, git $'\\x63'ommit, git log
+    $'\\x2d'p) is decoded (_ansi_c_static_quote, the escapes read as _ansi_c_escape reads them for
+    _decoded_readings), and the '$' of a locale $"..." quote is dropped (gi$"t"), the string bash reads when no
+    message catalogue translates it, as _dequoted_text drops it. It is the lexable counterpart of
+    _decoded_readings' readings, which remove every quote and so cannot be lexed. Unlike them it tracks quoting
+    as bash does, so a $' or $" inside single quotes, or inside double quotes outside a '$(...)' or backquote
+    substitution, stays as written (bash keeps it literal there: git commit -m "a $'\\x60'id$'\\x60' b" holds no
+    substitution). A '#' opens a comment only where bash opens one: at a word start (the command's start, or
+    right after an unescaped blank, newline or operator character, or after the opening of a '$(...)', '<(...)',
+    '>(...)' or backquote substitution), outside quotes, here-document bodies and '${...}' expansions, with no
+    parenthesis open in its command (_ansi_c_static_scan). The comment is kept as written to its line's end (or
+    a backquote body's first unescaped backquote), and a here-document's body is kept as written (a quoted
+    delimiter) or read as double-quoted text (an unquoted one), so a single quote in either (true # it's,
+    cat <<'EOF' / it's / EOF) neither hides a later $'...' quote nor is decoded; a body whose delimiter line
+    never comes is read as command text. A '#' after an escaped blank or operator, a line continuation inside a
+    word, or the ')' that closes a substitution is word text (echo a\\ #; and echo $(true)#; run what follows).
+    Where the scan cannot read a construct with certainty, or where its reading there could differ from the
+    comment and here-document reading before this one, ahead of a later $'...' or $"..." quote, it raises
+    _StaticReadingUncertain and each guard that reads it denies (_static_reading_uncertain_deny).
+    commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding read it BESIDE the command
+    itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear one. A word bash builds at
+    run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
+    unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
+    decoded: the disclosed run-time-word residual. GATE G comes first (_ansi_c_static_relevant): when the command
+    holds no locale quote and no ANSI-C quote with an escape that can change a value a guard tests, the reading is
+    command itself, so there is no extra reading and no refusal and each guard takes the decision of its path
+    without the static reading (an escape that decodes to one blank or control character, as in printf $'done\\n',
+    in a command whose text names neither git nor an AI identity). A '$' followed by a line continuation before a
+    quote ($<backslash-newline>'\\x67'it), which bash joins into an ANSI-C or locale quote, makes the command
+    relevant and is refused (_StaticReadingUncertain), since the scan reads the quote after the continuation as a
+    plain one. Otherwise the scan reads the whole command as above, and returns the rest of the text unchanged from
+    an ANSI-C quote that never closes. Linear; raises only _StaticReadingUncertain."""
+    if not _ansi_c_static_relevant(command):
+        return command
+    continued = _ANSI_C_CONTINUED_QUOTE_RE.search(command)
+    if continued is not None:
+        raise _StaticReadingUncertain("a '$' and a line continuation before a quote, which bash joins into an ANSI-C "
+                                      "or locale quote this reading does not decode", continued.start())
+    return _ansi_c_static_scan(command)
+
+
+# The characters an ANSI-C escape may decode to and spell part of a word a guard tests (_ansi_c_static_relevant):
+# printable, non-blank ASCII ('!' to '~') other than the single quote, the double quote and the backslash.
+_ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - frozenset("'\"\\")
+# The characters an INERT escape decodes to (_ansi_c_static_relevant): one blank or ASCII control character from
+# U+0002 to U+0020. None of them is a letter or bash quoting, so one can split or end the letters around it, or
+# vanish where eval or sh -c reads the text again (a newline after a backslash there is a line continuation), but
+# never stands in a name. Not inert: a single quote, double quote or backslash (bash quoting in a body read again:
+# eval $'g\x27\x27it log -p' runs git log -p), U+0001 and U+007F (the CTLESC and CTLNUL characters bash uses
+# internally to mark quoting), a NUL (bash ends the string there, so the letters after it in the quote drop out:
+# --author=$'Cl\0zz'aude is --author=Claude), non-ASCII text (a letter Python's case-insensitive match folds to an
+# ASCII one), nothing in _ansi_c_escape's decoding (a code point past U+10FFFF) and any other text.
+_ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
+# A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
+# the quote (_ansi_c_static_reading refuses it).
+_ANSI_C_CONTINUED_QUOTE_RE = re.compile(r"\$(?:\\\n)+['\"]")
+# The SUBJECT of an inert escape (_ansi_c_static_relevant): every value the four guards that read the static decoded
+# reading test needs one of these names in the text bash assembles. commit_msg_subst, git_explicit_binding and
+# diff_source_pretool test git words, subcommands, options and paths of a git command, so the text names git;
+# commit_identity tests identity values and trailers, every one of which it flags only when AI_IDENTITY_RE names an
+# AI in it (a git identity variable names git as well), so the text names one of AI_IDENTITY_RE's names. Matched
+# with no word boundary and in any case, so it can only find more than those tests do. Keep it in step with
+# AI_IDENTITY_RE.
+_ANSI_C_SUBJECT_RE = re.compile(r"(?i)git|claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt")
+# What bash removes between the letters of a word it assembles that the subject check reads past: a quote, a
+# backslash, a '$' (one before a quote), a backquote (an empty substitution) and a line continuation.
+_ANSI_C_SUBJECT_STRIP_RE = re.compile(r"\\\n|[\\'\"$`]")
+
+
+def _ansi_c_inert_dropped(match):
+    """match (_ANSI_C_ESCAPE_RE) removed when it is an inert escape (_ANSI_C_INERT_CHARS), else kept as written."""
+    return "" if _ansi_c_escape(match) in _ANSI_C_INERT_CHARS else match.group(0)
+
+
+def _ansi_c_inert_quote(match):
+    """One ANSI-C quote (_ANSI_C_QUOTE_RE) with its inert escapes removed (_ansi_c_inert_dropped)."""
+    return "$'" + _ANSI_C_ESCAPE_RE.sub(_ansi_c_inert_dropped, match.group(1)) + "'"
+
+
+def _ansi_c_static_subject(command):
+    """True when command names git or an AI identity (_ANSI_C_SUBJECT_RE) in any of three texts, each with every
+    quote, backslash, '$', backquote and line continuation then removed (_ANSI_C_SUBJECT_STRIP_RE): command itself
+    (a backslash outside quotes quotes the letter after it: gi\\t is git), command with the inert escapes of each
+    ANSI-C quote removed (the quotes matched once, left to right), and command with every inert escape removed
+    wherever it stands (so a quote that match swallows is read too). These are the only commands in which an inert
+    escape (_ANSI_C_INERT_CHARS) can change a value one of the four guards tests: an inert escape decodes to no
+    letter, so every letter of a name in the text bash assembles around it, or in a body eval or sh -c reads again,
+    is a letter of the raw text, with only what these texts remove between them (the escape vanishes there when a
+    backslash before its newline makes a line continuation). The letters and digits of an escape that is not
+    removed (x20) can only add a match. Linear, never raises."""
+    texts = (command, _ANSI_C_QUOTE_RE.sub(_ansi_c_inert_quote, command),
+             _ANSI_C_ESCAPE_RE.sub(_ansi_c_inert_dropped, command))
+    return any(_ANSI_C_SUBJECT_RE.search(_ANSI_C_SUBJECT_STRIP_RE.sub("", text)) for text in texts)
+
+
+def _ansi_c_static_relevant(command):
+    """GATE G of the static decoded reading (_ansi_c_static_reading), which needs no grammar: True when command
+    holds a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an escape (_ANSI_C_ESCAPE_RE)
+    that can change a value one of the four guards that read the reading tests (words, identity values, trailers
+    and paths), read as the guards' own lexer reads it (the escape's letter kept: $'\\x20' as x20) rather than as
+    bash does: one whose decoding (_ansi_c_escape) holds a character in _ANSI_C_RELEVANT_CHARS (it spells part of a git
+    word, subcommand, option or path) or is not a single inert character (_ANSI_C_INERT_CHARS: a NUL, non-ASCII
+    text, nothing, or more than one character), or an inert escape in a command whose text names git or an AI
+    identity (_ansi_c_static_subject). An inert escape there can split, end or join the value around it: a blank
+    or control character makes a word boundary AI_IDENTITY_RE needs ($'\\x20Claude'), a newline starts a trailer's
+    line, and a blank or newline splits words in a body eval or sh -c reads again (eval $'git\\x20log -p'), where
+    a newline after a backslash is a line continuation. False otherwise, and then the guards read no static decoded
+    reading and refuse nothing on its account. The command is read as written and with every backslash-newline
+    removed, so a '$', a line continuation and a quote (refused in _ansi_c_static_reading) read as the quote bash
+    joins them into; each reading can only add a quote. The quote is matched on its own (_ANSI_C_QUOTE_RE, which
+    ends it at the same unescaped single quote bash does) from EVERY index that holds $', with no tracking of the
+    quoting around it, so a spurious match that starts earlier (inside single quotes, a comment or a here-document
+    body) and swallows a real quote's opening cannot hide that quote: its own index is matched again. A $' or $"
+    inside other quotes is read the same way, so it can only make the command relevant, which keeps the scan's
+    path. An escape bash keeps unchanged (an unknown letter such as \\q) holds its letter and is relevant. Linear: a
+    match from one index ends no later than the single quote of the next $' (the character before that quote is the
+    '$', not a backslash, so no escape holds it), so the matches together read each character a bounded number of
+    times, and the subject is read at most once for the command as written and once for its joined text. Never
+    raises."""
+    joined = command.replace("\\\n", "")
+    return _ansi_c_static_relevant_text(command, joined) or (
+        joined != command and _ansi_c_static_relevant_text(joined, joined))
+
+
+def _ansi_c_static_relevant_text(text, joined):
+    """_ansi_c_static_relevant over one reading text of the command; joined is the command with every
+    backslash-newline removed, the text the subject check reads (_ansi_c_static_subject)."""
+    if '$"' in text:
+        return True
+    subject = None
+    at = text.find("$'")
+    while at >= 0:
+        match = _ANSI_C_QUOTE_RE.match(text, at)
+        if match is not None:
+            for escape in _ANSI_C_ESCAPE_RE.finditer(match.group(1)):
+                decoded = _ansi_c_escape(escape)
+                if not _ANSI_C_RELEVANT_CHARS.isdisjoint(decoded) or len(decoded) != 1 or (
+                        decoded not in _ANSI_C_INERT_CHARS):
+                    return True
+                if subject is None:
+                    subject = _ansi_c_static_subject(joined)
+                if subject:
+                    return True
+        at = text.find("$'", at + 1)
+    return False
+
+
+# A here-document operator (<< or <<-, not the <<< here-string) and its delimiter word, as bash reads them.
+_ANSI_C_HEREDOC_RE = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>\\'\"]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)")
+
+
+class _StaticReadingUncertain(Exception):
+    """The refusal of the static decoded reading (_ansi_c_static_reading): ahead of a later ANSI-C $'...' or locale
+    $"..." quote the scan met a construct it cannot read with certainty the way bash reads it, or one where its
+    reading could differ from the comment and here-document reading before this one, so which of those quotes
+    bash decodes as command text is not known. at is the construct's index. It is not a ValueError, so no lexer
+    fallback takes it for a parse failure that adds nothing: each guard that reads the static decoded reading
+    catches it and denies (_static_reading_uncertain_deny)."""
+
+    def __init__(self, message, at):
+        super().__init__(message)
+        self.at = at
+
+
+def _static_reading_uncertain_deny(rule, subject, exc):
+    """The deny a guard returns when the static decoded reading refuses a command (_StaticReadingUncertain): rule
+    names the rule, subject the shape the guard cannot rule out in the command's ANSI-C or locale quoting."""
+    return _deny(
+        "AIQT rule {}: this command holds an ANSI-C $'...' or locale $\"...\" quote after a construct the static "
+        "decoded reading cannot read with certainty the way bash reads it ({}), so this guard cannot tell which of "
+        "those quotes bash decodes as command text and cannot rule out {} spelled in them; it is denied rather than "
+        "allowed unread (check-fails-closed-on-unreadable). Write the quoted words plainly, put a comment's '#' "
+        "after a blank outside any grouping, substitution or expansion, or split the command.".format(
+            rule, exc, subject),
+        "AIQT guardrail: denied a command whose ANSI-C or locale quoting the static decoded reading could not read "
+        "(rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
+def _ansi_c_line_index(command):
+    """({line: [start, ...]}, {line with leading tabs removed: [start, ...]}, [index of each backslash-newline])
+    over every line of command, each list ascending: built once per scan, so finding every here-document's end
+    stays linear."""
+    plain, stripped = {}, {}
+    pos = 0
+    for line in command.split("\n"):
+        plain.setdefault(line, []).append(pos)
+        stripped.setdefault(line.lstrip("\t"), []).append(pos)
+        pos += len(line) + 1
+    return plain, stripped, [match.start() for match in re.finditer(r"\\\n", command)]
+
+
+def _ansi_c_heredoc_end(command, start, delim, strip, index, bound):
+    """The index just past the delimiter line of a here-document body that starts at start (a line start; leading
+    tabs removed first under <<-), or -1 when no line from start on, before bound, is the delimiter. index is
+    _ansi_c_line_index(command); bound is the end of the text the body is read in (the command's length, or the
+    end of the unquoted here-document body that holds this one)."""
+    starts = index[1 if strip else 0].get(delim, ())
+    at = bisect.bisect_left(starts, start)
+    if at == len(starts) or starts[at] >= bound:
+        return -1
+    nl = command.find("\n", starts[at], bound)
+    return bound if nl < 0 else nl + 1
+
+
+def _ansi_c_heredoc_continued(index, start, end):
+    """True when a backslash-newline lies in a here-document body command[start:end] before its delimiter line's
+    own newline: bash joins the lines of an unquoted body there before it looks for the delimiter line (cat <<E /
+    x<backslash> / E / ... reads x E as one body line), which _ansi_c_heredoc_end does not model."""
+    at = bisect.bisect_left(index[2], start)
+    return at < len(index[2]) and index[2][at] < end - 1
+
+
+def _ansi_c_heredoc_word(command, i, limit):
+    """bash's reading of the here-document delimiter word that starts at i, before limit: (the index past it, the
+    delimiter, True when any of it is quoted), the delimiter with its quoting removed as bash removes it (a
+    backslash-escaped character, a single-quoted string, an ANSI-C $'...' string decoded, a double-quoted or
+    locale string with a backslash removed only before $, backquote, double quote or backslash), or None where the
+    word holds a construct this reading does not model: a backslash-newline, a quote that never closes, a '#'
+    that starts it (bash reads a comment there), or a '$(', '${', '$[' or backquote, quoted or not."""
+    out = []
+    quoted = False
+    start = i
+    while i < limit:
+        c = command[i]
+        if c in " \t\n;&|()<>":
+            break
+        if c == "#" and i == start:
+            return None
+        if c == "\\":
+            if i + 1 >= limit or command[i + 1] == "\n":
+                return None
+            out.append(command[i + 1])
+            quoted = True
+            i += 2
+            continue
+        if c == "'":
+            close = command.find("'", i + 1, limit)
+            if close < 0:
+                return None
+            out.append(command[i + 1:close])
+            quoted = True
+            i = close + 1
+            continue
+        if command.startswith("$'", i):
+            match = _ANSI_C_QUOTE_RE.match(command, i, limit)
+            if match is None:
+                return None
+            out.append(_ansi_c_body(match))
+            quoted = True
+            i = match.end()
+            continue
+        if c == '"' or command.startswith('$"', i):
+            j = i + (2 if c == "$" else 1)
+            while j < limit and command[j] != '"':
+                if command[j] == "\\" and j + 1 < limit:
+                    if command[j + 1] == "\n":
+                        return None
+                    out.append(command[j + 1] if command[j + 1] in '$`"\\' else command[j:j + 2])
+                    j += 2
+                    continue
+                if command[j] == "`" or command.startswith(("$(", "${", "$["), j):
+                    return None
+                out.append(command[j])
+                j += 1
+            if j >= limit:
+                return None
+            quoted = True
+            i = j + 1
+            continue
+        if c == "`" or command.startswith(("$(", "${", "$["), i):
+            return None
+        out.append(c)
+        i += 1
+    return i, "".join(out), quoted
+
+
+# A comment's text that reads the same whether a '#' opens a comment or is word text: no quote, backslash, '$',
+# backquote, parenthesis, brace or redirection character (_ansi_c_static_scan).
+_ANSI_C_NEUTRAL_RE = re.compile(r"[^'\"`$\\(){}<>]*")
+
+
+def _ansi_c_static_scan(command):
+    """_ansi_c_static_reading's scan of command. stack holds the open contexts, innermost last: '"' double quotes,
+    'H' an unquoted here-document's body (read as double quotes that no '"' closes), '(' a '$(...)', '<(...)' or
+    '>(...)' substitution, '`' a backquote substitution and '{' a '${...}' expansion; depth holds, for the
+    command text at the top level and in each '(' or '`' context, how many plain parentheses are open there.
+
+    A '#' opens a comment only at a word start (word_at: the command's start, the index after an unescaped blank,
+    newline or operator character, after a line continuation that itself stands at a word start, or right inside
+    a substitution's opening), outside quotes, here-document bodies and '${...}' expansions, and only with no
+    parenthesis open in its command (in a subshell bash reads a comment there, but in a (( )) or $(( ))
+    arithmetic or a [[ =~ ]] group it reads text). A '#' anywhere else is word text: after an escaped blank or
+    operator (echo a\\ #;), a line continuation inside a word, or the ')' that closes a substitution
+    ($(true)#, $((1))#, <(true)#). The scan before this one took any '#' right after a blank, newline or one of
+    ;&|()<> for a comment and cut a backquote comment at the first backquote, escaped or not; where that test
+    and this one disagree the text from the '#' to its line's end reads the same both ways when it holds none
+    of _ANSI_C_NEUTRAL_RE's characters (it is kept as written), and otherwise the scan refuses.
+
+    It refuses (_StaticReadingUncertain) only ahead of the last ANSI-C or locale quote (past it nothing is
+    decoded, so the rest is kept as written): at a '#' at a word start with a parenthesis open, at such a
+    disagreement, at a '${' that opens a bash 5.3 command substitution (${ cmd; } or ${| cmd; }) or a '$['
+    arithmetic, at a here-document delimiter word whose bash reading (_ansi_c_heredoc_word) differs from the
+    one before this (<<$'E\\x41' ends at the line EA, <<"E\\"F" at E"F) or that it does not model, at a
+    here-document operator inside a '${...}' or with a parenthesis open ($(( 1 << 2 )) shifts) once its line
+    ends, and at an unquoted body that holds a line continuation (bash joins such lines before it looks for the
+    delimiter line). Bodies are read in place, not by a nested scan (frames holds each unquoted body being read:
+    its end, the heights of stack and depth to restore there, and the bodies after it on the same line), with
+    one line index per command, so nested here-documents cost no recursion and the scan is linear in the
+    length of command."""
+    out = []
+    stack = []
+    depth = [0]
+    frames = []
+    queue = []  # here-document bodies still to read on the current line, the next one last: (start, end, quoted)
+    pending = []  # here-documents opened on the current line: (delimiter, strip tabs, quoted, certain)
+    index = None  # _ansi_c_line_index(command), built at the first here-document body
+    word_at = 0
+    nl_at = -1  # the index of the first newline at or after i once looked up (len(command) when none)
+    last = max(command.rfind("$'"), command.rfind('$"'))
+    i, n = 0, len(command)
+    while True:
+        if queue:
+            start, end, quoted = queue.pop()
+            if quoted:
+                out.append(command[start:end])
+                i = word_at = end
+                continue
+            frames.append((end, len(stack), len(depth), queue))
+            queue = []
+            stack.append("H")
+            i = start
+            continue
+        limit = frames[-1][0] if frames else n
+        if i >= limit:
+            if not frames:
+                break
+            _end, height, levels, queue = frames.pop()
+            del stack[height:]
+            del depth[levels:]
+            pending = []
+            word_at = i
+            continue
+        if i > last:
+            out.append(command[i:])  # no ANSI-C or locale quote from here on: nothing left to decode
+            break
+        c = command[i]
+        top = stack[-1] if stack else None
+        if c == "\\" and i + 1 < limit:
+            if command[i + 1] == "\n" and word_at == i and top not in ('"', "H"):
+                word_at = i + 2  # bash removes a line continuation first, so a word start stays one
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if top in ('"', "H"):
+            if c == '"' and top == '"':
+                stack.pop()
+            elif c == "`":
+                stack.append("`")
+                depth.append(0)
+                word_at = i + 1
+            elif command.startswith("$(", i):
+                stack.append("(")
+                depth.append(0)
+                out.append("$(")
+                i += 2
+                word_at = i
+                continue
+            out.append(c)
+            i += 1
+            continue
+        if c == "#":
+            if nl_at < i:
+                nl_at = command.find("\n", i)
+                if nl_at < 0:
+                    nl_at = n
+            eol = min(nl_at, limit)
+            before = i == 0 or command[i - 1] in " \t\n;&|()<>"  # the comment test before this scan
+            if top == "{":
+                if before:
+                    raise _StaticReadingUncertain("a '#' after a blank or operator inside a '${...}' expansion", i)
+                out.append(c)
+                i += 1
+                continue
+            if i == word_at:
+                if depth[-1]:
+                    raise _StaticReadingUncertain("a '#' at a word start inside an open parenthesis, a comment in "
+                                                  "a subshell but text in an arithmetic or [[ ]] group", i)
+                end = eol
+                if top == "`":  # bash cuts a backquote body at its first unescaped backquote before it reads it
+                    j = i
+                    while j < eol:
+                        if command[j] == "\\":
+                            j += 2
+                        elif command[j] == "`":
+                            end = j
+                            break
+                        else:
+                            j += 1
+                if before:
+                    was = eol
+                    if top == "`":
+                        close = command.find("`", i, eol)
+                        if close >= 0:
+                            was = close
+                    if was == end:
+                        out.append(command[i:end])
+                        i = end
+                        continue
+            elif not before:
+                out.append(c)
+                i += 1
+                continue
+            if _ANSI_C_NEUTRAL_RE.fullmatch(command, i + 1, eol) is None:
+                raise _StaticReadingUncertain("a '#' that bash reads {} where the reading before this one read {}"
+                                              .format(*(("as word text", "a comment") if i != word_at else
+                                                        ("as a comment", "it otherwise"))), i)
+            out.append(command[i:eol])  # the same text either way
+            i = eol
+            continue
+        if command.startswith("<<<", i):
+            out.append("<<<")  # a here-string: its word is ordinary command text
+            i += 3
+            word_at = i
+            continue
+        if command.startswith("<<", i):
+            match = _ANSI_C_HEREDOC_RE.match(command, i, limit)
+            if match is not None:
+                word = match.group(2)
+                delim = re.sub(r"\\(.)", r"\1", word.replace("'", "").replace('"', ""))
+                quoted = any(q in word for q in "'\"\\")
+                if not delim or _ansi_c_heredoc_word(command, match.start(2), limit) != (match.end(), delim, quoted):
+                    raise _StaticReadingUncertain("a here-document delimiter word {!r} this reading does not read "
+                                                  "as bash does".format(word[:40]), i)
+                pending.append((delim, bool(match.group(1)), quoted, top != "{" and not depth[-1]))
+                out.append(match.group(0))
+                i = match.end()
+                continue
+        if c == "\n" and pending:
+            if top == "{" or not all(certain for _delim, _strip, _quoted, certain in pending):
+                raise _StaticReadingUncertain("a '<<' inside a '${...}' expansion or an open parenthesis, a "
+                                              "here-document in a subshell but a shift in an arithmetic", i)
+            out.append(c)
+            i += 1
+            word_at = i
+            if index is None:
+                index = _ansi_c_line_index(command)
+            at = i
+            for delim, strip, quoted, _certain in pending:
+                end = _ansi_c_heredoc_end(command, at, delim, strip, index, limit)
+                if end < 0:
+                    break  # bash would read the rest as the body; it is read as command text instead
+                if not quoted and _ansi_c_heredoc_continued(index, at, end):
+                    raise _StaticReadingUncertain("an unquoted here-document body with a line continuation", at)
+                queue.append((at, end, quoted))
+                at = end
+            queue.reverse()
+            pending = []
+            continue
+        if c == "'":
+            close = command.find("'", i + 1, limit)
+            end = limit if close < 0 else close + 1
+            out.append(command[i:end])
+            i = end
+            continue
+        if c == "$" and i + 1 < limit and command[i + 1] == "'":
+            match = _ANSI_C_QUOTE_RE.match(command, i, limit)
+            if match is None:
+                out.append(command[i:limit])
+                i = limit
+                continue
+            out.append(_ansi_c_static_quote(match))
+            i = match.end()
+            continue
+        if c == "$" and i + 1 < limit and command[i + 1] == '"':
+            stack.append('"')
+            out.append('"')
+            i += 2
+            continue
+        if c == '"':
+            stack.append('"')
+        elif c == "`":
+            if top == "`":
+                stack.pop()
+                depth.pop()
+            else:
+                stack.append("`")
+                depth.append(0)
+                word_at = i + 1
+        elif command.startswith("$(", i) or (top != "{" and command.startswith(("<(", ">("), i)):
+            stack.append("(")  # a process substitution closes as $(...) does: <(true)# is one word
+            depth.append(0)
+            out.append(command[i:i + 2])
+            i += 2
+            word_at = i
+            continue
+        elif command.startswith("${", i):
+            if command[i + 2:i + 3] in (" ", "\t", "\n", "|"):
+                raise _StaticReadingUncertain("a bash 5.3 '${ ...; }' command substitution", i)
+            stack.append("{")
+            out.append("${")
+            i += 2
+            continue
+        elif command.startswith("$[", i):
+            raise _StaticReadingUncertain("a '$[...]' arithmetic expansion", i)
+        elif top == "{":
+            if c == "{":
+                stack.append("{")  # bash pairs the braces in an expansion's word: ${x:-{a}} is {a}
+            elif c == "}":
+                stack.pop()
+        elif c == "(":
+            depth[-1] += 1
+            word_at = i + 1
+        elif c == ")":
+            if top == "(" and not depth[-1]:
+                stack.pop()  # $(...)#x, $((...))#x and <(...)#x are one word: this ')' starts none
+                depth.pop()
+            else:
+                if depth[-1]:
+                    depth[-1] -= 1
+                word_at = i + 1
+        elif c in " \t\n;&|<>":
+            word_at = i + 1
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _ansi_c_static_lexed(command, lex, **kwargs):
+    """lex(_ansi_c_static_reading(command), **kwargs) when that reading differs from command, else []: the extra
+    reading a guard reads beside its own lex of command. A reading lex refuses (any ValueError: a parse failure, an
+    uncertain '#', the reading budget) adds nothing, since the guard's own reading of command, with its fallbacks,
+    still decides. A reading the scan itself refuses (_StaticReadingUncertain) is not caught here: the guard
+    denies (_static_reading_uncertain_deny). The count of lexes that read a body main's reading fails
+    (_SubstHeredocs.reads) is restored, so the extra lex never moves the guard's MAIN'S DECISION AS A FLOOR
+    comparison."""
+    decoded = _ansi_c_static_reading(command)
+    if decoded == command:
+        return []
+    reads = _SubstHeredocs.reads
+    try:
+        return lex(decoded, **kwargs)
+    except ValueError:
+        return []
+    finally:
+        _SubstHeredocs.reads = reads
 
 
 # The uncertainty causes _lex_uncertain_causes reports, worded for the deny messages.
@@ -5151,8 +5720,14 @@ def _diff_source_fallback(command):
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
     broad raw probe) ASKS, everything else ALLOWS. An unparseable command can never earn an ALLOW from a
     summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
-    unparseable command is surfaced for confirmation rather than proven either way."""
-    if _RAW_DIFF_PRODUCER_RE.search(command):
+    unparseable command is surfaced for confirmation rather than proven either way. The probe reads the
+    de-quoted readings (_decoded_readings) BESIDE the raw text, so a producer split by quoting (git d''iff <<<x)
+    takes the note as its plain spelling (git diff <<<x) does; a reading can only add the note, never clear it.
+    The note is this fallback's only outcome for an apparent producer, which it never denies, since it cannot
+    tell a console dump from a summary or a redirect: a confirmed dump that the parsed path denies (git d''iff,
+    git diff) is noted, not denied, once a construct the lexer refuses is added, split or plain alike (the
+    disclosed residual of this convention-tier fallback)."""
+    if any(_RAW_DIFF_PRODUCER_RE.search(text) for text in (command,) + _decoded_readings(command)):
         return _allow_note(
             "AIQT guardrail (rule cnsdif, no-console-diff-dumps): the shared tokenizer could not parse this "
             "command and it appears to invoke a git diff-producer. This is a console-readability convention, "
@@ -5160,6 +5735,45 @@ def _diff_source_fallback(command):
             "form (--stat, --name-only), a redirect to a real file (> file), or a pager (| less) to keep the "
             "review surface readable.")
     return _allow()
+
+
+def _diff_parsed_kind(command, readings, reading):
+    """The decision diff_source_pretool takes on a command its lex read: 'allow' when no producer-capable form is
+    found anywhere (the bounded true boundary) or the WHOLE command is one of the closed proofs (AIRTIGHT-NARROW),
+    'deny' when a possible producer is a confirmed console dump (outranking the note across a compound), and
+    'note' for any remaining producer-capable but unproven form. readings are the lex's readings and reading the
+    _CommandReading the lex ran under (its added, shared and origins)."""
+    possibles = _diff_possibles(readings, reading.added, reading.shared)
+    if not possibles:
+        return "allow"
+    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
+    segments = [seg for segs in readings for seg in segs]
+    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
+    if (_diff_proof_help(command) or _diff_proof_summary(command) or _diff_proof_log_listing(command)
+            or _diff_proof_show_blob(command) or _diff_proof_realfile(own) or _diff_proof_pager(own)):
+        return "allow"
+    # A segment the command reading read past a compound command's reserved words writes where that compound's
+    # closing word sends its output, so it is a confirmed dump only where that reaches the console too
+    # (_diff_compound_console); a segment of a backquote substitution is judged as main judges one of a '$(...)'
+    # substitution, by its own redirects.
+    compound = _diff_compound_console(own) if reading.added else ()
+    for index, seg in possibles:
+        if index >= len(own):
+            origin, body = reading.origins[index - len(own)]
+            if not body and not compound[origin]:
+                continue
+        if _is_console_dump(seg, segments, index):
+            return "deny"
+    return "note"
+
+
+def _diff_static_kind(decoded):
+    """_diff_parsed_kind of the static decoded reading of a command (_ansi_c_static_reading, passed in as decoded),
+    lexed as diff_source_pretool lexes the command itself; a ValueError from that lex propagates, and
+    _ansi_c_static_lexed turns it into no added decision."""
+    with _CommandReading(origins=True) as reading:
+        readings = _lex_readings(decoded)
+    return _diff_parsed_kind(decoded, readings, reading)
 
 
 def diff_source_pretool(data):
@@ -5189,7 +5803,9 @@ def diff_source_pretool(data):
     quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are judged beside the lex's own where main's reading lexes, and where
     it fails the fallback a lex that fails takes, which never denies, decides in place of this guard's
-    allow."""
+    allow. The static decoded reading (_ansi_c_static_reading: ANSI-C escapes decoded, a locale quote's '$'
+    dropped) is judged the same way beside a command the lex read, and its decision stands where it is stricter
+    (git $'\\x6c'og -p DENIES as git log -p does)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -5234,38 +5850,34 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
-    possibles = _diff_possibles(readings, reading.added, reading.shared)
-    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
-    segments = [seg for segs in readings for seg in segs] if possibles else []
-    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
+    kind = _diff_parsed_kind(command, readings, reading)
+    if kind != "deny":
+        # The static decoded reading (_ansi_c_static_reading), judged the same way beside the command: a git word,
+        # producer or option spelled with an ANSI-C escape (git $'\x6c'og -p) is judged as its plain spelling is,
+        # and only a stricter kind than the command's own is taken (deny over note over allow). A reading the
+        # scan cannot make with certainty denies (_StaticReadingUncertain).
+        try:
+            decoded = _ansi_c_static_lexed(command, _diff_static_kind)
+        except _StaticReadingUncertain as exc:
+            return _static_reading_uncertain_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that "
+                                                  "dumps a patch to the console", exc)
+        if decoded == "deny" or (decoded == "note" and kind == "allow"):
+            kind = decoded
     # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
-    # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
+    # one of the closed proofs. Either allows, unless main's reading of a here-document body the lex read
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
-    if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
-                         or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-                         or _diff_proof_realfile(own) or _diff_proof_pager(own)):
+    if kind == "allow":
         if _SubstHeredocs.reads != reads:
             return _diff_source_fallback(command)
         return _allow()
-    # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
-    # compound), and any remaining producer-capable-but-unproven form ASKS. A segment the command reading read
-    # past a compound command's reserved words writes where that compound's closing word sends its output, so
-    # it is a confirmed dump only where that reaches the console too (_diff_compound_console); a segment of a
-    # backquote substitution is judged as main judges one of a '$(...)' substitution, by its own redirects.
-    compound = _diff_compound_console(own) if reading.added else ()
-    for index, seg in possibles:
-        if index >= len(own):
-            origin, body = reading.origins[index - len(own)]
-            if not body and not compound[origin]:
-                continue
-        if _is_console_dump(seg, segments, index):
-            return _deny(
-                "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
-                "patch is not redirected to a real file or piped into a pager where the diff command stands, "
-                "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
-                "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
-                "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
-                "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
+    if kind == "deny":
+        return _deny(
+            "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
+            "patch is not redirected to a real file or piped into a pager where the diff command stands, "
+            "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
+            "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
+            "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
+            "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
     return _allow_note(
         "AIQT guardrail (rule cnsdif, no-console-diff-dumps): this command is producer-capable (it can "
         "render a version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed "
@@ -7154,10 +7766,12 @@ def _commit_identity_fallback(command, error):
     unsupported construct), a command line that git runs from its operands was left unread, because the
     tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
-    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
-    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
-    git-identity env var or EMAIL, or a user, author or committer name or email config value
-    (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command, and
+    then each of its de-quoted readings (_cmtidn_fallback_texts, _decoded_readings), for an AI identity in a
+    Co-Authored-By trailer, an --author value (any prefix git reads as --author), a git-identity env var or
+    EMAIL, or a user, author or committer name or email config value (_RAW_IDENTITY_CONTEXTS), and denies on a
+    hit, so an option or trailer name split by quoting behind a here-string (git commit --au""thor="Claude
+    <...>" -m x <<<y) denies as it does where the command parses.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
     and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
@@ -7175,7 +7789,14 @@ def _commit_identity_fallback(command, error):
     single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
     at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
     33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
-    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. Those figures
+    measure the raw text's scan alone: a command that holds a quote, a backslash or an ANSI-C $'...' quote is
+    scanned again over each de-quoted reading that differs from it (one, or two with an ANSI-C quote), so it costs
+    more. On another, heavily loaded host, a command of 8,388,608 characters of repeated trailer names with a quote
+    and a newline before an AI name (so no reading finds one, and every pass runs whole) took 7.75 s of CPU time
+    with the de-quoted reading against 4.69 s for the raw scan alone (the highest of three runs each), about 1.7
+    times, so such a command can outlast the timeout at a shorter length than above; the two-reading case was not
+    measured. The platform
     contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
     call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
@@ -7218,19 +7839,35 @@ def _commit_identity_fallback(command, error):
             return _deny(reason,
                          "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
                          "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
-    for regex, label in _RAW_IDENTITY_CONTEXTS:
-        match = _ai_value_match(regex, command)
-        if match is not None:
-            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
-                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
-                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
-                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
-                      "closed. Remove it and commit as the maintainer.".format(hit))
-            return _deny(reason,
-                         "AIQT guardrail: denied a git command the check could not read in full that "
-                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
+    for text in _cmtidn_fallback_texts(command):
+        for regex, label in _RAW_IDENTITY_CONTEXTS:
+            match = _ai_value_match(regex, text)
+            if match is not None:
+                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+                reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                          "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                          "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                          "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                          "closed. Remove it and commit as the maintainer.".format(hit))
+                return _deny(reason,
+                             "AIQT guardrail: denied a git command the check could not read in full that "
+                             "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
+
+
+def _cmtidn_fallback_texts(command):
+    """The texts the raw-string contexts of _commit_identity_fallback read, in order: the raw command, then each
+    de-quoted reading (_decoded_readings) that differs from it, so an --author option or co-author trailer name
+    split by quoting (--au""thor=..., Co-Authored-""By: ...) is read as the word bash assembles, as the token
+    reader reads it when the command parses. The readings are made only after every context has read the raw
+    text and found nothing, so a raw hit denies with the same reason as before; a reading can only add a match,
+    never clear one. A de-quoted reading lets a co-author value run across a removed quote ('Co-Authored-By: J" -m
+    "Claude' reads 'Co-Authored-By: J -m Claude'), a safe-direction over-deny of a command whose quoted text
+    merely places an AI name after a trailer name."""
+    yield command
+    for text in _decoded_readings(command):
+        if text != command:
+            yield text
 
 
 def commit_identity(data):
@@ -7241,7 +7878,9 @@ def commit_identity(data):
     here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are read beside the lex's own where main's reading lexes, and where it
     fails the raw fallback a lex that fails takes, which denies or allows, decides in place of this guard's
-    allow."""
+    allow. Where the reader finds nothing in the command, it also reads the static decoded reading
+    (_ansi_c_static_reading: ANSI-C escapes decoded, a locale quote's '$' dropped), so git $'\\x63'ommit
+    --author="<AI>" denies as its plain spelling does."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -7286,6 +7925,18 @@ def commit_identity(data):
         if hit is None:
             return _commit_identity_fallback(command, str(exc))
         raw = True
+    if hit is None:
+        # The static decoded reading (_ansi_c_static_reading), read beside the command: a git word, subcommand,
+        # option or trailer spelled with an ANSI-C escape (git $'\x63'ommit --author "<AI>") is found as its plain
+        # spelling is. A reading the reader refuses adds nothing (_ansi_c_static_lexed); one the scan cannot make
+        # with certainty denies (_StaticReadingUncertain).
+        try:
+            hit = _ansi_c_static_lexed(command, find_ai_authorship) or None
+        except _StaticReadingUncertain as exc:
+            return _static_reading_uncertain_deny("cmtidn (commit-identity)", "a git command recording an AI "
+                                                  "identity (a co-author trailer, an --author value, a git "
+                                                  "identity variable, EMAIL, or a user, author or committer name "
+                                                  "or email value)", exc)
     if hit is None:
         # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
         # assigns an identity a value that names an AI, or a value it does not spell in a command that names an AI
@@ -10108,16 +10759,22 @@ def _expbnd_fallback_kind(command):
     command whose text names a git configuration variable, or that runs under a git alias the hook's environment
     carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
     parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
-    first, and one git word beside a cd notes."""
+    first, and one git word beside a cd notes. Every probe (the git-word count, the breadth and push probes, and
+    the cd, mutation and pruning-fetch probes) reads the de-quoted readings (_decoded_readings) BESIDE the raw
+    text, as the parsed path's de-quoted words and the uncertain-'#' path's _hash_doubt_scan do, so a push split
+    by quoting (git add -A && git p''ush <<< x) denies like its plain spelling, and a mutation or cd split by
+    quoting (cd /tmp && git co''mmit -m y <<<z) notes like its plain spelling; a reading can only add a match,
+    never clear one."""
     named = _git_alias_outside(command)
-    if named and len(_GIT_WORD_RE.findall(command)) > 1:
+    texts = (command,) + _decoded_readings(command)
+    if named and any(len(_GIT_WORD_RE.findall(text)) > 1 for text in texts):
         return "publish"
-    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
-            and _RAW_EXPBND_PUSH_RE.search(command)):
+    if (any(_RAW_EXPBND_ADD_BREADTH_RE.search(text) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(text) for text in texts)
+            and any(_RAW_EXPBND_PUSH_RE.search(text) for text in texts)):
         return "publish"
-    if (_RAW_EXPBND_CD_RE.search(command) and
-            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command)
-             or (named and _GIT_WORD_RE.search(command)))):
+    if (any(_RAW_EXPBND_CD_RE.search(text) for text in texts) and
+            any(_RAW_EXPBND_MUTATE_RE.search(text) or _RAW_EXPBND_PRUNING_FETCH_RE.search(text)
+                or (named and _GIT_WORD_RE.search(text)) for text in texts)):
         return "target"
     return None
 
@@ -10155,7 +10812,9 @@ def git_explicit_binding(data):
     otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments are judged beside the
     lex's own where main's reading lexes, and where it fails the raw fallback a lex that fails takes
     (_expbnd_fallback_kind) denies after this guard's own deny and before its notes, and decides in place of
-    its allow."""
+    its allow. The static decoded reading (_ansi_c_static_reading: ANSI-C escapes decoded, a locale quote's '$'
+    dropped) adds its own readings after the lex's, each judged on its own, so git add --all && git $'\\x70'ush
+    denies as its plain spelling does."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -10204,6 +10863,16 @@ def git_explicit_binding(data):
         return _expbnd_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _expbnd_fallback(command)
+    # The static decoded reading (_ansi_c_static_reading) adds its own readings after the lex's, each judged on its
+    # own like them, so a git word, subcommand or option spelled with an ANSI-C escape (git add --all && git
+    # $'\x70'ush) is read as its plain spelling; a reading can only add a deny or a note, and one the scan cannot
+    # make with certainty denies (_StaticReadingUncertain).
+    try:
+        readings = list(readings) + _ansi_c_static_lexed(command, _lex_readings_read, skip_empty=True)
+    except _StaticReadingUncertain as exc:
+        return _static_reading_uncertain_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree "
+                                              "breadth stage (git add -A, git commit -a) followed by a git push "
+                                              "that publishes whatever the tree holds", exc)
 
     # BREADTH-THEN-PUBLISH PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
     # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the same reading DENIES-and-educates, regardless
@@ -19364,10 +20033,12 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
-    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    only note or allow ($G commit -nv <<<x) denies. The decision kind reads the de-quoted readings beside the
+    raw text (_gate_fallback_read_kind), so the note tier, like the deny tier, is earned by a checker or swallow
+    spelling split by quoting. kind, when given, is _gate_fallback_read_kind(command) as the caller has just
+    read it, so the probes are not run over the command a second time."""
     if kind is _GATE_KIND_UNREAD:
-        kind = _gate_weakening_fallback_kind(command)
+        kind = _gate_fallback_read_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -19609,6 +20280,23 @@ def _gate_weakening_fallback_kind(command):
             and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
+
+
+def _gate_fallback_read_kind(command, raw_kind=_GATE_KIND_UNREAD):
+    """The decision _gate_weakening_fallback gives command over its raw text AND its de-quoted readings
+    (_decoded_readings), raw_kind being _gate_weakening_fallback_kind(command) when the caller has read it: the
+    raw kind when it denies, else the first deny kind (_GATE_FALLBACK_DENIES) a de-quoted reading earns, else the
+    raw kind when it is the note ("swallow"), else the first kind a de-quoted reading earns, else None. So a
+    checker split by quoting (pyt''est || true <<<x) notes like its plain spelling, and a bypass spelled only
+    through quoting denies on every path that reads this; a reading can only add a deny or a note, never clear
+    one. A reading equal to the raw text is not read again."""
+    if raw_kind is _GATE_KIND_UNREAD:
+        raw_kind = _gate_weakening_fallback_kind(command)
+    if raw_kind in _GATE_FALLBACK_DENIES:
+        return raw_kind
+    kinds = [_gate_weakening_fallback_kind(text) for text in _decoded_readings(command) if text != command]
+    return (next((k for k in kinds if k in _GATE_FALLBACK_DENIES), None) or raw_kind
+            or next((k for k in kinds if k is not None), None))
 
 
 def _gate_partial_segments(command, doubt=None):
@@ -20864,9 +21552,8 @@ def gate_weakening(data):
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
             raw_kind = _gate_weakening_fallback_kind(command)
-            if (raw_kind not in _GATE_FALLBACK_DENIES
-                    and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
-                            for text in _decoded_readings(command))):
+            kind = _gate_fallback_read_kind(command, raw_kind)
+            if raw_kind not in _GATE_FALLBACK_DENIES and kind in _GATE_FALLBACK_DENIES:
                 return _deny(
                     "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell "
                     "lexer (an unbalanced quote or an unsupported construct such as a here-string or a "
@@ -20881,7 +21568,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
+            return _gate_weakening_fallback(command, runtime=True, kind=kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -21040,9 +21727,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        raw_kind = _gate_weakening_fallback_kind(command)
-        if raw_kind in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
+        floor_kind = _gate_fallback_read_kind(command)
+        if floor_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=floor_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -21165,9 +21852,13 @@ def _commit_msg_subst_fallback(command):
     configuration variable and git, its text names git and defines one anywhere, past where the lexer stopped
     included, or a git segment a partial lex recovers defines one or runs under one the session environment
     carries) may run git commit under another name, so a marker anywhere in it denies too.
+    Both probes read the de-quoted readings (_decoded_readings) BESIDE the raw text, as the uncertain-'#'
+    path's _hash_doubt_scan does, so a subcommand split by quoting (git co''mmit -m "$(id)" <<<x) denies like
+    its plain spelling; a reading can only add a match, never clear one.
     Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
-    if (_RAW_COMMIT_MSG_MARKER_RE.search(command)
-            and (_RAW_COMMIT_MSG_GIT_RE.search(command) or _git_alias_recovered(command))):
+    texts = (command,) + _decoded_readings(command)
+    if (any(_RAW_COMMIT_MSG_MARKER_RE.search(text) for text in texts)
+            and (any(_RAW_COMMIT_MSG_GIT_RE.search(text) for text in texts) or _git_alias_recovered(command))):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
             "lexer and appears to carry a backtick or $( command substitution in a git commit argument, or in "
@@ -21194,7 +21885,9 @@ def commit_msg_subst(data):
     DENIES. Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION
     AS A FLOOR, above _MainHashReading), main's segments are judged beside the lex's own where main's reading
     lexes, and where it fails the raw fallback a lex that fails takes, which denies or allows, decides in place
-    of this guard's allow."""
+    of this guard's allow. The segments of the static decoded reading (_ansi_c_static_reading: ANSI-C escapes
+    decoded, a locale quote's '$' dropped) are read after the lex's own, so $'\\x67'it commit -m "$(id)" denies
+    as its plain spelling does."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -21230,7 +21923,17 @@ def commit_msg_subst(data):
         return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
-    named = _git_alias_outside(command)
+    # The static decoded reading (_ansi_c_static_reading) is read beside the lex's own segments, so a git word,
+    # subcommand or argument spelled with an ANSI-C escape ($'\x67'it commit -m "$(id)") denies like its plain
+    # spelling; its segments can only add a hit, and a reading the scan cannot make with certainty denies
+    # (_StaticReadingUncertain).
+    try:
+        segments = list(segments) + _ansi_c_static_lexed(command, _lex_command_read, skip_empty=True)
+        named = _git_alias_outside(command) or _git_alias_outside(_ansi_c_static_reading(command))
+    except _StaticReadingUncertain as exc:
+        return _static_reading_uncertain_deny("sectvl (tool-argument-validation)", "a backtick or $( command "
+                                              "substitution in a git commit argument, which the shell runs before "
+                                              "git sees the argument", exc)
     for seg in segments:
         hit = _commit_msg_subst_hit(seg, named)
         if hit is None:
@@ -36578,6 +37281,25 @@ _RWH_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")  # a full sha1 
 # t, so they do not match. Matching data that merely names git (a message, a path operand)
 # over-holds while a hold is live, a disclosed safe over-deny, never an under-block.
 _RWH_RAW_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+
+
+def _rwh_static_git_word(command):
+    """Whether command carries a git word bash assembles from its own text: the plain word
+    (_RWH_RAW_GIT_WORD_RE) or the letters g, i, t split only by quote characters, backslashes, '$'
+    or newlines (_GIT_WORD_RE: g''it, g""it, g\\it, gi$'t', gi$"t", a line continuation) in the
+    raw text, or the word git in one of its de-quoted readings (_decoded_readings: an ANSI-C quote's
+    escapes decoded, gi$'\\x74', gi$'\\164', gi$'\\u0074'). Each reading can only add a match to the
+    raw-text test, never clear one, so a command it matches is judged against the hold set as the
+    plain word is. A git word built at RUN TIME (one whose spelling holds a '$' expansion or
+    substitution or a backquote outside single quotes, an unquoted glob character or brace, or that
+    uses a value assigned earlier in the same command) is not read: the disclosed run-time-word
+    residual, tied to the open design question on a git-side control (PD-SHELL-GUARD-STALL). Linear,
+    never raises."""
+    if _RWH_RAW_GIT_WORD_RE.search(command) is not None or _GIT_WORD_RE.search(command) is not None:
+        return True
+    return any(_RWH_RAW_GIT_WORD_RE.search(text) is not None for text in _decoded_readings(command))
+
+
 # The substitution spellings whose presence anywhere in the raw text (even quoted as data) keeps a
 # command out of the one plain-git form a live hold still allows: a command or process
 # substitution opener, a backquote, and the heredoc/here-string operator.
@@ -38472,7 +39194,10 @@ def _rwh_decide(data):
     be resolved at all and withholds the command outright. The rule is
     ONE-PLAIN-GIT-or-fail-closed, judged from the RAW text, so shell grammar is never modelled case
     by case. A command whose raw text carries no git word (git as a word, the git of a git-<name>
-    executable, the git ending an interpreter path) consults nothing beyond the session repository.
+    executable, the git ending an interpreter path, each also with its letters split by quotes,
+    backslashes, '$' or newlines, or spelled by an ANSI-C quote's escapes: _rwh_static_git_word)
+    consults nothing beyond the session repository; a git word built at run time is the disclosed
+    run-time-word residual.
     A command that carries one is judged against its HOLD SET: the repositories of the session cwd,
     of every literal path the raw text names after -C, --git-dir, --work-tree (= and separated
     forms), cd, pushd or a GIT_ assignment (quotes stripped; quoted bodies, heredocs and option
@@ -38593,10 +39318,11 @@ def _rwh_decide(data):
             # an absent command fails closed exactly as it does for an unreadable cwd
             return ("unverifiable", _rwh_probe_text(cwd))
         return ("allow", None)
-    if _RWH_RAW_GIT_WORD_RE.search(command) is None:
-        # no git word anywhere in the raw text: nothing here runs git by a spelling this rule
-        # models (a git reached through an opaque program name is the disclosed indirect-git
-        # residual), so only the session notes (drift, expiry) travel
+    if not _rwh_static_git_word(command):
+        # no git word anywhere in the raw text or its de-quoted readings: nothing here runs git
+        # by a spelling this rule models (a git reached through an opaque program name is the
+        # disclosed indirect-git residual, and a git word built at run time the disclosed
+        # run-time-word residual), so only the session notes (drift, expiry) travel
         return ("note", " ".join(notes)) if notes else ("allow", None)
     try:
         segments = _segments(command, skip_empty=True)
@@ -44151,6 +44877,37 @@ def _fsw_in_spans(spans, pos):
     return k >= 0 and pos < spans[k][1]
 
 
+def _fsw_sched_view(line, base=0, in_subst=None, spans=None):
+    """`line` with each scheduling keyword (_FSW_SCHED_RE) that is not written data blanked to spaces of the
+    same length: one whose first or last character lies inside an inline code span (`spans`), or, when
+    `in_subst` is given (the Bash route, where it is true for an absolute position base+pos that is not data
+    of a store write), one whose first or last character it marks, such as a keyword in shell code that writes
+    nothing. `line` itself (the same object) when no keyword is blanked. Positions are kept, so the view's
+    exempter (_fsw_sched_exempter) reads the same literal positions as the raw line's."""
+    out = None
+    for k in _FSW_SCHED_RE.finditer(line):
+        first, last = k.start(), k.end() - 1
+        if ((spans and (_fsw_in_spans(spans, first) or _fsw_in_spans(spans, last)))
+                or (in_subst is not None and (in_subst(base + first) or in_subst(base + last)))):
+            out = list(line) if out is None else out
+            out[k.start():k.end()] = " " * (k.end() - k.start())
+    return line if out is None else "".join(out)
+
+
+def _fsw_data_sched_exempter(line, base=0, in_subst=None, spans=None):
+    """The scheduling-keyword exemption of _fsw_future_on_line, read over the written data: a position is
+    exempt only when _fsw_sched_exempter exempts it on the raw line AND on _fsw_sched_view(line, ...), the
+    line with every keyword that is not written data blanked. A keyword inside a code span, or in Bash shell
+    code that writes nothing, so exempts no literal; the conjunction keeps every literal the raw line's
+    exemption warns on warning (a view can only remove an exemption, never add one)."""
+    raw = _fsw_sched_exempter(line)
+    view = _fsw_sched_view(line, base, in_subst, spans)
+    if view is line:
+        return raw
+    data = _fsw_sched_exempter(view)
+    return lambda pos: raw(pos) and data(pos)
+
+
 def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None,
                         nc_spans=None, nc_quoted=False):
     """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
@@ -44160,9 +44917,12 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
     `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
     APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
     clock comparison and under the same exemptions; `nc_spans` (code spans) and `nc_quoted` (the whole line is
-    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them."""
+    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them. The
+    scheduling-keyword exemption reads the written data (_fsw_data_sched_exempter): a keyword inside a code span
+    (`spans`, or `nc_spans` on the Bash route) or at a position `in_subst` marks exempts nothing."""
     found, seen, sched = [], set(), None
     cache = {} if cache is None else cache
+    sched_spans = spans if spans is not None else nc_spans
     for m in _FSW_STAMP_RE.finditer(line):
         lit = m.group(0)
         if lit in seen or (in_subst is not None and in_subst(base + m.start())) \
@@ -44174,7 +44934,7 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
         if got is None or got - now_us <= _FSW_FUTURE_SLACK_US:
             continue
         if sched is None:
-            sched = _fsw_sched_exempter(line)
+            sched = _fsw_data_sched_exempter(line, base, in_subst, sched_spans)
         if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
             seen.add(lit)
             found.append(lit)
@@ -44183,7 +44943,7 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
                 or (nc_spans and _fsw_in_spans(nc_spans, pos)):
             continue
         if sched is None:
-            sched = _fsw_sched_exempter(line)
+            sched = _fsw_data_sched_exempter(line, base, in_subst, sched_spans)
         if not sched(pos) and not (extra_exempt is not None and extra_exempt(pos)):
             seen.add(tok)
             found.append(_FswNonClock(tok))
@@ -44223,9 +44983,26 @@ def _fsw_delim_cell_count(s):
     return s.count("|") + 1
 
 
+def _fsw_header_sched_cols(line, pipes):
+    """The column indexes of table header `line` (its unescaped pipes `pipes`) whose cell carries a scheduling
+    keyword (_FSW_SCHED_RE) that is written data: the cells are read from _fsw_sched_view(line, spans=...), the
+    header with every keyword inside an inline code span (_fsw_code_spans) blanked, so a keyword quoted as code
+    (| Item | `due` |) exempts no column, as a keyword inside a code span on an ordinary line exempts no literal
+    (_fsw_data_sched_exempter). The view keeps every position and blanks no pipe, so its cells are the raw
+    header's cells with those keywords blanked; a cell with a keyword outside every code span still counts. A
+    column counts only when its raw cell AND its cell in the view carry a keyword, so a blank that gives a
+    neighbouring word a new word start adds no column (a view can only remove an exemption, never add one)."""
+    cols = {k for k, c in enumerate(_fsw_table_cells(line, pipes)) if _FSW_SCHED_RE.search(c.strip())}
+    view = _fsw_sched_view(line, spans=_fsw_code_spans(line)) if cols and "`" in line else line
+    if view is line:
+        return cols
+    return cols & {k for k, c in enumerate(_fsw_table_cells(view, pipes)) if _FSW_SCHED_RE.search(c.strip())}
+
+
 def _fsw_row_exempter(line, pipes, sched_cols):
     """A predicate pos -> True when position `pos` of table row `line` lies in a column whose header cell
-    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos)."""
+    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos).
+    sched_cols comes from _fsw_header_sched_cols, which reads the header with its code-span keywords blanked."""
     lead = _fsw_leading_pipe(line, pipes)
 
     def exempt(pos):
@@ -44273,7 +45050,7 @@ def _fsw_table_walk(text, tables=True, ids=None):
                 hcells = _fsw_table_cells(*prev)
                 if ncols == len(hcells):
                     ctx = ids.setdefault((prev[0], line), len(ids))
-                    sched = {k for k, c in enumerate(hcells) if _FSW_SCHED_RE.search(c.strip())}
+                    sched = _fsw_header_sched_cols(*prev)
                     prev = None
                     yield line, None, None
                     continue
@@ -46971,11 +47748,15 @@ def future_stamp_write(data):
     "target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
     through and valid. Each keyword matches as a WHOLE word, optionally plural (so "validated",
     "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
+    A keyword exempts only where it is written data (_fsw_data_sched_exempter): one inside an inline code span, or in
+    Bash shell code that writes nothing (": due; echo ... >> <store file>"), exempts nothing.
 
     Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
     markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same
     keyword regex, on the stripped header cell text), so `| Item | Due |` over `|---|---|` over a row whose Due
-    cell holds a future time is allowed. This is additive: the keyword-on-line rule above is unchanged. Table
+    cell holds a future time is allowed. Like the keyword-on-line rule, a header keyword counts only where it is
+    written data (_fsw_header_sched_cols): one inside an inline code span (| Item | `due` |) exempts no column.
+    This is additive: the keyword-on-line rule above is unchanged. Table
     context is tracked over EVERY line of the resulting file, including unchanged carry-over lines that are not
     themselves checked, so a new row under an existing header is exempt. The recognized forms follow GFM: a
     header is a line holding at least one unescaped `|` (a leading pipe is optional), immediately followed by a

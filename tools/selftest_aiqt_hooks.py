@@ -6636,6 +6636,461 @@ def _hd_bash_oracle(vectors, failures, exceptions, search_path, unterminated=_hd
     return True
 
 
+# (fbv-*) The parse-failure fallbacks of commit_msg_subst (Fix A), git_explicit_binding (Fix B), commit_identity
+# (_commit_identity_fallback) and diff_source_pretool (_diff_source_fallback) read the de-quoted readings
+# (_decoded_readings) beside the raw text. Each row is (label, handler name, command, want, pinned by the flip):
+# fbv-msg-split, fbv-expbnd-split, fbv-cmtidn-author-split, fbv-cmtidn-trailer-split, fbv-cnsdif-split,
+# fbv-expbnd-target-split and fbv-gatdis-swallow-split, a subcommand, option, trailer name or checker split by empty
+# quotes behind a here-string, each allowed silently before (fbv-cmtidn-author-ansi-c builds the option from an
+# ANSI-C escape instead); the -plain and -parsed rows hold the deny or note the split spelling now matches (the
+# note where the fallback tier only notes: cnsdif's fallback never denies, and expbnd's cd target and gatdis's
+# swallow tiers are notes), and the -none rows hold the allow of a command whose de-quoted readings spell no
+# hazard either.
+_AI_TRAILER_VALUE = "Claude <noreply@anthropic.com>"
+_FALLBACK_VIEW_ROWS = (
+    ("fbv-msg-split", "commit_msg_subst", "git co''mmit -m \"$(id)\" <<<x", "deny", True),
+    ("fbv-msg-plain", "commit_msg_subst", "git commit -m \"$(id)\" <<<x", "deny", False),
+    ("fbv-msg-parsed", "commit_msg_subst", "git co''mmit -m \"$(id)\"", "deny", False),
+    ("fbv-msg-none", "commit_msg_subst", "git co''mmit -m x <<<y", "allow", False),
+    ("fbv-expbnd-split", "git_explicit_binding", "git add -A && git p''ush <<< x", "deny", True),
+    ("fbv-expbnd-plain", "git_explicit_binding", "git add -A && git push <<< x", "deny", False),
+    ("fbv-expbnd-parsed", "git_explicit_binding", "git add -A && git p''ush", "deny", False),
+    ("fbv-expbnd-none", "git_explicit_binding", "git add f && git p''ush <<< x", "allow", False),
+    ("fbv-cmtidn-author-split", "commit_identity",
+     "git commit --au\"\"thor=\"" + _AI_TRAILER_VALUE + "\" -m x <<<y", "deny", True),
+    ("fbv-cmtidn-author-plain", "commit_identity",
+     "git commit --author=\"" + _AI_TRAILER_VALUE + "\" -m x <<<y", "deny", False),
+    ("fbv-cmtidn-author-parsed", "commit_identity",
+     "git commit --au\"\"thor=\"" + _AI_TRAILER_VALUE + "\" -m x", "deny", False),
+    ("fbv-cmtidn-author-ansi-c", "commit_identity",
+     "git commit --au$'\\x74'hor=\"" + _AI_TRAILER_VALUE + "\" -m x <<<y", "deny", True),
+    ("fbv-cmtidn-trailer-split", "commit_identity",
+     "git commit -m \"x\n\nCo-Authored-\"\"By: " + _AI_TRAILER_VALUE + "\" <<<y", "deny", True),
+    ("fbv-cmtidn-trailer-plain", "commit_identity",
+     "git commit -m \"x\n\nCo-Authored-By: " + _AI_TRAILER_VALUE + "\" <<<y", "deny", False),
+    ("fbv-cmtidn-trailer-parsed", "commit_identity",
+     "git commit -m \"x\n\nCo-Authored-\"\"By: " + _AI_TRAILER_VALUE + "\"", "deny", False),
+    ("fbv-cmtidn-none", "commit_identity",
+     "git commit --au\"\"thor=\"Jeff Posluns <jeff@posluns.ca>\" -m x <<<y", "allow", False),
+    ("fbv-cnsdif-split", "diff_source_pretool", "git d''iff <<<x", "allow-note", True),
+    ("fbv-cnsdif-plain", "diff_source_pretool", "git diff <<<x", "allow-note", False),
+    ("fbv-cnsdif-parsed", "diff_source_pretool", "git d''iff", "deny", False),
+    ("fbv-cnsdif-none", "diff_source_pretool", "git st''atus <<<x", "allow", False),
+    ("fbv-expbnd-target-split", "git_explicit_binding", "cd /tmp && git co''mmit -m y <<<z", "allow-note", True),
+    ("fbv-expbnd-target-plain", "git_explicit_binding", "cd /tmp && git commit -m y <<<z", "allow-note", False),
+    ("fbv-expbnd-target-parsed", "git_explicit_binding", "cd /tmp && git co''mmit -m y", "allow-note", False),
+    ("fbv-expbnd-target-none", "git_explicit_binding", "cd /tmp && git st''atus <<<z", "allow", False),
+    ("fbv-gatdis-swallow-split", "gate_weakening", "pyt''est || true <<<x", "allow-note", True),
+    ("fbv-gatdis-swallow-plain", "gate_weakening", "pytest || true <<<x", "allow-note", False),
+    ("fbv-gatdis-swallow-parsed", "gate_weakening", "pyt''est || true", "allow-note", False),
+    ("fbv-gatdis-swallow-none", "gate_weakening", "ls || true <<<x", "allow", False),
+)
+
+
+def _test_fallback_views(failures):
+    """(fbv-*) A parse-failure fallback reads the same view as the refusal it replaces: _FALLBACK_VIEW_ROWS. Each
+    row runs as given, then each pinned row runs again under a flip that restores the raw-only reading
+    (_decoded_readings read as no reading), where it must allow, so the row is red on the old reading."""
+    for label, name, command, want, _pinned in _FALLBACK_VIEW_ROWS:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+    readings = aiqt_hooks._decoded_readings
+    aiqt_hooks._decoded_readings = lambda command: ()
+    try:
+        for label, name, command, _want, pinned in _FALLBACK_VIEW_ROWS:
+            if not pinned:
+                continue
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != "allow":
+                failures.append("({}-flip) with the fallback reading the raw text alone the row must allow, so it "
+                                "pins the de-quoted readings; got {}".format(label, got))
+    finally:
+        aiqt_hooks._decoded_readings = readings
+
+
+# (sdr-*) commit_msg_subst, commit_identity, git_explicit_binding and diff_source_pretool read the static decoded
+# reading (_ansi_c_static_reading) beside the command: a git word, subcommand or option spelled with an ANSI-C escape
+# or a locale quote, which bash assembles from the command text alone, is judged as its plain spelling is. Each row
+# is (label, handler name, command, want, decision under the flip or None when not pinned): the -git, -sub, -opt and
+# -locale rows were allowed (or only noted) before and now take the plain spelling's decision (the -plain rows);
+# the -none rows hold the allow of a command whose decoded reading spells no hazard (an ANSI-C message, and an
+# ANSI-C escape inside double quotes, which bash keeps literal, so no backquote substitution is read there).
+_STATIC_DECODED_ROWS = (
+    ("sdr-sectvl-git", "commit_msg_subst", "$'\\x67'it commit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-sectvl-sub", "commit_msg_subst", "true && git c$'\\157'mmit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-sectvl-locale", "commit_msg_subst", "gi$\"t\" commit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-sectvl-plain", "commit_msg_subst", "git commit -m \"`hostname`\"", "deny", None),
+    ("sdr-sectvl-none", "commit_msg_subst", "git commit -m \"note: $'\\x60'id$'\\x60' stays literal\"", "allow",
+     None),
+    ("sdr-cmtidn-sub", "commit_identity", "git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny",
+     "allow"),
+    ("sdr-cmtidn-opt", "commit_identity", "git commit -$'\\055'author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny",
+     "allow"),
+    ("sdr-cmtidn-trailer", "commit_identity",
+     "git commit -m $'x\\n\\nCo-Authored-\\x42y: " + _AI_TRAILER_VALUE + "'", "deny", "allow"),
+    ("sdr-cmtidn-plain", "commit_identity", "git commit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny", None),
+    ("sdr-cmtidn-none", "commit_identity", "git commit -m $'feat: x\\n\\nbody line'", "allow", None),
+    ("sdr-expbnd-sub", "git_explicit_binding", "git add --all && git $'\\x70'ush", "deny", "allow"),
+    ("sdr-expbnd-opt", "git_explicit_binding", "git add -''-$'\\x61'll && git push", "deny", "allow"),
+    ("sdr-expbnd-locale", "git_explicit_binding", "git add --all && gi$\"t\" push", "deny", "allow"),
+    ("sdr-expbnd-plain", "git_explicit_binding", "git add --all && git push", "deny", None),
+    ("sdr-expbnd-none", "git_explicit_binding", "git add src/a.py && git commit -m $'a\\nb'", "allow", None),
+    ("sdr-cnsdif-git", "diff_source_pretool", "$'\\x67'it log -p", "deny", "allow"),
+    ("sdr-cnsdif-sub", "diff_source_pretool", "git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-cnsdif-opt", "diff_source_pretool", "git log $'\\x2d'p", "deny", "allow-note"),
+    ("sdr-cnsdif-plain", "diff_source_pretool", "git log -p", "deny", None),
+    ("sdr-cnsdif-none", "diff_source_pretool", "git commit -m $'a\\tb'", "allow", None),
+    ("sdr-cnsdif-after-comment", "diff_source_pretool", "true # it's fine\n$'\\x67'it log -p", "deny", "allow"),
+    ("sdr-expbnd-after-comment", "git_explicit_binding", "git add -A # don't\ngit $'\\x70'ush", "deny", "allow"),
+    ("sdr-sectvl-after-heredoc", "commit_msg_subst",
+     "cat <<'EOF'\nit's here\nEOF\n$'\\x67'it commit -m \"`hostname`\"", "deny", "allow"),
+    ("sdr-cnsdif-comment-none", "diff_source_pretool", "ls # $'\\x67'it log -p", "allow", None),
+    ("sdr-cnsdif-backquote-comment", "diff_source_pretool", "echo \"`true # x`\"; git $'\\x6c'og -p", "deny",
+     "allow"),
+    # A '#' that is not a comment (the reading refuses ahead of a later ANSI-C quote): after an escaped blank or
+    # operator, a line continuation inside a word, the ')' closing a substitution, inside a backquote comment cut
+    # at an escaped backquote, in a '${...}' expansion, in a (( )) or [[ =~ ( ) ]] group; and a here-document
+    # delimiter read otherwise than bash reads it. Bash runs the command after each one (bash 5.3.9).
+    ("sdr-sectvl-escaped-blank", "commit_msg_subst", "echo a\\ #; $'\\x67'it commit -m \"$(hostname)\"", "deny",
+     "allow"),
+    ("sdr-cnsdif-escaped-operator", "diff_source_pretool", "echo a\\;#; git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-expbnd-continuation", "git_explicit_binding", "git add -A; echo a\\\n#; git $'\\x70'ush", "deny",
+     "allow"),
+    ("sdr-cnsdif-subst-close", "diff_source_pretool", "echo $(true)#; git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-cmtidn-arith-close", "commit_identity",
+     "echo $((1))#; git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "deny", "allow"),
+    ("sdr-cnsdif-escaped-backquote", "diff_source_pretool", "echo \"`true # a\\`b`\"; git $'\\x6c'og -p", "deny",
+     "allow"),
+    ("sdr-sectvl-param-blank", "commit_msg_subst", "echo ${x:- #}; $'\\x67'it commit -m \"$(hostname)\"", "deny",
+     "allow"),
+    ("sdr-expbnd-dparen", "git_explicit_binding", "git add -A; (( 1 #)); git $'\\x70'ush", "deny", "allow"),
+    ("sdr-cnsdif-regex-group", "diff_source_pretool", "[[ a =~ ( #) ]]; git $'\\x6c'og -p", "deny", "allow"),
+    ("sdr-sectvl-delim-escaped-quote", "commit_msg_subst",
+     "cat <<\"E\\\"F\"\nit's\nE\"F\n$'\\x67'it commit -m \"$(hostname)\"", "deny", "allow"),
+    ("sdr-cnsdif-word-hash-none", "diff_source_pretool", "echo a\\ #x\nprintf $'a\\tb'", "allow", None),
+)
+
+# Commands whose static decoded reading refuses (_StaticReadingUncertain): each holds, ahead of an ANSI-C quote, a
+# construct the reading cannot read with certainty, or one it reads otherwise than the reading before it did.
+_STATIC_DECODED_REFUSED = (
+    ("sdr-refuse-escaped-blank", "echo a\\ #; gi$'\\x74' log"),
+    ("sdr-refuse-escaped-operator", "echo a\\;#; gi$'\\x74' log"),
+    ("sdr-refuse-continuation", "echo a\\\n#; gi$'\\x74' log"),
+    ("sdr-refuse-subst-close", "echo $(true)#; gi$'\\x74' log"),
+    ("sdr-refuse-arith-close", "echo $((1))#; gi$'\\x74' log"),
+    ("sdr-refuse-procsub-close", "cat <(true)#; gi$'\\x74' log"),
+    ("sdr-refuse-escaped-backquote", "echo \"`true # a\\`b`\"; gi$'\\x74' log"),
+    ("sdr-refuse-param-blank", "echo ${x:- #}; gi$'\\x74' log"),
+    ("sdr-refuse-dparen", "(( 1 #)); gi$'\\x74' log"),
+    ("sdr-refuse-regex-group", "[[ a =~ ( #) ]]; gi$'\\x74' log"),
+    ("sdr-refuse-funsub", "echo ${ true; }; gi$'\\x74' log"),
+    ("sdr-refuse-dollar-bracket", "echo $[1]; gi$'\\x74' log"),
+    ("sdr-refuse-delim-ansi-c", "cat <<$'E\\x41'\nit's\nEA\ngi$'\\x74' log"),
+    ("sdr-refuse-delim-escaped-quote", "cat <<\"E\\\"F\"\nit's\nE\"F\ngi$'\\x74' log"),
+    ("sdr-refuse-heredoc-continuation", "cat <<E\nx\\\nE\nit's\nE\ngi$'\\x74' log"),
+    ("sdr-refuse-arith-shift-line", "echo $(( 1 << 2 ))\ngi$'\\x74' log\n2"),
+)
+
+
+def _test_static_decoded_reading(failures):
+    """(sdr-*) The static decoded reading (_ansi_c_static_reading) is read beside the command by four guards:
+    _STATIC_DECODED_ROWS. Each row runs as given, then each pinned row runs again under a flip that reads no static
+    decoded reading (the command itself returned), where it must take its old decision, so the row is red on the
+    old reading. A direct check holds the reading itself: an escape decoded unquoted where its text is plain, a
+    single-quoted body otherwise, and an ANSI-C quote inside double quotes left as written."""
+    for label, name, command, want, _old in _STATIC_DECODED_ROWS:
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+    for label, command, want in (
+            ("sdr-reading-plain", "git $'\\x6c'og -p", "git log -p"),
+            ("sdr-reading-quoted", "printf $'a\\tb'; gi$'\\x74' log", "printf 'a\tb'; git log"),
+            ("sdr-reading-gate-none", "printf $'a\\tb'", "printf $'a\\tb'"),
+            ("sdr-reading-gate-none-refusable", "echo $(true)#; printf $'a\\tb'", "echo $(true)#; printf $'a\\tb'"),
+            ("sdr-reading-dq-literal", "echo \"$'\\x60'\"", "echo \"$'\\x60'\""),
+            ("sdr-reading-dq-subst", "echo \"$(git $'\\x6c'og)\"", "echo \"$(git log)\""),
+            ("sdr-reading-locale", "gi$\"t\" log", "gi\"t\" log"),
+            ("sdr-reading-sq-literal", "echo '$\\x67'", "echo '$\\x67'"),
+            ("sdr-reading-comment-apostrophe", "true # it's\n$'\\x67'it log", "true # it's\ngit log"),
+            ("sdr-reading-comment-literal", "ls # $'\\x67'it", "ls # $'\\x67'it"),
+            ("sdr-reading-heredoc-quoted", "cat <<'E'\nit's $'\\x67'\nE\ngi$'\\x74' log",
+             "cat <<'E'\nit's $'\\x67'\nE\ngit log"),
+            ("sdr-reading-heredoc-unquoted", "cat <<E\nit's $'\\x67' $($'\\x67'it log)\nE\ngi$'\\x74' log",
+             "cat <<E\nit's $'\\x67' $(git log)\nE\ngit log"),
+            ("sdr-reading-heredoc-tabs", "cat <<-E\n\tit's\n\tE\ngi$'\\x74' log", "cat <<-E\n\tit's\n\tE\ngit log"),
+            ("sdr-reading-herestring", "cat <<< $'\\x67'it", "cat <<< git"),
+            ("sdr-reading-arith-shift", "echo $(( 1 << 2 )); gi$'\\x74' log", "echo $(( 1 << 2 )); git log"),
+            ("sdr-reading-backquote-comment", "echo \"`true # x`\"; gi$'\\x74' log",
+             "echo \"`true # x`\"; git log"),
+            ("sdr-reading-word-hash-neutral", "echo a\\ #x\ngi$'\\x74' log", "echo a\\ #x\ngit log"),
+            ("sdr-reading-subshell-comment", "(true) # it's\ngi$'\\x74' log", "(true) # it's\ngit log"),
+            ("sdr-reading-param-braces", "echo ${x:-{a}}; gi$'\\x74' log", "echo ${x:-{a}}; git log"),
+            ("sdr-reading-param-hash", "echo ${x#a} ${#x}; gi$'\\x74' log", "echo ${x#a} ${#x}; git log"),
+            ("sdr-reading-heredoc-nested", "cat <<A\n$(cat <<B\nit's\nB\n)\nA\ngi$'\\x74' log",
+             "cat <<A\n$(cat <<B\nit's\nB\n)\nA\ngit log"),
+            ("sdr-reading-heredoc-pair", "cat <<'A' <<B\nit's\nA\n$($'\\x67'it log)\nB\ngi$'\\x74' log",
+             "cat <<'A' <<B\nit's\nA\n$(git log)\nB\ngit log")):
+        got = aiqt_hooks._ansi_c_static_reading(command)
+        if got != want:
+            failures.append("({}) _ansi_c_static_reading({!r}): expected {!r}, got {!r}".format(
+                label, command, want, got))
+    for label, command in _STATIC_DECODED_REFUSED:
+        try:
+            got = aiqt_hooks._ansi_c_static_reading(command)
+        except aiqt_hooks._StaticReadingUncertain:
+            continue
+        failures.append("({}) _ansi_c_static_reading({!r}) must refuse (_StaticReadingUncertain); it read {!r}"
+                        .format(label, command, got))
+    # (sdr-reading-nested-depth) Unquoted here-document bodies nested 3,000 deep are read in place, with no
+    # recursion, so the reading neither raises RecursionError nor loses the decoded word after them.
+    depth = 3000
+    command = ("".join("cat <<E{}\n$(".format(k) for k in range(depth)) + "x"
+               + "".join(")\nE{}\n".format(k) for k in reversed(range(depth))) + "gi$'\\x74' log")
+    try:
+        got = aiqt_hooks._ansi_c_static_reading(command)
+    except RecursionError:
+        got = "RecursionError"
+    if not got.endswith("\ngit log"):
+        failures.append("(sdr-reading-nested-depth) _ansi_c_static_reading of {} nested unquoted here-documents "
+                        "must end with the decoded git log; got {!r}".format(depth, got[-40:]))
+    reading = aiqt_hooks._ansi_c_static_reading
+    aiqt_hooks._ansi_c_static_reading = lambda command: command
+    try:
+        for label, name, command, _want, old in _STATIC_DECODED_ROWS:
+            if old is None:
+                continue
+            got = _decision(getattr(aiqt_hooks, name), command)
+            if got != old:
+                failures.append("({}-flip) with no static decoded reading the row must take its old decision {}, "
+                                "so it pins the reading; got {}".format(label, old, got))
+    finally:
+        aiqt_hooks._ansi_c_static_reading = reading
+
+
+# (sdr-gate-*) Gate G of the static decoded reading (_ansi_c_static_relevant): only a locale quote, or an ANSI-C quote
+# with an escape that decodes to printable, non-blank ASCII other than a quote or backslash, to anything but one inert
+# character (a blank or a control character from U+0002), or to an inert character in a command that names git or
+# an AI identity, makes the reading run; otherwise there is no extra reading and no refusal. _STATIC_GATE_PREFIX is a
+# construct the scan refuses ahead of a relevant quote. The F6 commands hold no git word: each guard allows them
+# (main does) and denied them before G.
+_STATIC_GATE_PREFIX = "echo $(date +%F)#nightly; "
+_STATIC_GATE_GUARDS = (("sectvl", "commit_msg_subst"), ("cmtidn", "commit_identity"),
+                       ("expbnd", "git_explicit_binding"), ("cnsdif", "diff_source_pretool"))
+_STATIC_GATE_F6 = (
+    ("array", "files=(\n  a.py # first\n  b.py\n)\nprintf $'%s\\n' \"${files[@]}\""),
+    ("subshell", "(\n  # build first\n  make\n) && printf $'done\\n'"),
+    ("subst-hash", "echo $(date +%F)#nightly; printf $'x\\n'"),
+)
+# Inert escapes after the refused construct, in a command that names neither git nor an AI identity
+# (diff_source_pretool): each allows, and denies under the flip that reads every quote as relevant (the reading
+# before G).
+_STATIC_GATE_IRRELEVANT = (
+    ("sdr-gate-blank", _STATIC_GATE_PREFIX + "printf $'\\x20'"),
+    ("sdr-gate-control", _STATIC_GATE_PREFIX + "printf $'\\cB'"),
+    ("sdr-gate-named", _STATIC_GATE_PREFIX + "printf $'\\t\\n\\r\\e\\a\\v\\f\\b'"),
+    ("sdr-gate-inert-in-word", _STATIC_GATE_PREFIX + "printf $'done\\x20now\\n'"),
+)
+# Escapes that are not inert, after the refused construct (diff_source_pretool), with the decision under the flip
+# that reads nothing as relevant (main's): a quote or a backslash (bash quoting in a body eval or sh -c reads again),
+# U+0001 and U+007F (bash's internal quoting marks), a NUL (it ends the string), non-ASCII text and nothing (a code
+# point past U+10FFFF). Each denies through the refusal, and allows under the flips that read nothing as relevant and
+# that read the gate before inert escapes were defined (the gate of 72e8287b, gate_before in
+# _test_static_decoded_gate).
+_STATIC_GATE_NOT_INERT = (
+    ("sdr-gate-ctlesc", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\cA'", "allow"),
+    ("sdr-gate-single-quote", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\x27'", "allow"),
+    ("sdr-gate-double-quote", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\x22'", "allow"),
+    ("sdr-gate-backslash", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\\\'", "allow"),
+    ("sdr-gate-non-ascii", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\u00e9'", "allow"),
+    ("sdr-gate-past-unicode", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\U00110000'", "allow"),
+    ("sdr-gate-delete", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\x7f'", "allow"),
+    ("sdr-gate-nul", "diff_source_pretool", _STATIC_GATE_PREFIX + "printf $'\\0'", "allow"),
+)
+# An escape inside a value commit_identity tests (F1 of the review of 72e8287b): each denies (the parent 83d6980b
+# denies each), and allows under the flips that read nothing as relevant and that read the gate of 72e8287b. The
+# rows whose escapes are all inert (inert-subject) also allow under the flip that finds no subject, and
+# sdr-gate-id-stripped-name, whose AI name bash assembles past a backslash, allows under the flip whose subject text
+# keeps its quoting.
+_STATIC_GATE_IDENTITY = (
+    ("sdr-gate-id-author-blank", "git commit --author=$'Claude\\x20Bot <bot@example.com>' -m x", True),
+    ("sdr-gate-id-author-tab", "git commit --author=$'Claude\\tBot <bot@example.com>' -m x", True),
+    ("sdr-gate-id-author-ctlesc", "git commit --author=$'\\x01Claude <c@example.com>' -m x", False),
+    ("sdr-gate-id-author-double-quote", "git commit --author=$'\\x22Claude\\x22 <c@example.com>' -m x", False),
+    ("sdr-gate-id-author-single-quote", "git commit --author=$'\\x27Claude <c@example.com>' -m x", False),
+    ("sdr-gate-id-author-backslash", "git commit --author=$'\\x5cClaude <c@example.com>' -m x", False),
+    ("sdr-gate-id-trailer-blank", "git commit -m $'fix\\n\\nCo-Authored-By:\\x20Claude'", True),
+    ("sdr-gate-id-trailer-tab", "git commit -m $'fix\\n\\nCo-Authored-By:\\tClaude'", True),
+    ("sdr-gate-id-author-nul", "git commit --author=$'Cl\\0zz'aude -m x", False),
+    ("sdr-gate-id-email-nul", "EMAIL=$'Cl\\0zz'aude true", False),
+    ("sdr-gate-id-email-blank", "EMAIL=$'\\x20Claude' true", True),
+    ("sdr-gate-id-stripped-name", "EMAIL=$'\\x20'Cl\\aude true", True),
+)
+# An inert escape inside a body eval or sh -c reads again (F3 of the review of 72e8287b): diff_source_pretool notes
+# each (as the parent did), and allows under the flips that read nothing as relevant, that read the gate of 72e8287b
+# and that find no subject.
+_STATIC_GATE_REPARSED = (
+    ("sdr-gate-eval-blank", "eval $'git\\x20log -p'"),
+    ("sdr-gate-sh-c-newline", "bash -c $'true\\ngit log -p'"),
+)
+# A '$' and a line continuation before a quote (F2 of the review of 72e8287b): each guard denies (the scan's refusal),
+# and takes the parent's decision under the flips that refuse no continued quote and that read the gate on the
+# command as written only (no backslash-newline removed).
+_STATIC_GATE_CONTINUED = (
+    ("sdr-gate-continued-sectvl", "commit_msg_subst", "$\\\n'\\x67'it commit -m \"$(hostname)\"", "allow"),
+    ("sdr-gate-continued-cmtidn", "commit_identity", "git $\\\n'\\x63'ommit --author=Claude -m y", "allow"),
+    ("sdr-gate-continued-expbnd", "git_explicit_binding", "git add -A; git $\\\n'\\x70'ush", "allow"),
+    ("sdr-gate-continued-cnsdif", "diff_source_pretool", "git $\\\n'\\x6c'og -p", "allow"),
+    ("sdr-gate-continued-locale", "diff_source_pretool", "git $\\\n\"log\" -p", "allow-note"),
+)
+# Relevant escapes: (label, handler name, command, decision under the flip that reads nothing as relevant). Each
+# denies, through the refusal after the construct or through the decoded word.
+_STATIC_GATE_RELEVANT = (
+    ("sdr-gate-hex", "diff_source_pretool", _STATIC_GATE_PREFIX + "git $'\\x6c'og -p", "allow"),
+    ("sdr-gate-octal", "commit_msg_subst", _STATIC_GATE_PREFIX + "git c$'\\157'mmit -m \"$(hostname)\"", "allow"),
+    ("sdr-gate-unicode", "git_explicit_binding", _STATIC_GATE_PREFIX + "git add --all && git $'\\u0070'ush",
+     "allow"),
+    ("sdr-gate-identity", "commit_identity",
+     _STATIC_GATE_PREFIX + "git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y", "allow"),
+    ("sdr-gate-locale", "diff_source_pretool", _STATIC_GATE_PREFIX + "gi$\"t\" log -p", "allow-note"),
+    ("sdr-gate-unknown-escape", "diff_source_pretool", _STATIC_GATE_PREFIX + "git log $'\\q'", "allow-note"),
+    ("sdr-gate-after-irrelevant", "diff_source_pretool", "printf $'\\t'; git $'\\x6c'og -p", "allow"),
+)
+# A spurious $' inside single quotes whose match swallows the real quote's opening: each denies, and allows under the
+# flip that matches the quotes once, left to right, without overlap, instead of from every index.
+_STATIC_GATE_EVERY_INDEX = (
+    ("sdr-gate-every-index-sectvl", "commit_msg_subst", "echo '$'; $'\\x67'it commit -m \"$(hostname)\""),
+    ("sdr-gate-every-index-cmtidn", "commit_identity",
+     "echo '$'; git $'\\x63'ommit --author \"" + _AI_TRAILER_VALUE + "\" -m y"),
+    ("sdr-gate-every-index-expbnd", "git_explicit_binding", "echo '$'; git add -A; git $'\\x70'ush"),
+    ("sdr-gate-every-index-cnsdif", "diff_source_pretool", "echo '$'; git $'\\x6c'og -p"),
+)
+
+
+def _test_static_decoded_gate(failures):
+    """(sdr-gate-*) Gate G (_ansi_c_static_relevant): each irrelevant row (the F6 commands under every guard, and each
+    class of escape that spells no guarded word) allows and its gate reads nothing relevant; each relevant row denies
+    and its gate reads a relevant quote. Then every row runs again under a flip: the irrelevant rows with every
+    ANSI-C or locale quote read as relevant (the reading before G), where they must deny; the relevant rows with
+    nothing read as relevant, where they must take main's decision; and the every-index rows with the quotes
+    matched once without overlap, where they must allow. The rows the review of 72e8287b added (F1 to F4) run under
+    their own flips as well: the gate of 72e8287b (every escape that decodes to no printable, non-blank ASCII other
+    than a quote or backslash read as irrelevant), no subject found, a subject text that keeps its quoting, no
+    continued quote refused, and the gate read on the command as written only. So each row is red without the
+    gate's part it names."""
+    gate = aiqt_hooks._ansi_c_static_relevant
+    irrelevant = [("sdr-gate-f6-{}-{}".format(name, rule), handler, command)
+                  for name, command in _STATIC_GATE_F6 for rule, handler in _STATIC_GATE_GUARDS]
+    irrelevant += [(label, "diff_source_pretool", command) for label, command in _STATIC_GATE_IRRELEVANT]
+    relevant = (list(_STATIC_GATE_RELEVANT) + list(_STATIC_GATE_NOT_INERT)
+                + [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]
+                + [(label, "commit_identity", command, "allow") for label, command, _inert in _STATIC_GATE_IDENTITY]
+                + [(label, name, command, "deny") for label, name, command, _flip in _STATIC_GATE_CONTINUED])
+    reparsed = [(label, "diff_source_pretool", command) for label, command in _STATIC_GATE_REPARSED]
+    for label, name, command in irrelevant:
+        if gate(command):
+            failures.append("({}) _ansi_c_static_relevant({!r}) must read no relevant quote".format(label, command))
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != "allow":
+            failures.append("({}) {} on {!r}: expected allow, got {}".format(label, name, command, got))
+    for label, name, command, want in ([row[:3] + ("deny",) for row in relevant]
+                                       + [row + ("allow-note",) for row in reparsed]):
+        if not gate(command):
+            failures.append("({}) _ansi_c_static_relevant({!r}) must read a relevant quote".format(label, command))
+        got = _decision(getattr(aiqt_hooks, name), command)
+        if got != want:
+            failures.append("({}) {} on {!r}: expected {}, got {}".format(label, name, command, want, got))
+
+    def matched_once(command):
+        if '$"' in command:
+            return True
+        return any(not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._ansi_c_escape(escape))
+                   for match in aiqt_hooks._ANSI_C_QUOTE_RE.finditer(command)
+                   for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1)))
+
+    def gate_before(command):
+        # The gate of 72e8287b: from every index, an escape is relevant only when it decodes to a character in
+        # _ANSI_C_RELEVANT_CHARS, on the command as written.
+        if '$"' in command:
+            return True
+        at = command.find("$'")
+        while at >= 0:
+            match = aiqt_hooks._ANSI_C_QUOTE_RE.match(command, at)
+            if match is not None and any(
+                    not aiqt_hooks._ANSI_C_RELEVANT_CHARS.isdisjoint(aiqt_hooks._ansi_c_escape(escape))
+                    for escape in aiqt_hooks._ANSI_C_ESCAPE_RE.finditer(match.group(1))):
+                return True
+            at = command.find("$'", at + 1)
+        return False
+
+    def as_written(command):
+        return aiqt_hooks._ansi_c_static_relevant_text(command, command.replace("\\\n", ""))
+
+    identity = [(label, "commit_identity", command) for label, command, _inert in _STATIC_GATE_IDENTITY]
+    inert_subject = [(label, "commit_identity", command) for label, command, inert in _STATIC_GATE_IDENTITY if inert]
+    not_inert = [(label, "commit_identity", command) for label, command, inert in _STATIC_GATE_IDENTITY if not inert]
+    stripped = [row for row in identity if row[0] == "sdr-gate-id-stripped-name"]
+    flips = (
+        ("_ansi_c_static_relevant", "every quote relevant", lambda command: "$'" in command or '$"' in command,
+         [row + ("deny",) for row in irrelevant]),
+        ("_ansi_c_static_relevant", "nothing relevant", lambda command: False,
+         list(_STATIC_GATE_RELEVANT) + list(_STATIC_GATE_NOT_INERT)
+         + [row + ("allow",) for row in identity + reparsed]),
+        ("_ansi_c_static_relevant", "quotes matched once without overlap", matched_once,
+         [row + ("allow",) for row in _STATIC_GATE_EVERY_INDEX]),
+        ("_ansi_c_static_relevant", "as 72e8287b did", gate_before,
+         [row[:3] + ("allow",) for row in _STATIC_GATE_NOT_INERT] + [row + ("allow",) for row in identity + reparsed]),
+        ("_ansi_c_static_subject", "no subject", lambda command: False,
+         [row + ("allow",) for row in inert_subject + reparsed] + [row + ("deny",) for row in not_inert]),
+        ("_ANSI_C_SUBJECT_STRIP_RE", "a subject text that keeps its quoting", re.compile(r"[^\s\S]"),
+         [row + ("allow",) for row in stripped]),
+        ("_ANSI_C_CONTINUED_QUOTE_RE", "no continued quote refused", re.compile(r"[^\s\S]"),
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED]),
+        ("_ansi_c_static_relevant", "the command as written only", as_written,
+         [row[:3] + (row[3],) for row in _STATIC_GATE_CONTINUED]),
+    )
+    for how_attr, how, flip, rows in flips:
+        saved = getattr(aiqt_hooks, how_attr)
+        setattr(aiqt_hooks, how_attr, flip)
+        try:
+            for label, name, command, want in rows:
+                got = _decision(getattr(aiqt_hooks, name), command)
+                if got != want:
+                    failures.append("({}-flip) with the gate reading {} the row must take {}, so it pins the gate; "
+                                    "got {}".format(label, how, want, got))
+        finally:
+            setattr(aiqt_hooks, how_attr, saved)
+    # A name bash assembles past an inert escape that vanishes (a newline after a backslash, a line continuation in
+    # the body eval reads again): the subject is found in the text with the inert escape removed, and is not found
+    # under the flip that removes no inert escape.
+    command = "eval \"gi\\\\\"$'\\n't log -p"
+    if not gate(command):
+        failures.append("(sdr-gate-subject-inert-dropped) _ansi_c_static_relevant({!r}) must find the subject bash "
+                        "assembles past an inert escape".format(command))
+    dropped = aiqt_hooks._ansi_c_inert_dropped
+    aiqt_hooks._ansi_c_inert_dropped = lambda match: match.group(0)
+    try:
+        if gate(command):
+            failures.append("(sdr-gate-subject-inert-dropped-flip) with no inert escape removed the subject must not "
+                            "be found in {!r}, so the row pins the removal".format(command))
+    finally:
+        aiqt_hooks._ansi_c_inert_dropped = dropped
+    # Every name AI_IDENTITY_RE matches is a subject (_ANSI_C_SUBJECT_RE), so the subject check keeps step with it: the
+    # letters each alternative of its first group starts with, and its two address forms.
+    group = re.search(r"\\b\(([^()]*(?:\([^()]*\)[^()]*)*)\)\\b", aiqt_hooks.AI_IDENTITY_RE.pattern)
+    names = [re.match(r"[a-z]*", alternative).group(0) for alternative in group.group(1).split("|")] if group else []
+    names += ["@anthropic.com", "@openai.com"]
+    if not group or not all(names):
+        failures.append("(sdr-gate-subject-names-read) cannot read the names of AI_IDENTITY_RE {!r}".format(
+            aiqt_hooks.AI_IDENTITY_RE.pattern))
+    for name in names:
+        if not aiqt_hooks.AI_IDENTITY_RE.search(name + ("4o" if name == "gpt" else "")):
+            failures.append("(sdr-gate-subject-names-identity) AI_IDENTITY_RE must match {!r}".format(name))
+        if not aiqt_hooks._ANSI_C_SUBJECT_RE.search(name):
+            failures.append("(sdr-gate-subject-names-subject) _ANSI_C_SUBJECT_RE must find the AI name {!r} "
+                            "AI_IDENTITY_RE matches".format(name))
+
+
 def _test_heredoc_terminator(failures):
     """(hd-*) heredoc_terminator (sectvl): every heredoc opener bash acts on needs a later line exactly equal to
     its delimiter (after the line's leading tabs for <<-) before the end of the command, or the command is
@@ -18261,6 +18716,45 @@ def _test_clock_hooks(failures, tmp):
         {"file_path": st + "/state.md", "content": "> hb: " + future + "\n`" + future + "`\n"}, "allow")
     fsw("(fsw-write-due-column-silent) a future literal under a Due table header passes silently", "Write",
         {"file_path": st + "/state.md", "content": "| Item | Due |\n|---|---|\n| x | " + future + " |\n"}, "allow")
+    # A scheduling keyword exempts a literal only where it is written data (_fsw_data_sched_exempter): one inside an
+    # inline code span, or in Bash shell code that writes nothing, exempts nothing, so each sched-view row warns (each
+    # passed silently before); fsw-sched-data-silent keeps a keyword in the written data exempt. The -flip runs read
+    # the exemption over the raw line again (_fsw_sched_view returning the line unchanged) and must pass silently.
+    sched_view_rows = (
+        ("fsw-sched-view-code-span-warns", "a keyword inside a code span", "Write",
+         {"file_path": st + "/state.md", "content": "Status `due` " + future}, None),
+        ("fsw-sched-view-shell-code-warns", "a keyword in shell code that writes nothing", "Bash",
+         {"command": ": due; echo \"hb {}\" >> {}/state.md".format(future, st)}, "/"))
+    for label, what, tool, tool_input, cwd in sched_view_rows:
+        fsw("({}) a future literal after {} warns".format(label, what), tool, tool_input, "allow-note", cwd=cwd)
+    fsw("(fsw-sched-data-silent) a future literal after a keyword in the written data passes silently", "Bash",
+        {"command": "echo \"due {}\" >> {}/state.md".format(future, st)}, "allow", cwd="/")
+    sched_view = aiqt_hooks._fsw_sched_view
+    aiqt_hooks._fsw_sched_view = lambda line, base=0, in_subst=None, spans=None: line
+    try:
+        for label, what, tool, tool_input, cwd in sched_view_rows:
+            fsw("({}-flip) with the exemption read over the raw line, a future literal after {} must pass silently, "
+                "so the row pins the written-data view".format(label, what), tool, tool_input, "allow", cwd=cwd)
+    finally:
+        aiqt_hooks._fsw_sched_view = sched_view
+    # A header cell's keyword exempts its column only where it is written data (_fsw_header_sched_cols): one inside a
+    # code span exempts no column, so fsw-header-code-span-warns warns (it passed silently before), while
+    # fsw-write-due-column-silent above and fsw-header-keyword-outside-span-silent keep a plain keyword exempting. The
+    # -flip reads the raw header cells again and must pass silently.
+    header_row = {"file_path": st + "/state.md", "content": "| Item | `due` |\n|---|---|\n| x | " + future + " |\n"}
+    fsw("(fsw-header-code-span-warns) a future literal under a header keyword inside a code span warns", "Write",
+        header_row, "allow-note")
+    fsw("(fsw-header-keyword-outside-span-silent) a header keyword outside a code span still exempts its column",
+        "Write", {"file_path": st + "/state.md",
+                  "content": "| Item | Due `x` |\n|---|---|\n| x | " + future + " |\n"}, "allow")
+    header_cols = aiqt_hooks._fsw_header_sched_cols
+    aiqt_hooks._fsw_header_sched_cols = lambda line, pipes: {
+        k for k, c in enumerate(aiqt_hooks._fsw_table_cells(line, pipes)) if aiqt_hooks._FSW_SCHED_RE.search(c.strip())}
+    try:
+        fsw("(fsw-header-code-span-warns-flip) with the header cells read raw, the row must pass silently, so it pins "
+            "the written-data header view", "Write", header_row, "allow")
+    finally:
+        aiqt_hooks._fsw_header_sched_cols = header_cols
     fsw("(fsw-edit-future-warns) an Edit that brings a future literal into a store file warns", "Edit",
         {"file_path": st + "/edit.md", "old_string": "a", "new_string": "hb " + future}, "allow-note")
     fsw("(fsw-multiedit-future-warns) a MultiEdit that brings a future literal into a store file warns", "MultiEdit",
@@ -40218,6 +40712,9 @@ def _main_isolated(monitor):
         _test_trkasy_heredoc_consumer(failures, tmp)
         _test_trkasy_data_shape_rules(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
+        _test_fallback_views(failures)
+        _test_static_decoded_reading(failures)
+        _test_static_decoded_gate(failures)
         _test_heredoc_terminator(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)

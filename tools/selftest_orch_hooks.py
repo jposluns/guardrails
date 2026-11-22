@@ -2793,6 +2793,48 @@ def _rwh_cases(tmp):
     check("rwh/cwd-inside-held-denies-red-on-revert",
           [kind(held / "sub", "git switch main"),
            _rwh_without_hold(lambda: kind(held / "sub", "git switch main"))], ["deny", "allow"])
+    # a git word bash assembles from the command's own text by quote removal, a backslash, a '$'-quote or an
+    # ANSI-C quote's escapes is judged against the hold set as the plain word is (_rwh_static_git_word), never
+    # read as absent; with the gate reverted to the raw plain-word test alone every one is allowed (red on
+    # revert)
+    split_git = ["g''it", 'g""it', "g\\it", "gi$'t'", "gi$'\\x74'", "gi$'\\164'", 'gi$"t"', "g\\\nit"]
+    split_cmds = [w + " -C " + str(held) + " checkout " + seed for w in split_git] + [
+        "/usr/bin/g''it -C " + str(held) + " checkout " + seed,
+        "true && g''it -C " + str(held) + " reset --hard " + seed]
+
+    def split_kinds():
+        return ([kind(base, c) for c in split_cmds]
+                + [kind(held, "g''it checkout " + seed), kind(held, "g\\it reset --hard " + seed)])
+
+    def raw_gate_only(fn):
+        saved = aiqt_hooks._rwh_static_git_word
+        aiqt_hooks._rwh_static_git_word = lambda command: (
+            aiqt_hooks._RWH_RAW_GIT_WORD_RE.search(command) is not None)
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._rwh_static_git_word = saved
+    check("rwh/split-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in split_kinds()], raw_gate_only(split_kinds)],
+          [[True] * (len(split_cmds) + 2), ["allow"] * (len(split_cmds) + 2)])
+    # the static reading adds no match to text carrying no git word, so ordinary commands run inside the held
+    # worktree stay allowed; with the gate reading every command as a git word each is withheld (the
+    # over-broad gate this row catches)
+    plain_cmds = ["ls -la", "echo legit digit", "cat .gitignore", "grep -rn gitx .", "printf '%s\\n' g it"]
+
+    def plain_kinds():
+        return [kind(held, c) for c in plain_cmds]
+
+    def every_word_git(fn):
+        saved = aiqt_hooks._rwh_static_git_word
+        aiqt_hooks._rwh_static_git_word = lambda command: True
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._rwh_static_git_word = saved
+    check("rwh/non-git-text-held-allowed-over-broad-gate",
+          [plain_kinds(), [k != "allow" for k in every_word_git(plain_kinds)]],
+          [["allow"] * len(plain_cmds), [True] * len(plain_cmds)])
     al = "git -C " + str(base / "alias") + " checkout " + seed
     check("rwh/symlink-alias-denies-red-on-revert",
           [kind(base, al), _rwh_without_hold(lambda: kind(base, al))], ["deny", "allow"])

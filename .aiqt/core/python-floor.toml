@@ -205,6 +205,7 @@ guarded-surfaces = [
     "tools/orch_doctor.py",
     "tools/orch_preflight.py",
     "tools/orch_register.py",
+    "tools/orch_round_gate.py",
     "tools/pin.py",
     "tools/render_og_cards.py",
     "tools/selftest_aiqt_corpus.py",
@@ -218,6 +219,7 @@ guarded-surfaces = [
     "tools/selftest_opf_render.py",
     "tools/selftest_orch_dispatch_marker.py",
     "tools/selftest_orch_hooks.py",
+    "tools/selftest_orch_round_gate.py",
 ]
 nonblocking-surfaces = [
     ".preview/constraint-reread.py",
