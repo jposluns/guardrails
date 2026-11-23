@@ -79,10 +79,13 @@ its own would not be stopped (a residual, disclosed).
 CONDITIONS. The table is preceded by the conditions it was measured under: the load average at start and end
 (os.getloadavg), the CPU count, the harness and hook interpreters, the git version and the fixture sizes, and
 the host label: what --host-label LABEL gives (1 to 100 printable characters, no space at either end), else
-"unlabelled". Reports may be shared, so the hostname is never read; the operator names the host. Nor does a
-condition record an absolute path, which can name a user or the host: the harness interpreter is named by
-its file name and version, each hook interpreter by the command hooks.json gives and its version, and hooks.json
-by its path in the repository, or by its file name alone when it lies outside. --json PATH writes the same
+"unlabelled". Reports may be shared, so the hostname is never recorded; the operator names the host (the
+platform condition, platform.platform(), comes from os.uname(), which also returns the node name, but that name
+is not kept). Nor does a condition record an absolute path, which can name a user or the host: the harness
+interpreter is named by its file name and version, each hook interpreter by the command hooks.json gives and
+its version, and hooks.json by its path in the repository once its symlinks and .. components are resolved
+(so never with a .. component), or by its file name alone when the resolved path lies outside. --json PATH
+writes the same
 figures and conditions, with the figures' standing as an estimate, under the format id aiqt-hook-latency/3 (a
 PATH that already exists is refused, never overwritten).
 
@@ -101,7 +104,8 @@ after every valid sample, and a statistic whose position lands on it reads TIMED
 not a failed sample, so timed-out samples alone never change the exit.
 
 FIGURES AND THE MARGIN. Each row gives the min, median, 95th percentile and max of its valid and timed-out
-samples, beside the configured timeout of its hook (the timeout of its hooks.json entry). A sample is the wall
+samples, beside the configured timeout of its hook (the timeout of its hooks.json entry) and its near-timeout
+threshold (below). A sample is the wall
 time rounded to the microsecond (a median that is the mean of two samples, to a tenth of a microsecond), and
 the table prints each figure in full, so it shows the very value --json holds and the flag compares. The 95th
 percentile is the nearest rank: the sample at position ceil(0.95 n) of the n in sorted order, so with fewer
@@ -110,7 +114,8 @@ row of --json carries p95_is_max_by_rank. --margin takes at most 3 decimal place
 never rounded) and is kept as the decimal written; the threshold is (one minus --margin) times the timeout,
 computed in exact decimal, so --margin 0.7 under a 10 s timeout is exactly 3 s (default margin 0.5, so half
 the timeout). The report gives the margin, each threshold and each timeout as the exact decimals the flag
-used (the margin and the thresholds as decimal strings in --json). A row is near its timeout when its max
+used (the margin and the thresholds as decimal strings in --json, each row's threshold in the table's threshold
+column as the same string). A row is near its timeout when its max
 reaches the threshold: yes when the max is a time at
 or above the threshold, or is TIMED OUT under a --case-timeout at or above it (such a sample is known to exceed
 the threshold); no when the max is a time below it; unknown when the max is TIMED OUT under a --case-timeout
@@ -134,8 +139,8 @@ newline or a carriage return, are written as Python's repr writes them, so the l
 measure (a harness Python older than 3.14, a bad argument, an unreadable or malformed hooks.json, a hook id it
 needs that hooks.json lacks, a hook that no case runs or a case that no hook matches, a dispatcher that names
 no command budget, git or the hook interpreter missing, a hook interpreter whose version probe fails, a fixture
-that cannot be built or removed, signal handlers that cannot be installed, a --json PATH that exists or cannot
-be written (exit 2 then, whatever the rows hold), a host that is not POSIX); 128 plus the signal number (130,
+root that cannot be made, a fixture that cannot be built or removed, signal handlers that cannot be installed,
+a --json PATH that exists or cannot be written (exit 2 then, whatever the rows hold), a host that is not POSIX); 128 plus the signal number (130,
 143 or 129) when SIGINT, SIGTERM or SIGHUP stopped the run, after the fixture root is removed. The self-test
 exits 0 pass, 1 a failed check.
 """
@@ -203,10 +208,12 @@ PERCENTILE_APART = next(count for count in range(1, 101) if math.ceil(PERCENTILE
 # A sample is the wall time rounded to this many decimal places of a second (the microsecond); a median of two
 # samples is rounded to one place more, so each figure's shortest decimal is the value the table prints.
 SAMPLE_PLACES = 6
+# How the text report's figures line states that precision, as the docstring's FIGURES AND THE MARGIN does.
+FIGURES_PRECISION = "seconds to the microsecond (a median of two samples, to a tenth of a microsecond)"
 # The report's format id; bump it whenever a row or the conditions gain, lose or change a field.
 FORMAT = "aiqt-hook-latency/3"
 # The host label the operator supplies with --host-label; reports may be shared, so the raw hostname is never
-# read, and a run without the option is labelled this.
+# recorded, and a run without the option is labelled this.
 DEFAULT_HOST_LABEL = "unlabelled"
 HOST_LABEL_MAX = 100
 # The figures' standing in --json, as the text report's figures line states it.
@@ -864,8 +871,16 @@ def measure(hooks_json, plugin_root, runs=DEFAULT_RUNS, files=DEFAULT_FILES, com
         raise MeasureError("the cases do not measure every {} hook in {}: {}".format(EVENT, hooks_json,
                                                                                     "; ".join(problems)))
     with _interrupt_handlers() as interrupts:
-        # Not armed yet, so a signal while the root is made is held, and arm() raises it inside the try.
-        root = Path(tempfile.mkdtemp(prefix=ROOT_PREFIX))
+        # Not armed yet, so a signal while the root is made is held, and arm() raises it inside the try. A root
+        # that cannot be made is a fixture that cannot be built (exit 2), and a signal held meanwhile is noted.
+        try:
+            root = Path(tempfile.mkdtemp(prefix=ROOT_PREFIX))
+        except OSError as exc:
+            failure = MeasureError("cannot make the fixture root: {}".format(exc))
+            held, interrupts.held = interrupts.held, None
+            if held is not None:
+                failure.add_note("{} also arrived while the run was stopping".format(_signal_name(held)))
+            raise failure
         failure = None
         try:
             interrupts.arm()
@@ -955,11 +970,6 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
                                                            "f")
             row["near_timeout"] = near_timeout(row["max"], row["platform_timeout_seconds"], margin, case_timeout)
         rows.extend(case_rows)
-    # No absolute path enters the conditions (see CONDITIONS in the module docstring): a path can name a user or
-    # the host, and reports may be shared.
-    hooks_name = Path(hooks_json).absolute()
-    hooks_name = (hooks_name.relative_to(ROOT).as_posix() if hooks_name.is_relative_to(ROOT)
-                  else hooks_name.name)
     conditions = {
         "host_label": host_label, "estimate": ESTIMATE_NOTE,
         "started_utc": started, "finished_utc": _utc_now(),
@@ -967,13 +977,22 @@ def _measure_in(root, hooks_json, plugin_root, active, runs, files, commits, cas
         "cpu_count": os.cpu_count(), "platform": platform.platform(),
         "harness_python": sys.version, "harness_executable": Path(sys.executable or "unknown").name,
         "hook_interpreters": interpreters, "git_version": git_version,
-        "hooks_json": hooks_name, "runs": runs, "untracked_files": files, "commits": commits,
+        "hooks_json": _hooks_json_name(hooks_json), "runs": runs, "untracked_files": files, "commits": commits,
         "case_timeout_seconds": case_timeout, "command_budget": cap, "write_sizes": list(write_sizes),
         "margin": format(_exact(margin), "f"), "percentile": PERCENTILE,
         "order": "one child at a time; each run goes once through the hooks of the case",
     }
     return {"format": FORMAT, "conditions": conditions, "cases": ran, "rows": rows,
             "skipped_cases": skipped}
+
+
+def _hooks_json_name(hooks_json):
+    """hooks_json as the conditions name it (see CONDITIONS in the module docstring): its path relative to ROOT
+    once resolved (symlinks and .. components, so the name holds no .. component), else its resolved file name
+    alone. No absolute path enters the conditions: a path can name a user or the host, and reports may be
+    shared; a lexical check alone would record ROOT/../../home/alice/hooks.json as ../../home/alice/hooks.json."""
+    resolved = Path(hooks_json).resolve()
+    return resolved.relative_to(ROOT).as_posix() if resolved.is_relative_to(ROOT) else resolved.name
 
 
 def _seconds(value):
@@ -1012,9 +1031,10 @@ def render(result):
                  "the case timeout; {} means the row has no valid or timed-out sample".format(TIMED_OUT,
                                                                                          NO_VALID_SAMPLE))
     # The margin is the string the conditions hold, the exact decimal the thresholds were computed from.
-    lines.append("figures: an estimate measured on this host on the date above, not a fixed fact; seconds to the "
-                 "microsecond; p{} s is the nearest-rank {}th percentile; near timeout is yes when the max reaches "
-                 "{} times the hook's configured timeout (margin {})".format(
+    lines.append("figures: an estimate measured on this host on the date above, not a fixed fact; {}; p{} s is the "
+                 "nearest-rank {}th percentile; near timeout is yes when the max reaches {} times the hook's "
+                 "configured timeout (margin {}), the row's threshold s".format(
+                     FIGURES_PRECISION,
                      PERCENTILE, PERCENTILE, format(near_threshold(1, Decimal(conditions["margin"])), "f"),
                      conditions["margin"]))
     by_rank = [row for row in result["rows"] if row.get("p95_is_max_by_rank")]
@@ -1031,21 +1051,23 @@ def render(result):
     if result["skipped_cases"]:
         lines.append("skipped (no selected hook matches): {}".format(", ".join(result["skipped_cases"])))
     header = ("case", "hook id", "runs", "failed", "min s", "median s", "p{} s".format(PERCENTILE), "max s",
-              "timeout s", "near timeout", "outcomes")
+              "timeout s", "threshold s", "near timeout", "outcomes")
     table = [header]
     for row in result["rows"]:
         outcomes = ", ".join("{} x{}".format(label, count) for label, count in sorted(row["outcomes"].items()))
+        # the threshold is the string the row stores, the exact decimal the flag compared with
         table.append((row["case"], row["hook_id"], str(len(row["samples"]) + row["failed_samples"]),
                       str(row["failed_samples"]), _seconds(row["min"]), _seconds(row["median"]),
                       _seconds(row["p95"]), _seconds(row["max"]),
-                      _decimal_text(row["platform_timeout_seconds"]), row["near_timeout"], outcomes))
+                      _decimal_text(row["platform_timeout_seconds"]), row["near_timeout_threshold_seconds"],
+                      row["near_timeout"], outcomes))
     widths = [max(len(line[column]) for line in table) for column in range(len(header))]
     lines.append("")
     for line in table:
         cells = [line[0].ljust(widths[0]), line[1].ljust(widths[1])]
-        cells += [cell.rjust(width) for cell, width in zip(line[2:9], widths[2:9])]
-        cells.append(line[9].ljust(widths[9]))
-        lines.append("  ".join(cells + [line[10]]).rstrip())
+        cells += [cell.rjust(width) for cell, width in zip(line[2:10], widths[2:10])]
+        cells.append(line[10].ljust(widths[10]))
+        lines.append("  ".join(cells + [line[11]]).rstrip())
     lines.append("")
     for label, flag in (("near timeout", NEAR_YES), ("near timeout unknown", NEAR_UNKNOWN)):
         named = _flagged(result["rows"], flag)
@@ -1202,7 +1224,7 @@ if name == "stub_spike.py":
     with open(count, "w", encoding="utf-8") as handle:
         handle.write(str(launches + 1))
     if launches == 0:
-        time.sleep(0.5)
+        time.sleep(1.5)
 if mode == "env_dump":
     sys.stdout.write(json.dumps(dict(os.environ)))
 '''
@@ -1232,15 +1254,18 @@ STUB_TIMEOUT = 10
 MARGIN_RUN = "0.70"
 MARGIN_TIMEOUT = 2.5
 MARGIN_HOST_LABEL = "lab host 7"
-# The p95 run: 20 runs of stub_spike.py as orch_yield_tool, the first SPIKE_NAP long, so the row's nearest-rank
-# 95th percentile (the 19th of 20) is a fast sample and its max is the nap.
-SPIKE_NAP = 0.5
+# The p95 run: 20 runs of stub_spike.py as orch_yield_tool, the first SPIKE_NAP long (the nap in STUB_SOURCE), so
+# the row's nearest-rank 95th percentile (the 19th of 20) is a fast sample and its max is the nap.
+SPIKE_NAP = 1.5
 SPIKE_RUNS = 20
 # The configured timeout the p95 run gives orch_yield_tool: under the default margin its threshold is exactly
 # SPIKE_NAP, which the max reaches and the p95 does not, so the row reads yes only when the flag uses the max.
-SPIKE_TIMEOUT = 1.0
+# The nap and the threshold are 1.5 s, so a fast launch (the p95) keeps about 1.4 s of slack on a loaded host.
+SPIKE_TIMEOUT = 3.0
 # A hook id named only in the margin run's stub hooks.json, so the run shows the list is read from there.
 CONFIG_ONLY_ID = "listed_only_in_config"
+# The shortest hostname the host-label check looks for inside condition strings and text lines.
+HOSTNAME_PROBE_MIN = 6
 SELF_TEST_WRITE_SIZES = (1024, 2048, 4096)
 SELF_TEST_CASES = ["startup", "bash-512b", "write-1kib", "write-2kib", "write-4kib", "ask-user-question",
                    "schedule-wakeup", "git-discard", "branch-root", "protected-line"]
@@ -1730,6 +1755,19 @@ def _stub_cli_rows(base, name, argv, variant="fail", extra=(), startup=False, ti
     return code, out.getvalue(), err.getvalue(), rows
 
 
+def _threshold_cells(text, rows):
+    """For each row of --json: (case, hook id, the threshold string it stores, the threshold cell its table
+    line prints, None when no single table line has that case and hook id). The cells are split on blanks, so
+    this reads only rows whose figures are times (no TIMED OUT or NO VALID SAMPLE cell holds a blank)."""
+    table = [line.split() for line in text.partition("\ncase ")[2].splitlines()[1:]]
+    found = []
+    for row in rows:
+        lines = [cells for cells in table if cells[:2] == [row.get("case"), row.get("hook_id")]]
+        shown = lines[0][9] if len(lines) == 1 and len(lines[0]) > 9 else None
+        found.append((row.get("case"), row.get("hook_id"), row.get("near_timeout_threshold_seconds"), shown))
+    return found
+
+
 def _unevaluated_named(err_text, rows):
     """True when err_text holds exactly one cannot-evaluate line, and it gives the count of rows and names each
     of them as case/hook id, in report order, and no other row."""
@@ -1965,7 +2003,7 @@ def self_test(report_path=None):
         # min, median, p95 and max read TIMED OUT, and so does the outcome; under a case timeout below the
         # threshold (half of 10 s) the row's near-timeout flag is unknown
         check("report/table-plain", "case" in text and "median s" in text and "p95 s" in text
-              and len(lines) == 4 and all(line.count(TIMED_OUT) == 5 and re.search(r" 10  unknown ", line)
+              and len(lines) == 4 and all(line.count(TIMED_OUT) == 5 and re.search(r" 10 +5\.0  unknown ", line)
                                           and not re.search(r"[0-9]\.[0-9]{3}", line) for line in lines),
               text[-1200:])
         # the report's format id names this field set (rows with p95, p95_is_max_by_rank and the near-timeout
@@ -1973,27 +2011,40 @@ def self_test(report_path=None):
         # percentile, the host label, the estimate note and no absolute path)
         check("report/format-id", written.get("format") == "aiqt-hook-latency/3", written.get("format"))
         # the figures are labelled a one-host, one-date estimate, in the text and in --json
+        # and the precision the text states is the docstring's: a median of two is to a tenth of a microsecond
         check("report/estimate-labelled", "\nfigures: an estimate measured on this host on the date above, not a "
-              "fixed fact; " in text and conditions.get("estimate") == "measured on one host on one date under "
+              "fixed fact; seconds to the microsecond (a median of two samples, to a tenth of a microsecond); "
+              "p95 s " in text and conditions.get("estimate") == "measured on one host on one date under "
               "these conditions: an estimate, never a property of the hooks",
               (conditions.get("estimate"), text[-1200:]))
         # with no --host-label the host is "unlabelled" in the text and in --json, and the hostname is no
-        # condition's value (reports may be shared)
+        # condition's value and no part of any condition string or text line (reports may be shared); the
+        # substring test runs only for a hostname of at least HOSTNAME_PROBE_MIN characters, since a shorter one
+        # can occur in a condition by chance
         node = platform.node()
+        hosted = ([text for text in _strings(conditions) + out.getvalue().splitlines() if node in text]
+                  if len(node) >= HOSTNAME_PROBE_MIN and node != "unlabelled" else [])
         check("report/host-label-default", conditions.get("host_label") == "unlabelled"
               and "\nhost: label unlabelled; {} CPU(s), ".format(os.cpu_count()) in text
-              and (not node or node == "unlabelled" or node not in conditions.values()),
-              (conditions.get("host_label"), text[:600]))
+              and (not node or node == "unlabelled" or node not in conditions.values()) and hosted == [],
+              (conditions.get("host_label"), len(hosted), text[:600]))
         # no condition holds an absolute path, which can name a user or the host: the harness interpreter is
         # its file name, a hook interpreter its version under its command, hooks.json (outside the repository
         # here) its file name; and the text prints none of the paths those were read from
         absolute = [value for value in _strings(conditions) if os.path.isabs(value)]
         withheld = [path for path in (sys.executable, str(slow_json), str(slow_json.parent)) if path in text]
+        # and hooks.json is named after its .. components are resolved: a path that leaves the repository
+        # through them (to a user's directory here) is named by its file name, never as ../../home/...
+        named = [(path, _hooks_json_name(path)) for path in (
+            ROOT / HOOKS_JSON_REL, ROOT / "plugin" / ".." / HOOKS_JSON_REL,
+            Path(ROOT, *[".."] * len(ROOT.parts), "home", "alice", "hooks.json"),
+            Path(base, "away", "..", "..", "hooks.json"))]
         check("report/no-absolute-path", absolute == [] and withheld == []
               and conditions.get("harness_executable") == Path(sys.executable).name
               and conditions.get("hooks_json") == "hooks.json"
-              and all(set(found) == {"version"} for found in conditions.get("hook_interpreters", {}).values()),
-              (absolute, withheld, conditions.get("harness_executable"), conditions.get("hook_interpreters")))
+              and all(set(found) == {"version"} for found in conditions.get("hook_interpreters", {}).values())
+              and [name for _path, name in named] == [HOOKS_JSON_REL, HOOKS_JSON_REL, "hooks.json", "hooks.json"],
+              (absolute, withheld, conditions.get("harness_executable"), conditions.get("hook_interpreters"), named))
         before = figures.read_bytes() if figures.exists() else None
         err = io.StringIO()
         with _recording_roots() as made_again:
@@ -2177,19 +2228,26 @@ def self_test(report_path=None):
         # margin the threshold is exactly SPIKE_NAP, which the max (the nap) reaches and the p95 (a fast sample)
         # does not, so the row reads yes, in --json and in the table, and is named on the flagged line
         check("flag/from-max-not-p95", spike_code == 0 and len(spiked) == 1 and all(
-            row["near_timeout"] == NEAR_YES and row["near_timeout_threshold_seconds"] == "0.50"
-            and _exact(row["max"]) >= Decimal("0.5") > _exact(row["p95"]) for row in spiked)
-            and len(cells) >= 10 and cells[9] == NEAR_YES
+            row["near_timeout"] == NEAR_YES and row["near_timeout_threshold_seconds"] == "1.50"
+            and _exact(row["max"]) >= Decimal("1.5") > _exact(row["p95"]) for row in spiked)
+            and len(cells) >= 11 and cells[10] == NEAR_YES
             and any(line.startswith("near timeout: ") and "schedule-wakeup/orch_yield_tool" in line.split(": ")[-1]
                     .split(", ") for line in spike_text.splitlines()),
             (spike_code, [(row.get("p95"), row.get("max"), row.get("near_timeout")) for row in spiked], cells))
         # the text prints each configured timeout and the case timeout as the exact decimal used, as --json
-        # holds it (SPIKE_TIMEOUT 1.0 and case timeout 30.0, which a shortest-form print would give as 1 and 30)
-        check("report/values-as-used", len(cells) >= 9 and cells[8] == "1.0"
-              and "(platform timeout per hook there: 1.0 s)\n" in spike_text
+        # holds it (SPIKE_TIMEOUT 3.0 and case timeout 30.0, which a shortest-form print would give as 3 and 30),
+        # and each row's threshold column is the threshold string that row of --json stores (the margin run's
+        # "0.750" and "3.00", the spike run's "1.50"), for every row of both runs
+        agree = _threshold_cells(margin_text, margin_rows) + _threshold_cells(spike_text, spike_rows)
+        check("report/values-as-used", len(cells) >= 10 and cells[8] == "3.0" and cells[9] == "1.50"
+              and "(platform timeout per hook there: 3.0 s)\n" in spike_text
               and "; case timeout 30.0 s\n" in spike_text
-              and spiked and spiked[0].get("platform_timeout_seconds") == SPIKE_TIMEOUT,
-              (cells, spike_text[:900]))
+              and spiked and spiked[0].get("platform_timeout_seconds") == SPIKE_TIMEOUT
+              and len(agree) == len(margin_rows) + len(spike_rows) > len(SELF_TEST_WRITE_SIZES) + 1
+              and all(stored is not None and stored == shown for _case, _hook, stored, shown in agree)
+              and ("ask-user-question", "orch_ask_guard", "0.750", "0.750") in agree
+              and ("write-1kib", "secrets_shift_left", "3.00", "3.00") in agree,
+              (cells, agree, spike_text[:900]))
         # the report says when p95 is the max by rank (fewer than PERCENTILE_APART samples): the margin run (one
         # sample a row) says so for every row, the spike run (20 samples) for none, and a report mixing both
         # names the rows it holds; each row of --json carries the same fact
@@ -2233,6 +2291,19 @@ def self_test(report_path=None):
         check("measure/fixture-root-removed", len(made_fast) == 1 and len(made_slow) == 1
               and len(made_failing) == 1 and failed is None and "injected measurement failure" in (failure or "")
               and not any(os.path.lexists(path) for path in roots), (roots, failure))
+        # a fixture root that cannot be made is a fixture that cannot be built: exit 2 naming it (the docstring's
+        # Exit), never an uncaught OSError, and the interrupt handlers are restored
+        def unmade(*_args, **_kwargs):
+            raise OSError("injected mkdtemp failure")
+        err = io.StringIO()
+        with _patched(tempfile, "mkdtemp", unmade):
+            unmade_code = _try_cli(["--runs", "1", "--files", "1", "--commits", "1"], fast_json, fast_root,
+                                   write_sizes=SELF_TEST_WRITE_SIZES, out=io.StringIO(), err=err)
+        unmade_handlers = {signum: signal.getsignal(signum) for signum in INTERRUPT_SIGNALS}
+        check("measure/root-unmade-exit-two", unmade_code == 2 and unmade_handlers == handlers_before
+              and [line for line in err.getvalue().splitlines() if line.startswith("error:")]
+              == ["error: cannot make the fixture root: injected mkdtemp failure"],
+              (unmade_code, err.getvalue()[-400:]))
 
         # 10. an interruption stays the reported cause when the root cannot be removed, and so does an error;
         # the root left behind is reported with it (the removal is real; only its result is injected)
@@ -2320,18 +2391,20 @@ def self_test(report_path=None):
           "nearest-rank 95th percentile with timed-out samples, the near-timeout rule at its boundaries, a stub "
           "that naps past its configured timeout flagged and fast stubs not, a non-default --margin reaching the "
           "measurement with its threshold exact in decimal, a margin finer than 3 places refused, the margin, "
-          "thresholds and figures reported as the exact decimals used, a 20-sample p95 told apart from the max, "
+          "thresholds and figures reported as the exact decimals used, each row's threshold in the table as "
+          "--json stores it, a 20-sample p95 told apart from the max, "
           "the flag computed from the max, p95 stated as the max below 20 samples, the format id, the estimate "
-          "label and the host label in the text and --json, no absolute path in the conditions, the hook list "
-          "read from hooks.json, "
+          "label with its stated precision and the host label in the text and --json, the hostname in no "
+          "condition or text line, no absolute path in the conditions, hooks.json named with its .. components "
+          "resolved, the hook list read from hooks.json, "
           "an unreadable hooks.json refused before any fixture, the Bash command at its budget and the Write "
           "sizes exact, the real hooks.json resolved and "
           "fully measured, malformed, missing and unmeasured hook ids refused by name, the git fixture shape, "
           "the pinned child environment, every case with its runs, TIMED OUT never a time, failed samples "
           "never timed and a run with one (in the startup row too) exiting 3 while an all-valid or timed-out "
           "run exits 0, a --json write failure exiting 2 whatever the rows hold, control characters in a named "
-          "hook id escaped onto one line, a failed version probe refused, the JSON conditions, and the fixture "
-          "root removed at the normal end, on a timeout, on an error and on SIGINT, SIGTERM and SIGHUP)"
+          "hook id escaped onto one line, a failed version probe refused, the JSON conditions, a fixture root "
+          "that cannot be made exiting 2, and the fixture root removed at the normal end, on a timeout, on an error and on SIGINT, SIGTERM and SIGHUP)"
           .format(len(results)))
     return 0
 

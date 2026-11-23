@@ -5540,6 +5540,7 @@ expected-check-ids = [
   "measure/version-probe-failure-refused",
   # ---------- the fixture root and interrupts ----------
   "measure/fixture-root-removed",
+  "measure/root-unmade-exit-two",
   "measure/interrupt-cause-kept",
   "measure/signal-during-removal-held",
   "measure/signal-handlers-restored",
