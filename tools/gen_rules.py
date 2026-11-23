@@ -869,11 +869,15 @@ def _valued_option_failures():
 # rename, link, directory creation, os.mkfifo (which raises no audit event of its own, so the child wraps it to
 # raise one) or a child process, so a generator whose guard is reverted shows as exit 97 (or a non-2 exit).
 # The same check then confirms the defined modes still run, each in its own child under the same hook, which here
-# lets one child process through: the exact git index read the generators make, `git -C <dir>`, then only the
-# pins `-c core.fsmonitor=false` and `-c protocol.allow=never` (or the gen_manifest.git_tracked form, `git
-# --no-replace-objects -c core.commitGraph=false`, then only those two pins, then `-C <dir>`), then `ls-files` with only -z, --cached and --stage
-# before an optional `--` and its pathspecs, launched as git with no GIT_* variable in its environment but
-# GIT_NO_LAZY_FETCH; that read writes nothing. Any other git command is blocked. A write
+# lets one child process through: one of the git index reads the generators make (_GIT_READS there), argument for
+# argument and nothing wider. They are gen_manifest.git_tracked's `git --no-replace-objects -c
+# core.commitGraph=false -c core.fsmonitor=false -c protocol.allow=never -C <dir> ls-files -z --cached --stage`,
+# gen_manifest's output-mode read `git -C <dir> -c core.fsmonitor=false -c protocol.allow=never ls-files -z
+# --cached --stage -- <path>...` and gen_skill.authoring_marker_tracked's `git -C <dir> -c core.fsmonitor=false -c
+# protocol.allow=never ls-files -z --cached -- <path>`, each launched as git with no GIT_* variable in its
+# environment but GIT_NO_LAZY_FETCH; that read writes nothing. The same read with a pin or option dropped,
+# repeated, reordered or added is blocked, and so is any other git command (the git-read controls,
+# _GEN_ARGV_GIT_READS, pin both directions). A write
 # here is an open for writing, a directory creation, a delete, a rename or a truncation whose path lies in the
 # child's working directory (the copy); the hook marks such a block, so a process event, an os.chmod, or a
 # directory tempfile.mkdtemp makes outside the copy is not a write. On the current tree, with no argument the
@@ -970,6 +974,15 @@ def _in_tree(event, args):
     except (TypeError, ValueError, IndexError):
         return False
     return path == _CWD or path.startswith(_CWD.rstrip(os.sep) + os.sep)
+# The git index reads the generators make, argument for argument after the executable (None is the -C directory),
+# each with the (least, most) number of pathspecs that may follow it (most None: no bound): gen_manifest.git_tracked,
+# gen_manifest's output-mode read and gen_skill.authoring_marker_tracked. Nothing wider is admitted.
+_GIT_READS = ((["--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false", "-c",
+                "protocol.allow=never", "-C", None, "ls-files", "-z", "--cached", "--stage"], 0, 0),
+              (["-C", None, "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "ls-files", "-z", "--cached",
+                "--stage", "--"], 1, None),
+              (["-C", None, "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "ls-files", "-z", "--cached",
+                "--"], 1, 1))
 def _git_listing(args):
     if not accept or len(args) < 4 or not isinstance(args[1], (list, tuple)):
         return False
@@ -983,23 +996,12 @@ def _git_listing(args):
         return False
     if any(k.startswith("GIT_") and k != "GIT_NO_LAZY_FETCH" for k in env):
         return False
-    if argv[1:4] == ["--no-replace-objects", "-c", "core.commitGraph=false"]:
-        i = 4
-        while argv[i:i + 1] == ["-c"] and argv[i + 1:i + 2] in (["core.fsmonitor=false"], ["protocol.allow=never"]):
-            i += 2
-        if argv[i:i + 1] != ["-C"] or len(argv) < i + 3:
-            return False
-        i += 2
-    elif argv[1] != "-C":
-        return False
-    else:
-        i = 3
-        while argv[i:i + 1] == ["-c"] and argv[i + 1:i + 2] in (["core.fsmonitor=false"], ["protocol.allow=never"]):
-            i += 2
-    if argv[i:i + 1] != ["ls-files"]:
-        return False
-    rest = argv[i + 1:]
-    return all(tok in ("-z", "--cached", "--stage") for tok in (rest[:rest.index("--")] if "--" in rest else rest))
+    for form, least, most in _GIT_READS:
+        head, tail = argv[1:len(form) + 1], argv[len(form) + 1:]
+        if (len(head) == len(form) and all(want is None or want == got for want, got in zip(form, head))
+                and len(tail) >= least and (most is None or len(tail) <= most)):
+            return True
+    return False
 def _hook(event, args):
     if event == "open":
         mode, flags = args[1], args[2]
@@ -1522,6 +1524,44 @@ _GEN_ARGV_RECONCILE_MODES = ("import sys\nfrom pathlib import Path\n" + _GEN_ARG
 _GEN_ARGV_EARLY_GUARD = _GEN_ARGV_RECONCILE_MODES.format(name="gen_earlyguard.py", check="sys.argv[1:] == ['--check']")
 _GEN_ARGV_NOARG_CHECK = _GEN_ARGV_RECONCILE_MODES.format(name="gen_noargcheck.py", check="True")
 _GEN_ARGV_CHECK_IGNORER = _GEN_ARGV_RECONCILE_MODES.format(name="gen_checkignorer.py", check="False")
+# The git-read controls: a generator whose --check launches one of the generators' git index reads exactly (the
+# hook's _GIT_READS) must pass, and one whose --check launches a near miss (a pin dropped, reordered or repeated;
+# each was admitted before the hook's admission was narrowed to the exact reads) must be reported for --check
+# alone, its launch blocked. With no argument each writes (ended by the hook). Each launch's -C names a directory
+# that does not exist, so an admitted launch fails at once and reads no repository. (name, argv after `git`, with
+# None for that directory, admitted)
+_GEN_ARGV_GIT_TRACKED = ["--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false", "-c",
+                         "protocol.allow=never", "-C", None, "ls-files", "-z", "--cached", "--stage"]
+_GEN_ARGV_GIT_PINS = ["-c", "core.fsmonitor=false", "-c", "protocol.allow=never"]
+_GEN_ARGV_GIT_READS = (
+    ("gen_gittracked.py", _GEN_ARGV_GIT_TRACKED, True),
+    ("gen_gitmodes.py", ["-C", None] + _GEN_ARGV_GIT_PINS + ["ls-files", "-z", "--cached", "--stage", "--", "a", "b"],
+     True),
+    ("gen_gitmarker.py", ["-C", None] + _GEN_ARGV_GIT_PINS + ["ls-files", "-z", "--cached", "--", "a"], True),
+    ("gen_gitnofsmonitor.py", _GEN_ARGV_GIT_TRACKED[:3] + _GEN_ARGV_GIT_TRACKED[5:], False),
+    ("gen_gitreordered.py", ["-C", None] + _GEN_ARGV_GIT_PINS[2:] + _GEN_ARGV_GIT_PINS[:2]
+     + ["ls-files", "-z", "--cached", "--", "a"], False),
+    ("gen_gitrepeated.py", ["-C", None] + _GEN_ARGV_GIT_PINS + _GEN_ARGV_GIT_PINS[2:]
+     + ["ls-files", "-z", "--cached", "--stage", "--", "a"], False))
+
+
+def _gen_argv_git_stub(name, argv):
+    """The source of the git-read control generator name: it refuses unknown options, writes with no argument, and
+    under --check launches git with argv (None: a directory that does not exist) as the generators do, its GIT_*
+    environment scrubbed but GIT_NO_LAZY_FETCH=1, then exits 0 whatever git did."""
+    launch = "[" + ", ".join("missing" if arg is None else repr(arg) for arg in ["git"] + argv) + "]"
+    return ("import os, subprocess, sys\nfrom pathlib import Path\n" + _GEN_ARGV_GUARD.format(name=name)
+            + "if not sys.argv[1:]:\n"
+            "    Path(__file__).with_name('written.txt').write_text('x')\n"
+            "    sys.exit(0)\n"
+            "missing = str(Path(__file__).with_name('missing-dir'))\n"
+            "env = dict((k, v) for k, v in os.environ.items() if not k.startswith('GIT_'))\n"
+            "env['GIT_NO_LAZY_FETCH'] = '1'\n"
+            "try:\n"
+            "    subprocess.run(" + launch + ", capture_output=True, timeout=60, env=env)\n"
+            "except (OSError, subprocess.SubprocessError):\n"
+            "    pass\n"
+            "sys.exit(0)\n")
 
 
 def _gen_argv_class_check_failures():
@@ -1621,6 +1661,20 @@ def _gen_argv_class_check_failures():
             if problem or not intact or wrong:
                 failures.append("class-check control: on a stale tree, {} must {}; got {}, out.txt {}".format(
                     name, expected, got, "as committed" if intact else "changed"))
+        # The git-read controls (_GEN_ARGV_GIT_READS): an exact read passes, a near miss is blocked (red when the
+        # hook admits a wider form than the generators' exact reads, or drops one of them).
+        for name, argv, admitted in _GEN_ARGV_GIT_READS:
+            stub = tmp / ("git-" + name[:-3])
+            stub.mkdir()
+            (stub / name).write_text(_gen_argv_git_stub(name, argv), encoding="utf-8")
+            got = _gen_argv_class_failures(stub)
+            blocked = (len(got) == 1 and got[0].startswith(name + " --check: ")
+                       and "blocked: subprocess.Popen" in got[0])
+            if (got if admitted else not blocked) or (stub / "written.txt").exists():
+                failures.append("class-check control: {} must {}, with its no-argument write blocked; got {}, "
+                                "written.txt {}".format(name, "pass" if admitted else "be reported for --check alone "
+                                                        "with its git launch blocked", got,
+                                                        "present" if (stub / "written.txt").exists() else "absent"))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # The real generators run only in a throwaway copy of the committed tree, never in the working tree.
