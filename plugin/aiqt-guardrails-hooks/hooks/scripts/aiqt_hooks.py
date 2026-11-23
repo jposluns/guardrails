@@ -33966,7 +33966,7 @@ def _rdp_time_left(cap):
     return min(cap, left) if left > 0.05 else None
 
 
-def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
+def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT, env_extra=None):
     """One isolated git probe for the review dispatch pin: the _isolate_git_env scrub plus no optional
     locks, replacement refs and grafts disabled (so a `git replace --graft` or an info/grafts file cannot
     change the parents the base is derived from), literal pathspecs (a declared path is matched as a literal
@@ -33975,8 +33975,9 @@ def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
     core.untrackedCache), and the submodule settings that would hide a submodule change or recurse into
     one (diff.ignoreSubmodules, submodule.recurse; a .gitmodules `ignore` value is overridden by each
     diff read's own --ignore-submodules=none). Bytes in and out. The probe is given timeout seconds at most
-    (_RDP_GIT_TIMEOUT unless a caller with its own deadline passes what is left of it). Returns the
-    CompletedProcess, or None when git could not be run,
+    (_RDP_GIT_TIMEOUT unless a caller with its own deadline passes what is left of it); env_extra, a
+    caller's own variables, is applied after the scrub. Returns the CompletedProcess, or None when git
+    could not be run,
     timed out, or the decision's deadline has passed (the caller's cannot-evaluate)."""
     timeout = _rdp_time_left(timeout)
     if timeout is None:
@@ -33990,6 +33991,7 @@ def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
     # not-a-git-repository answer), so the C locale pins them against translation; LC_ALL
     # outranks LANG and LC_MESSAGES, and gettext ignores LANGUAGE under the C locale
     env["LC_ALL"] = "C"
+    env.update(env_extra or {})
     try:
         return subprocess.run(["git", "-C", repo, "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
                                "-c", "core.untrackedCache=false", "-c", "diff.ignoreSubmodules=none",
@@ -34905,7 +34907,14 @@ def _rdp_draft_census(cfg, found, changed, pin):
 #   fixed options of _RDP_EXPORT_DIFF_ARGS: plumbing diff-tree, recursive, a full patch with binary content
 #   and full object ids, no rename or copy detection, three context lines and no inter-hunk merging, the
 #   myers algorithm with the indent heuristic, no relative root or order file, a/ and b/ prefixes, quoted
-#   path names, no colour, no external diff, no textconv and every submodule change shown. So a diff of
+#   path names, no colour, no external diff, no textconv and every submodule change shown. The diff is also
+#   taken with no attribute in force (_rdp_export_diff_args: attributes read from the empty tree, no
+#   core.attributesFile, no system attributes file) and binary content deflated at the default level 1, so
+#   no `-diff`, `binary` or diff driver attribute and no compression setting shapes it. Where the diff git
+#   takes with the repository's own attributes and configuration differs from it, or a changed path has a
+#   diff attribute from the one source that cannot be switched off ($GIT_DIR/info/attributes), the export is
+#   a cannot-evaluate (_rdp_export_ambient), so an attribute can never render a text change as a binary
+#   patch that passes, and no export refused before these options were added is now allowed. So a diff of
 #   another base, a merge's second parent, a series, or a section that is only a binary marker, mode lines
 #   or an empty hunk differs and is refused even where it names the same paths; the bytes are compared as
 #   they are, so a commit changing a CRLF file passes with its genuine diff. A diff that differs is then
@@ -34914,7 +34923,8 @@ def _rdp_draft_census(cfg, found, changed, pin):
 #   has it); every head copy, a regular file under the root outside the diff file and the base-copy
 #   directory, is byte-identical to the pin's blob at its path; every base copy, a regular file under the
 #   base-copy directory, is byte-identical to the base's blob at its path, so a path the base lacks has none;
-#   and a root commit has no base copy at all (_rdp_export_p2).
+#   every copy's owner execute bit matches its blob's mode (set for 100755, clear for 100644); and a root
+#   commit has no base copy at all (_rdp_export_p2).
 # A brief naming the export only in part, a value that is not an absolute root or a plain relative path, an
 # unreadable or malformed input (the root, the diff file, the base-copy directory), a symlink, a FIFO, device
 # or socket anywhere under the root, a changed path that is a symlink or submodule entry, a failed git read
@@ -34926,7 +34936,70 @@ _RDP_EXPORT_DIFF_ARGS = ("-c", "core.quotePath=true", "-c", "diff.suppressBlankE
                          "--diff-algorithm=myers", "--indent-heuristic", "--no-relative", "-O" + os.devnull,
                          "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--no-ext-diff", "--no-textconv",
                          "--ignore-submodules=none", "--submodule=short")
-_RDP_EXPORT_DIFF_SHOWN = "GIT_NO_REPLACE_OBJECTS=1 git {} <base> <pin>".format(" ".join(_RDP_EXPORT_DIFF_ARGS))
+# The empty tree of each object format: the hook's diff reads attributes from it, so it reads none from the
+# working tree, the index or a tree the pin commits.
+_RDP_EMPTY_TREE = {"sha1": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                   "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"}
+# The options ahead of _RDP_EXPORT_DIFF_ARGS that take attributes and the compression setting out of the
+# hook's diff: no core.attributesFile, and binary content deflated at level 1 (git's default) whatever
+# core.compression or core.loosecompression says. _RDP_EXPORT_NEUTRAL_ENV drops the system attributes file.
+_RDP_EXPORT_NEUTRAL_ARGS = ("-c", "core.attributesFile=" + os.devnull, "-c", "core.loosecompression=1")
+_RDP_EXPORT_NEUTRAL_ENV = {"GIT_ATTR_NOSYSTEM": "1"}
+_RDP_EXPORT_DIFF_SHOWN = ("GIT_NO_REPLACE_OBJECTS=1 GIT_ATTR_NOSYSTEM=1 git {} --attr-source=$(git hash-object -t "
+                          "tree /dev/null) {} <base> <pin>".format(" ".join(_RDP_EXPORT_NEUTRAL_ARGS),
+                                                                   " ".join(_RDP_EXPORT_DIFF_ARGS)))
+
+
+def _rdp_export_diff_args(fmt):
+    """The git arguments of the hook's own diff for object format fmt: the neutralizing options, attributes
+    read from the empty tree, then _RDP_EXPORT_DIFF_ARGS."""
+    return _RDP_EXPORT_NEUTRAL_ARGS + ("--attr-source=" + _RDP_EMPTY_TREE[fmt],) + _RDP_EXPORT_DIFF_ARGS
+
+
+def _rdp_export_ambient_differs(own, ambient):
+    """True unless the hook's neutralized diff own and the diff git takes with the repository's own
+    attributes and configuration, ambient, are the same bytes."""
+    return own != ambient
+
+
+def _rdp_export_marked(repo, fmt, changed):
+    """The changed paths (bytes, sorted) that carry a diff attribute even with the hook's neutralizing
+    options, so from $GIT_DIR/info/attributes, or None when the attributes cannot be read."""
+    p = _review_git(repo, *_RDP_EXPORT_NEUTRAL_ARGS, "--attr-source=" + _RDP_EMPTY_TREE[fmt], "check-attr", "-z",
+                    "--stdin", "diff", stdin=b"".join(c + b"\0" for c in sorted(changed)),
+                    env_extra=_RDP_EXPORT_NEUTRAL_ENV)
+    if p is None or p.returncode != 0:
+        return None
+    fields = p.stdout.split(b"\0")
+    if fields[-1] != b"" or (len(fields) - 1) != 3 * len(changed):
+        return None
+    rows = [fields[i:i + 3] for i in range(0, len(fields) - 1, 3)]
+    if any(attr != b"diff" for _path, attr, _value in rows) or set(r[0] for r in rows) != set(changed):
+        return None
+    return sorted(path for path, _attr, value in rows if value != b"unspecified")
+
+
+def _rdp_export_ambient(repo, fmt, base, pin, changed, own):
+    """None when no attribute or configuration value in force shapes the hook's diff own of pin from base;
+    otherwise the cannot-evaluate reason. The diff git takes with only _RDP_EXPORT_DIFF_ARGS, so with the
+    repository's own attributes and configuration, must be the same bytes as own, and no changed path may
+    carry a diff attribute from $GIT_DIR/info/attributes, which no option switches off."""
+    ambient = _review_git(repo, *_RDP_EXPORT_DIFF_ARGS, base, pin)
+    if ambient is None or ambient.returncode != 0:
+        return "the diff of {} from its derived base {} cannot be read".format(pin, base)
+    if _rdp_export_ambient_differs(own, ambient.stdout):
+        return ("the diff of {} from its derived base {} with the repository's own attributes and configuration "
+                "differs from the one the hook takes with none in force (a binary, -diff or diff driver "
+                "attribute, or a core.compression or core.loosecompression setting), so the export cannot be "
+                "checked; remove the setting or attribute".format(pin, base))
+    marked = _rdp_export_marked(repo, fmt, changed)
+    if marked is None:
+        return "the diff attributes of the paths {} changes cannot be read".format(pin)
+    if marked:
+        return ("the changed paths {} carry a diff attribute from $GIT_DIR/info/attributes, which can render a "
+                "text change as a binary patch, so the export cannot be checked; remove it".format(
+                    _rdp_listing(sorted(m.decode("utf-8", "replace") for m in marked))))
+    return None
 
 
 def _rdp_export_rel(value):
@@ -34977,7 +35050,8 @@ def _rdp_export_declared(cfg, found):
 
 def _rdp_export_walk(root, fmt, diff, max_bytes):
     """(files, dirs, text, None) for the export under root: files maps each regular file's slash-separated
-    bytes path under root, the diff file's excepted, to its git blob id; dirs is the set of directory paths;
+    bytes path under root, the diff file's excepted, to its git blob id and whether its owner execute bit
+    is set; dirs is the set of directory paths;
     text is the diff file's bytes (None when there is no regular file at diff). (None, None, None, reason)
     for a cannot-evaluate: a root that cannot be opened as a directory, a symlink, FIFO, device or socket
     under it, an entry that cannot be read, a diff file over max_bytes, more than _RDP_EXPORT_MAX_ENTRIES
@@ -35026,7 +35100,7 @@ def _rdp_export_walk(root, fmt, diff, max_bytes):
                                 return (None, None, None, "the export's diff file {!r} is larger than "
                                         "max_brief_bytes ({})".format(shown, max_bytes))
                         else:
-                            files[rel] = _rdp_blob_id(fmt, fst.st_size, fd)
+                            files[rel] = (_rdp_blob_id(fmt, fst.st_size, fd), bool(fst.st_mode & stat.S_IXUSR))
                     finally:
                         os.close(fd)
             finally:
@@ -35057,9 +35131,10 @@ def _rdp_export_tree(repo, rev):
 
 def _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, root_commit):
     """P2 of the export check: None when every changed path is exported and every head and base copy is
-    byte-identical to the blob at its path in the pin and in the derived base, a root commit having no base
-    copy; otherwise (kind, message) for the first failure. changed is the pin's changed set, the entries are
-    _rdp_export_tree maps, and heads and bases map each copy's bytes path to its blob id."""
+    byte-identical to the blob at its path in the pin and in the derived base, with the owner execute bit
+    its mode gives, a root commit having no base copy; otherwise (kind, message) for the first failure.
+    changed is the pin's changed set, the entries are _rdp_export_tree maps, and heads and bases map each
+    copy's bytes path to its blob id and execute bit."""
     regular = ("100644", "100755")
     for path in sorted(changed):
         for where, entries in ((pin, pin_entries), (base, base_entries)):
@@ -35080,18 +35155,29 @@ def _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, 
     if root_commit and bases:
         return ("deny", "{} is a root commit, so its export holds no base copy, but it holds {}".format(
             pin, shown(bases)))
-    stale = [p for p, oid in heads.items() if pin_entries.get(p, ("", ""))[0] not in regular
+    stale = [p for p, (oid, _exe) in heads.items() if pin_entries.get(p, ("", ""))[0] not in regular
              or pin_entries[p][1] != oid]
     if stale:
         return ("deny", "the export's head copies {} are not byte-identical to the blobs at {} (a path {} "
                 "lacks, or other bytes)".format(shown(stale), pin, pin))
-    stale = [p for p, oid in bases.items() if base_entries.get(p, ("", ""))[0] not in regular
+    stale = [p for p, (oid, _exe) in bases.items() if base_entries.get(p, ("", ""))[0] not in regular
              or base_entries[p][1] != oid]
     if stale:
         return ("deny", "the export's base copies {} are not byte-identical to the blobs at {}, the base the "
                 "hook derives for {} (a path the base lacks, or other bytes, as when the copies come from "
                 "another base)".format(shown(stale), base, pin))
+    for side, copies, entries, rev in (("head", heads, pin_entries, pin), ("base", bases, base_entries, base)):
+        moded = _rdp_export_mode_stale(copies, entries)
+        if moded:
+            return ("deny", "the export's {} copies {} do not carry the mode of the blobs at {} (an owner "
+                    "execute bit set for a 100644 blob or clear for a 100755 one)".format(side, shown(moded), rev))
     return None
+
+
+def _rdp_export_mode_stale(copies, entries):
+    """The copies (bytes paths) whose owner execute bit differs from their blob's mode in entries, every
+    copy's entry being a regular blob already."""
+    return [p for p, (_oid, exe) in copies.items() if exe != (entries[p][0] == "100755")]
 
 
 def _rdp_export_diff_differs(blob, own):
@@ -35161,12 +35247,15 @@ def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
     if base_dir not in dirs:
         return ("unverifiable", "the export's base-copy directory {!r} is not a directory under {}".format(
             base_dir.decode("utf-8", "replace"), root))
-    own = _review_git(repo, *_RDP_EXPORT_DIFF_ARGS, base, pin)
+    own = _review_git(repo, *_rdp_export_diff_args(fmt), base, pin, env_extra=_RDP_EXPORT_NEUTRAL_ENV)
     if own is None or own.returncode != 0:
         return ("unverifiable", "the diff of {} from its derived base {} cannot be read".format(pin, base))
     if len(own.stdout) > cfg["max_brief_bytes"]:
         return ("unverifiable", "the diff of {} from its derived base {} is larger than max_brief_bytes "
                 "({})".format(pin, base, cfg["max_brief_bytes"]))
+    why = _rdp_export_ambient(repo, fmt, base, pin, changed, own.stdout)
+    if why is not None:
+        return ("unverifiable", why)
     if _rdp_export_diff_differs(blob, own.stdout):
         return _rdp_export_p1(blob, changed, pin, base)
     pin_entries = _rdp_export_tree(repo, pin)

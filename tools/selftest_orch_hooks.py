@@ -5143,19 +5143,37 @@ def _rdp_blob(root, rev, path):
     return p.stdout if p.returncode == 0 else None
 
 
-def _rdp_export_diff(root, old, new, *paths, swap=None):
+def _rdp_export_diff(root, old, new, *paths, swap=None, ambient=False):
     """The diff of new from old in the fixture repository root as the review export check takes it: the
-    hook's documented fixed options (_RDP_EXPORT_DIFF_ARGS), no ambient GIT_* and replacement objects
-    disabled, as the bytes git writes. swap replaces one option, (old option, new option), to take the
-    diff another way."""
-    args = list(aiqt_hooks._RDP_EXPORT_DIFF_ARGS)
+    hook's documented options (_rdp_export_diff_args, attributes and the compression setting neutralized),
+    no ambient GIT_* and replacement objects disabled, as the bytes git writes. swap replaces one option,
+    (old option, new option), to take the diff another way; ambient takes it with the fixed options alone,
+    so with the repository's own attributes and configuration."""
+    fmt = _rdp_git(root, "rev-parse", "--show-object-format")
+    args = list(aiqt_hooks._RDP_EXPORT_DIFF_ARGS if ambient else aiqt_hooks._rdp_export_diff_args(fmt))
     if swap is not None:
         args[args.index(swap[0])] = swap[1]
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    if not ambient:
+        env.update(aiqt_hooks._RDP_EXPORT_NEUTRAL_ENV)
     p = subprocess.run(["git", "-C", str(root)] + args + [old, new, "--"] + list(paths), check=True,
                        capture_output=True, timeout=30, env=env)
     return p.stdout
+
+
+def _rdp_copy_blob(root, rev, path, dest):
+    """Write the blob at path in rev of the fixture repository root to dest with the owner execute bit its
+    mode gives (0755 for 100755, 0644 otherwise), as a genuine export copy; False when rev has no such
+    path."""
+    blob = _rdp_blob(root, rev, path)
+    if blob is None:
+        return False
+    mode = _rdp_git(root, "ls-tree", rev, "--", path).split(" ")[0]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(blob)
+    os.chmod(str(dest), 0o755 if mode == "100755" else 0o644)
+    return True
 
 
 def _rdp_export_cases(base):
@@ -5196,10 +5214,8 @@ def _rdp_export_cases(base):
         (root / "CHANGE.diff").write_bytes(diff_text)
         for path in paths:
             for rev, top in ((head_rev or f3, root), (base_rev, root / "base")):
-                blob = _rdp_blob(fixture.root, rev, path) if rev else None
-                if blob is not None:
-                    (top / path).parent.mkdir(parents=True, exist_ok=True)
-                    (top / path).write_bytes(blob)
+                if rev:
+                    _rdp_copy_blob(fixture.root, rev, path, top / path)
         return root
 
     def copy(src, name):
@@ -5401,10 +5417,7 @@ def _rdp_export_bytes_cases(base):
         (root / "CHANGE.diff").write_bytes(diff_bytes)
         for path in paths:
             for rev, top in ((pin, root), (base_rev, root / "base")):
-                blob = _rdp_blob(ez.root, rev, path)
-                if blob is not None:
-                    (top / path).parent.mkdir(parents=True, exist_ok=True)
-                    (top / path).write_bytes(blob)
+                _rdp_copy_blob(ez.root, rev, path, top / path)
         return root
 
     def copy(src, name):
@@ -5526,6 +5539,101 @@ def _rdp_export_bytes_cases(base):
     cr_lf = export("crlf-normalized", crlf, quoted, cr_diff.replace(b"\r\n", b"\n"), ["C.txt"])
     check("rdp/export-shape-crlf", [b"+e\r\n" in cr_diff] + [named(run(r, crlf, ["C.txt"]), w) for r, w in (
         (cr_good, ""), (cr_lf, differs))], [True, ("allow", True), ("deny", True)])
+    # The copies' modes: the genuine mode-only export holds X.sh as 0755 and its base copy as 0644; a head
+    # copy exported 0644, or a base copy exported 0755, is refused, and with the mode check patched out both
+    # are allowed.
+    md_head = copy(md_good, "mode-head-0644")
+    os.chmod(str(md_head / "X.sh"), 0o644)
+    md_base = copy(md_good, "mode-base-0755")
+    os.chmod(str(md_base / "base" / "X.sh"), 0o755)
+
+    def mode_rows():
+        return [named(run(r, moded, ["X.sh"]), w) for r, w in (
+            (md_good, ""), (md_head, "head copies 'X.sh' do not carry the mode of the blobs at " + moded),
+            (md_base, "base copies 'X.sh' do not carry the mode of the blobs at " + deleted))]
+    check("rdp/export-copy-modes-deny", mode_rows(), [("allow", True), ("deny", True), ("deny", True)])
+    check("rdp/export-copy-modes-revert-allows", _rdp_mutant(
+        [("_rdp_export_mode_stale", lambda copies, entries: [])], lambda: [k for k, _n in mode_rows()]),
+        ["allow"] * 3)
+    # A changed symlink, a symlink turned into a regular file, and a new gitlink: the check compares regular
+    # files only, so each is a cannot-evaluate even with the genuine diff.
+    special = "is a symlink or submodule entry"
+    (ez.root / "L").symlink_to("C.txt")
+    _rdp_git(ez.root, "add", "--", "L")
+    linked = commit("link")
+    (ez.root / "L").unlink()
+    (ez.root / "L").symlink_to("R2.txt")
+    _rdp_git(ez.root, "add", "--", "L")
+    relinked = commit("relink")
+    (ez.root / "L").unlink()
+    unlinked = commit("unlink", [("L", b"l\n")])
+    _rdp_git(ez.root, "update-index", "--add", "--cacheinfo", "160000,{},S".format(z0))
+    gitlinked = commit("gitlink")
+    (ez.root / "S").mkdir()
+    sp_rows = [(export(name, pin, old, _rdp_export_diff(ez.root, old, pin), paths), pin, changed)
+               for name, pin, old, paths, changed in (
+                   ("symlink-changed", relinked, linked, [], ["L"]),
+                   ("symlink-to-file", unlinked, relinked, ["L"], ["L"]),
+                   ("gitlink-added", gitlinked, unlinked, [], ["S"]))]
+    check("rdp/export-symlink-submodule-unverifiable", [named(run(r, pin, changed), special, "'" + changed[0] + "'")
+                                                        for r, pin, changed in sp_rows],
+          [("unverifiable", True)] * 3)
+    # Attributes and compression. A text change to A.txt and a binary change to B.bin, genuinely exported, are
+    # allowed. An untracked .gitattributes marking A.txt -diff renders git's diff of A.txt with the
+    # repository's own attributes as a binary patch: the export holding that patch and the one holding the
+    # hook's text diff are each a cannot-evaluate, as is the text export under a core.compression of 9 (B.bin's
+    # binary patch then differs), and A.txt marked -diff in .git/info/attributes, which no option switches off,
+    # with the binary-patch export the hook's own diff then matches.
+    ab = ["A.txt", "B.bin"]
+    a0 = commit("attr 0", [("A.txt", b"a\nb\n"), ("B.bin", bytes(range(256)) * 4)])
+    a1 = commit("attr 1", [("A.txt", b"a\nc\n"), ("B.bin", bytes(range(255, -1, -1)) * 4)])
+    at_text = _rdp_export_diff(ez.root, a0, a1)
+    at_good = export("attr-good", a1, a0, at_text, ab)
+    attrs = ez.root / ".gitattributes"
+    info = ez.root / ".git" / "info" / "attributes"
+    attrs.write_text("A.txt -diff\n", encoding="utf-8")
+    at_bin = _rdp_export_diff(ez.root, a0, a1, ambient=True)
+    attrs.unlink()
+    at_patch = export("attr-patch", a1, a0, at_bin, ab)
+    ambient = "with the repository's own attributes and configuration differs"
+
+    def attr_rows():
+        got = [named(run(at_good, a1, ab))]
+        attrs.write_text("A.txt -diff\n", encoding="utf-8")
+        try:
+            got += [named(run(r, a1, ab), ambient) for r in (at_patch, at_good)]
+        finally:
+            attrs.unlink()
+        _rdp_git(ez.root, "config", "core.compression", "9")
+        try:
+            got.append(named(run(at_good, a1, ab), ambient))
+        finally:
+            _rdp_git(ez.root, "config", "--unset", "core.compression")
+        info.parent.mkdir(exist_ok=True)
+        info.write_text("A.txt -diff\n", encoding="utf-8")
+        try:
+            got.append(named(run(at_patch, a1, ab), "'A.txt' carry a diff attribute from $GIT_DIR/info/attributes"))
+        finally:
+            info.unlink()
+        return got
+    check("rdp/export-attributes-unverifiable", [
+        b"GIT binary patch" in at_bin.split(b"diff --git a/B.bin")[0],
+        b"GIT binary patch" not in at_text.split(b"diff --git a/B.bin")[0]] + attr_rows(),
+        [True, True, ("allow", True)] + [("unverifiable", True)] * 4)
+    # Each part is load bearing. With the hook's diff taken as before (no neutralizing option) and no ambient
+    # check, the binary-patch export passes under both attribute sources (the round's MEDIUM 1); with the
+    # ambient comparison alone patched out, the text export passes where the repository's attributes and
+    # compression setting shape git's diff (an export the hook refused before); with the info/attributes read
+    # patched out, the binary-patch export passes under it.
+    kinds = lambda: [k for k, _n in attr_rows()]  # noqa: E731
+    check("rdp/export-attributes-revert-allows", [
+        _rdp_mutant([("_rdp_export_diff_args", lambda fmt: aiqt_hooks._RDP_EXPORT_DIFF_ARGS),
+                     ("_rdp_export_ambient", lambda *args: None)], kinds),
+        _rdp_mutant([("_rdp_export_ambient_differs", lambda own, ambient: False)], kinds),
+        _rdp_mutant([("_rdp_export_marked", lambda *args: [])], kinds)], [
+        ["allow", "allow", "deny", "deny", "allow"],
+        ["allow", "deny", "allow", "allow", "unverifiable"],
+        ["allow", "unverifiable", "unverifiable", "unverifiable", "allow"]])
 
 
 def _rdp_ls(cwd, background):
