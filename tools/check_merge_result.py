@@ -134,7 +134,10 @@ configuration is read (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL, HOME and XDG_CONF
 device, every other GIT_ variable dropped, GIT_ATTR_NOSYSTEM set), and the private bare repository has an
 unborn HEAD and no info/attributes, so no .gitattributes is read: no custom merge driver, merge=binary or
 text conversion applies. A merge made with other settings (a custom driver, -X ours, rename detection off,
-directoryRenames true) can differ from the re-merge and is then a finding to declare, never a pass.
+directoryRenames true) can differ from the re-merge and is then a finding to declare, never a pass. Every git
+run but git version (the gate's own and its self-test fixtures') also carries -c gc.auto=0, -c gc.autoDetach=false
+and -c maintenance.auto=false in option position, so none starts automatic gc or maintenance; those keys set
+housekeeping only, not how a merge resolves.
 
 CANNOT EVALUATE (exit 2, each named by its kind, never a pass): git older than 2.38 (git-too-old, read from
 git version; merge-tree --write-tree is not available before it), a merge whose parents have more than one
@@ -330,8 +333,11 @@ class Git:
         self.env = git_env(replace_objects)
 
     def run(self, args, ok=(0,), what=None, data=None, discard=False):
-        """git with args; data, when given, is its standard input, and discard drops its standard output."""
-        cmd = [self.git] + self.prefix + list(args)
+        """git with args; data, when given, is its standard input, and discard drops its standard output. The three
+        -c pairs in option position switch off automatic gc and maintenance (tools/_git_fixture_env.py
+        _NO_AUTO_MAINTENANCE), so the maintenance-pin scan reads this launch as pinned whatever args carries."""
+        cmd = ([self.git, "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+               + self.prefix + list(args))
         stdout = subprocess.DEVNULL if discard else subprocess.PIPE
         try:
             if data is None:
@@ -1408,7 +1414,9 @@ class Fixture:
         self.git("init", "-q", "-b", "main", "--object-format=" + object_format, "--template=" + template)
 
     def git(self, *args, ok=(0,), data=None):
-        cmd = ["git", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "merge.conflictStyle=merge",
+        # The first three -c pairs switch off automatic gc and maintenance, as Git.run's do.
+        cmd = ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+               "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false", "-c", "merge.conflictStyle=merge",
                "-C", self.path] + list(args)
         if data is None:
             proc = subprocess.run(cmd, env=self.env, capture_output=True, timeout=GIT_TIMEOUT,
@@ -2331,8 +2339,9 @@ def self_test():
         # (real output of a conflicted merge); the whole output parses.
         fx, ours, theirs = fixtures.conflict_inputs
         settings = [arg for key, value in MERGE_SETTINGS for arg in ("-c", "{}={}".format(key, value))]
-        proc = subprocess.run(["git", "-C", fx.path] + settings + ["merge-tree", "--write-tree", "-z", "--messages",
-                                                                   ours, theirs],
+        proc = subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                               "-C", fx.path] + settings + ["merge-tree", "--write-tree", "-z", "--messages", ours,
+                                                            theirs],
                               env=git_env(), capture_output=True, timeout=GIT_TIMEOUT, stdin=subprocess.DEVNULL)
         out = proc.stdout
         fields = out.split(b"\x00")
