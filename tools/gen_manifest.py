@@ -352,8 +352,10 @@ def check_output_modes(root):
     to the generated outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER
     touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
     and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
-    Pinned exactly as git_tracked (the sibling index read): core.fsmonitor=false,
-    protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub."""
+    Pinned like git_tracked (the sibling index read) on the hook and transport options only:
+    core.fsmonitor=false, protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub; unlike
+    git_tracked it passes neither --no-replace-objects nor core.commitGraph=false (ls-files --stage reads
+    the index, not objects or the commit graph)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
