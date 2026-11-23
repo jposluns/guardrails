@@ -9,3 +9,31 @@ id = "refuse/moved-suite-counts"
 state = "unreachable"
 capability-removed = "the move rule of tools/check_selftest_removal.py, introduced in the change series that also adds this record: a check id newly registered in another suite with the same launch (runner path and args) and the same check() body, not generic, is reported as moved, not removed, so the refusal of a move that this row asserted no longer exists"
 observed = "pass/moved-between-suites runs the same fixture (check id c moved from suite s to suite t, one runner) and asserts exit 0; refuse/move-target-held-at-base, refuse/move-absorbs-one-removal, refuse/move-other-body, refuse/move-other-runner, refuse/move-other-args, refuse/move-body-generic and refuse/move-live-generic-twin assert the refusals that remain"
+
+[[removal]]
+suite = "verifier-delivery-selftest"
+id = "c2/code-span-not-a-quote-passes"
+state = "unreachable"
+capability-removed = "commit d3d06d0bc (check_verifier_delivery: read a quote line only in the certain quote shape) adds _quote_shape_refusal to tools/check_verifier_delivery.py: a paragraph line that holds a double quote mark and a backtick is refused at the line (the line holds a backtick, so a code span may hide a mark or a mark may be code), and evaluate raises that refusal unless a quote or an answer fails or a NO_VOTE rule applies, so a PASS for this row's delivery line (a code span holding a made-up quote beside an exact quote of docs/alpha.md) no longer exists"
+observed = "c2/code-span-not-a-quote-cannot-evaluate runs the same delivery line, byte for byte, and observes CANNOT_EVALUATE in the verifier-delivery-selftest run; the code span is still masked in the head reading, so its text is never a failed quote and the line never FAILs"
+
+[[removal]]
+suite = "verifier-delivery-selftest"
+id = "c2/inline-example-not-a-quote-passes"
+state = "unreachable"
+capability-removed = "commit d3d06d0bc (check_verifier_delivery: read a quote line only in the certain quote shape) adds _quote_shape_refusal to tools/check_verifier_delivery.py: a paragraph line that holds a double quote mark and an example opener is refused at the line, and evaluate raises that refusal unless a quote or an answer fails or a NO_VOTE rule applies, so a PASS for this row's delivery line (an e.g. example quoting a word beside an exact quote of docs/alpha.md) no longer exists"
+observed = "c2/inline-example-not-a-quote-cannot-evaluate runs the same delivery line, byte for byte, and observes CANNOT_EVALUATE in the verifier-delivery-selftest run; flip/c2-inline-example still shows that with the example opener patched out the example words are read as quotes and FAIL"
+
+[[removal]]
+suite = "verifier-delivery-selftest"
+id = "c2/inch-mark-opens-nothing-passes"
+state = "unreachable"
+capability-removed = "commit d3d06d0bc (check_verifier_delivery: read a quote line only in the certain quote shape) adds _quote_shape_refusal to tools/check_verifier_delivery.py: a line holds the certain quote shape only with exactly two straight marks, one curly pair or one lone inch mark, so a line with an inch mark beside a straight quote (three straight marks) is refused at the line, and evaluate raises that refusal unless a quote or an answer fails or a NO_VOTE rule applies, so a PASS for this row's delivery line no longer exists"
+observed = "c2/inch-mark-beside-quote-cannot-evaluate runs the same delivery line, byte for byte, and observes CANNOT_EVALUATE in the verifier-delivery-selftest run; c2/inch-mark-unpaired-passes keeps the PASS for a line whose only mark is an inch mark, and c2/inch-mark-needs-ascii-digit-fails keeps the inch mark rule"
+
+[[removal]]
+suite = "verifier-delivery-selftest"
+id = "c2/unmatched-curly-opener-hides-nothing-fails"
+state = "covered"
+covered-by-suite = "verifier-delivery-selftest"
+covered-by-id = "c2/unmatched-curly-opener-before-failed-quote-fails"
