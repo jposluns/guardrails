@@ -26,8 +26,9 @@ wrong.
 Whenever the changelog bytes change, on a cut or not, every release entry,
 earlier entries included, must carry a date that is a quoted string holding a
 real calendar date written YYYY-MM-DD, a rule stricter than both changelog
-renderers (tools/gen_draft_site.py reads only the entry for VERSION and takes
-any non-empty string date; tools/gen_changelog.py renders any date it finds, a
+renderers (tools/gen_draft_site.py reads only the entry for VERSION, or the
+newest entry on a development VERSION, and takes any non-empty string date;
+tools/gen_changelog.py renders any date it finds, a
 TOML local date included). A missing date, the "YYYY-MM-DD" placeholder, any
 other string, a TOML local date and a date that is not on the calendar, such as
 2026-02-30, are refused (exit 1). On a cut, a pending-fixes record
@@ -35,6 +36,22 @@ bound to another release is decided first (exit 2). A date later than the run
 day is not refused: the verdict stays a function of the repository bytes alone,
 not of the clock or time zone of the run. A change that leaves the changelog
 bytes unchanged reads no date.
+
+Between release cuts, changelog.toml may carry one optional top-level
+[unreleased] table, placed after the [[release]] array: version (required, the
+planned next release as a bare X.Y.Z; the -dev suffix is generated into VERSION,
+never authored), title (optional nonblank string) and items (optional array of
+strings). Its shape is checked by opf/tools/_semver.unreleased_problem; a
+malformed table in either snapshot, a suffixed version such as "1.1.1-dev"
+included, cannot be evaluated (exit 2). Whenever the head carries [unreleased]
+and the release identities are unchanged, its version must be above the latest
+release (exit 1); adding, editing or removing it without a cut is otherwise
+allowed, under the declaration and date rules above. A cut folds [unreleased]
+into the release: when the base carries [unreleased], the appended identity
+must equal its version (exit 1), and on every cut the head must no longer carry
+[unreleased] (exit 1); development reopens in a later change, after RELEASING
+step 6b. A cut from a base without [unreleased] is judged as before. The
+declaration schema is unchanged and stays bare SemVer.
 
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
@@ -106,7 +123,7 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
-from _semver import _parse  # noqa: E402
+from _semver import _parse, unreleased_problem  # noqa: E402
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
@@ -156,9 +173,16 @@ def version(value, label):
 
 
 def parse_changelog(raw, label):
+    """Return the validated release rows; any [unreleased] table is validated, not returned."""
+    return parse_changelog_document(raw, label)[0]
+
+
+def parse_changelog_document(raw, label):
+    """Return (rows, unreleased): the validated release rows, and the validated [unreleased] table
+    as a dict, or None when the changelog carries none. A malformed table cannot be evaluated."""
     data = document(raw, label)
-    require(set(data) == {"title", "note", "release"},
-            label + ": expected title, note and release fields")
+    require(set(data) - {"unreleased"} == {"title", "note", "release"},
+            label + ": expected title, note and release fields, and at most an [unreleased] table")
     for key in ("title", "note"):
         require(isinstance(data[key], str), label + ": " + key + " must be a string")
     rows = data["release"]
@@ -188,7 +212,28 @@ def parse_changelog(raw, label):
             require(isinstance(row["artifacts"], dict)
                     and all(isinstance(value, str) for value in row["artifacts"].values()),
                     where + ": artifacts must map paths to strings")
-    return rows
+    if "unreleased" not in data:
+        return rows, None
+    # Shape only (keys, a bare X.Y.Z version, title, items); the comparison with the latest
+    # release is evaluate_transition's, through unreleased_refusal.
+    problem = unreleased_problem(data["unreleased"])
+    require(problem is None, label + ": " + str(problem))
+    return rows, dict(data["unreleased"])
+
+
+def unreleased_refusal(unreleased, rows):
+    """Return why a parsed [unreleased] table does not plan a version above the latest release
+    row, else None (also None when there is no table)."""
+    if unreleased is None:
+        return None
+    value = unreleased.get("version")
+    planned = _parse(value) if isinstance(value, str) else None
+    latest = rows[-1]["version"]
+    if planned is not None and planned > _parse(latest):
+        return None
+    # The diagnostic stays total for any value, even with the shape guard mutated away.
+    return ("[unreleased] version {!r} is not above the latest release {}; it must name the planned"
+            " next release".format(value, latest))
 
 
 def parse_declaration(raw, label="declaration"):
@@ -249,9 +294,10 @@ def release_date_refusal(row):
 
     The date must be a quoted string holding a real calendar date written YYYY-MM-DD, so a
     TOML local date is refused. The rule is stricter than both changelog renderers
-    (tools/gen_draft_site.py reads only the entry for VERSION and takes any non-empty string
-    date; tools/gen_changelog.py renders any date it finds, a TOML local date included). A
-    date after the run day is not refused, so the verdict never depends on the clock."""
+    (tools/gen_draft_site.py reads only the entry for VERSION, or the newest entry on a
+    development VERSION, and takes any non-empty string date; tools/gen_changelog.py renders
+    any date it finds, a TOML local date included). A date after the run day is not refused,
+    so the verdict never depends on the clock."""
     value = row.get("date")
     if isinstance(value, str) and RELEASE_DATE.fullmatch(value) is not None:
         try:
@@ -284,9 +330,10 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
                         base_decl, head_decl, base_pending=None, head_pending=None):
     """Return (exit_code, detail). Only the caller can prove that None is absence."""
     try:
-        base = ([] if base_changelog_bytes_or_absent is None else
-                parse_changelog(base_changelog_bytes_or_absent, "base changelog"))
-        head = parse_changelog(head_changelog_bytes, "head changelog")
+        base, base_unreleased = (([], None) if base_changelog_bytes_or_absent is None else
+                                 parse_changelog_document(base_changelog_bytes_or_absent,
+                                                          "base changelog"))
+        head, head_unreleased = parse_changelog_document(head_changelog_bytes, "head changelog")
         base_decl = parse_declaration(base_decl, "base declaration")
         head_decl = parse_declaration(head_decl, "head declaration")
         base_pending = parse_pending(base_pending, "base pending fixes")
@@ -310,6 +357,11 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
             return 1, "declaration changed without a release transition"
         if date_refusal is not None:
             return 1, "release date refused: " + date_refusal
+        # Adding, editing or removing [unreleased] cuts nothing; a present one must plan a
+        # version above the latest release.
+        unreleased_refused = unreleased_refusal(head_unreleased, head)
+        if unreleased_refused is not None:
+            return 1, unreleased_refused
         return 0, "release identities unchanged"
     if len(after) != len(before) + 1 or after[:-1] != before:
         return 1, "only one appended identity is permitted (no relabel, insert, delete or reorder)"
@@ -331,6 +383,14 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
                    + head_pending["release"] + ", not to the appended " + after[-1])
     if date_refusal is not None:
         return 1, "release date refused: " + date_refusal
+    # A cut folds [unreleased] into the appended release: a declared planned version is the one
+    # the cut releases, and the head no longer carries [unreleased] (development reopens in a
+    # later change, after RELEASING step 6b), whether or not the base carried one.
+    if base_unreleased is not None and after[-1] != base_unreleased.get("version"):
+        return 1, ("the cut must release the declared [unreleased] version "
+                   + str(base_unreleased.get("version")) + "; it appends " + after[-1])
+    if head_unreleased is not None:
+        return 1, "a cut folds [unreleased] into the release; reopen after step 6b"
     if head_pending is not None:
         # The record proves currency only for the one cut it names, never completeness.
         open_items = [item["id"] for item in head_pending["fix"] if item["state"] == "open"]
@@ -858,6 +918,8 @@ def test_cases():
         "operation": declaration.replace(b'"append"', b'"publish"'),
         "digest": declaration.replace(digest(base).encode(), b"absent"),
         "semver": declaration.replace(b'"1.1.0"', b'"1.1.0-rc1"'),
+        # The declaration stays bare SemVer: the generated -dev suffix is never declared.
+        "dev-suffix": declaration.replace(b'"1.1.0"', b'"1.1.0-dev"'),
     }
     for label, raw in bad_declarations.items():
         add("head-decl-" + label, 2, new=raw)
@@ -993,6 +1055,44 @@ def test_cases():
     # A record bound to another release fails closed (exit 2) ahead of a refused date (exit 1).
     add("cut-date-vs-pending-bound-elsewhere", 2, after=placeholder_cut, new=declaration,
         fixes=fixture_pending("1.0.0", (("id", "loose-end"), ("state", "done"))))
+    # [unreleased]: the planned next release, folded into the appended release by a cut.
+    planned = base + b'\n[unreleased]\nversion = "1.1.0"\ntitle = "Next"\nitems = ["planned note"]\n'
+    add("unreleased-add", 0, after=planned)
+    add("unreleased-edit", 0, before=planned,
+        after=planned.replace(b'"1.1.0"', b'"1.2.0"').replace(b'"planned note"', b'"curated"'))
+    add("unreleased-remove-no-cut", 0, before=planned)
+    add("unreleased-unchanged", 0, before=planned, after=planned)
+    add("unreleased-equal-latest", 1, after=planned.replace(b'"1.1.0"', b'"1.0.0"'))
+    add("unreleased-below-latest", 1, after=planned.replace(b'"1.1.0"', b'"0.9.0"'))
+    add("unreleased-fold", 0, before=planned, after=cut, new=fixture_declaration(planned))
+    add("unreleased-fold-skips", 1, before=planned, after=fixture_changelog(["1.0.0", "1.2.0"]),
+        new=fixture_declaration(planned, following="1.2.0"))
+    add("unreleased-fold-keeps", 1, before=planned, after=cut + b'\n[unreleased]\nversion = "1.1.0"\n',
+        new=fixture_declaration(planned))
+    add("unreleased-reopen-in-cut", 1, after=cut + b'\n[unreleased]\nversion = "1.2.0"\n',
+        new=declaration)
+    add("unreleased-fold-initialize-keeps", 1, before=None,
+        after=fixture_changelog(["1.0.0"]) + b'\n[unreleased]\nversion = "1.1.0"\n',
+        new=fixture_declaration(None, following="1.0.0"))
+    bad_unreleased = {
+        "dev-suffix": planned.replace(b'"1.1.0"', b'"1.1.0-dev"'),
+        "rc": planned.replace(b'"1.1.0"', b'"1.1.0-rc1"'),
+        "leading-zero": planned.replace(b'"1.1.0"', b'"01.1.0"'),
+        "typed-version": planned.replace(b'"1.1.0"', b"7"),
+        "missing-version": planned.replace(b'version = "1.1.0"\n', b""),
+        "unknown": planned + b"extra = 1\n",
+        "date": planned + b'date = "2000-01-01"\n',
+        "blank-title": planned.replace(b'"Next"', b'" "'),
+        "typed-title": planned.replace(b'"Next"', b"7"),
+        "typed-items": planned.replace(b'["planned note"]', b"[7]"),
+        "scalar-items": planned.replace(b'["planned note"]', b'"planned note"'),
+        "array": base + b'\n[[unreleased]]\nversion = "1.1.0"\n',
+        "scalar": b'unreleased = "1.1.0"\n' + base,
+        "unknown-top": base.replace(b'note = "Fixture"\n', b'note = "Fixture"\nnext = "1.1.0"\n'),
+    }
+    for label, raw in bad_unreleased.items():
+        add("head-unreleased-" + label, 2, after=raw)
+        add("base-unreleased-" + label, 2, before=raw)
     return cases
 
 
@@ -2147,6 +2247,8 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
                    "an absent component left fd None), never prev")),
+    ("tools/orch_round_gate.py", "read_regular", "TRY", "prev", "fd", 1,
+     _CS_P1.format("prev, fd = fd, nfd runs before os.close(prev), so the finally closes nfd, never prev")),
     ("tools/orch_register.py", "_dirs_created", "TRY", "prev", "dir_fd", 1,
      _CS_P1.format("prev, dir_fd = dir_fd, nxt runs before os.close(prev), so the handler closes nxt, never "
                    "prev")),
@@ -4807,6 +4909,24 @@ def _self_test_isolated(red_on_revert):
                 check(case_id + "-binding",
                       all(row["code"] == 2 and "bound to release 1.0.0" in row["detail"]
                           for row in report["snapshots"]))
+            unreleased_details = {
+                "unreleased-fold-skips": "the cut must release the declared [unreleased] version 1.1.0",
+                "unreleased-fold-keeps": "a cut folds [unreleased] into the release; reopen after step 6b",
+                "unreleased-reopen-in-cut": "a cut folds [unreleased] into the release; reopen after step 6b",
+                "unreleased-fold-initialize-keeps":
+                    "a cut folds [unreleased] into the release; reopen after step 6b",
+                "unreleased-equal-latest": "is not above the latest release 1.0.0",
+                "unreleased-below-latest": "is not above the latest release 1.0.0",
+                "head-unreleased-dev-suffix": "is not a bare SemVer X.Y.Z",
+                "base-unreleased-dev-suffix": "is not a bare SemVer X.Y.Z",
+                "head-unreleased-unknown": "unsupported key(s) extra",
+            }
+            if case_id in unreleased_details:
+                # Every refusing snapshot carries the [unreleased] refusal, not another one.
+                refusing = [row for row in report["snapshots"] if row["code"] != 0]
+                check(case_id + "-names-unreleased",
+                      bool(refusing) and all(unreleased_details[case_id] in row["detail"]
+                                             for row in refusing))
             print("PASS " + case_id)
         _close_stage(parent, script)
         stage_failures = _close_stage_mapping_check(parent, script)
@@ -5093,6 +5213,41 @@ def _self_test_isolated(red_on_revert):
                  "require(isinstance(item[key], str) and bool(item[key].strip()),",
                  "require(isinstance(item[key], str) and bool(item[key]),",
                  "head-fix-space-id", 0),
+                # [unreleased]: the earlier top-level key set refuses a well-formed table; a
+                # superset test would admit any unknown top-level key.
+                ("unreleased-top-key",
+                 'require(set(data) - {"unreleased"} == {"title", "note", "release"},',
+                 'require(set(data) == {"title", "note", "release"},', "unreleased-add", 2),
+                ("unreleased-top-key-only",
+                 'require(set(data) - {"unreleased"} == {"title", "note", "release"},',
+                 'require(set(data) >= {"title", "note", "release"},',
+                 "head-unreleased-unknown-top", 0),
+                # Without the shape check, an unknown key, or a suffixed version in either
+                # snapshot, is judged instead of refused as malformed.
+                ("unreleased-shape", "require(problem is None,", "require(True,",
+                 "head-unreleased-unknown", 0),
+                ("unreleased-shape-suffix", "require(problem is None,", "require(True,",
+                 "head-unreleased-dev-suffix", 1),
+                ("unreleased-shape-base", "require(problem is None,", "require(True,",
+                 "base-unreleased-dev-suffix", 0),
+                ("unreleased-above-latest",
+                 "if planned is not None and planned > _parse(latest):\n        return None",
+                 "if True:\n        return None", "unreleased-equal-latest", 0),
+                ("unreleased-below-latest",
+                 "if planned is not None and planned > _parse(latest):\n        return None",
+                 "if True:\n        return None", "unreleased-below-latest", 0),
+                ("unreleased-fold-version",
+                 'if base_unreleased is not None and after[-1] != base_unreleased.get("version"):',
+                 "if False:", "unreleased-fold-skips", 0),
+                ("unreleased-fold-refuses-declared",
+                 'if base_unreleased is not None and after[-1] != base_unreleased.get("version"):',
+                 "if base_unreleased is not None:", "unreleased-fold", 1),
+                ("unreleased-fold-keeps", "if head_unreleased is not None:", "if False:",
+                 "unreleased-fold-keeps", 0),
+                ("unreleased-reopen-in-cut", "if head_unreleased is not None:", "if False:",
+                 "unreleased-reopen-in-cut", 0),
+                ("unreleased-initialize-keeps", "if head_unreleased is not None:", "if False:",
+                 "unreleased-fold-initialize-keeps", 0),
             ) + tuple(
                 # With the date refusal reverted, every refused date form, entry and mode is accepted.
                 ("release-date-off-" + case_id, "    if not refused:\n        return None",

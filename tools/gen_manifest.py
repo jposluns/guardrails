@@ -544,25 +544,43 @@ def check_authoring_only(root, tracked, classes, exclusions):
             raise GateError("authoring-only path {} must be a regular file".format(rel))
 
 
+def snippet_text(version, root_hex):
+    """The publishable announce snippet, the ONE formula gen_manifest writes and check_manifest recomputes.
+
+    A plain X.Y.Z (a cut or tag tree) is announced as a release. A development X.Y.Z-dev (main between cuts)
+    is announced as a development build that is not a release, so main never claims a published version.
+    Any other value is GateError: read_version admits only these two forms."""
+    parsed = check_versions.parse_tree_version(version)
+    if parsed is None:
+        raise GateError("version {!r} is neither X.Y.Z nor X.Y.Z{}".format(version, check_versions.DEV_SUFFIX))
+    if parsed[1]:
+        return "aiqt-guardrails development build {} (unreleased, not a release)\nroot sha256:{}\n".format(
+            version, root_hex)
+    return "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex)
+
+
 def read_version(root):
     # Validate the RAW VERSION file grammar FIRST, then parse. Read the raw BYTES (not read_text): read_text
     # applies universal-newline translation, which silently rewrites a CR-terminated "1.0.0\r\n" to "1.0.0\n"
     # and masks the CR. Do NOT .strip() either: .strip() masks surrounding Unicode whitespace, so an
     # NBSP-wrapped " 1.0.0 \n" would collapse to "1.0.0" and seed release-version at exit 0. The canonical
-    # VERSION file is exactly `X.Y.Z` followed by a single trailing LF and nothing else (no leading/trailing/
-    # embedded whitespace, no NBSP, no CR, exactly one final "\n"), the same standard check_versions holds the
-    # on-disk VERSION to (both read raw bytes and reject anything but `latest + "\n"`); the two gates agree.
+    # VERSION file is exactly `X.Y.Z` (a cut or tag tree) or `X.Y.Z-dev` (main between cuts) followed by a
+    # single trailing LF and nothing else (no leading/trailing/embedded whitespace, no NBSP, no CR, exactly one
+    # final "\n"), the same standard check_versions holds the on-disk VERSION to (both read raw bytes and reject
+    # anything but the exact single-source text); the two gates agree.
     try:
         raw = (root / VERSION_REL).read_bytes().decode("utf-8")
     except UnicodeDecodeError as exc:
         raise GateError("VERSION is not valid UTF-8 ({})".format(exc))
     if not raw.endswith("\n") or raw.count("\n") != 1:
-        raise GateError("VERSION {!r} is not a bare SemVer with a single trailing newline".format(raw))
+        raise GateError("VERSION {!r} is not a tree version with a single trailing newline".format(raw))
     version = raw[:-1]
-    # Parse the X.Y.Z body with the SHARED ASCII SemVer validator, never a second grammar: it rejects a
-    # Unicode digit, a leading zero, and any surrounding or embedded whitespace (an NBSP/CR body fails here).
-    if check_versions._parse(version) is None:
-        raise GateError("VERSION {!r} is not a bare SemVer".format(raw))
+    # Parse the body with the SHARED ASCII tree-version validator (_semver.parse_tree_version), never a second
+    # grammar: exactly X.Y.Z (a cut or tag tree) or X.Y.Z-dev (main between cuts). It rejects a Unicode digit,
+    # a leading zero, any other suffix, and any surrounding or embedded whitespace (an NBSP/CR body fails here).
+    if check_versions.parse_tree_version(version) is None:
+        raise GateError("VERSION {!r} is neither a bare SemVer X.Y.Z nor X.Y.Z{}".format(
+            raw, check_versions.DEV_SUFFIX))
     return version
 
 
@@ -813,9 +831,8 @@ def compute_all(root, write_mode):
     # 3 + 4. ROOT over the exact manifest bytes; the publishable snippet.
     root_hex = _sha256(manifest_text.encode("utf-8"))
     root_text = "sha256:{}\n".format(root_hex)
-    snippet_text = "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex)
     return {ATTRIBUTES_REL: attributes_text, MANIFEST_REL: manifest_text,
-            ROOT_REL: root_text, SNIPPET_REL: snippet_text, FROZEN_REL: frozen_text}
+            ROOT_REL: root_text, SNIPPET_REL: snippet_text(version, root_hex), FROZEN_REL: frozen_text}
 
 
 def run(root, check):
@@ -961,6 +978,24 @@ class = "pack-immutable"
 [[release-class]]
 pattern = "tools/**"
 class = "pack-immutable"
+'''
+
+# The ownership rows a release cut adds to .aiqt/core/ownership.toml in the same change that first tracks the
+# cut records tools/check_release_cut.py reads (RELEASING.md step 1 prints these rows). The map cannot carry
+# them earlier: a [[release-class]] or [[exclusion]] row whose path is not tracked is refused (NO-STRAYS, or
+# a stale exclusion; exit 2), while a tracked record with no row is refused too (COMPLETENESS; exit 2).
+# Self-test case (n) stages a cut through manifest generation with exactly these rows.
+CUT_RECORD_OWNERSHIP_ROWS = '''
+[[release-class]]
+path = ".aiqt/release-cut.toml"
+class = "pack-immutable"
+note = "The release-cut declaration tools/check_release_cut.py reads (RELEASING step 1). Added by the first cut that writes it and tracked from then on, since that gate refuses a change that removes it. Release metadata beside changelog.toml, whose digest it binds, and shipped like it."
+'''
+
+PENDING_FIXES_OWNERSHIP_ROWS = '''
+[[exclusion]]
+path = ".aiqt/pending-fixes.toml"
+reason = "Repository-local hand-kept pending-fix list tools/check_release_cut.py reads on a cut; tracked, not shipped, like .aiqt/check-removals.toml. Added with the change that first tracks the list and removed with the change that deletes it."
 '''
 
 _OWN_TAIL = '''
@@ -1653,6 +1688,55 @@ def _self_test_main_isolated():
             failures.append("authoring-only roster: tools/gen_hooks.py must roster exactly .aiqt/authoring.toml and "
                             ".claude/settings.json, got {!r}".format(real_roster))
 
+        # (n) A release cut staged through manifest generation (RELEASING step 1). A development tree
+        #     (VERSION 1.1.0-dev) generates clean; the cut then stages the plain VERSION and the cut records
+        #     (.aiqt/release-cut.toml and a .aiqt/pending-fixes.toml). Without their ownership rows that is
+        #     COMPLETENESS (exit 2) naming the declaration; with exactly the documented rows the cut generates
+        #     a plain release-version, hashes the declaration as a SOURCES member, leaves the excluded list
+        #     out, and regenerates drift-clean. The rows cannot land before the records are tracked: on the
+        #     development tree each row alone is refused (NO-STRAYS, or a stale exclusion; exit 2).
+        cut_decl = ('schema = 1\noperation = "append"\nprevious-version = "1.0.0"\nnext-version = "1.1.0"\n'
+                    'base-changelog-sha256 = "' + "0" * 64 + '"\n')
+        cut_pending = 'schema = 1\nrelease = "1.1.0"\n'
+        for label, rows, want in (("release-cut row", CUT_RECORD_OWNERSHIP_ROWS, "NO-STRAYS"),
+                                  ("pending-fixes exclusion", PENDING_FIXES_OWNERSHIP_ROWS,
+                                   "stale deny-list entry")):
+            early = _build_fixture(tmp / ("cut-early-" + want.split()[0].lower()), own_extra=rows,
+                                   extra_files={"VERSION": "1.1.0-dev\n"})
+            rc, err = run_stderr(early) if early is not None else (None, "")
+            if rc not in (2, "raised SystemExit(2)") or want not in err:
+                failures.append("release cut: the {} on a development tree that does not track its path "
+                                "expected exit 2 ({}), got {}".format(label, want, rc))
+        cutfx = _build_fixture(tmp / "cut-staged", extra_files={"VERSION": "1.1.0-dev\n"})
+        if cutfx is None or run_quiet(cutfx, check=False) != 0:
+            failures.append("release cut: the development tree (VERSION 1.1.0-dev) expected to generate exit 0")
+        else:
+            _git(cutfx, "add", "-A").check_returncode()
+            (cutfx / "VERSION").write_text("1.1.0\n", encoding="utf-8")
+            (cutfx / ".aiqt" / "release-cut.toml").write_text(cut_decl, encoding="utf-8")
+            (cutfx / ".aiqt" / "pending-fixes.toml").write_text(cut_pending, encoding="utf-8")
+            _git(cutfx, "add", "-A").check_returncode()
+            rc, err = run_stderr(cutfx)
+            if rc not in (2, "raised SystemExit(2)") or "COMPLETENESS" not in err \
+                    or ".aiqt/release-cut.toml" not in err:
+                failures.append("release cut: staged cut records with no ownership rows expected exit 2 "
+                                "(COMPLETENESS naming .aiqt/release-cut.toml), got {} ({!r})".format(rc, err[-300:]))
+            (cutfx / OWNERSHIP_REL).write_text(
+                _OWN_BASE + CUT_RECORD_OWNERSHIP_ROWS + PENDING_FIXES_OWNERSHIP_ROWS + _OWN_TAIL,
+                encoding="utf-8")
+            _git(cutfx, "add", "-A").check_returncode()
+            rc = run_quiet(cutfx, check=False)
+            cut_manifest = (cutfx / MANIFEST_REL).read_text(encoding="utf-8") if rc == 0 else ""
+            _git(cutfx, "add", "-A").check_returncode()
+            if rc != 0 or 'release-version = "1.1.0"\n' not in cut_manifest \
+                    or 'path = ".aiqt/release-cut.toml"' not in cut_manifest \
+                    or ".aiqt/pending-fixes.toml" in cut_manifest:
+                failures.append("release cut: with the documented ownership rows the staged cut expected exit 0, "
+                                "a plain release-version 1.1.0, the declaration in SOURCES and the excluded "
+                                "pending-fix list absent (got exit {})".format(rc))
+            elif run_quiet(cutfx, check=True) != 0:
+                failures.append("release cut: the regenerated cut expected --check drift-clean exit 0")
+
         partition_failure = _frozen_partition_vector()
         if partition_failure is not None:
             failures.append(partition_failure)
@@ -1692,6 +1776,9 @@ def _self_test_main_isolated():
           "under a symlinked directory at any of three levels or under a directory whose lstat fails each fail "
           "closed (exit 2); an exact exclusion of an authoring-scoped (shipped) gensrc target fails closed "
           "(exit 2) while the same target given a class passes; "
+          "a release cut staged through manifest generation fails closed (exit 2, COMPLETENESS) without "
+          "the documented cut-record ownership rows and generates a plain, drift-clean release with them, "
+          "while those rows on a tree that does not yet track the records fail closed (exit 2); "
           "and a vocabulary class "
           "recorded in neither FROZEN_CLASSES nor UNFROZEN_CLASSES, a class recorded in both, and a frozen "
           "class outside the vocabulary each fail the frozen floor closed")

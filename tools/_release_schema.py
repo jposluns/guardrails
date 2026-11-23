@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_versions import _parse                    # noqa: E402  the shipped bare-SemVer parser
+from check_versions import parse_tree_version        # noqa: E402  the X.Y.Z / X.Y.Z-dev tree grammar
 from gen_manifest import RELEASE_ROW_ALLOWED          # noqa: E402  the single shared allowed keyset
 from check_clauses import split_clause_id, _valid_register_id, SHA256_RE  # noqa: E402  authoritative
 #                                       clause-id / register-id syntax and the source-digest regex (7.1/7.2)
@@ -194,7 +195,7 @@ MANAGED_BLOCK_ID = "RULES-INDEX"
 MANAGED_BLOCK_PATH = "CLAUDE.md"
 
 
-def strict_manifest(data, where):
+def strict_manifest(data, where, development_ok=False):
     """The COMPLETE manifest schema (4.1), mirrored from check_manifest.load_manifest and run on head AND
     predecessor objects in genesis, non-genesis, audit, pre-tag, and post-tag (round-5 finding 1: the prior
     validator rejected extra top-level keys but did not REQUIRE the exact keyset, so a missing [[sources]]/
@@ -204,7 +205,13 @@ def strict_manifest(data, where):
     [[sources]] rows EXACTLY {path, bytes, sha256} (non-empty logical path, non-negative integer bytes,
     64-hex digest, no duplicate path, sorted bytewise); [[artifacts]] rows the EXACT kind-specific keyset
     (file: the base four; managed-block: the base four plus block-id) with a 64-hex sha256 and unique
-    artifact-id. The full SOURCES-set-equality against the tracked tree stays check_manifest's."""
+    artifact-id. The full SOURCES-set-equality against the tracked tree stays check_manifest's.
+
+    release-version is a bare X.Y.Z by default. Only a caller that reads main's working tree between cuts
+    (the check_release_build audit and the check_release_delta genesis/delta head) passes development_ok=True,
+    which also admits the development form X.Y.Z-dev (_semver.parse_tree_version). A candidate, tagged,
+    attestation, post-release or predecessor manifest stays strict, and a -dev value there gets its own named
+    refusal."""
     if not isinstance(data, dict):
         raise SchemaError("{}: manifest is not a table".format(where))
     if not MANIFEST_TOP_KEYS <= set(data) <= MANIFEST_TOP_KEYS | MANIFEST_OPTIONAL_KEYS:
@@ -215,9 +222,14 @@ def strict_manifest(data, where):
         raise SchemaError("{}: opf-version {!r} is not a bare SemVer".format(where, data["opf-version"]))
     if data["format-version"] != 1:
         raise SchemaError("{}: format-version must be exactly 1".format(where))
-    if not isinstance(data["release-version"], str) or _parse(data["release-version"]) is None:
-        raise SchemaError("{}: release-version {!r} is not a bare SemVer".format(
-            where, data["release-version"]))
+    tree_version = parse_tree_version(data["release-version"])
+    if tree_version is not None and tree_version[1] and not development_ok:
+        raise SchemaError("{}: release-version {!r} is a development version; a candidate, tagged, attestation "
+                          "or post-release manifest carries the plain X.Y.Z".format(
+                              where, data["release-version"]))
+    if tree_version is None:
+        raise SchemaError("{}: release-version {!r} is not a bare SemVer{}".format(
+            where, data["release-version"], " or X.Y.Z-dev" if development_ok else ""))
     if not isinstance(data["genesis"], bool):
         raise SchemaError("{}: genesis must be a real boolean".format(where))
     if not isinstance(data["tree-sha256"], str) or not HEX64_RE.fullmatch(data["tree-sha256"]):

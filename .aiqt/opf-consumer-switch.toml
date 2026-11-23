@@ -297,7 +297,7 @@ reason = "It reads changelog.toml at the head, the base and each tag, and where 
 path = "tools/check_release_cut.py"
 records = ["changelog.toml", "pending-fixes.toml"]
 disposition = "stays-outside-store"
-reason = "It reads changelog.toml and the optional, untracked pending-fix list, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+reason = "It reads changelog.toml and the optional pending-fix list a cut may keep (.aiqt/pending-fixes.toml, tracked but not shipped, RELEASING step 1), and where changelog.toml lives in OPF awaits the maintainer's ruling."
 
 [[reader]]
 path = "tools/check_release_delta.py"
@@ -396,6 +396,12 @@ disposition = "not-a-reader"
 reason = "It names the hook library's file to generate the plugin's hook copy; the scan finds no record name, registry key or record-path flag in it."
 
 [[reader]]
+path = "tools/gen_manifest.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the pending-fix list only as a file its self-test writes into a staged release-cut fixture, to check that list's ownership row; it never opens or parses a pending-fix list, and its live run reads only the git index, the ownership map and the files it hashes."
+
+[[reader]]
 path = "tools/gen_reference_facts.py"
 records = ["none"]
 disposition = "not-a-reader"
@@ -418,6 +424,12 @@ path = "tools/pin.py"
 records = ["none"]
 disposition = "not-a-reader"
 reason = "Its mode reads are a file mode in a pin operation, not the registry's mode key."
+
+[[reader]]
+path = "tools/selftest_gate_record.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file only to copy it into the throwaway git fixtures it builds and run the gate-record recorder, verifiers and installer there; it reads no project record."
 
 [[reader]]
 path = "tools/selftest_git_fixture_env.py"

@@ -922,6 +922,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_changelog.py --check
 
+      - name: Version format self-test
+        shell: bash
+        run: python3 -I -B tools/check_versions.py --self-test
+
       - name: Version format and single-source
         shell: bash
         run: python3 -I -B tools/check_versions.py
@@ -1355,6 +1359,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 
+      - name: Dispatch-marker self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite dispatch-marker-selftest
+
+      - name: Round-gate record reader self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite round-gate-selftest
+
       - name: Site-scope self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
@@ -1362,6 +1374,10 @@ jobs:
       - name: CI-status behaviour self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+
+      - name: Gate-record self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite gate-record-selftest
 
       - name: Instruction-budget self-test (execution-reconciled)
         shell: bash

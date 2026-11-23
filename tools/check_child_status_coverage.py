@@ -13,7 +13,8 @@ with exit 2). This gate holds where it runs:
      opf/tools/_opf_adopt_complete.py, opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py,
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
      tools/check_verifier_delivery.py, tools/render_og_cards.py, tools/check_links.py,
-     tools/check_review_labels.py, opf/tools/check_opf_selftest_execution.py and tools/check_baseline_pin.py), in
+     tools/check_review_labels.py, opf/tools/check_opf_selftest_execution.py, tools/check_baseline_pin.py,
+     tools/orch_dispatch_marker.py and tools/selftest_orch_dispatch_marker.py), in
      opf/tools/_opf_declaration.py and tools/check_opf_declaration.py (the constant and both functions) and in
      the hooks dispatcher and its generated plugin copy (the constant and the probe) are each bound exactly once
      at module scope, by one top-level definition (an undecorated one for a function), and AST-identical
@@ -146,8 +147,9 @@ unreadable, not UTF-8, outside the parity reader's grammar or unparsable; a dire
 walked; an unresolved dynamic load), the live refusal, or usage. There is no warning tier. A self-test launch
 row is no verdict either way only when every part of it that fails is a launch that reached the canonical
 probe's CHILD_TIMEOUT bound (host load); any other failing part, a finished launch included, keeps the row a
-failure. With no row failed, the self-test prints SELF-TEST CANNOT EVALUATE naming each no-verdict row and exits
-2, never 0; any failed row still makes it exit 1.
+failure. That bound is the probe's measured worst launch times its stated margin (verdict/launch-bound-measured).
+With no row failed, the self-test prints SELF-TEST CANNOT EVALUATE naming each no-verdict row and exits 2, never
+0; any failed row still makes it exit 1.
 
 Disclosed residuals, not closed by this gate: R1 an ignore or SA_NOCLDWAIT set below Python after interpreter
 start (a native extension, ctypes, an embedding host) is not seen by the disposition read, and the fork probe runs
@@ -242,7 +244,9 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/render_og_cards.py", "render_og_cards.py"), ("tools/check_links.py", "check_links.py"),
               ("tools/check_review_labels.py", "check_review_labels.py"),
               ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"),
-              ("tools/check_baseline_pin.py", "check_baseline_pin.py"))
+              ("tools/check_baseline_pin.py", "check_baseline_pin.py"),
+              ("tools/orch_dispatch_marker.py", "orch_dispatch_marker.py"),
+              ("tools/selftest_orch_dispatch_marker.py", "selftest_orch_dispatch_marker.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -518,6 +522,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/selftest_aiqt_corpus.py",
     "tools/selftest_aiqt_hooks.py",
     "tools/selftest_ci_status.py",
+    "tools/selftest_gate_record.py",
     "tools/selftest_git_fixture_env.py",
     "tools/selftest_git_fixture_env_config_combined.py",
     "tools/selftest_git_fixture_env_config_malformed.py",
@@ -3388,6 +3393,38 @@ def self_test(lane, report_path=None):
             ok, detail = _verdict_row(probe, Path(base) / "verdict-timed-out", _finished_none, (),
                                       _timeout_fails_verdict)
             check("verdict/all-timed-out-no-verdict", ok, detail)
+            # The launch bound is sized from its measured worst launch with a stated margin, never a flat
+            # constant that a loaded host's heaviest launch (opf.py --help, 61.67 s there) already reaches.
+            # The probe's own --self-test reads its launches the same way: every launch at its bound is no
+            # verdict (exit 2), and a finished failure beside one stays a failure (exit 1).
+            worst = getattr(probe, "CHILD_TIMEOUT_MEASURED_WORST", None)
+            margin = getattr(probe, "CHILD_TIMEOUT_MARGIN", None)
+            sized = all(isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+                        for value in (worst, margin, probe.CHILD_TIMEOUT)) and margin >= 5 \
+                and probe.CHILD_TIMEOUT >= worst * margin
+            routed = {}
+            for case, finished in (("all-timed-out", False), ("finished-beside-timeout", True)):
+                calls = []
+
+                def scripted_child(args, stdin="", calls=calls, finished=finished):
+                    calls.append(args)
+                    if finished and len(calls) == 1:
+                        return 1, "a launch that finished and failed\n", ""
+                    return LAUNCH_TIMED_OUT, "", ""
+
+                def scripted_bash(disposition, argv, stdin="", cwd=None, pass_fds=()):
+                    return None, LAUNCH_TIMED_OUT, ""
+
+                real_child, real_bash = probe.run_child, probe.through_bash
+                probe.run_child, probe.through_bash = scripted_child, scripted_bash
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        routed[case] = probe.self_test()
+                finally:
+                    probe.run_child, probe.through_bash = real_child, real_bash
+            check("verdict/launch-bound-measured",
+                  sized and routed == {"all-timed-out": 2, "finished-beside-timeout": 1},
+                  dict(bound=probe.CHILD_TIMEOUT, measured_worst=worst, margin=margin, self_test=routed))
         for check_id, _kind in (("behaviour/opf-cli-refuses", 0), ("behaviour/launcher-cli-refuses", 0),
                                 ("behaviour/coverage-gate-refuses", 0), ("behaviour/adopt-complete-refuses", 0),
                                 ("behaviour/adopt-complete-self-test-refuses", 0),

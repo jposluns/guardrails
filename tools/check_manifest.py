@@ -330,7 +330,9 @@ def run(root, anchored=False):
         root_hex = hashlib.sha256(manifest_raw).hexdigest()
         if root_disk != "sha256:{}\n".format(root_hex).encode():
             findings.append("root.txt does not recompute from the manifest bytes")
-        want_snippet = "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex).encode()
+        # The ONE snippet formula gen_manifest writes: "release X.Y.Z" on a cut or tag tree, "development build
+        # X.Y.Z-dev (unreleased, not a release)" on main between cuts. Never a second, hard-coded copy.
+        want_snippet = gen_manifest.snippet_text(version, root_hex).encode()
         if snippet_disk != want_snippet:
             findings.append("announce-snippet.txt does not recompute from manifest plus version")
 
@@ -580,10 +582,34 @@ def _self_test_main_isolated():
         root_hex = hashlib.sha256(manifest_raw).hexdigest()
         (m / gm.ROOT_REL).write_text("sha256:{}\n".format(root_hex), encoding="utf-8")
         version = gm.read_version(m)
-        (m / gm.SNIPPET_REL).write_text(
-            "aiqt-guardrails release {}\nroot sha256:{}\n".format(version, root_hex), encoding="utf-8")
+        (m / gm.SNIPPET_REL).write_text(gm.snippet_text(version, root_hex), encoding="utf-8")
         if check_quiet(m) != 1:
             failures.append("a missing SOURCES row expected exit 1 SOLELY on set-equality")
+
+        # (b3) a development tree (main between release cuts: VERSION is X.Y.Z-dev). gen_manifest writes the
+        #      development snippet, which never announces a release, and check_manifest recomputes it clean
+        #      through the ONE shared formula (gen_manifest.snippet_text); a "release X.Y.Z-dev" snippet is
+        #      drift, and a VERSION with any other suffix cannot be evaluated.
+        dv = _fresh("devtree")
+        (dv / gm.VERSION_REL).write_text("1.1.0-dev\n", encoding="utf-8")
+        gen_quiet(dv)
+        dv_root = hashlib.sha256((dv / gm.MANIFEST_REL).read_bytes()).hexdigest()
+        if (dv / gm.SNIPPET_REL).read_text(encoding="utf-8") != (
+                "aiqt-guardrails development build 1.1.0-dev (unreleased, not a release)\n"
+                "root sha256:{}\n".format(dv_root)):
+            failures.append("a development VERSION expected the development announce snippet")
+        if 'release-version = "1.1.0-dev"\n' not in (dv / gm.MANIFEST_REL).read_text(encoding="utf-8"):
+            failures.append("a development VERSION expected release-version \"1.1.0-dev\" verbatim")
+        if check_quiet(dv) != 0:
+            failures.append("a development tree with its development snippet expected exit 0")
+        (dv / gm.SNIPPET_REL).write_text(
+            "aiqt-guardrails release 1.1.0-dev\nroot sha256:{}\n".format(dv_root), encoding="utf-8")
+        if check_quiet(dv) != 1:
+            failures.append("a development tree announced as \"release 1.1.0-dev\" expected exit 1 (drift)")
+        for bad in ("1.1.0-rc1\n", "1.1.0-dev.0\n", "1.1.0-DEV\n", "1.1.0-dev\r\n"):
+            (dv / gm.VERSION_REL).write_text(bad, encoding="utf-8", newline="")
+            if check_quiet(dv) != 2:
+                failures.append("VERSION {!r} expected exit 2 (neither X.Y.Z nor X.Y.Z-dev)".format(bad))
 
         # (c) a below-minimum class: build clean (outputs written), then swap the map so a pack path
         #     (src.txt, minimum pack-immutable) is assigned the weaker 'derived'. The checker's

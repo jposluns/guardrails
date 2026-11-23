@@ -11,7 +11,9 @@ restates each enforced rule's linkage so the roadmap is reviewable standalone, a
 CROSS-VALIDATES that restatement against the ledger so the two can never fork.
 
 The register reads every DISPLAY fact from the ledger and the roadmap. Each mechanism's display name is
-its own namespaced ledger reference (gate:<id> / hook:<id>), rendered code-styled; there is no separately
+its own namespaced ledger reference (gate:<id> / githook:<id> / hook:<id>), rendered code-styled; a githook
+is a git hook (pre-commit, pre-push, ...) installed per clone, its entry point its git hook events then its
+entry command and its channel its install command. There is no separately
 authored mechanism label or summary. Class, default, platform, entry point, and the technical-limits
 residual are read verbatim from the ledger, and the residual is quoted in full, not summarized.
 
@@ -31,7 +33,7 @@ every rule it is linked to. A rule whose every linked mechanism is class c (part
 be "partial"; "enforced" there is refused as an overclaim (exit 2). So the views never show the word
 Enforced as a status: a linked rule displays as "Gate-linked (class a)" when at least one linked gate is
 class a, "Gate-linked (class c only)" when every linked gate is class c, "Hook-linked" when only hooks
-cite it (the ledger's own gate-linked / hook-linked precedence), and "Preview only" when every linked
+or githooks cite it (the ledger's own gate-linked / hook-linked precedence), and "Preview only" when every linked
 mechanism is a preview-channel hook (a standalone .preview/ file installed by hand, not in the plugin), each
 followed by ", partial" when the
 roadmap decision is "partial". "none" displays as "No control" and "pending" as "Pending"; both mean no
@@ -126,10 +128,10 @@ STATUSES = {"enforced", "none", "partial", "pending"}
 # The statuses that record ledger linkage: partial is enforced linkage whose known coverage is a part
 # of the rule, so it carries the same mechanisms invariant and renders the same mechanism cell.
 LINKED = frozenset({"enforced", "partial"})
-# A mechanism reference is a closed namespaced form. Only gate: and hook: exist: the linkage ledger
-# exposes gates[] and hooks[] and NO lint axis, so a well-formed lint: reference is deliberately rejected
-# as cannot-evaluate (exit 2) rather than inferred from a gate's script name.
-MECH_RE = re.compile(r"^(gate|hook):[a-z][a-z0-9-]*$")
+# A mechanism reference is a closed namespaced form. Only gate:, githook: and hook: exist: the linkage
+# ledger exposes gates[], githooks[] and hooks[] and NO lint axis, so a well-formed lint: reference is
+# deliberately rejected as cannot-evaluate (exit 2) rather than inferred from a gate's script name.
+MECH_RE = re.compile(r"^(gate|githook|hook):[a-z][a-z0-9-]*$")
 CID_RE = re.compile(r"^[a-z0-9]{6,}$")
 EN, EM = "–", "—"
 
@@ -142,6 +144,7 @@ RESIDUAL_HEADING = "Technical limits (from the enforcement ledger)"
 CLASS_LEGEND = (
     ("a", "deterministic gate: a machine predicate over committed artefacts, total for what it examines"),
     ("b", "runtime hook: a best-effort interception judging an action at the moment it runs"),
+    # A githook (a git hook installed per clone) is graded b or c by the same rubric; the legend is per letter.
     ("c", "partial: a control that covers a recognizable subset of the surface"),
 )
 
@@ -152,8 +155,9 @@ EXPLAINER = (
     "a control exists, not how much of the rule it covers, so none of the statuses means a rule is "
     "enforced. Gate-linked means at least one shipped repository gate cites the rule: class a when at least "
     "one of those gates is total for what it examines, class c only when every linked gate covers "
-    "just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook cites "
-    "the rule and no gate does. Preview only means every linked control is a preview-channel hook: a "
+    "just a recognizable subset of the surface. Hook-linked means at least one shipped runtime hook or git "
+    "hook cites the rule and no gate does; a git hook (githook) is installed per clone by its install "
+    "command and runs only in a clone that installed it. Preview only means every linked control is a preview-channel hook: a "
     "standalone file under .preview/ that an adopter installs by hand, not part of the plugin, so nothing "
     "runs for it unless it is installed. A status ending in partial records the same linkage and states "
     "that the "
@@ -279,8 +283,11 @@ def _hook_channel(hook):
 
 def ledger_index(ledger):
     """From the ledger build: cid -> entry, and ref -> control-display-info (deduped; a control cited by
-    several rules is identical everywhere). Each rule's namespaced linkage is sorted(gate refs) then
-    sorted(hook refs), which is total lexical order because 'gate:' < 'hook:'."""
+    several rules is identical everywhere). Each rule's namespaced linkage is sorted(gate refs), then
+    sorted(githook refs), then sorted(hook refs), which is total lexical order because
+    'gate:' < 'githook:' < 'hook:'. A githook (a git hook installed per clone, run by git rather than by
+    Claude Code) displays its git hook events then its entry command as its entry point, and its install
+    command in its channel."""
     by_cid = {}
     controls = {}
     linkage = {}
@@ -303,6 +310,14 @@ def ledger_index(ledger):
                              "default": hook["default"], "platform": hook["platform"],
                              "entry": entry_point, "channel": _hook_channel(hook),
                              "preview": hook.get("channel") == "preview", "residue": hook["residue"]}
+        for githook in entry.get("githooks", ()):
+            ref = "githook:" + githook["id"]
+            refs.append(ref)
+            controls[ref] = {"kind": "githook", "id": githook["id"], "class": githook["class"],
+                             "default": githook["default"], "platform": "git",
+                             "entry": "{}: {}".format(", ".join(githook["events"]), githook["entry"]),
+                             "channel": "git hook, installed per clone by " + githook["install"],
+                             "residue": githook["residue"]}
         linkage[cid] = sorted(refs)
     return by_cid, controls, linkage
 
@@ -327,7 +342,7 @@ def load_roadmap(path, ledger_cids, linkage):
             raise ValueError("{}: every [[rule]] must be a table".format(name))
         cid = _req_str(row, "corpus-id", "{}: [[rule]]".format(name))
         where = "{}: [[rule]] {}".format(name, cid)
-        if not CID_RE.match(cid):
+        if not CID_RE.fullmatch(cid):
             raise ValueError("{}: corpus-id must match ^[a-z0-9]{{6,}}$".format(where))
         if cid in out:
             raise ValueError("{}: duplicate corpus-id".format(where))
@@ -345,9 +360,9 @@ def load_roadmap(path, ledger_cids, linkage):
         if not isinstance(mechanisms, list) or not all(isinstance(m, str) for m in mechanisms):
             raise ValueError("{}: mechanisms must be a list of strings (it may be empty)".format(where))
         for mech in mechanisms:
-            if not MECH_RE.match(mech):
-                raise ValueError("{}: mechanism {!r} is not a supported gate:/hook: reference (a lint: or "
-                                 "other axis is unsupported: the ledger exposes no lint axis)".format(
+            if not MECH_RE.fullmatch(mech):
+                raise ValueError("{}: mechanism {!r} is not a supported gate:/githook:/hook: reference (a "
+                                 "lint: or other axis is unsupported: the ledger exposes no lint axis)".format(
                                      where, mech))
         if mechanisms != sorted(set(mechanisms)):
             raise ValueError("{}: mechanisms must be unique and sorted".format(where))
@@ -456,7 +471,8 @@ def _status_label(row, controls):
     """The display label for one roadmap row. load_roadmap has already bound an enforced or partial row's
     mechanisms to the ledger linkage, and the gates manifest admits only classes a and c, so a gate-linked
     rule is either class a (at least one class a gate) or class c only. Any other gate class fails closed.
-    A row with no gate whose every mechanism is a preview-channel hook reads LABEL_PREVIEW, never LABEL_HOOK.
+    A row with no gate whose every mechanism is a preview-channel hook reads LABEL_PREVIEW, never LABEL_HOOK;
+    a row with no gate and any plugin hook or githook (a git hook installed per clone) reads LABEL_HOOK.
     A partial row carries its linkage label followed by PARTIAL_SUFFIX."""
     status = row["status"]
     if status == "pending":
@@ -733,7 +749,7 @@ def _page_content(html_inner):
         '  <h1>Guardrail Enforcement Register</h1>',
         '  <p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
         '    This page is generated from the enforceability ledger, so its linkage claims match the controls',
-        '    declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
+        '    declared in the pack\'s gates, hooks and git hooks manifests when the page was generated.</p>',
         '</div>',
         "",
         '<section id="register">',
@@ -822,7 +838,7 @@ def page_content_strings(root):
     the hook MATCHER ship unscanned). One channel per verbatim interpolation the page emits:
       - "title"       each rule's display title (the corpus '# ' heading render_* puts in the Rule cell)
       - "corpus-id"   each rule's corpus id (the code-styled Corpus ID cell / anchor stem)
-      - "mech-id"     each enforced mechanism's namespaced reference (gate:<id> / hook:<id>)
+      - "mech-id"     each enforced mechanism's namespaced reference (gate:<id> / githook:<id> / hook:<id>)
       - one channel per _MECH_FIELDS entry ("platform", "default", "entry", "class"): the metadata the
         mechanism block emits verbatim. "entry" is the entry point, which carries the hook matcher
         ("<event> on <matcher>") and the gate script path.
@@ -1449,6 +1465,19 @@ def self_test_main():
         expect2("roadmap-lint-ref",
                 lambda t: replace_in(t / ROADMAP, 'mechanisms = ["hook:hook-one"]',
                                      'mechanisms = ["lint:hook-one"]'))
+        # (m2) A mechanism with a trailing newline (the TOML \n escape) is refused by the shape check itself:
+        #      MECH_RE ends in $, which also matches just before a final newline, so only fullmatch refuses it
+        #      (with .match the row got past the shape check to the ledger-linkage comparison).
+        nl_tree = _build(tmp / "roadmap-mech-newline")
+        replace_in(nl_tree / ROADMAP, 'mechanisms = ["hook:hook-one"]', 'mechanisms = ["hook:hook-one\\n"]')
+        nl_by_cid, _nl_controls, nl_linkage = ledger_index(load_ledger(nl_tree))
+        try:
+            load_roadmap(nl_tree / ROADMAP_REL, set(nl_by_cid), nl_linkage)
+            failures.append("roadmap-mech-newline: a trailing-newline mechanism must fail closed (ValueError)")
+        except ValueError as exc:
+            if "is not a supported gate:/githook:/hook: reference" not in str(exc):
+                failures.append("roadmap-mech-newline: expected the mechanism shape refusal, got {!r}".format(
+                    str(exc)))
         # (q) A stale committed ledger (mutate it so it no longer matches a fresh build).
         expect2("stale-ledger",
                 lambda t: (t / ".aiqt" / "enforceability.json").write_text(
@@ -1570,6 +1599,46 @@ def self_test_main():
                 if token not in page:
                     failures.append("preview tree: {!r} missing from the generated page".format(token))
 
+        # (ab) GITHOOK, both views: a git-side hook (.aiqt/core/githooks/manifest.toml) citing rulebb (which
+        # gate-alpha also cites, so its linkage sorts gate: before githook:) and ruledd (which nothing else
+        # cites). ruledd reads Hook-linked (here Hook-linked, partial: its only mechanism is class c), never
+        # Preview only, and the mechanism block shows platform git, the events then the entry command as its
+        # entry point, and the install command in its channel, with a mechanism-githook-<id> anchor.
+        gh = _build(tmp / "githook")
+        (gh / ".aiqt" / "core" / "githooks").mkdir()
+        (gh / gen_enforceability.GITHOOKS_MANIFEST_REL).write_text(
+            'version = 1\n\n[[githook]]\nid = "gh-one"\nrules = ["rulebb", "ruledd"]\n'
+            'events = ["pre-commit", "pre-push"]\nentry = "run-gh-one"\ninstall = "install-gh-one"\n'
+            'default = "block"\nclass = "c"\nresidue = "A self-test git hook, installed per clone."\n',
+            encoding="utf-8")
+        (gh / ".aiqt" / "enforceability.json").write_text(gen_enforceability.build_ledger(gh), encoding="utf-8")
+        replace_in(gh / ROADMAP, 'corpus-id = "rulebb"\nstatus = "partial"\nmechanisms = ["gate:gate-alpha"]',
+                   'corpus-id = "rulebb"\nstatus = "partial"\nmechanisms = ["gate:gate-alpha", "githook:gh-one"]')
+        replace_in(gh / ROADMAP, 'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
+                   'corpus-id = "ruledd"\nstatus = "partial"\nmechanisms = ["githook:gh-one"]')
+        if run_quiet(gh, check=False) != 0 or run_quiet(gh, check=True) != 0:
+            failures.append("githook tree: generation and a drift-clean regeneration expected exit 0")
+        else:
+            body = (gh / MD_REL).read_text(encoding="utf-8")
+            for token in ("| Hook-linked, partial | 1 |", "| Preview only | 0 |",
+                          "| `ruledd` | Hook-linked, partial | `githook:gh-one`, class c |",
+                          "| `rulebb` | Gate-linked (class a), partial | `gate:gate-alpha`, class a; "
+                          "`githook:gh-one`, class c |",
+                          "### `githook:gh-one`", "- Platform: `git`",
+                          "- Entry point: `pre-commit, pre-push: run-gh-one`",
+                          "- Channel: `git hook, installed per clone by install-gh-one`"):
+                if token not in body:
+                    failures.append("githook tree: {!r} missing from ENFORCEMENT.md".format(token))
+            page = (gh / HTML_REL).read_text(encoding="utf-8")
+            for token in ('id="mechanism-githook-gh-one"', '<a href="#mechanism-githook-gh-one">',
+                          '<blockquote class="ledger-residual" data-mech="githook:gh-one">'):
+                if token not in page:
+                    failures.append("githook tree: {!r} missing from the generated page".format(token))
+        # A githook: reference the ledger does not link fails closed like any mismatched mechanism.
+        expect2("roadmap-githook-unlinked",
+                lambda t: replace_in(t / ROADMAP, 'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
+                                     'corpus-id = "ruledd"\nstatus = "partial"\nmechanisms = ["githook:gh-one"]'))
+
         # A .aiqt/core/rules that is a symlink to the corpus moved elsewhere inside the root is read (exit 0,
         # the views written); one to the corpus moved outside the root (so following it would render cleanly)
         # fails closed (exit 2) with no view written, refused by this generator's own corpus probe (its
@@ -1625,7 +1694,10 @@ def self_test_main():
           "neither view calls a linked control enforcement, and the page "
           "lead scopes its linkage claim to the declared inputs; and a rule linked only to a preview-channel "
           "hook reads Preview only (not Hook-linked) while a rule linked to a plugin hook and a preview hook "
-          "reads Hook-linked with the preview mechanism marked, in both views; a corpus symlinked inside the "
+          "reads Hook-linked with the preview mechanism marked, in both views; a githook (a git hook "
+          "installed per clone) links its rules as githook:<id>, sorted after gate: refs, makes a rule with "
+          "no gate Hook-linked, renders its events, entry, install and platform git, and a githook: "
+          "reference the ledger does not link fails closed (exit 2); a corpus symlinked inside the "
           "root is read, and one symlinked outside the root fails closed (exit 2) with no view written")
     return 0
 

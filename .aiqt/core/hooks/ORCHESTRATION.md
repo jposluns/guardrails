@@ -280,7 +280,8 @@ directory below, and a declaration there arms slice confinement.
                       "labels": {"target": "Review-target:", "revision": "Reviewed-revision:",
                                  "path": "Review-path:", "repo": "Review-repo:",
                                  "branch": "Review-branch:", "draft": "Review-draft:",
-                                 "skip": "Review-skip:"},
+                                 "skip": "Review-skip:", "carried": "Review-carried-from:",
+                                 "reopen": "Review-reopen:"},
                       "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
                       "max_brief_bytes": 1048576},
   "mistakes_register": "path",
@@ -305,7 +306,32 @@ Stop or TeammateIdle, which has no banner; a denied scheduling call carries it i
 banner), which asks for a manual record, and leaves no row) and the append-only `forced-exit.jsonl`
 (every non-closed-disposition forced exit appended as its
 own row, each normally raised once, at least once if recording that it was raised fails, tracked by a
-companion `forced-exit-surfaced.json`). The whole-file JSON records (`turn-state.json`,
+companion `forced-exit-surfaced.json`). The citation read recorder (the `citation-read-ledger` hook, which
+runs wherever the session cwd resolves to a git toplevel, with or without a registry) keeps a
+`citation-ledger/` subdirectory there, made mode 0700 whatever the umask, holding one append-only
+`<key>.jsonl` per session (`<key>` is the first 16 hex digits of the sha256 of the session id), mode 0600,
+opened without following a symlink and refused unless it is a regular file. Each row names a path resolved through
+symlinks (for `git show`, the blob's repository path under the resolved toplevel, never resolved through
+the working tree), its path relative to the repository root (or null outside it, and for `git show` null
+unless the repository is the session's), a 1-based inclusive line span, the sha256 of the raw bytes of
+those lines (split on LF only, CR kept), the tool that read or wrote them and, for `git show`, the
+revision exactly as the command typed it (not resolved, so the commit a moving name such as `HEAD` named
+then is not recorded). An append that would take a non-empty session file past 4 MiB first renames it
+onto `<key>.jsonl.1`, replacing the older generation (a later reader reads both); a row already present (equal in kind, tool, path,
+span, digest and revision) is skipped only while the file is under 256 KiB; creating a session file (a new
+session's, or the fresh one after a rotation) removes up to 50 regular files of
+the ledger name shape in the directory last modified more than 14 days earlier. A failed append is named
+in a non-blocking note, never swallowed. The citation read check (the `citation-read-check` hook, a
+PreToolUse Bash hook in its warning-only bake) reads both generations of the session's ledger, merged
+over the state directory of each distinct toplevel among the session cwd's, the command's `git -C`
+toplevel and each cited file's (at most 8 state directories; one past that bound or the deadline is named
+in its guard-events row and, when a cited range is judged, in its note, at most 10 in each and the rest
+counted), when a
+`git commit` message or a `gh pr create` or `gh pr edit` body cites a path with a line or line range,
+notes each cited range no row covers at its current content, and appends one `guard-events.jsonl` row of
+kind `citint` per checked command (decision `warn` or `allow`, with each citation's class), the evidence a
+later promotion to deny is decided on; a failed append of a `warn` row is named in its note, and a failed
+append of an `allow` row, the over-fire metric only, is not reported. The whole-file JSON records (`turn-state.json`,
 `backlog-checkpoint.json`, its `checkpoint-init.marker`, `attestations-validated.json` and
 `forced-exit-surfaced.json`; NOT `lease-heartbeat.json`, whose keeper has its OWN writer,
 described under "The lease heartbeat" below: that writer binds to the holder's held
@@ -844,7 +870,9 @@ malformed.
 - `commands` lists the basenames of the commands that dispatch a review.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
 - `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
-  together or not at all, which turn on the worker draft census below. They must be distinct.
+  together or not at all, which turn on the worker draft census below, and optionally two more,
+  `carried` and `reopen`, declared together or not at all, which turn on the carried review check
+  below (rule evgcmp). They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
   for the hook's own git reads, and it must print exactly one full commit id: the
@@ -955,6 +983,11 @@ MODIFIER LETTER TRIANGULAR COLON); and when it is split across lines.
   of the worker draft the commit applies, once.
 - `Review-skip:` lines (only with the `skip` label) each name one drafted path deliberately left out
   of the commit, kept exactly as written.
+- `Review-carried-from:` (only where the binding declares the `carried` label) is required, once, for a
+  `revision` target: `none` for a fresh review, or the full lowercase id of the reviewed revision a
+  review is carried from.
+- `Review-reopen:` lines (only with the `reopen` label) each name one path where review reopens because
+  it differs between the reviewed and the new bases, kept exactly as written.
 
 For a `revision` target, the hook checks the following in order. The first failure decides.
 
@@ -973,6 +1006,7 @@ For a `revision` target, the hook checks the following in order. The first failu
    or a configured filter therefore cannot report a changed file as clean. A path the pin deletes
    must be absent. A checked-out submodule must be at the pinned commit. With `core.fileMode`
    false, a file that differs from the pin only in its executable bit is clean, as git reads it.
+7. Where the binding declares the carry labels, the carried review check below passes.
 
 Every git read disables replacement refs, grafts, pathspec magic, the commit-graph cache, the
 fsmonitor, the untracked cache and submodule recursion, and takes no optional locks. The changed set
@@ -1101,6 +1135,60 @@ a value other than `7bit` or `8bit` is refused with the rest, which can withhold
 telling a message line from a part header or a section's line needs the mailbox structure, which a
 draft can mangle, so the census refuses such a line wherever it stands.
 
+### The carried review check
+
+Rule evgcmp says a review carried to a rebased or replayed revision transfers only if the replayed
+diff is byte-identical to the reviewed diff, and even then review reopens wherever the change
+interacts with a file that differs between the reviewed and new bases. Where the binding declares
+the `carried` and `reopen` labels, the hook checks that at dispatch time, after every other check
+of a `revision` target:
+
+- A revision brief must carry exactly one `Review-carried-from:` line. With none, the dispatch is
+  refused, so a carry is always stated. Two or more lines are withheld as `UNVERIFIABLE:`.
+- `none` declares a fresh review. `Review-reopen:` lines beside it are refused, since reopen lines
+  need a carried revision.
+- Any other value must be a full lowercase commit id, at the length of the repository's object
+  format; a short id, a branch name or `HEAD` is refused, as for the pin. An id that does not resolve
+  to itself as a commit, and an empty `Review-reopen:` value, are withheld as `UNVERIFIABLE:`.
+- A carried revision equal to the pin is allowed with a note that nothing was replayed; reopen
+  lines beside it are refused.
+- A merge on either side, or a carried revision whose parent is missing (a shallow or partial
+  clone), is withheld as `UNVERIFIABLE:`, with a reason that says to declare `none` and dispatch a
+  full review. A root commit's base is the empty tree.
+- The hook writes two patches, the carried revision against its first parent and the pin against
+  its first parent, each with plumbing `git diff-tree -r -p` and every option that shapes its bytes
+  pinned on the command line (`--binary --full-index -U3 --no-color --no-renames --no-ext-diff
+  --no-textconv --src-prefix=a/ --dst-prefix=b/ --diff-algorithm=myers --indent-heuristic -O/dev/null
+  --no-relative --submodule=short --ignore-submodules=none`, with `diff.suppressBlankEmpty=false` and
+  `core.quotePath=true`), so repository configuration cannot shape or thin them. Each index line names
+  full blob ids, so two different contents never print the same patch, and with renames off a renamed
+  file whose content the base changed shows that content. The comparison is stricter than
+  `git patch-id`, which ignores line numbers and whitespace. A patch that cannot be read, or one larger
+  than 16 times `max_brief_bytes`, is withheld as `UNVERIFIABLE:`.
+- Patches that differ are refused: the reason names the first differing patch line and its section,
+  and says the review does not transfer.
+- With identical patches, a path that differs between the two bases (the carried revision's first
+  parent and the pin's first parent) but cannot be written on a `Review-reopen:` line is withheld as
+  `UNVERIFIABLE:`, with a reason that names it and says to declare `none` and dispatch a full review.
+  Such a path is not UTF-8, or holds a newline, another line boundary, or a character the label
+  screen refuses (a tab is allowed).
+- With identical patches, a path the change touches that also differs between the bases is refused
+  as needing a new review. Only a change to a file's mode alone reaches this step, since its section
+  names no blob; for any other touched file such a base change already makes the patches differ.
+- Otherwise the paths that differ between the two bases must equal the `Review-reopen:` lines
+  exactly. A path that differs but is not reopened, and a reopened path that is identical in both
+  bases, are refused; equality allows.
+- A `Review-carried-from:` value other than `none`, or a `Review-reopen:` line, on a `working-tree`
+  or `not-a-review` target is refused: a carried review needs a revision target. Two or more
+  `Review-carried-from:` lines on such a target, `none` included, are withheld as `UNVERIFIABLE:`.
+- A brief names one reviewed commit, so a reviewed range or squash is not recognized. Naming a
+  range's tip compares that commit's own diff alone; the earlier commits' paths count only where they
+  differ between the bases. A squash of a reviewed range is compared with the tip's diff alone, so it
+  is refused unless the two match. Name the single commit that was reviewed.
+
+The hook cannot decide whether the change relies on a file, or is called or consumed by one, so it
+over-approximates: review reopens on every path that differs between the bases.
+
 The hook refuses with a deny that names the reason. When it cannot evaluate, it denies with the
 reason prefixed `UNVERIFIABLE:`, so that outcome stays distinct. Cannot-evaluate cases include a
 duplicate label, an unreadable brief, a failed or timed-out git probe, an exhausted time budget, and
@@ -1200,6 +1288,32 @@ Limits:
   census reads the draft the brief names, which is not proven to be the draft the commit applied.
   A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
   rather than censused.
+- The carried review check sees only a declared carry. A brief that writes `none` while its prose
+  still carries a verdict, and a dispatch through an undeclared command, alias, script or non-Bash
+  tool, are not seen, the same limit as a misdeclared target.
+- A carried verdict used with no dispatch, such as merging or accepting the replayed revision on the
+  earlier verdict, is not seen; the check acts only at dispatch time.
+- No receipt is checked: the hook does not check that a review of the carried revision exists or what
+  it concluded, nor that the reviewer re-reads the reopened paths.
+- Interaction is over-approximated, not computed: review must reopen on every path that differs
+  between the bases, which over-refuses large base moves at the cost of a full review. Interactions
+  outside the repository (the toolchain, system libraries, network services, an unpinned dependency)
+  are not seen.
+- The carried review check compares one commit with its first parent. A merge on either side is
+  cannot-evaluate. Reviewed ranges and squashes are not recognized: naming a range's tip compares only
+  that commit's own diff, and a squash is compared with the tip's diff alone, so name the single
+  commit that was reviewed.
+- A base change inside a touched file always forces a new review: the byte comparison refuses one in
+  a file whose content the change edits, and a separate check refuses one in a file whose mode alone
+  the change sets. A large diff can hit the patch cap or the time budget and be withheld. The patch
+  cap is measured after git's output has been read.
+- A path that differs between the bases but cannot be written on a reopen line (not UTF-8, or holding
+  a newline, another line boundary or a character the label screen refuses) withholds every carry
+  across those bases as cannot-evaluate; declare `none` and dispatch a full review.
+- A stopped rebase, whose HEAD differs from its branch ref, is not addressed. Not built: a hook-owned
+  record of allowed pins that a carried revision must name, a check of the mid-operation markers of an
+  in-progress rebase, merge, cherry-pick or revert, and diff-shaping keys in the shared config-lane
+  poison.
 
 ## Review holds
 

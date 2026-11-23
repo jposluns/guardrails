@@ -387,7 +387,12 @@ This manifests in three recurring forms. An asynchronous result is correlated to
 produced it only through the authoritative identifier that dispatch returns, a handle, a path, or an
 id, never by wall-clock proximity or arrival order, because two dispatches can complete out of order
 or at the same instant and ambient timing cannot tell them apart; a result with no identifier is
-surfaced as unbound, never assigned to the nearest or most recent dispatch. A command with side
+surfaced as unbound, never assigned to the nearest or most recent dispatch. A path is such an
+identifier only when no other dispatch can have written to it; a location reused across dispatches,
+such as a shared scratch directory or a fixed result file name, is not, so each dispatch writes into
+a location created exclusively for it, or its result carries an id the dispatcher issued before
+launch and is accepted only on a match, and deleting an earlier result first or comparing
+timestamps is not that binding. A command with side
 effects prefers to name its target on the command that performs the mutation, a repository or
 working tree bound by an on-command flag rather than left to the current working directory. Where
 the same command also shifts that target, a directory change chained ahead of the mutation or a
@@ -1162,6 +1167,14 @@ procedure standing in for them, search the decision record for that subject: a m
 and outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the
 assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
 unclear, the ASK goes ahead.
+Run that search, and the same search before an ASK is recorded or sent or a matter is called undecided or
+open, across every durable store, notes logs included, by at least the subject's key terms; in the ASK or the
+statement calling the matter undecided or open, or, when neither is made, in the recorded classification, name
+the stores and terms searched and cite each hit or dismiss it with a reason. Whether the assistant can write a
+store decides whether a ruling in it can count, for a notes log as for any other store, and is judged when the
+store is read, from its actual permissions, not its name or usual role. A hit showing a maintainer ruling
+anywhere but an artefact the maintainer controls and the assistant cannot write is cited as unconfirmed: a
+lead to confirm in such an artefact before the matter is treated as decided, never silently ignored.
 
 ## Repeated failure triggers premise review
 

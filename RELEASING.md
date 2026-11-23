@@ -44,6 +44,51 @@ pull request (CLAUDE.md, Gates and CI).
    in the candidate tree, so the file must be committed before the freeze. Its content is not defined
    here; it remains open under the first-release-evidence item.
 
+   Fold the version declaration. Between cuts `changelog.toml` ends with an `[unreleased]` table whose
+   `version` is the planned release N (a bare `X.Y.Z`), and the generators write `N-dev` into `VERSION`,
+   `.aiqt/manifest.toml`, the announce snippet and the site version labels. The freeze pull request moves
+   that table into a new last `[[release]]` with `version = N`, a real `date` (a quoted `YYYY-MM-DD`), a
+   `title` and the collected `items`, deletes `[unreleased]`, and writes `.aiqt/release-cut.toml`
+   (`operation = "append"`, `previous-version` the previous release, `next-version = N`, and the base
+   changelog digest). The `python3 tools/gen_changelog.py` run that follows the fold makes `VERSION` the
+   plain `N`, and the generator sweep below then turns every other one of those outputs back into the
+   plain `N`. The declaration is a tracked path, so it needs an ownership class: `python3 tools/gen_manifest.py`
+   refuses an unclassified tracked path (exit 2, "COMPLETENESS: ... carry no class, e.g.
+   .aiqt/release-cut.toml"). The first cut that writes the declaration therefore also adds this row to
+   `.aiqt/core/ownership.toml`, beside the `changelog.toml` row; it cannot land earlier, because the map
+   refuses a row whose path is not tracked (exit 2, NO-STRAYS), and later cuts keep it, since the
+   declaration stays tracked (the cut gate refuses a change that removes it):
+
+   ```toml
+   [[release-class]]
+   path = ".aiqt/release-cut.toml"
+   class = "pack-immutable"
+   note = "The release-cut declaration tools/check_release_cut.py reads (RELEASING step 1). Added by the first cut that writes it and tracked from then on, since that gate refuses a change that removes it. Release metadata beside changelog.toml, whose digest it binds, and shipped like it."
+   ```
+
+   A cut that keeps a `.aiqt/pending-fixes.toml` list (optional; `tools/check_release_cut.py` refuses
+   the cut while it lists an open item) adds, in the change that first tracks the list, this exclusion
+   beside the other `[[exclusion]]` rows, and removes it in the change that deletes the list (a
+   stale exclusion is refused too):
+
+   ```toml
+   [[exclusion]]
+   path = ".aiqt/pending-fixes.toml"
+   reason = "Repository-local hand-kept pending-fix list tools/check_release_cut.py reads on a cut; tracked, not shipped, like .aiqt/check-removals.toml. Added with the change that first tracks the list and removed with the change that deletes it."
+   ```
+
+   These are the rows `CUT_RECORD_OWNERSHIP_ROWS` and `PENDING_FIXES_OWNERSHIP_ROWS` in
+   `tools/gen_manifest.py`, whose self-test stages a cut through manifest generation with them.
+   `python3 -I -B tools/check_release_cut.py` refuses a cut that releases another version than the
+   declared N or that keeps `[unreleased]`, and step 5b refuses a candidate whose manifest carries a `-dev`
+   version or whose `changelog.toml` still carries `[unreleased]`.
+
+   Then, before the skill checklist below, run `python3 tools/gen_changelog.py`. It regenerates `VERSION`
+   and `CHANGELOG.md` from the folded `changelog.toml`, so `VERSION` reads the plain `N` that the
+   checklist's generators compare against. Until it runs, `VERSION` still says `N-dev` while
+   `changelog.toml` has no `[unreleased]` table, and `python3 tools/gen_draft_site.py` refuses that (exit 2,
+   "VERSION N-dev is a development version and there is no [unreleased] table").
+
    Skill version bump checklist. The skill is independently versioned before the 1.1.1 pack release
    (skill 1.0.6 under pack release 1.0.5); from the 1.1.1 pack release on, the skill version equals the
    pack version. `gen_skill.build_outputs` enforces this: once `VERSION` is at or above
@@ -53,7 +98,9 @@ pull request (CLAUDE.md, Gates and CI).
    so the release cut also sets that value to the pack version and regenerates
    `plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json` with `python3 tools/gen_hooks.py`. The root
    `VERSION` is the pack version only in this repository (the tree carrying `.aiqt/authoring.toml`), so the
-   rule is a release-time rule of this repository and is enforced only here; in an adopter's tree, where
+   rule is a release-time rule of this repository and is enforced only here. A development `VERSION`
+   (`X.Y.Z-dev`, main between cuts) skips both checks, and the `gen_changelog.py` run after the freeze's fold
+   makes `VERSION` plain again, so the rule re-arms exactly at the cut; any other suffix still fails closed (exit 2); in an adopter's tree, where
    `VERSION` is the adopter's own, neither generator nor `conformance.py` re-checks it (a release ships only
    after this check passed). A deleted `.aiqt/authoring.toml` that the git index still tracks is refused
    (exit 2), not read as an adopter tree. Only the latest skill version is served: exactly
@@ -99,15 +146,30 @@ pull request (CLAUDE.md, Gates and CI).
    release on, the skill version equals the pack version (see the top of this checklist), so this bump
    happens with each release cut. A bump that misses spot a leaves
    the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
-   drift or portability gate; a bump that misses spot e is caught by `gen_skill.py --check`. Next, run
-   repoint the install page's download at the new versioned filename: set it in
-   `site/draft-src/install.toml` and in `KEPT_LIVE_PATHS` in `tools/gen_draft_site.py`, then run
-   `python3 tools/gen_draft_site.py`. Finally, set the `Version X.Y.Z` line in the three
+   drift or portability gate; a bump that misses spot e is caught by `gen_skill.py --check`. Next,
+   repoint the install pages' downloads at the new versioned filename, in four places that spell the
+   skill version as literals (not derived from it): the download link in `site/draft-src/install.toml`;
+   in `site/draft-src/install-details.toml`, the Skill `download` entry's `href`
+   (`/downloads/aiqt-skill-<skill version>.zip`), its `filename` (`aiqt-skill-<skill version>.zip`) and
+   the version prose in its `html` ("The Skill carries its own version, <skill version>, which ships under
+   AIQT pack release <pack version>.", reworded once the two versions are equal); and the
+   `/downloads/aiqt-skill-<skill version>.zip` entry of `KEPT_LIVE_PATHS` in `tools/gen_draft_site.py`.
+   Search `site/draft-src/` for the old skill version and update any other prose that names it (the
+   teams and future pages state the chat Skill's version). Then run `python3 tools/gen_draft_site.py`,
+   which must exit 0. Its exit 2 is a refusal whose message names the cause, so read the message, not
+   the exit code alone: once `KEPT_LIVE_PATHS` names the new zip, a link left at the old zip is refused
+   ("is not a site-relative href or a kept live path"); a new zip that `gen_skill.py` has not yet written
+   is refused ("kept live path(s) with no target under site/"); and a `VERSION` still at `N-dev` is
+   refused when `gen_changelog.py` has not run since the fold. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
    re-bless them with `python3 tools/check_sized_instructions.py --update`. Before the generator sweep,
    confirm that both index changes are in place: `git rm site/downloads/aiqt-skill-<old>.zip` and
    `git add site/downloads/aiqt-skill-<new>.zip`. Otherwise `gen_manifest.py` refuses the untracked binary
-   (exit 2, "is not a tracked in-scope path; fail-closed"). Then run every
+   (exit 2, "is not a tracked in-scope path; fail-closed"). Stage the cut records the same way
+   (`git add .aiqt/release-cut.toml .aiqt/core/ownership.toml`, plus `.aiqt/pending-fixes.toml` when the
+   cut keeps one): `gen_manifest.py` reads the tracked set from the git index, so it refuses an unstaged
+   declaration whose ownership row is in place (exit 2, "selector '.aiqt/release-cut.toml' matches no
+   tracked in-scope path (NO-STRAYS)") rather than leaving it out of the manifest. Then run every
    `tools/gen_*.py` generator, with `python3 tools/gen_manifest.py` last: besides the generators named
    above, the bump also changes the outputs of `python3 tools/gen_renderers.py` (`.aiqt/core/renderers.toml`)
    and `python3 tools/gen_gensrc.py` (`.aiqt/gensrc.json`). Finally run each generator with `--check`
@@ -165,7 +227,8 @@ pull request (CLAUDE.md, Gates and CI).
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
    merged on green. Main stays frozen from this merge until step 6b has merged: the freeze covers the
    tag and BOTH post-release pull requests (6a and 6b), which is what makes the release-delta gate print
-   its `release-delta: POST-RELEASE` line on each of them. If the freeze is broken and a commit declaring
+   its `release-delta: POST-RELEASE` line on each of them. Reopening development (step 8) declares a later
+   version, so it waits for step 6b too. If the freeze is broken and a commit declaring
    a later version lands before step 6b, the step 6b gate prints its ordinary `PASS:` line instead of
    `POST-RELEASE`; treat that as evidence the freeze was broken and re-check the intervening commits, not
    as the step 6b 'exit 0' evidence.
@@ -217,6 +280,23 @@ pull request (CLAUDE.md, Gates and CI).
      request either: the tag does not exist yet at that point, so the tag-monotonicity check cannot
      resolve it.
 7. Publish. The public flip is a separate, maintainer-owned step; nothing in steps 1 to 6 depends on it.
+8. Reopen development. After step 6b has merged, one pull request adds an `[unreleased]` table at the end
+   of `changelog.toml` with `version` set to the next planned release (a bare `X.Y.Z` above the release
+   just cut; never write the `-dev` suffix, the generators add it) and runs every `tools/gen_*.py`
+   generator, with `python3 tools/gen_manifest.py` last. `VERSION`, the manifest and the announce snippet
+   then say `X.Y.Z-dev`, the snippet calls it a development build that is not a release, the site shows
+   "Unreleased" beside the last published release, and `CHANGELOG.md` gains an "Unreleased" section. The
+   release-delta gate leaves its post-release route and checks the declared version against the attested
+   release. Once `releases.toml` has a row, it refuses (exit 2) a reopen while the newest `changelog.toml`
+   release has no `releases.toml` row. At genesis (no row yet: the first recorded release before its
+   step 6a attestation row has merged) it does not: its genesis route only binds the manifest to the
+   `[unreleased]` version plus `-dev`, so a reopen landed before step 6a passes it, and waiting for step 6b
+   is then this protocol's rule alone, not a gate's. A
+   later pull request whose required version bump is larger than the declared version raises it; the
+   version-monotonicity gate allows raising it and refuses lowering it or removing `[unreleased]` without a
+   cut. Between step 6a and this pull request main shows the plain release version with a root that
+   differs from the one published for the tag (6a regenerates the manifest), so verify a release against
+   the root published for its tag, never against main.
 
 ## Note on the evidence "Built from" field
 
