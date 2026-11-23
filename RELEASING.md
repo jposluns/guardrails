@@ -19,6 +19,44 @@ added to it (the merge lane adds the `merge-train` label), and its heavy jobs ru
 a `merge-train-*` branch of this repository, so "merged on green" means green on such a labelled train
 pull request (CLAUDE.md, Gates and CI).
 
+Every pull request below except the step 6a attestation pull request lands through the repository's
+merge entry point, by squash only, from a checkout of this repository that holds the head commit:
+`python3 -I -B tools/merge_pr.py --pr <N> --head <full head SHA> --base main --method squash
+--expect-base <full SHA of the main commit the head was checked on> --train`
+(add `--require-status local-quality` where that status is required). It binds every read and the merge
+request to the repository the checkout's origin names, that pull request, main and that full head SHA;
+reads the repository's allowed merge methods, refusing (exit 1) when squash is disabled and printing
+a WARNING when merge commits or rebase merges are allowed too; refuses any method but squash and any base
+but main; refuses (exit 1) when main is not at `--expect-base`; refuses (exit 1) the step 6a attestation
+pull request (one that changes `.aiqt/core/releases.toml`), which step 6a lands instead; runs
+`tools/ci-status.sh --main-health` and `tools/ci-status.sh <head> --require-base main` before the merge,
+reads the settings, the pull request, the compare and the head commit again, sends one squash request
+pinned to the head SHA whose commit title is the pull request title and number and whose message is its
+body (an empty body is refused), requires a single-parent landing commit whose parent is `--expect-base`,
+whose tree is the head's tree and whose message is that title and body, then runs
+`tools/ci-status.sh --main-health --merge-commit <landing SHA>` and, when that is green, reads main's tip
+again and requires it to contain the landing commit. Every `tools/ci-status.sh` run it starts is bound to
+the same host and repository as its own reads (`--api-host github.com`, `GH_HOST=github.com`, `GH_REPO`
+removed, `CI_STATUS_REPO` set to the validated repository). The request pins only the head: a base
+that moves between the last read and the merge is caught after the landing, not prevented, unless branch
+protection requires an up-to-date branch. Exit 1 is a refusal (or, after a merge, a landing property that
+does not hold, a red main, or a main whose tip no longer contains the landing; one RESULT line per
+property says which); exit 2 is cannot-evaluate (settings or state unreadable, or an interruption before
+the request: nothing was merged) or, once the request was sent, an UNKNOWN OUTCOME (an interruption
+included), or a main push run or main tip that cannot be evaluated: read the pull request to reconcile and
+never resend.
+Exit 0, with its `RESULT: LANDED:` line, confirms a landing that satisfies every post-merge check; it is
+not the only exit that can follow a merge. Once the request was sent, a merge can also have happened on
+exit 1 (a `MERGED:` line followed by `RESULT: LANDED, MAIN IS RED` or `RESULT: LANDED, NOT ON MAIN`, or a
+`RESULT: MERGED ...` line naming a landing property that does not hold) and on exit 2 (an UNKNOWN OUTCOME,
+or a `MERGED:` line followed by a post-merge read that cannot be evaluated); after any of them, read the
+pull request to reconcile and never resend.
+A WARNING means the hosting settings are wider than squash. It does not mean anything landed: the settings
+let the run go on to its remaining checks, and the squash request is sent only when every check before it
+passes. The maintainer disables the extra methods in the repository settings. The tool cannot stop a
+merge made outside it (the web interface or the API) while those settings allow another method; its
+BOUNDARY line says so.
+
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. That run FAILS when gitleaks is not on
    PATH or reports another version than the `Secrets (gitleaks)` step of `.github/workflows/quality.yml`
