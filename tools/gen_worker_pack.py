@@ -150,7 +150,9 @@ def main():
 #   (f) an invalid-UTF-8 SOURCE fails closed (exit 2); an invalid-UTF-8 published target is plain byte
 #       drift under the raw-byte comparison, covered by the (b) and (e) legs;
 #   (g) a .claude/ symlinked outside the root fails closed (exit 2) in --check and write mode, the published
-#       pack there untouched; symlinked inside the root, it is read and rewritten.
+#       pack there untouched; symlinked inside the root, it is read and rewritten;
+#   (h) a corpus of rule sources using the `## Detail` split resolves the lineage and publishes the expected
+#       body (the unsplit corpus's), drift-clean.
 
 _RULE_SRC = """---
 corpus-id: {cid}
@@ -270,6 +272,26 @@ def self_test_main():
         #     published pack there untouched; symlinked inside the root, it is read and rewritten.
         failures.extend(linked_dir_failures(tmp, "claude", lambda base: _build(base, "selfw1, selfw2"), run,
                                             ".claude", TARGET_REL))
+
+        # (h) a corpus of rule sources using the `## Detail` split (a detail-trigger key, a core layer and the
+        #     split line added, the rule's text moved below the split unchanged): the lineage resolves and the
+        #     published bytes equal the expected body, the ones the unsplit corpus gives, then --check is clean.
+        #     This generator reads only the corpus-ids of the rules, never their text, so this leg guards that
+        #     a split corpus is read and changes no published byte; it has no rule-text read to revert.
+        split = tmp / "split"
+        _build(split, "selfw1, selfw2")
+        for n, cid in enumerate(("selfw1", "selfw2"), 1):
+            (split / ".aiqt" / "core" / "rules" / "quali-worker-pack-selftest-{}.md".format(n)).write_bytes(
+                _RULE_SRC.format(cid=cid, n=n).replace(
+                    "---\n\n# Worker-pack self-test rule {}\n".format(n),
+                    "detail-trigger: writing a self-test fixture\n---\n\n# Worker-pack self-test rule {}\n\n"
+                    "A self-test core layer.\n\n## Detail\n".format(n)).encode("utf-8"))
+        split_codes = (run_quiet(split, check=False), run_quiet(split, check=True))
+        split_target = split / TARGET_REL
+        split_held = split_target.read_bytes() if split_target.is_file() else None
+        if split_codes != (0, 0) or split_held != _EXPECTED_BODY.encode("utf-8"):
+            failures.append("split corpus: expected generate then --check exits (0, 0) with the published pack "
+                            "byte-equal to the expected body, got {!r}".format(split_codes))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -283,7 +305,8 @@ def self_test_main():
           "each fail --check (exit 1, red without the byte-exact gate); and an unresolved restates "
           "corpus-id, a source missing restates, and an invalid-UTF-8 source all fail closed (exit 2); a "
           ".claude/ symlinked outside the root fails closed (exit 2) with the pack there untouched, and one "
-          "symlinked inside the root is read and rewritten")
+          "symlinked inside the root is read and rewritten; a corpus of rule sources using the `## Detail` "
+          "split publishes the bytes the unsplit corpus does, drift-clean")
     return 0
 
 

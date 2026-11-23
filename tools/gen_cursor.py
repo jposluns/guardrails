@@ -4,18 +4,20 @@
 Same core that feeds Claude's .claude/rules/ tree, so a Cursor session gets identical AIQT governance.
 Cursor loads *.mdc files under .cursor/rules/ (recursing into subdirectories; a plain .md there is
 ignored), and an .mdc whose frontmatter says `alwaysApply: true` is always included, with `globs` and
-`description` ignored, so each rule becomes its own .mdc carrying that one key and the rule body
-verbatim (H1 intact: each .mdc is its own document, unlike the AGENTS.md/GEMINI.md concatenations,
-which demote it). All output lives under the RESERVED subtree .cursor/rules/aiqt-guardrails/,
-mirroring the two-axis taxonomy, so reconciliation (including orphan deletion) only ever touches the
-pack's own subtree and never an adopter's own Cursor rules beside it. Format per
+`description` ignored, so each rule becomes its own .mdc carrying that one key and the body of the
+rule's full render (gen_rules.full_body) verbatim (H1 intact: each .mdc is its own document, unlike
+the AGENTS.md/GEMINI.md concatenations, which demote it). All output lives under the RESERVED subtree
+.cursor/rules/aiqt-guardrails/, mirroring the two-axis taxonomy, so reconciliation (including orphan
+deletion) only ever touches the pack's own subtree and never an adopter's own Cursor rules beside it.
+Format per
 https://cursor.com/docs/rules (retrieved 2026-08-17).
   gen_cursor.py           regenerate .cursor/rules/aiqt-guardrails/{aiqt,security}/
   gen_cursor.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_cursor.py --self-test  assert an invalid-UTF-8 generated .mdc target, a source path that is not a
                              directory or a symlink to a directory inside the root, and a reserved subtree, a
                              family directory inside it or a .cursor/ above it symlinked outside the root fail
-                             closed (exit 2)
+                             closed (exit 2), and that a source using the `## Detail` split generates the
+                             .mdc its unsplit original does, byte for byte
 """
 import sys
 
@@ -37,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _standards import dir_chain_or_absent, dir_or_absent, dir_present  # noqa: E402
-from gen_rules import load_corpus  # noqa: E402
+from gen_rules import full_body, load_corpus, read_rule_source  # noqa: E402
 
 # The reserved output subtree (relative parts, joined under repo root). Everything under it is
 # generated; nothing outside it is ever written or deleted, so an adopter's own .cursor/rules files
@@ -64,11 +66,12 @@ def cursor_rel(rel):
 
 
 def render_rule(path):
-    """The full .mdc content for one source rule: the Cursor frontmatter, then the rule body verbatim
-    (source frontmatter stripped, H1 kept; do NOT reuse gen_agents.body_of, which demotes the H1 for
-    the single-document concatenations). conformance.py imports this so the checker and the generator
-    can never disagree on the shape."""
-    text = path.read_text(encoding="utf-8")
+    """The full .mdc content for one source rule: the Cursor frontmatter, then the body of the rule's full
+    render verbatim (gen_rules.full_body, the text gen_rules writes to the .claude/rules/ read tree, so a
+    source using the `## Detail` split reads as its unsplit original; source frontmatter stripped, H1 kept;
+    do NOT reuse gen_agents.body_of, which demotes the H1 for the single-document concatenations).
+    conformance.py imports this so the checker and the generator can never disagree on the shape."""
+    text = full_body(read_rule_source(path), path.name)
     end = text.find("\n---\n", 4)
     body = text[end + 5:].strip()
     return FRONTMATTER + body + "\n"
@@ -317,6 +320,28 @@ def self_test_main():
                                         "written" if want == 0 and source else "not written",
                                         (" and the orphan " + ("kept" if want == 2 else "pruned")) if judged else "",
                                         got, kept, wrote))
+        # A rule source using the `## Detail` split renders as its full render (gen_rules.full_body): for every
+        # gen_rules _SPLIT_CASES pair, the .mdc tree generated from the split source is byte-equal to the one
+        # generated from its unsplit original, and --check over it is clean. Red when render_rule reads the
+        # source text instead of its full render (the core layer and the split line would leak into the .mdc).
+        from gen_rules import _SPLIT_CASES, _SPLIT_NAME, _split_case_texts
+        for case in _SPLIT_CASES:
+            trees = []
+            for label, text in zip(("original", "split"), _split_case_texts(case)):
+                case_root = tmp / "split" / case[0] / label
+                (case_root / ".aiqt" / "core" / "rules").mkdir(parents=True)
+                (case_root / ".aiqt" / "core" / "rules" / _SPLIT_NAME).write_bytes(text.encode("utf-8"))
+                codes = (run_quiet(case_root, check=False), run_quiet(case_root, check=True))
+                if codes != (0, 0):
+                    failures.append("split case {} ({}): write then --check expected exits (0, 0), got {!r}"
+                                    .format(case[0], label, codes))
+                out = case_root.joinpath(*OUT_PARTS)
+                trees.append({f.relative_to(out).as_posix(): f.read_bytes()
+                              for f in sorted(out.rglob("*.mdc"))} if out.is_dir() else {})
+            if not trees[0] or trees[1] != trees[0]:
+                failures.append("split case {}: the .mdc tree from the split source is not byte-equal to the one "
+                                "from its unsplit original; got {!r}".format(
+                                    case[0], [v[-300:] for v in trees[1].values()]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     # An unknown option is exit 2 with the usage line and runs nothing (red when main()'s guard is reverted):
@@ -335,7 +360,9 @@ def self_test_main():
           "exits 2 with the generated .mdc kept, and one symlinked to a directory inside the root is read; a "
           "reserved subtree, a family directory inside it or a .cursor/ directory above it symlinked outside the "
           "root exits 2 in write mode with nothing written or deleted there, and one symlinked inside the root is "
-          "read; an unknown option is exit 2 with the usage line and runs nothing.")
+          "read; a rule source using the `## Detail` split generates an .mdc tree byte-equal to its unsplit "
+          "original's ({} split cases); an unknown option is exit 2 with the usage line and runs nothing."
+          .format(len(_SPLIT_CASES)))
     return 0
 
 

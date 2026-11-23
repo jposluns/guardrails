@@ -1362,6 +1362,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 
+      - name: Dispatch-marker self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite dispatch-marker-selftest
+
+      - name: Round-gate record reader self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite round-gate-selftest
+
       - name: Site-scope self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
@@ -1373,6 +1381,10 @@ jobs:
       - name: Merge entry point self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite merge-pr-selftest
+
+      - name: Gate-record self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite gate-record-selftest
 
       - name: Instruction-budget self-test (execution-reconciled)
         shell: bash

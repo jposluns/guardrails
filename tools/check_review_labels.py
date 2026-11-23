@@ -24,7 +24,9 @@ so a line copied more times than it is deleted is charged for each extra copy, a
 (any byte changed, its indentation included) is charged. Every other added line is searched for each
 label shape in .aiqt/review-labels.toml (a tracked TOML file: a test name numbered after a review cycle,
 a parenthesised or bracketed review or QA cycle tag, a numbered round, the words review and round side
-by side, a numbered finding and a tracker backlog id by default, each one Python regular expression),
+by side, a numbered finding, a tracker backlog id (a fix-round id included), an upper-case QA round
+number and a reviewer family name beside an upper-case severity grade, in either order, by default, each
+one Python regular expression),
 both as written and folded: compatibility-normalized with format characters (a zero-width space, say)
 and combining marks removed, a closed table of Cyrillic and Greek look-alike letters (CONFUSABLES) read
 as the Latin letters they imitate and any other script's decimal digit read as its ASCII digit, so a
@@ -91,7 +93,10 @@ same line be added once anywhere else (in that same file only, when the baseline
 line there); an untracked file is not judged; a label outside the configured
 shapes is not matched, among them a look-alike letter outside the CONFUSABLES table, punctuation the
 shapes do not allow, a parenthesised tag with nothing after its number or with a comma after it, a
-lower-case backlog id, a number written as a word, a cycle tag written after the word review (an
+lower-case backlog id, a lower-case QA token, a lower-case severity grade, a reviewer family other than
+the four the shape names, a grade written before its family with a comma, colon or semicolon between
+(rule text lists them so), a grade before a family name followed by the word code (a product name), a
+number written as a word, a cycle tag written after the word review (an
 upper-case R and a number, which is this pack's rule-number spelling) and a label split, encoded or
 wrapped across lines; prose that matches a shape without being a label is a
 false positive that the allow-marker or a rewording settles (a numbered game or protocol round, its
@@ -2164,7 +2169,11 @@ def _self_test():
           "and one with the marker inside a longer word or none is refused; excluded "
           "files are not judged and every other file is; a moved or reordered line is not charged while "
           "an edited line and an extra copy are; a text file declared binary, a genuine binary and "
-          "look-alike characters are read; textconv, an external diff, a submodule log, a GIT_DIR "
+          "look-alike characters are read; a fix-round id, a QA round number and a reviewer family "
+          "beside a severity grade are refused and pass once their shape is removed, while a grade word "
+          "alone, a finding id, quoted rule text, a lower-case grade, a family file name, a lower-case "
+          "QA path and a grade before a product name pass and are refused once their narrowing is removed; "
+          "textconv, an external diff, a submodule log, a GIT_DIR "
           "redirect, a replace ref and a caller's home configuration and fsmonitor are held off; "
           "git output off its shape is refused; a clean main, a "
           "clone of main and a branch behind main pass with a NOTE and an uncommitted label there is "
@@ -2315,6 +2324,7 @@ def _existing_rows(tmp):
     _exclusion_rows(tmp, labels)
     _move_rows(tmp, labels)
     _text_rows(tmp, labels)
+    _grade_rows(tmp)
     _hardening_rows(tmp, labels)
     _replace_ref_rows(tmp, labels)
     _git_output_rows()
@@ -4933,6 +4943,155 @@ def _wide_marker_rows(tmp, labels):
     with _patched(_line_views=lambda line: _views(line.text)):
         code, out = _gate(repo)
     check("flip/utf16-label-without-marker-missed-with-nul", "wide-marked.txt:4:" not in out, out)
+
+
+def _shipped_regex(shape_id):
+    """The regular expression the shipped configuration gives the shape `shape_id`."""
+    for row in tomllib.loads(_config_text())["shape"]:
+        if row["id"] == shape_id:
+            return row["regex"]
+    raise RuntimeError("the shipped configuration has no shape {!r}".format(shape_id))
+
+
+def _swapped(regex, old, new):
+    """`regex` with its one occurrence of `old` replaced by `new` (a flip that drops one narrowing)."""
+    if regex.count(old) != 1:
+        raise RuntimeError("the shipped regex holds {!r} {} time(s), not once".format(old, regex.count(old)))
+    return regex.replace(old, new)
+
+
+def _grade_label_lines():
+    """The fix-round, QA-round and reviewer-grade label lines (graded.py, lines 1 to 20), assembled at run
+    time so that no contiguous label sits in this source (the internal-name gate's tracker layer scans
+    it too). Lines 10 to 20 pin the joiners the first nine leave open: a QA number after one space, in a
+    snake_case name, with a letter or a finding suffix, and a grade after a colon, a square bracket or a
+    backtick, and before its family with a number and a plain space, a slash, a hyphen or a bracket."""
+    return (
+        "# tracked as " + "FI" + "X-123-R" + "4",
+        "# closes " + "co" + "dex Q" + "A18 F3",
+        "# raised in Q" + "A-18",
+        "# see GD121-Q" + "A-2",
+        "# guards the pidfd (" + "co" + "dex BLO" + "CKER 1)",
+        "# kept narrow, ME" + "DIUM (co" + "dex)",
+        "# F1 (Fa" + "ble/co" + "dex, BLO" + "CKER): a FIFO",
+        "# cla" + "ude r3 MI" + "NOR-2: hidden",
+        "# CO" + "DEX's MA" + "JOR 2",
+        "# raised in Q" + "A 18",
+        "def test_Q" + "A_18_case():",
+        "# Q" + "A18a follow-up",
+        "# closes Q" + "A18F" + "3",
+        "# Co" + "dex: MA" + "JOR",
+        "# Co" + "dex [BLO" + "CKER]",
+        "# Co" + "dex `MI" + "NOR`",
+        "# MI" + "NOR-3 CL" + "AUDE",
+        "# BLO" + "CKER/Ge" + "mini",
+        "# MA" + "JOR-co" + "dex",
+        "# MA" + "JOR [co" + "dex]")
+
+
+def _grade_twin_lines():
+    """The legitimate lines beside them (ungraded.py, lines 1 to 7), assembled the same way."""
+    return (
+        'bump = "MAJOR"  # a MAJOR or MINOR version bump, a BLOCKER severity',
+        "# the store refuses it (F-OPF-STATUSFILTER-EQ-BYPASS)",
+        'RULE = "grade each finding BLOCKER, MAJOR, MEDIUM or MINOR; Claude, Codex and Gemini name '
+        'no QA run"',
+        "# cla" + "ude ma" + "jor changes land in a minor release",
+        "# MINOR CLAUDE.md edits",
+        "# the process pattern qa2451/ and the QA suite",
+        "# the MINOR Claude Code changes ship in 2.4")
+
+
+def _grade_rows(tmp):
+    """A fix-round id, a QA round number (after a family name, alone with a hyphen or a space, inside a
+    longer id or a snake_case name, with a letter or a finding suffix) and a reviewer family name beside
+    a severity grade (in either order, a family pair, a numbered round between, an upper-case possessive,
+    a colon, a square bracket or a backtick before the grade, a numbered grade, a slash, a hyphen or a
+    square bracket before the family) are refused on added lines, each once; a severity word alone, a
+    finding id, quoted rule text, a lower-case grade, a family name opening a file name, a lower-case QA
+    path and a grade before a product name pass. Each refused row passes once its shape is removed; each
+    passing row is refused once the narrowing that lets it through is removed."""
+    repo = _base_repo(tmp, "grades")
+    _fx_git(repo, "checkout", "-q", "-b", "work")
+    labels, twins = _grade_label_lines(), _grade_twin_lines()
+    _write(repo, "graded.py", "".join(text + "\n" for text in labels))
+    _write(repo, "ungraded.py", "".join(text + "\n" for text in twins))
+    _commit_all(repo, "graded labels and their legitimate twins")
+    code, out = _gate(repo)
+    for check_id, index, shape_id in (("refuse/fix-round-id", 1, "backlog-id"),
+                                      ("refuse/qa-round-after-family", 2, "qa-round"),
+                                      ("refuse/qa-round-hyphen-alone", 3, "qa-round"),
+                                      ("refuse/qa-round-inside-id", 4, "qa-round"),
+                                      ("refuse/family-then-grade", 5, "reviewer-grade"),
+                                      ("refuse/grade-then-family", 6, "reviewer-grade"),
+                                      ("refuse/family-pair-then-grade", 7, "reviewer-grade"),
+                                      ("refuse/family-numbered-then-grade", 8, "reviewer-grade"),
+                                      ("refuse/family-possessive-upper-case", 9, "reviewer-grade"),
+                                      ("refuse/qa-round-space-joined", 10, "qa-round"),
+                                      ("refuse/qa-round-snake-case", 11, "qa-round"),
+                                      ("refuse/qa-round-letter-suffix", 12, "qa-round"),
+                                      ("refuse/qa-round-finding-suffix", 13, "qa-round"),
+                                      ("refuse/family-colon-grade", 14, "reviewer-grade"),
+                                      ("refuse/family-bracketed-grade", 15, "reviewer-grade"),
+                                      ("refuse/family-backticked-grade", 16, "reviewer-grade"),
+                                      ("refuse/grade-numbered-then-family", 17, "reviewer-grade"),
+                                      ("refuse/grade-slash-family", 18, "reviewer-grade"),
+                                      ("refuse/grade-hyphen-family", 19, "reviewer-grade"),
+                                      ("refuse/grade-bracketed-family", 20, "reviewer-grade")):
+        check(check_id, code == 1 and "  graded.py:{}: {} (".format(index, shape_id) in out, out)
+    check("refuse/graded-one-finding-per-line", code == 1 and out.count("  graded.py:") == len(labels), out)
+    for check_id, index in (("pass/severity-word-alone", 1), ("pass/finding-id", 2),
+                            ("pass/quoted-rule-text", 3), ("pass/lower-case-grade-prose", 4),
+                            ("pass/family-file-name", 5), ("pass/lower-case-qa-path", 6),
+                            ("pass/grade-before-product-name", 7)):
+        check(check_id, "  ungraded.py:{}: ".format(index) not in out, out)
+    check("pass/graded-twins-clean", "ungraded.py" not in out, out)
+    removed = {}
+    for shape_id in ("backlog-id", "qa-round", "reviewer-grade"):
+        with _patched(load_config=_without_shape(shape_id)):
+            removed[shape_id] = _gate(repo)[1]
+    for check_id, index, shape_id in (
+            ("flip/fix-round-id-shape-removed", 1, "backlog-id"),
+            ("flip/qa-round-after-family-shape-removed", 2, "qa-round"),
+            ("flip/qa-round-hyphen-alone-shape-removed", 3, "qa-round"),
+            ("flip/qa-round-inside-id-shape-removed", 4, "qa-round"),
+            ("flip/family-then-grade-shape-removed", 5, "reviewer-grade"),
+            ("flip/grade-then-family-shape-removed", 6, "reviewer-grade"),
+            ("flip/family-pair-then-grade-shape-removed", 7, "reviewer-grade"),
+            ("flip/family-numbered-then-grade-shape-removed", 8, "reviewer-grade"),
+            ("flip/family-possessive-upper-case-shape-removed", 9, "reviewer-grade"),
+            ("flip/qa-round-space-joined-shape-removed", 10, "qa-round"),
+            ("flip/qa-round-snake-case-shape-removed", 11, "qa-round"),
+            ("flip/qa-round-letter-suffix-shape-removed", 12, "qa-round"),
+            ("flip/qa-round-finding-suffix-shape-removed", 13, "qa-round"),
+            ("flip/family-colon-grade-shape-removed", 14, "reviewer-grade"),
+            ("flip/family-bracketed-grade-shape-removed", 15, "reviewer-grade"),
+            ("flip/family-backticked-grade-shape-removed", 16, "reviewer-grade"),
+            ("flip/grade-numbered-then-family-shape-removed", 17, "reviewer-grade"),
+            ("flip/grade-slash-family-shape-removed", 18, "reviewer-grade"),
+            ("flip/grade-hyphen-family-shape-removed", 19, "reviewer-grade"),
+            ("flip/grade-bracketed-family-shape-removed", 20, "reviewer-grade")):
+        check(check_id, "  graded.py:{}: ".format(index) not in removed[shape_id], removed[shape_id])
+
+    grade = _shipped_regex("reviewer-grade")
+    qa = _shipped_regex("qa-round")
+    for check_id, index, patterns in (
+            ("flip/severity-word-alone-flagged-without-family", 1,
+             {"reviewer-grade": (r"(?<![A-Za-z0-9_])(?:BLOCKER|MAJOR|MEDIUM|MINOR)(?![A-Za-z_])", 0)}),
+            ("flip/finding-id-flagged-when-widened", 2,
+             {"reviewer-grade": (grade + r"|\bF-[A-Z]+-[A-Z]", 0)}),
+            ("flip/quoted-rule-text-flagged-with-list-punctuation", 3,
+             {"reviewer-grade": (_swapped(grade, r"(?:[ \t]*[(/\[\x60][ \t]*|[ \t]+|-)",
+                                          r"[ \t]*[,:;(/\[\x60-]?[ \t]*"), 0)}),
+            ("flip/lower-case-grade-flagged-when-case-folded", 4, {"reviewer-grade": (grade, re.IGNORECASE)}),
+            ("flip/family-file-name-flagged-without-dot-exception", 5,
+             {"reviewer-grade": (_swapped(grade, r"|\.[A-Za-z]|", "|"), 0)}),
+            ("flip/lower-case-qa-path-flagged-when-case-folded", 6, {"qa-round": (qa, re.IGNORECASE)}),
+            ("flip/grade-before-product-name-flagged-without-exemption", 7,
+             {"reviewer-grade": (_swapped(grade, r"|[ \t-]+(?i:code)(?![A-Za-z0-9_])", ""), 0)})):
+        with _patched(load_config=_with_patterns(patterns)):
+            code, out = _gate(repo)
+        check(check_id, code == 1 and "  ungraded.py:{}: ".format(index) in out, out)
 
 
 def _with_patterns(patterns):

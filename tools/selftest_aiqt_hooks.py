@@ -88,7 +88,16 @@ off-roster verb and data an accepted scan consumed stay allowed; a checker-shape
 (|| true, || :) or piped into an adjacent head or tail allows with a note, except that a narrow
 verification run on the allow-list whose output reaches a sink on the allow-list (head or tail with
 one positive line count, grep -m N/-q/-c/-l/-L, rg -q/-c/-l) denies; option-value, post-'--', and
-push/merge -n edges stay allowed; and the parse-error fallback fails safe.
+push/merge -n edges stay allowed; and the parse-error fallback fails safe. The interim narrowing (gcg-* rows): a
+command that runs a check and names git (or holds a $ or backquote after the check) denies unless it is exactly one
+shape of the list (CHECK [> ABS 2>&1] && GIT), after every earlier deny, which keeps its message; each flip row is
+red with the narrowing reverted and each shape row red with the shape list emptied; the interim plumbing deny
+(gpl-* rows): a command naming git commit-tree, send-pack or http-push denies, each flip row red with that deny
+reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
+reverted); the interim push-redirect deny (gpr-* rows): a git push naming --receive-pack or --exec (any prefix git
+accepts), a PATH or GIT_EXEC_PATH override, git --exec-path= or a loader variable denies, each flip row red with
+that deny reverted, except in a quoted literal git commit, tag or merge message (data rows, red with that reading
+reverted); and the write-scope guard denies a Write into the git-side gate record's directory (gcg-wr-* rows).
 
 It also covers the BEST-EFFORT, ASK-only git-commit argument substitution guard
 (commit_msg_subst, sectvl). In a parsed simple segment whose effective command resolves past the named
@@ -194,6 +203,7 @@ import collections
 import contextlib
 import datetime
 import dis
+import errno
 import hashlib
 import importlib.util
 import io
@@ -1829,6 +1839,459 @@ def _test_stream_failure_exits(failures):
           err_needle="could not be written to stdout")
     child("stream-note-stdout-closed", ["bash_absolute_paths"], note_payload, "closed", "pipe", 2,
           err_needle="could not be written to stdout")
+
+
+# (stdin-loc-*) The locales the hook input decoding is proved under: the two required ones, and C.UTF-8,
+# covered where the host has it.
+_STDIN_REQUIRED_LOCALES = ("C", "en_US.UTF-8")
+_STDIN_OPTIONAL_LOCALES = ("C.UTF-8",)
+# The locales the same rows also run under with the shipped command line (python3 -I, no -X option), where
+# the interpreter turns UTF-8 mode on; both are required.
+_STDIN_SHIPPED_LOCALES = ("C", "POSIX")
+# One child per locale names what that locale gives the interpreter: whether the C library accepts it,
+# its codeset, and the standard input's encoding and error handler, so a missing locale (which the C
+# library replaces with C without a word) is never read as evaluated coverage.
+_STDIN_LOCALE_PROBE = (
+    "import locale, sys\n"
+    "try:\n"
+    "    locale.setlocale(locale.LC_ALL, '')\n"
+    "except locale.Error as exc:\n"
+    "    print('unavailable', exc)\n"
+    "    raise SystemExit(0)\n"
+    "print('available', locale.nl_langinfo(locale.CODESET), sys.stdin.encoding, sys.stdin.errors,\n"
+    "      sys.flags.utf8_mode)\n"
+)
+# The marker a fixture carries where its raw bytes go: the raw form puts the bytes there, the escaped
+# form the ASCII JSON escapes of the text those bytes decode to.
+_STDIN_MARK = "QAMARK"
+
+
+def _stdin_fixture(obj, raw, escaped):
+    """(raw bytes, ASCII bytes) of one JSON fixture: obj's json.dumps with _STDIN_MARK replaced by raw in
+    the first and by the JSON escape text escaped in the second."""
+    text = json.dumps(obj).encode("ascii")
+    if _STDIN_MARK.encode("ascii") not in text:
+        raise ValueError("a stdin fixture carries no " + _STDIN_MARK)
+    return (text.replace(_STDIN_MARK.encode("ascii"), raw),
+            text.replace(_STDIN_MARK.encode("ascii"), escaped.encode("ascii")))
+
+
+def _stdin_mode_fixture(mode, cwd):
+    """A controlled payload for one registered mode, shaped by its event, with _STDIN_MARK in a field no
+    handler reads; the tool is a plain Bash true, so no fixture reaches a probe or a state write that the
+    stripped environment and the plain cwd do not keep inert."""
+    event = aiqt_hooks.HANDLER_EVENT[mode]
+    obj = dict(hook_event_name=event, session_id="qa-stdin-locale", cwd=cwd, aiqt_qa_ignored=_STDIN_MARK)
+    if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+        obj.update(tool_name="Bash", tool_input=dict(command="true"))
+        if event == "PostToolUse":
+            obj["tool_response"] = dict(stdout="", stderr="", interrupted=False)
+        elif event == "PostToolUseFailure":
+            obj["error"] = "exit 1"
+    elif event in ("Stop", "SubagentStop"):
+        obj.update(last_assistant_message="Done.", stop_hook_active=False)
+    elif event == "UserPromptSubmit":
+        obj["prompt"] = "hello"
+    elif event == "SessionStart":
+        obj["source"] = "startup"
+    return obj
+
+
+def _stdin_outcome(proc):
+    """The decision category of one hook child, never its clock-dependent text: the exit status, the
+    stdout object's keys with its permission decision (or a marker for no stdout or an unparsed one), and
+    the diagnostic category (an unreadable payload, a fail-closed note, other text, or none)."""
+    out = (proc.stdout or b"").decode("utf-8", "replace")
+    err = (proc.stderr or b"").decode("utf-8", "replace")
+    if not out.strip():
+        shape = ("no-stdout",)
+    else:
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            shape = ("unparsed-stdout",)
+        else:
+            if isinstance(obj, dict):
+                specific = obj.get("hookSpecificOutput")
+                decision = specific.get("permissionDecision") if isinstance(specific, dict) else None
+                shape = tuple(sorted(obj)) + ("decision=" + str(decision),)
+            else:
+                shape = ("non-object-stdout",)
+    if "unreadable payload" in out or "unreadable hook payload" in err:
+        diagnostic = "unreadable-payload"
+    elif "failing closed" in err:
+        diagnostic = "failing-closed"
+    elif err.strip():
+        diagnostic = "other-stderr"
+    else:
+        diagnostic = "no-stderr"
+    return (proc.returncode, shape, diagnostic)
+
+
+def _test_stdin_locale_decoding(failures, tmp):
+    """(stdin-loc-*) Real-subprocess vectors: the dispatcher decodes the hook payload the same way under
+    every locale. Each child runs the LIVE hook file under [sys.executable, "-I", "-B", "-X", "utf8=0"]
+    (isolated, and with UTF-8 mode off, so the interpreter's own UTF-8 mode cannot mask a locale-encoded
+    read) with LC_ALL set to C, to en_US.UTF-8 and, where the host has it, to C.UTF-8, sends real bytes on
+    its standard input and asserts the exit status, the parsed decision and the diagnostic category. The
+    same rows run again under the shipped command line, [sys.executable, "-I", "-B"] with no -X option
+    (the hooks.json command is python3 -I; -B only stops bytecode writes), with LC_ALL set to C and to
+    POSIX, where the interpreter turns UTF-8 mode on; their labels start stdin-loc-shipped-, and their
+    probe must report UTF-8 mode 1 and a utf-8/surrogateescape standard input, or the rows under that
+    locale are reported as unevaluated coverage, a failure.
+
+    A raw 0xff inside an otherwise valid JSON string, first in a field no handler reads and then in the
+    consumed path, command or message, must give the same decision as an ASCII fixture carrying the
+    equivalent \\udcff escape, on a benign allow, a structured deny, an allow-note and a Stop warning;
+    valid non-ASCII UTF-8 and truncated and overlong sequences must match their escaped equivalents too;
+    an invalid byte outside a string, empty input, malformed JSON, non-object JSON and a payload that
+    starts with a UTF-8 byte order mark keep each mode's error posture (fail-closed exit 2, fail-open warn
+    on exit 0); CRLF and lone-CR line ends between JSON tokens decide as LF does (no line end is
+    translated, and translating one would not change that decision; _test_stdin_read_once pins that line
+    ends come through unchanged). Every registered mode is then run on a controlled fixture holding a raw
+    0xff in an ignored field, which must decide as its escaped twin does and never as an unreadable
+    payload.
+
+    These vectors fail on the locale-encoded reader (sys.stdin.read()): under en_US.UTF-8 a raw 0xff
+    raised UnicodeDecodeError, so a fail-closed mode exited 2 on an unreadable payload and a fail-open one
+    warned, where the C locale judged the same payload; and under C with UTF-8 mode off, as the utf8=0
+    children run, the ASCII codec turned valid UTF-8 into surrogates, so the deny reason echoing a
+    non-ASCII path differed from its escaped twin. The stdin-loc-shipped- rows pass on that reader: under
+    the shipped command line the C and POSIX locales read standard input as utf-8 with surrogateescape,
+    as this reader does. They pin that the shipped configuration decides as the utf8=0 rows do, and fail
+    on a reader whose decoding depends on UTF-8 mode. A required locale the host lacks is reported as
+    unevaluated coverage, a failure; a missing C.UTF-8 is reported as unevaluated and skipped."""
+    hook = os.path.abspath(aiqt_hooks.__file__)
+    home = tmp / "stdin-locale-home"
+    cwd = tmp / "stdin-locale-cwd"
+    for path in (home, cwd, home / "state", home / "config", home / "cache"):
+        path.mkdir(parents=True, exist_ok=True)
+    base_env = dict((k, v) for k, v in os.environ.items()
+                    if not k.startswith(("AIQT_", "ORCH_", "CLAUDE_", "LC_", "PYTHON", "GIT_"))
+                    and k not in ("LANG", "LANGUAGE"))
+    base_env.update(HOME=str(home), XDG_STATE_HOME=str(home / "state"),
+                    XDG_CONFIG_HOME=str(home / "config"), XDG_CACHE_HOME=str(home / "cache"))
+
+    def run(label, args, payload, env):
+        # Every child is the interpreter, spelled here as the literal launch head, so the repo-wide
+        # maintenance pin scan can see it is not git; args holds only what follows -I -B.
+        try:
+            return subprocess.run([sys.executable, "-I", "-B", *args], input=payload, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, cwd=str(cwd), timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append("(" + label + ") could not run the child: " + repr(exc))
+            return None
+
+    # (tag, LC_ALL, interpreter options before the hook, UTF-8 mode the probe must report, required)
+    configs = [(name, name, ["-X", "utf8=0"], "0", name in _STDIN_REQUIRED_LOCALES)
+               for name in _STDIN_REQUIRED_LOCALES + _STDIN_OPTIONAL_LOCALES]
+    configs += [("shipped-" + name, name, [], "1", True) for name in _STDIN_SHIPPED_LOCALES]
+    locales = []
+    for tag, name, flags, want_mode, required in configs:
+        env = dict(base_env, LC_ALL=name)
+        label = "stdin-loc-probe-" + tag
+        proc = run(label, flags + ["-c", _STDIN_LOCALE_PROBE], b"", env)
+        if proc is None:
+            continue
+        words = proc.stdout.decode("utf-8", "replace").split()
+        utf8_name = "utf-8" in name.lower()
+        reason = None
+        if proc.returncode != 0 or not words:
+            reason = "the probe exited {} with {!r}".format(proc.returncode, proc.stdout + proc.stderr)
+        elif words[0] != "available":
+            reason = "the C library refused it ({})".format(" ".join(words[1:]))
+        elif len(words) != 5 or words[4] != want_mode:
+            reason = "the probe reported {!r}, not UTF-8 mode {}".format(" ".join(words), want_mode)
+        elif utf8_name and words[1].upper().replace("-", "") != "UTF8":
+            reason = "its codeset is {}, not UTF-8".format(words[1])
+        elif want_mode == "1" and (words[2].lower().replace("-", "") != "utf8"
+                                   or words[3] != "surrogateescape"):
+            reason = "its standard input is {}/{}, not utf-8/surrogateescape".format(words[2], words[3])
+        if reason is not None:
+            note = ("(stdin-loc-unevaluated-{}) LC_ALL={} under {} is not usable on this host ({}), so the "
+                    "stdin decoding rows under it are unevaluated".format(
+                        tag, name, " ".join(["python3", "-I"] + flags), reason))
+            if required:
+                failures.append(note)
+            else:
+                print(note)
+            continue
+        locales.append((tag, name, flags, env, "{}, codeset {}, stdin {}/{}, UTF-8 mode {}".format(
+            " ".join(["-I"] + flags), words[1], words[2], words[3], words[4])))
+
+    deny_obj = dict(hook_event_name="PreToolUse", tool_name="Write", tool_input=dict(file_path="relative.txt"))
+    allow_obj = dict(hook_event_name="PreToolUse", tool_name="Read", tool_input=dict(file_path="/abs/x.txt"))
+    note_obj = dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command="cd sub"))
+    wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    stop_obj = dict(hook_event_name="Stop", last_assistant_message=wall)
+
+    def with_ignored(obj):
+        return dict(obj, aiqt_qa_ignored="x" + _STDIN_MARK + "y")
+
+    def consumed(obj, key, value):
+        copy = json.loads(json.dumps(obj))
+        if key == "last_assistant_message":
+            copy[key] = value
+        else:
+            copy["tool_input"][key] = value
+        return copy
+
+    # (label, mode, fixture object, raw bytes, escaped text, the decision both must give: shape_ok's kind)
+    paired = [
+        ("allow-ignored", "absolute_paths", with_ignored(allow_obj), b"\xff", "\\udcff", "allow"),
+        ("allow-consumed", "absolute_paths", consumed(allow_obj, "file_path", "/abs/" + _STDIN_MARK + ".txt"),
+         b"\xff", "\\udcff", "allow"),
+        ("deny-ignored", "absolute_paths", with_ignored(deny_obj), b"\xff", "\\udcff", "deny"),
+        ("deny-consumed", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xff", "\\udcff", "deny"),
+        ("note-ignored", "bash_absolute_paths", with_ignored(note_obj), b"\xff", "\\udcff", "note"),
+        ("note-consumed", "bash_absolute_paths", consumed(note_obj, "command", "cd sub" + _STDIN_MARK),
+         b"\xff", "\\udcff", "note"),
+        ("stopwarn-ignored", "diff_wall_stop", with_ignored(stop_obj), b"\xff", "\\udcff", "warn"),
+        ("stopwarn-consumed", "diff_wall_stop",
+         consumed(stop_obj, "last_assistant_message", wall.replace("+b", "+b" + _STDIN_MARK)),
+         b"\xff", "\\udcff", "warn"),
+        ("deny-utf8", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         "é→\U0001f600".encode("utf-8"), "\\u00e9\\u2192\\ud83d\\ude00", "deny"),
+        ("deny-truncated", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK),
+         b"\xe2\x86", "\\udce2\\udc86", "deny"),
+        ("deny-truncated-mid", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xc3", "\\udcc3", "deny"),
+        ("deny-overlong", "absolute_paths", consumed(deny_obj, "file_path", "rel" + _STDIN_MARK + ".txt"),
+         b"\xc0\xaf", "\\udcc0\\udcaf", "deny"),
+        ("note-utf8", "bash_absolute_paths", consumed(note_obj, "command", "cd sub" + _STDIN_MARK),
+         "é".encode("utf-8"), "\\u00e9", "note"),
+        # The heredoc-terminator residue names these: a here-document body or delimiter holding a byte that
+        # is not valid UTF-8 is judged on its termination, as its escaped twin is.
+        ("heredoc-body-closed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<EOF\nab " + _STDIN_MARK + " cd\nEOF\n"), b"\xff", "\\udcff", "allow"),
+        ("heredoc-delim-closed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<E" + _STDIN_MARK + "\nbody\nE" + _STDIN_MARK + "\n"),
+         b"\xff", "\\udcff", "allow"),
+        ("heredoc-delim-mistyped", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<E" + _STDIN_MARK + "\nbody\nEOF\n"), b"\xff", "\\udcff", "deny"),
+        ("heredoc-body-unclosed", "heredoc_terminator",
+         consumed(note_obj, "command", "cat <<EOF\nab " + _STDIN_MARK + "\nEOFX\n"), b"\xff", "\\udcff", "deny"),
+    ]
+
+    def shape_ok(kind, proc):
+        out = proc.stdout.decode("utf-8", "replace")
+        if kind == "allow":
+            return proc.returncode == 0 and not out.strip() and not proc.stderr
+        try:
+            obj = json.loads(out)
+        except ValueError:
+            return False
+        if proc.returncode != 0 or not isinstance(obj, dict) or proc.stderr:
+            return False
+        specific = obj.get("hookSpecificOutput")
+        if kind == "deny":
+            return isinstance(specific, dict) and specific.get("permissionDecision") == "deny"
+        if kind == "note":
+            return specific is None and isinstance(obj.get("systemMessage"), str)
+        return specific is None and "WARNING" in str(obj.get("systemMessage"))
+
+    deny_text = json.dumps(deny_obj, indent=1).encode("ascii")
+    stop_text = json.dumps(stop_obj).encode("ascii")
+    allow_text = json.dumps(allow_obj).encode("ascii")
+    bom = b"\xef\xbb\xbf"
+    # (label, mode, payload, expected exit, stderr needle or None, fail-open stdout needle or None)
+    # The bom rows: a payload that starts with a UTF-8 byte order mark is not stripped. The mark decodes to
+    # U+FEFF, which json.loads refuses ("Unexpected UTF-8 BOM"), so the payload reads as unreadable: a
+    # fail-closed mode exits 2 even on an allow-shaped payload, and a fail-open one warns on exit 0. A
+    # reader that stripped the mark (a utf-8-sig decode) would judge the payload instead and allow it.
+    postured = [
+        ("fc-bom", "absolute_paths", bom + allow_text, 2, "Unexpected UTF-8 BOM", None),
+        ("fo-bom", "diff_wall_stop", bom + stop_text, 0, None, "Unexpected UTF-8 BOM"),
+        ("fc-outside-string", "absolute_paths", b"{\xff" + json.dumps(deny_obj).encode("ascii")[1:], 2,
+         "JSONDecodeError", None),
+        ("fc-empty", "absolute_paths", b"", 2, "unreadable hook payload", None),
+        ("fc-malformed", "absolute_paths", b"not json", 2, "unreadable hook payload", None),
+        ("fc-nonobject", "absolute_paths", b"[\"\xff\"]", 2, "payload is not a JSON object", None),
+        ("fc-cr-in-string", "absolute_paths", deny_text.replace(b"relative.txt", b"rel\r.txt"), 2,
+         "unreadable hook payload", None),
+        ("fo-outside-string", "diff_wall_stop", b"{\xff" + stop_text[1:], 0, None, "JSONDecodeError"),
+        ("fo-empty", "diff_wall_stop", b"", 0, None, "unreadable payload"),
+        ("fo-malformed", "diff_wall_stop", b"not json", 0, None, "unreadable payload"),
+        ("fo-nonobject", "diff_wall_stop", b"[\"\xff\"]", 0, None, "payload is not a JSON object"),
+    ]
+    # These rows pin that CRLF and lone-CR line ends between JSON tokens still parse and decide as LF does.
+    # They cannot pin whether a line end is translated: strict json.loads reads a CR between tokens as
+    # whitespace and refuses a raw CR or LF inside a string alike, so translating would change no decision,
+    # and these rows pass either way. The stdin-once-line-ends row pins that line ends come through
+    # unchanged.
+    line_ends = [
+        ("deny-crlf", "absolute_paths", deny_text.replace(b"\n", b"\r\n")),
+        ("deny-lone-cr", "absolute_paths", deny_text.replace(b"\n", b"\r")),
+    ]
+    modes = sorted(aiqt_hooks.HANDLERS)
+
+    for name, lc_all, flags, env, effective in locales:
+        hook_args = flags + [hook]
+        where = " under LC_ALL={} ({})".format(lc_all, effective)
+        for label, mode, obj, raw, escaped, kind in paired:
+            row = "stdin-loc-" + name + "-" + label
+            raw_payload, escaped_payload = _stdin_fixture(obj, raw, escaped)
+            got = run(row, hook_args + [mode], raw_payload, env)
+            want = run(row + "-escaped", hook_args + [mode], escaped_payload, env)
+            if got is None or want is None:
+                continue
+            if not shape_ok(kind, want):
+                failures.append("({}-escaped) the ASCII \\u-escaped control did not give the expected {}{}: "
+                                "exit {}, stdout {!r}, stderr {!r}".format(row, kind, where, want.returncode,
+                                                                           want.stdout, want.stderr))
+            if not shape_ok(kind, got):
+                failures.append("({}) the raw-byte fixture did not give the expected {}{}: exit {}, stdout "
+                                "{!r}, stderr {!r}".format(row, kind, where, got.returncode, got.stdout,
+                                                           got.stderr))
+            elif (got.returncode, got.stdout, got.stderr) != (want.returncode, want.stdout, want.stderr):
+                failures.append("({}) the raw-byte fixture decided differently from its \\u-escaped twin{}: "
+                                "{!r} against {!r}".format(row, where, got.stdout, want.stdout))
+        for label, mode, payload, want_rc, err_needle, out_needle in postured:
+            row = "stdin-loc-" + name + "-" + label
+            got = run(row, hook_args + [mode], payload, env)
+            if got is None:
+                continue
+            out = got.stdout.decode("utf-8", "replace")
+            err = got.stderr.decode("utf-8", "replace")
+            if got.returncode != want_rc:
+                failures.append("({}) expected exit {}{}, got {} (stdout {!r}, stderr {!r})".format(
+                    row, want_rc, where, got.returncode, out, err))
+            if want_rc == 2 and out:
+                failures.append("({}) a fail-closed payload error wrote to stdout, the decision "
+                                "channel{}: {!r}".format(row, where, out))
+            if err_needle is not None and err_needle not in err:
+                failures.append("({}) stderr does not name {!r}{}: {!r}".format(row, err_needle, where, err))
+            if out_needle is not None and (out_needle not in out or "systemMessage" not in out):
+                failures.append("({}) the fail-open warning does not name {!r}{}: {!r}".format(
+                    row, out_needle, where, out))
+        lf = run("stdin-loc-" + name + "-deny-lf", hook_args + ["absolute_paths"], deny_text, env)
+        for label, mode, payload in line_ends:
+            row = "stdin-loc-" + name + "-" + label
+            got = run(row, hook_args + [mode], payload, env)
+            if got is None or lf is None:
+                continue
+            if not shape_ok("deny", got) or got.stdout != lf.stdout:
+                failures.append("({}) a payload with {} line ends did not decide as its LF twin{}: {!r} "
+                                "against {!r}".format(row, label.split("-", 1)[1], where, got.stdout, lf.stdout))
+        for mode in modes:
+            row = "stdin-loc-" + name + "-mode-" + mode
+            raw_payload, escaped_payload = _stdin_fixture(_stdin_mode_fixture(mode, str(cwd)), b"\xff",
+                                                          "\\udcff")
+            got = run(row, hook_args + [mode], raw_payload, env)
+            want = run(row + "-escaped", hook_args + [mode], escaped_payload, env)
+            if got is None or want is None:
+                continue
+            got_outcome, want_outcome = _stdin_outcome(got), _stdin_outcome(want)
+            if want_outcome[2] == "unreadable-payload":
+                failures.append("({}-escaped) the ASCII control fixture read as an unreadable payload{}: "
+                                "{!r}".format(row, where, want_outcome))
+            if got_outcome[2] == "unreadable-payload" or got_outcome != want_outcome:
+                failures.append("({}) a raw 0xff in an ignored field decided {!r}, its \\u-escaped twin "
+                                "{!r}{}".format(row, got_outcome, want_outcome, where))
+    print("(stdin-loc) hook stdin decoding evaluated under: " + (
+        "; ".join("LC_ALL={} ({})".format(lc_all, effective)
+                  for _tag, lc_all, _flags, _env, effective in locales) or "none"))
+
+
+# (stdin-once-*) The payload a stand-in stdin's own text read() returns: allow-shaped, so a reader that
+# fell back to a second read through the text layer would turn a payload failure into an allow.
+_STDIN_ONCE_ALLOW = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Read",
+                                    tool_input=dict(file_path="/abs/x.txt")))
+
+
+class _StdinOnceStream:
+    """A stand-in sys.stdin with a binary buffer that records every read in calls. buffer.read() raises
+    result when it is an exception and returns it otherwise; the stream's own read() returns
+    _STDIN_ONCE_ALLOW."""
+
+    def __init__(self, result):
+        self.calls = []
+        calls = self.calls
+
+        class _Buffer:
+            def read(self, *args):
+                calls.append("buffer.read")
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+
+        self.buffer = _Buffer()
+
+    def read(self, *args):
+        self.calls.append("text.read")
+        return _STDIN_ONCE_ALLOW
+
+
+def _test_stdin_read_once(failures):
+    """(stdin-once-*) In-process vectors: main() reads a real standard input once, through its binary
+    buffer, and a failure of that read or of the payload it returns reaches the existing unreadable-payload
+    handling with no second read. Each row installs a _StdinOnceStream as sys.stdin and asserts the exit
+    status, the diagnostic and that the only read was one buffer.read: a buffer.read that raises EIO fails
+    a fail-closed mode with exit 2 and warns on exit 0 for a fail-open one; a buffer.read that returns a
+    0xff the decoder must surrogate-escape, outside a JSON string, fails as unreadable JSON, and inside a
+    string reaches the handler, which denies the relative path; a buffer.read that returns None (a
+    non-blocking standard input with no data ready) is a read failure named as BlockingIOError, exit 2
+    for a fail-closed mode and a warning on exit 0 for a fail-open one.
+
+    Each fallback shape fails its own rows, not every row: that fallback read is a second call, and its
+    allow-shaped payload is allowed. A reader that falls back to the stream's own read() after a raising
+    binary read fails the two raise-* rows only. A reader that falls back after a strict decode that
+    refuses the 0xff fails the two escape-* rows and the line-ends row only. The two none-* rows fail on a
+    reader that lets the None reach the decoder (its note names AttributeError instead), and on one that
+    falls back on a None read.
+
+    The stdin-once-line-ends row calls _read_hook_input directly and pins that line ends are not
+    translated: a CRLF and a lone CR come through unchanged, as the text stream this replaced gave them on
+    POSIX. No decision row can pin that (strict json.loads reads a CR between tokens as whitespace and
+    refuses a raw CR or LF inside a string alike, so translating would change no decision); this row
+    fails on a reader that translates a CRLF or a lone CR to LF."""
+    deny_bytes = json.dumps(dict(hook_event_name="PreToolUse", tool_name="Write",
+                                 tool_input=dict(file_path="relative.txt"))).encode("ascii")
+    eio = OSError(errno.EIO, "injected EIO")
+    # (label, mode, buffer.read result, expected exit, stderr needle or None, stdout needle or None)
+    rows = [
+        ("raise-fail-closed", "absolute_paths", eio, 2, "unreadable hook payload (OSError", None),
+        ("raise-fail-open", "diff_wall_stop", eio, 0, None, "unreadable payload: OSError"),
+        ("escape-outside-string", "absolute_paths", b"{\xff" + deny_bytes[1:], 2,
+         "unreadable hook payload (JSONDecodeError", None),
+        ("escape-in-string", "absolute_paths", deny_bytes.replace(b"relative", b"rel\xffative"), 0, None,
+         '"permissionDecision": "deny"'),
+        ("none-fail-closed", "absolute_paths", None, 2,
+         "unreadable hook payload (BlockingIOError: standard input is non-blocking", None),
+        ("none-fail-open", "diff_wall_stop", None, 0, None,
+         "unreadable payload: BlockingIOError: standard input is non-blocking"),
+    ]
+    for label, mode, result, want_rc, err_needle, out_needle in rows:
+        row = "stdin-once-" + label
+        stream = _StdinOnceStream(result)
+        out = io.StringIO()
+        try:
+            code, err, _seconds = _main_run(mode, stdin=stream, stdout=out)
+        except Exception as exc:
+            failures.append("({}) main() raised {!r}".format(row, exc))
+            continue
+        if stream.calls != ["buffer.read"]:
+            failures.append("({}) expected exactly one read, buffer.read, got {!r}".format(row, stream.calls))
+        if code != want_rc:
+            failures.append("({}) expected exit {}, got {} (stdout {!r}, stderr {!r})".format(
+                row, want_rc, code, out.getvalue(), err))
+        if want_rc == 2 and out.getvalue():
+            failures.append("({}) a fail-closed payload error wrote to stdout, the decision channel: "
+                            "{!r}".format(row, out.getvalue()))
+        if err_needle is not None and err_needle not in err:
+            failures.append("({}) stderr does not name {!r}: {!r}".format(row, err_needle, err))
+        if out_needle is not None and out_needle not in out.getvalue():
+            failures.append("({}) stdout does not name {!r}: {!r}".format(row, out_needle, out.getvalue()))
+    stream = _StdinOnceStream(b"a\r\nb\rc\nd\xff\r\r\n")
+    try:
+        text = aiqt_hooks._read_hook_input(stream)
+    except Exception as exc:
+        failures.append("(stdin-once-line-ends-raised) _read_hook_input raised {!r}".format(exc))
+    else:
+        if text != "a\r\nb\rc\nd\udcff\r\r\n" or stream.calls != ["buffer.read"]:
+            failures.append("(stdin-once-line-ends) expected 'a\\r\\nb\\rc\\nd\\udcff\\r\\r\\n', line ends "
+                            "unchanged, from one buffer.read, got {!r} from {!r}".format(text, stream.calls))
 
 
 def _test_note_shape_pins(failures, tmp):
@@ -4983,6 +5446,251 @@ _TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUO
 _TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS)
 
 
+# The gatdis interim narrowing (gcg-*): a check followed by git outside the exact shape list denies. "main" is the
+# decision main's guard gave before the narrowing (observed for the plan's rows); a flip row's decision changes,
+# a keep row's does not. With the new rule reverted (_gate_check_then_git returning False) every flip row goes
+# back to its main decision, so each is red then; with the shape list emptied (_gate_check_git_shape returning
+# False) every shape row denies, so each allow row is red then.
+_GCG_ROWS = (
+    # (label, command, main decision, decision now, kind)
+    ("gcg-01", "pytest && git commit -m x", "allow", "deny", "flip"),
+    ("gcg-02", "pytest | tee /tmp/check.log && git commit -m x", "allow", "deny", "flip"),
+    ("gcg-03", "pytest; git commit -m x", "allow", "deny", "flip"),
+    ("gcg-04", "pytest\ngit commit -m x", "allow", "deny", "flip"),
+    ("gcg-05", "pytest || true; git push origin feat", "allow-note", "deny", "flip"),
+    ("gcg-06", "make test && git -C /r push origin feat", "allow", "deny", "flip"),
+    ("gcg-07", "pytest && git status", "allow", "deny", "flip"),
+    ("gcg-08", "pytest && g'i't commit -m x", "allow", "deny", "flip"),
+    ("gcg-09", "bash tools/run_all_checks.sh && git commit -F /tmp/msg", "allow", "allow", "shape"),
+    ("gcg-10", "bash tools/run_all_checks.sh > /tmp/out.log 2>&1 && git commit -m 'fix parser'", "allow", "allow",
+     "shape"),
+    ("gcg-11", "python3 -I -B tools/check_leaks.py && git -C /r commit -F /tmp/m", "allow", "allow", "shape"),
+    ("gcg-12", "tools/run_all_checks.sh && git push origin feat/x", "allow", "allow", "shape"),
+    ("gcg-13", "bash tools/run_all_checks.sh  && git commit -F /tmp/msg", "allow", "deny", "flip"),
+    ("gcg-14", "bash tools/run_all_checks.sh && git commit -m 'see git log'", "allow", "deny", "flip"),
+    ("gcg-15", "bash tools/run_all_checks.sh && git commit -F /tmp/../etc/m", "allow", "deny", "flip"),
+    ("gcg-16", "bash tools/run_all_checks.sh && git push origin ../x", "allow", "deny", "flip"),
+    ("gcg-17", "bash tools/run_all_checks.sh | tail -5 && git commit -m x", "deny", "deny", "keep"),
+    ("gcg-18", "bash tools/run_all_checks.sh && git commit -F /tmp/msg --no-verify", "deny", "deny", "keep"),
+    ("gcg-19", "pytest", "allow", "allow", "keep"),
+    ("gcg-20", "git commit -m tests", "allow", "allow", "keep"),
+    ("gcg-21", "pytest && echo done", "allow", "allow", "keep"),
+    ("gcg-22", "pytest && cat .gitignore", "allow", "allow", "keep"),
+    ("gcg-23", "pytest && $G commit -m x", "allow", "deny", "flip"),
+    ("gcg-24", 'sh -c "$CMD" && git commit -m x', "allow", "allow", "keep"),
+    ("gcg-25", "pytest tests && git -C /r commit -F /tmp/m", "allow", "deny", "flip"),
+    ("gcg-26", "pytest 'unbalanced && git commit -m x", "allow", "deny", "flip"),
+    ("gcg-27", "python3 -I -B tools/check_selftest_execution.py --suite aiqt-hooks && git push origin feat", "allow",
+     "allow", "shape"),
+    ("gcg-28", "bash tools/run_all_checks.sh && git push origin feat.lock", "allow", "deny", "flip"),
+)
+
+
+# The gatdis interim plumbing deny (gpl-*): git commit-tree, send-pack and http-push run no hook.
+# With the deny reverted (_gate_plumbing_git returning False) every flip row goes back to main's decision.
+_GPL_ROWS = (
+    ("gpl-01", "git commit-tree -p HEAD -m x 4b825dc642cb6eb9a060e54bf8d69288fbee4904", "allow", "deny", "flip"),
+    ("gpl-02", "c=$(git commit-tree -p HEAD -m x HEAD^{tree}) && git update-ref refs/heads/p $c", "allow", "deny",
+     "flip"),
+    ("gpl-03", "git send-pack /srv/r.git refs/heads/plumb", "allow", "deny", "flip"),
+    ("gpl-04", "git -C /r send-pack origin plumb", "allow", "deny", "flip"),
+    ("gpl-05", "git http-push https://example.invalid/r.git plumb", "allow", "deny", "flip"),
+    ("gpl-06", "git commit-'tree' -m x T", "deny", "deny", "keep"),  # main's closed grammar denies it first
+    ("gpl-07", "git-send-pack /srv/r.git main", "allow", "deny", "flip"),
+    ("gpl-08", "$G send-pack /srv/r.git main", "allow", "deny", "flip"),
+    ("gpl-09", "git send-pack 'unbalanced", "allow", "deny", "flip"),
+    ("gpl-10", "git log --oneline", "allow", "allow", "keep"),
+    ("gpl-11", "git push origin feat", "allow", "allow", "keep"),
+    ("gpl-12", "grep -n send-pack notes.txt", "allow", "allow", "keep"),
+    ("gpl-13", "git commit-tree -p HEAD -m x T && git commit --no-verify -m y", "deny", "deny", "keep"),
+    # Messages as data: a verb inside a quoted literal git commit, tag or merge message is data ("data"
+    # rows: allowed, and denied again with _gate_plumbing_inert reverted); every other place still denies.
+    ("gpl-14", "git commit -m 'fix the send-pack docs'", "allow", "allow", "data"),
+    ("gpl-15", 'git commit -am "commit-tree: document it"', "allow", "allow", "data"),
+    ("gpl-16", "git tag -a v1 -m 'http-push notes'", "allow", "allow", "data"),
+    ("gpl-17", "git merge -m 'send-pack fix' feat", "allow", "allow", "data"),
+    ("gpl-18", "git commit -m 'send-pack' && git send-pack /r.git main", "allow", "deny", "flip"),
+    ("gpl-19", "echo commit-tree | xargs git", "allow", "deny", "flip"),
+    ("gpl-20", "sh -c \"git commit -m 'x' && git send-pack /r main\"", "allow", "deny", "flip"),
+    ("gpl-21", "git commit -m send-pack", "allow", "deny", "flip"),  # an unquoted message stays denied
+    ("gpl-22", "git -c 'core.editor=git send-pack /r' commit", "allow", "deny", "flip"),
+    ("gpl-23", "git config alias.sp send-pack", "allow", "deny", "flip"),
+    ("gpl-24", "git commit -m 'commit-tree' && git commit-tree -m 'commit-tree' T", "allow", "deny", "flip"),
+    ("gpl-25", "git commit -m 'send-pack' ; git commit -m 'send-pack' ; git-send-pack /r main", "allow", "deny",
+     "flip"),
+)
+
+
+# The gatdis interim push-redirect deny (gpr-*, residuals X4 and X5): a git push naming its own
+# receive-pack (--receive-pack, --exec, any prefix git accepts), a PATH or GIT_EXEC_PATH override, git
+# --exec-path= or a loader variable. The third column is 52baa177's decision; with the deny reverted
+# (_gate_push_redirect returning None) every row gives it again and every flip row is red.
+_GPR_ROWS = (
+    ("gpr-01", "git push '--receive-pack=git receive-pack /srv/r.git #' . HEAD:refs/heads/x", "allow", "deny",
+     "flip"),
+    ("gpr-02", "git push --receive-pack=/usr/bin/git-receive-pack origin main", "allow", "deny", "flip"),
+    ("gpr-03", "git push --rece=x . HEAD", "allow", "deny", "flip"),
+    ("gpr-04", "git push --receive-pack x origin", "allow", "deny", "flip"),
+    ("gpr-05", "git push --exec=x origin main", "allow", "deny", "flip"),
+    ("gpr-06", "git push --e x origin main", "allow", "deny", "flip"),
+    ("gpr-07", "git push --exe=x origin", "allow", "deny", "flip"),
+    ("gpr-08", "PATH=/x:/usr/bin git push origin main", "allow", "deny", "flip"),
+    ("gpr-09", "env PATH=/x git push origin main", "allow", "deny", "flip"),
+    ("gpr-10", "GIT_EXEC_PATH=/x git push origin main", "allow", "deny", "flip"),
+    ("gpr-11", "git --exec-path=/x push origin main", "allow", "deny", "flip"),
+    ("gpr-12", "export PATH=/x:$PATH; git push origin main", "allow", "deny", "flip"),
+    ("gpr-13", "LD_PRELOAD=/x.so git push origin main", "allow", "deny", "flip"),
+    # 52baa177 already denies these four (a nested shell, an ANSI-C or quoted option word, a parse failure)
+    ("gpr-14", "sh -c 'PATH=/x git push origin main'", "deny", "deny", "keep"),
+    ("gpr-15", "git push $'--receive-pack=x' .", "deny", "deny", "keep"),
+    ("gpr-16", "git push --rec'eive-pack'=x .", "deny", "deny", "keep"),
+    ("gpr-17", "git push --exec=x origin 'unbalanced", "deny", "deny", "keep"),
+    ("gpr-18", "git push origin main", "allow", "allow", "keep"),
+    ("gpr-19", "git push --no-exec origin", "allow", "allow", "keep"),
+    ("gpr-20", "git push --recurse-submodules=check origin", "allow", "allow", "keep"),
+    ("gpr-21", "git rebase --exec 'make test' main", "allow", "allow", "keep"),
+    ("gpr-22", "git fetch --upload-pack=x origin", "allow", "allow", "keep"),
+    ("gpr-23", "MYPATH=/x git push origin main", "allow", "allow", "keep"),
+    ("gpr-24", "git commit -m x && PATH=/x make", "allow", "allow", "keep"),
+    ("gpr-25", "echo $PATH && git push origin main", "allow", "allow", "keep"),
+    # Messages as data: a quoted literal commit message is data on the parsed path (_gate_plumbing_inert); the same
+    # spelling outside a message still denies. The data rows are red with that reading reverted (gpr-*-raw).
+    ("gpr-26", "git commit -m 'ci: set PATH= for node' && git push origin main", "allow", "allow", "data"),
+    ("gpr-27", "git merge -m 'merge the --receive-pack docs' topic && git push origin main", "allow", "allow",
+     "data"),
+    ("gpr-28", "git commit -m 'ci' && PATH=/x git push origin main", "allow", "deny", "flip"),
+    # The disclosed X5 form: an assignment read back at run time from a quoted literal message the same command
+    # writes is not read (allowed, with and without the deny); an ANSI-C message is not a quoted literal and
+    # still denies.
+    ("gpr-29", "git commit -m 'PATH=/x' && env $(git log -1 --format=%B) git push origin main", "allow", "allow",
+     "keep"),
+    ("gpr-30", "git commit -m 'PATH=/x' && declare -x $(git log -1 --format=%B) && git push origin main", "allow",
+     "allow", "keep"),
+    ("gpr-31", "git commit -m $'PATH=/x' && env $(git log -1 --format=%B) git push origin main", "deny", "deny",
+     "keep"),
+)
+
+
+def _gcg_reason(command):
+    _code, obj, _err = aiqt_hooks.gate_weakening({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                  "tool_input": {"command": command}})
+    return ((obj or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+
+
+def _test_gate_check_git(failures, tmp):
+    """The gatdis interim narrowing rows (gcg-*), their message rows, their revert proofs, and the write-scope
+    guard's gate-record directory rows (gcg-wr-*, orchestrator answer O5)."""
+    for label, command, main, now, kind in _GCG_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    reason = _gcg_reason("pytest && git commit -m x")
+    for token in ("runs a check and names git", "bash tools/run_all_checks.sh", "git commit -F /ABS/PATH",
+                  "as its own Bash call", "gate-record install"):
+        if token not in reason:
+            failures.append("(gcg-msg) the check-then-git deny does not name {!r}: {!r}".format(token, reason))
+    if "truncat" not in _gcg_reason("bash tools/run_all_checks.sh | tail -5 && git commit -m x"):
+        failures.append("(gcg-msg-17) the sink-tier deny no longer keeps its own message")
+    if "--no-verify" not in _gcg_reason("bash tools/run_all_checks.sh && git commit -F /tmp/msg --no-verify"):
+        failures.append("(gcg-msg-18) the hook-bypass deny no longer keeps its own message")
+    saved_rule, saved_shape = aiqt_hooks._gate_check_then_git, aiqt_hooks._gate_check_git_shape
+    try:
+        aiqt_hooks._gate_check_then_git = lambda command, records=None: False
+        for label, command, main, now, kind in _GCG_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the narrowing reverted, gate_weakening({!r}) should give main's "
+                                "{}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the narrowing reverted".format(label))
+        aiqt_hooks._gate_check_then_git = saved_rule
+        aiqt_hooks._gate_check_git_shape = lambda command: False
+        for label, command, main, now, kind in _GCG_ROWS:
+            if kind == "shape" and _decision(aiqt_hooks.gate_weakening, command) == now:
+                failures.append("({}-empty) shape row is not red with the shape list emptied".format(label))
+    finally:
+        aiqt_hooks._gate_check_then_git, aiqt_hooks._gate_check_git_shape = saved_rule, saved_shape
+    for label, command, main, now, kind in _GPL_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    if "commit-tree" not in _gcg_reason("git send-pack /r.git refs/heads/x"):
+        failures.append("(gpl-msg) the plumbing deny does not name the routes it refuses")
+    if "--no-verify" not in _gcg_reason("git commit-tree -p HEAD -m x T && git commit --no-verify -m y"):
+        failures.append("(gpl-msg-bypass) the hook-bypass deny no longer keeps its own message before the plumbing deny")
+    saved_plumb, saved_inert = aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert
+    try:
+        aiqt_hooks._gate_plumbing_git = lambda command, records=None: False
+        for label, command, main, now, kind in _GPL_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the plumbing deny reverted, gate_weakening({!r}) should give "
+                                "main's {}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the plumbing deny reverted".format(label))
+        aiqt_hooks._gate_plumbing_git = saved_plumb
+        aiqt_hooks._gate_plumbing_inert = lambda command, records: command
+        for label, command, main, now, kind in _GPL_ROWS:
+            if kind == "data" and _decision(aiqt_hooks.gate_weakening, command) != "deny":
+                failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_git, aiqt_hooks._gate_plumbing_inert = saved_plumb, saved_inert
+    for label, command, main, now, kind in _GPR_ROWS:
+        got = _decision(aiqt_hooks.gate_weakening, command)
+        if got != now:
+            failures.append("({}) gate_weakening({!r}): expected {}, got {}".format(label, command, now, got))
+    if "receive-pack" not in _gcg_reason("git push --exec=x origin main"):
+        failures.append("(gpr-msg) the push-redirect deny does not name the routes it refuses")
+    if "--no-verify" not in _gcg_reason("PATH=/x git push --no-verify origin main"):
+        failures.append("(gpr-msg-bypass) the hook-bypass deny no longer keeps its own message before the "
+                        "push-redirect deny")
+    saved_redirect = aiqt_hooks._gate_push_redirect
+    try:
+        aiqt_hooks._gate_push_redirect = lambda command, records=None: None
+        for label, command, main, now, kind in _GPR_ROWS:
+            got = _decision(aiqt_hooks.gate_weakening, command)
+            if got != main:
+                failures.append("({}-revert) with the push-redirect deny reverted, gate_weakening({!r}) should "
+                                "give 52baa177's {}, got {}".format(label, command, main, got))
+            if kind == "flip" and got == now:
+                failures.append("({}-revert) flip row is not red with the push-redirect deny reverted".format(label))
+    finally:
+        aiqt_hooks._gate_push_redirect = saved_redirect
+    saved_inert = aiqt_hooks._gate_plumbing_inert
+    try:
+        aiqt_hooks._gate_plumbing_inert = lambda command, records: command
+        for label, command, main, now, kind in _GPR_ROWS:
+            if kind == "data" and _decision(aiqt_hooks.gate_weakening, command) != "deny":
+                failures.append("({}-raw) data row does not deny with the message reading reverted".format(label))
+    finally:
+        aiqt_hooks._gate_plumbing_inert = saved_inert
+    repo = _init_repo(Path(tmp) / "gcg-write-scope")
+
+    def write(path):
+        code, obj, _err = aiqt_hooks.write_scope_guard({
+            "hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": str(repo),
+            "tool_input": {"file_path": str(path), "content": "x\n"}})
+        return (_reduce_result(code, obj),
+                ((obj or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", ""))
+
+    log = repo / ".git" / "aiqt" / "gate-records.jsonl"
+    other = repo / ".git" / "worktrees" / "wt" / "aiqt" / "gate-records.jsonl"
+    for label, path, want in (("gcg-wr-1", log, ("deny", True)), ("gcg-wr-2", other, ("deny", True)),
+                              ("gcg-wr-3", repo / "notes.txt", ("allow", False))):
+        decision, why = write(path)
+        if (decision, "gate record's directory" in why) != want:
+            failures.append("({}) write_scope_guard Write {}: expected {}, got {} ({!r})".format(
+                label, path, want, (decision, "gate record's directory" in why), why))
+    saved_hit = aiqt_hooks._wrtscp_gate_record_hit
+    try:
+        aiqt_hooks._wrtscp_gate_record_hit = lambda root, file_path, target: ""
+        decision, why = write(log)
+        if "gate record's directory" in why:
+            failures.append("(gcg-wr-1-revert) the gate-record reason survives with the check reverted")
+    finally:
+        aiqt_hooks._wrtscp_gate_record_hit = saved_hit
+
+
 def _test_trkasy_no_amp(failures, tmp):
     """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
     _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies; each
@@ -7751,12 +8459,43 @@ def _gate_runtime_cost_failures(cost_inputs):
     return out
 
 
-_GW_FLOOR = 0.1
-_GW_SIZES = 9
-# The most a gw-lin row's t_2n/t_n may be, and how many timings of each size a ratio over it may take: a ratio
-# over the bound times both sizes again and compares the least time of each (_gw_scan_ratio).
-_GW_RATIO = 3.0
-_GW_TIMINGS = 3
+# The smaller input of a gw-lin row repeats its unit _GW_REPS times; the doubled input repeats it twice as often.
+_GW_REPS = 4000
+# The most a gw-lin row's work count may grow when its input doubles: count(2n) <= 2 * count(n) + _GW_COUNT_SLACK,
+# the count being what the hook's work-count seam (aiqt_hooks._GATE_SCAN_COUNTER, _gate_scan_count) adds over one
+# scan. On these inputs (prefix + unit * n + suffix) each counted pass reads a stretch that is a fixed multiple of
+# n plus a fixed part, and a fixed part adds to count(2n) - 2 * count(n) only when it is negative. The slack covers
+# the two ways the code makes a pass's stretch shorter than whole units, or grow by a step instead of a multiple:
+# - the dequoted-word walk (_gate_novrf_dequoted_bypass) finds a terminator over slices of 16, 32, 64, ... words.
+#   A walk over L words that finds no terminator counts _gw_walk_count(L) = 16 * (2 ** k - 1) + 2 * L, where
+#   16 * 2 ** k is the least slice size not under L (k = 0 when L <= 16): the full slices of 16 to 8 * 2 ** k
+#   words, the last slice, truncated to L, and the slice of L words read for the spelling. The rows' words give
+#   L(2n) = 2 * L(n) + 1 (L = 2n - 1 for gw-lin-dq-roster and 3n - 1 for gw-lin-dq-roster-m). When the doubled
+#   walk's truncated last slice crosses one more slice size than the smaller walk's (16 * 2 ** k < L(2n) <=
+#   32 * 2 ** k), the full slices add 16 over twice and the two truncated reads add 2 * 1, so 18 (_GW_WALK_SLACK).
+#   When it crosses two, which happens only when L(n) is a slice size itself (L(2n) = 32 * 2 ** k + 1), the next
+#   full slice of 16 * 2 ** k words is added too: 32 * 2 ** k + 18, about twice L(n), which no fixed slack can
+#   cover. At n = 11 roster-m's L(n) = 32 is such a size: its walk counts 80 then 242, and the linear row grows
+#   from 149 to 377, 79 over twice. So the bound is derived for the pinned sizes, not for every n: at _GW_REPS
+#   L(n) is 7999 and 11999, not over the slice sizes 8192 and 16384, and L(2n) is 15999 and 23999, not over the
+#   next sizes 16384 and 32768; at _GW_MUT_REPS (the mutated-copy rows) L(n) is 599 and 899, not over 1024, and
+#   L(2n) is 1199 and 1799, not over 2048. gw-lin-slice-count pins _gw_walk_count to the hook's own count at
+#   those sizes and at the boundary size n = 11 (gw-lin-slice-boundary checks the crossing there),
+#   gw-lin-slice-pinned fails when a size the rows use crosses two slice sizes, and gw-lin-slice-slack when the
+#   two parts below exceed the slack. A walk that finds no bypass covers every later git word of its verb, so a
+#   row takes at most one such walk for each roster verb its words hold, and none holds more than one;
+# - a pass that stops at the next unit (the grammar lexer's off-roster stop at the next ambiguous quote) reads the
+#   last unit only to the end of the text, at most one unit short: no unit here is longer than 18 characters, and
+#   the lexer counts a character at most twice (its main pass and its read of a quote's interior), so at most 36
+#   (_GW_LEX_SLACK).
+# 18 + 36 = 54, rounded up to 64. A walk restarted at each unit, or a copy of the suffix after each unit, adds
+# about n * n / 2 counted items, millions at these sizes, so the slack cannot hide one.
+_GW_COUNT_SLACK = 64
+_GW_WALK_SLACK = 18
+_GW_LEX_SLACK = 36
+# The smaller input of a row run on a mutated copy of the hook (gw-lin-mut-*): a quadratic mutant is already
+# hundreds of thousands of counted items over the bound at 300 units, and each such row stays near a second.
+_GW_MUT_REPS = 300
 # The getrusage fields a gw-lin row reports, then (name, format) for each reported reading, in order: user and
 # system CPU time, minor page faults, involuntary context switches, and the collector's collection count.
 _GW_RUSAGE_FIELDS = ("ru_utime", "ru_stime", "ru_minflt", "ru_nivcsw")
@@ -7796,145 +8535,564 @@ def _gw_usage_text(use_n, use_2n):
     return ", ".join(parts)
 
 
-def _gw_scan_once(cmd, scan):
-    """(CPU seconds, decision, usage) for one scan of cmd; usage is what _gw_usage grew by across the call,
-    read outside the timed region, with None for a reading unavailable before or after it."""
+def _gw_count_once(cmd, scan, hooks=None):
+    """(work count, CPU seconds, decision, usage) for one scan of cmd with the hook's work-count seam on: the
+    seam (aiqt_hooks._GATE_SCAN_COUNTER, or that of hooks, a mutated copy of the hook module, when given) holds a
+    fresh counter for the call and is None again after it, whether the scan returns or raises. usage is what
+    _gw_usage grew by across the call, read outside the timed region, with None for a reading unavailable before
+    or after it. The CPU time and the usage are diagnostics that a failing row reports; no verdict reads them."""
+    hooks = aiqt_hooks if hooks is None else hooks
+    counter = [0]
     u0 = _gw_usage()
-    t0 = time.process_time()
-    decision = scan(cmd)
-    t = time.process_time() - t0
-    return t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
+    hooks._GATE_SCAN_COUNTER = counter
+    try:
+        t0 = time.process_time()
+        decision = scan(cmd)
+        t = time.process_time() - t0
+    finally:
+        hooks._GATE_SCAN_COUNTER = None
+    return counter[0], t, decision, tuple(None if a is None or b is None else b - a for a, b in zip(u0, _gw_usage()))
 
 
-def _gw_scan_ratio(unit, prefix, suffix, scan, once=_gw_scan_once):
-    """Double n (from 4000, at most _GW_SIZES sizes) until t_n clears the _GW_FLOOR floor, then compare
-    t_2n/t_n. While that ratio is over _GW_RATIO, both sizes are timed again (at most _GW_TIMINGS timings of
-    each) and the least time of each is compared, so one call charged for stray work cannot fail a linear scan,
-    while a scan that grows faster than its input in every timing still fails. Returns (ratio, t_n, t_2n,
-    length_2n, decisions, (usage_n, usage_2n), timings), the times and usages being those of the least timing
-    of each size and timings how many of each were taken, or (None, t_n, None, length, decisions, None, 1) when
-    the floor was never cleared in the bound, so the caller fails 'linearity not evaluated'; decisions lists
-    every timed scan's decision, in order. The input is a command string for the whole-command scan or a word
-    list for the dequoted-word scan; once times one scan (a check stands in scripted times through it)."""
-    reps = 4000
-    decisions = []
-    for _ in range(_GW_SIZES):
-        cmd_n = prefix + unit * reps + suffix
-        t_n, decision, use_n = once(cmd_n, scan)
-        decisions.append(decision)
-        if t_n > _GW_FLOOR:
-            cmd_2n = prefix + unit * (reps * 2) + suffix
-            t_2n, decision, use_2n = once(cmd_2n, scan)
-            decisions.append(decision)
-            timings = 1
-            while t_2n / t_n > _GW_RATIO and timings < _GW_TIMINGS:
-                timings += 1
-                again_n, decision, again_use_n = once(cmd_n, scan)
-                decisions.append(decision)
-                again_2n, decision, again_use_2n = once(cmd_2n, scan)
-                decisions.append(decision)
-                if again_n < t_n:
-                    t_n, use_n = again_n, again_use_n
-                if again_2n < t_2n:
-                    t_2n, use_2n = again_2n, again_use_2n
-            return t_2n / t_n, t_n, t_2n, len(cmd_2n), decisions, (use_n, use_2n), timings
-        reps *= 2
-    return None, t_n, None, len(prefix + unit * reps + suffix), decisions, None, 1
+def _gw_count_growth(unit, prefix, suffix, scan, once=_gw_count_once, size=_GW_REPS):
+    """One scan of prefix + unit * size + suffix (size is _GW_REPS but on a mutated copy) and one of the input with
+    twice as many units, each through once (a check stands in scripted readings through it). Returns (count_n,
+    count_2n, length_n, length_2n, decisions, (t_n, t_2n), (usage_n, usage_2n)): the work counts, the input
+    lengths, both decisions in order, and the CPU times and usages, diagnostics only. The input is a command
+    string for the text scans or a word list for the dequoted-word scan, so a length counts characters or words."""
+    readings = []
+    for reps in (size, 2 * size):
+        cmd = prefix + unit * reps + suffix
+        count, t, decision, use = once(cmd, scan)
+        readings.append((count, len(cmd), decision, t, use))
+    (count_n, length_n, decision_n, t_n, use_n), (count_2n, length_2n, decision_2n, t_2n, use_2n) = readings
+    return count_n, count_2n, length_n, length_2n, [decision_n, decision_2n], (t_n, t_2n), (use_n, use_2n)
 
 
-def _gw_lin_failures(cases):
-    """What the gw-lin timing rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each
-    timed by _gw_scan_ratio, and a row fails on a decision other than want, on a t_n that never cleared the
-    floor, or on a ratio of the least timings over _GW_RATIO (reporting the usage of the two calls those
-    least timings came from)."""
+def _gw_lin_failures(cases, once=_gw_count_once, size=_GW_REPS):
+    """What the gw-lin growth rows got wrong: cases are (label, unit, prefix, suffix, scan, want) rows, each read
+    by _gw_count_growth through once at size units. A row fails on a decision other than want (with the seam on, at
+    both sizes, and, for a row with a scan, with the seam off at the smaller size, so the seam changes no decision),
+    on a smaller input whose work count is under its length (the seam did not count the scan's own pass over its
+    input, so growth was not evaluated), on a seam left on after the row, or on a doubled input whose work count
+    is over twice the smaller one's plus _GW_COUNT_SLACK. The CPU times and the usage of both calls are reported
+    with a growth failure as diagnostics; no verdict reads them, so a loaded host cannot change one."""
     out = []
     for label, unit, prefix, suffix, scan, want in cases:
-        ratio, t_n, t_2n, length_2n, got, use, timings = _gw_scan_ratio(unit, prefix, suffix, scan)
+        count_n, count_2n, length_n, length_2n, got, (t_n, t_2n), use = _gw_count_growth(
+            unit, prefix, suffix, scan, once, size)
+        if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+            out.append("({}) the work-count seam was left on after the row: {!r}".format(
+                label, aiqt_hooks._GATE_SCAN_COUNTER))
+            aiqt_hooks._GATE_SCAN_COUNTER = None
+        if scan is not None:
+            got.append(scan(prefix + unit * size + suffix))
         wrong = [decision for decision in got if decision != want]
         if wrong:
-            out.append("({}) the timed scan decided {!r} on {} of its {} inputs, expected {!r}"
+            out.append("({}) the counted scan decided {!r} on {} of its {} inputs, expected {!r}"
                        .format(label, wrong[0], len(wrong), len(got), want))
-        if ratio is None:
-            out.append("({}) linearity not evaluated: t_n stayed under the {}s floor through "
-                       "{} sizes (last {:.4f}s)".format(label, _GW_FLOOR, _GW_SIZES, t_n))
-        elif ratio > _GW_RATIO:
-            out.append("({}) doubling the input scaled the scan {:.2f}x (>3x, super-linear): "
-                       "{:.3f}s then {:.3f}s, the least of {} timings of each, for an input of length {} ({})"
-                       .format(label, ratio, t_n, t_2n, timings, length_2n, _gw_usage_text(*use)))
+        if count_n < length_n:
+            out.append("({}) growth not evaluated: the work count on an input of length {} was {}, under that "
+                       "length, so the seam did not count the scan's pass over its input".format(
+                           label, length_n, count_n))
+        elif count_2n > 2 * count_n + _GW_COUNT_SLACK:
+            out.append("({}) doubling the input grew the scan's work count from {} to {}, over twice that plus {} "
+                       "(super-linear), for inputs of length {} then {}; diagnostics only, not judged: CPU {:.3f}s "
+                       "then {:.3f}s, {}".format(label, count_n, count_2n, _GW_COUNT_SLACK, length_n, length_2n,
+                                                t_n, t_2n, _gw_usage_text(*use)))
     return out
 
 
-def _gw_retime_failures():
-    """(gw-lin-retime-edge) _gw_scan_ratio over scripted times (no scan runs): the first size's time clears the
-    floor, then each pair is (t_n, t_2n) for one timing of both sizes. A first ratio just under or exactly at
-    _GW_RATIO is final with one timing; one just over it retimes, and a retimed pair at the bound ends the
-    retiming. One slow timing of either size is outvoted by the least of the others (the CI shape: 0.109 s then
-    0.328 s, then 0.115 s then 0.230 s), a slow retimed t_n never replaces a faster one, a ratio over the bound
-    in all but the last allowed timing passes on that last one, and a ratio over the bound in every timing stops
-    at _GW_TIMINGS timings of each and stays over it."""
+def _gw_count_edge_failures():
+    """(gw-lin-count-edge) _gw_lin_failures over scripted readings (no scan runs): each case is (count_n, count_2n,
+    t_n, t_2n, decision) for the smaller input (4000 characters) and the doubled one, and the failure kinds the row
+    must give. A doubled count exactly at twice plus _GW_COUNT_SLACK passes and one over it fails; a smaller
+    count under the input's length fails 'growth not evaluated'; a linear count passes whatever the CPU times
+    (a doubled input charged 50 times the CPU time of the smaller, the shape of a call on a loaded host) and a
+    quadratic count fails with CPU times in proportion to the input; a decision other than the row's fails."""
     out = []
-    for name, pairs, want_ratio, want_timings in (
-            ("under", [(0.25, 0.7499)], 0.7499 / 0.25, 1),
-            ("at", [(0.25, 0.75)], 0.75 / 0.25, 1),
-            ("over-then-at", [(0.25, 0.7501), (0.25, 0.75)], 0.75 / 0.25, 2),
-            ("slow-2n", [(0.109, 0.328), (0.115, 0.230)], 0.230 / 0.109, 2),
-            ("slow-n-retimed", [(0.109, 0.33), (0.3, 0.22), (0.11, 0.44)], 0.22 / 0.109, 2),
-            ("over-until-last", [(0.25, 0.7501), (0.25, 0.7502), (0.25, 0.5)], 0.5 / 0.25, _GW_TIMINGS),
-            ("quadratic", [(0.11, 0.44), (0.12, 0.46), (0.115, 0.45), (0.1, 0.1)], 0.44 / 0.11, _GW_TIMINGS)):
-        times = [t for pair in pairs for t in pair]
+    slack = _GW_COUNT_SLACK
+    for name, readings, want in (
+            ("at", (5000, 10000 + slack, 0.1, 0.2, None), ()),
+            ("over", (5000, 10001 + slack, 0.1, 0.2, None), ("doubling the input grew",)),
+            ("length", (4000, 8000, 0.1, 0.2, None), ()),
+            ("under-length", (3999, 7998, 0.1, 0.2, None), ("growth not evaluated",)),
+            ("loaded-linear", (5000, 10000, 0.01, 0.5, None), ()),
+            ("quadratic", (5000, 20000, 0.1, 0.2, None), ("doubling the input grew",)),
+            ("decision", (5000, 10000, 0.1, 0.2, "deny"), ("the counted scan decided 'deny' on 2 of its 2",))):
+        count_n, count_2n, t_n, t_2n, decision = readings
         taken = []
 
         def once(cmd, _scan):
             taken.append(len(cmd))
-            return times[len(taken) - 1], None, (len(taken),) * len(_GW_USAGE_LABELS)
+            first = len(taken) == 1
+            return (count_n if first else count_2n), (t_n if first else t_2n), decision, \
+                (len(taken),) * len(_GW_USAGE_LABELS)
 
-        ratio, _t_n, _t_2n, length_2n, decisions, _use, timings = _gw_scan_ratio("x", "", "", None, once)
-        if (ratio is None or abs(ratio - want_ratio) > 1e-9 or timings != want_timings
-                or taken != [4000, 8000] * timings or len(decisions) != 2 * timings or length_2n != 8000):
-            out.append("(gw-lin-retime-edge) {}: the scripted times {} gave ratio {!r} over {} timings of lengths "
-                       "{}, want {!r} over {} timings of 4000 then 8000".format(
-                           name, pairs, ratio, timings, taken, want_ratio, want_timings))
+        got = _gw_lin_failures((("gw-lin-count-edge-" + name, "x", "", "", None, None),), once)
+        if taken != [_GW_REPS, 2 * _GW_REPS] or len(got) != len(want) \
+                or any(part not in line for part, line in zip(want, got)):
+            out.append("(gw-lin-count-edge) {}: the scripted readings {} over inputs of lengths {} gave {!r}, want "
+                       "one failure holding each of {!r}".format(name, readings, taken, got, want))
     return out
 
 
-def _gw_spin_scan(power):
-    """A stand-in scan that spends CPU time growing with the input's length to the given power: 0.12 s at
-    4000 characters, so the first size clears the floor and the ratio is about 2 ** power."""
+def _gw_count_scan(power, spin_doubled=0.0):
+    """A stand-in scan that adds len(cmd) ** power // 4000 ** (power - 1) to the hook's work count through its seam
+    (aiqt_hooks._gate_scan_count), so its count grows in proportion to the input (power 1) or to its square (power
+    2), and decides None. With spin_doubled, a call on the doubled input (over 4000 characters) also spends that
+    many seconds of CPU time, standing in for a call charged for stray work on a loaded host."""
     def scan(cmd):
-        until = time.process_time() + 1.2 * _GW_FLOOR * (len(cmd) / 4000) ** power
-        while time.process_time() < until:
-            pass
+        aiqt_hooks._gate_scan_count(len(cmd) ** power // _GW_REPS ** (power - 1))
+        if spin_doubled and len(cmd) > _GW_REPS:
+            until = time.process_time() + spin_doubled
+            while time.process_time() < until:
+                pass
         return None
     return scan
 
 
-def _gw_slow_once_scan(power):
-    """_gw_spin_scan(power) whose second call (the first timing of the doubled input) also spends 2 * _GW_FLOOR
-    more CPU time, standing in for one timed call charged for stray work."""
-    spin = _gw_spin_scan(power)
-    calls = []
-
-    def scan(cmd):
-        calls.append(None)
-        if len(calls) == 2:
-            until = time.process_time() + 2 * _GW_FLOOR
-            while time.process_time() < until:
-                pass
-        return spin(cmd)
-    return scan
-
-
-def _gw_retime_cpu_failures():
-    """(gw-lin-retime-linear, gw-lin-retime-super) The retiming in CPU time: with one timing of the doubled input
-    charged 0.2 s more (a first ratio of about 3.7 for a linear stand-in), the linear row still passes on its
-    least timings and the quadratic one still fails after _GW_TIMINGS timings of each."""
+def _gw_count_seam_failures():
+    """(gw-lin-count-linear, gw-lin-count-super, gw-lin-count-off-default, gw-lin-count-off-inert,
+    gw-lin-count-raise-propagates, gw-lin-count-raise-restores) The count verdict through the hook's real seam. A
+    linear stand-in passes even when its doubled call is charged 0.2 s more CPU time (a time ratio far over 2), and
+    a quadratic one fails, with nothing else reported. The seam is None before the rows, _gate_scan_count with it
+    None leaves it None and returns None, and a scan that raises propagates its exception and leaves the seam None."""
     out = []
-    got = _gw_lin_failures((("gw-lin-retime-linear", "x", "", "", _gw_slow_once_scan(1), None),
-                            ("gw-lin-retime-super", "x", "", "", _gw_slow_once_scan(2), None)))
-    if len(got) != 1 or not got[0].startswith("(gw-lin-retime-super) doubling the input scaled the scan ") \
-            or ", the least of {} timings of each, ".format(_GW_TIMINGS) not in got[0]:
-        out.append("(gw-lin-retime-linear/super) the rows gave {!r}, want only the quadratic row's failure after "
-                   "{} timings of each".format(got, _GW_TIMINGS))
+    if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-off-default) the hook's work-count seam is {!r} before any row, want None (off)".format(
+            aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    got = aiqt_hooks._gate_scan_count(5)
+    if got is not None or aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-off-inert) _gate_scan_count with the seam off returned {!r} and left the seam {!r}, "
+                   "want None and None".format(got, aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    got = _gw_lin_failures((("gw-lin-count-linear", "x", "", "", _gw_count_scan(1, 0.2), None),
+                            ("gw-lin-count-super", "x", "", "", _gw_count_scan(2), None)))
+    if len(got) != 1 or not got[0].startswith("(gw-lin-count-super) doubling the input grew the scan's work count "
+                                              "from 4000 to 16000, over twice that plus "):
+        out.append("(gw-lin-count-linear/super) the rows gave {!r}, want only the quadratic row's failure".format(got))
+
+    def raising(_cmd):
+        aiqt_hooks._gate_scan_count(1)
+        raise ValueError("stand-in")
+
+    try:
+        _gw_count_once("x", raising)
+        out.append("(gw-lin-count-raise-propagates) a scan that raised returned through _gw_count_once")
+    except ValueError:
+        pass
+    if aiqt_hooks._GATE_SCAN_COUNTER is not None:
+        out.append("(gw-lin-count-raise-restores) a scan that raised left the seam {!r}, want None".format(
+            aiqt_hooks._GATE_SCAN_COUNTER))
+        aiqt_hooks._GATE_SCAN_COUNTER = None
+    return out
+
+
+def _gw_walk_count(length):
+    """What one dequoted-word walk over length words that finds no terminator adds to the work count
+    (_gate_novrf_dequoted_bypass; derivation at _GW_COUNT_SLACK): the slices of 16, 32, ... words it copies to find
+    the terminator, the last one truncated to length, then the slice of length words it reads for the spelling."""
+    total, size = 0, 16
+    while size < length:
+        total += size
+        size *= 2
+    return total + 2 * length
+
+
+# The dequoted-word growth rows whose words hold one roster verb's walk: (label, unit, prefix, suffix). Their words
+# are echo, the units, then a -n, so the walk starts after the first verb (index 2) and reads to the -n, the last
+# word the spelling test can read: it reads len(words) - 3 words.
+_GW_WALK_ROWS = (
+    ("gw-lin-dq-roster", ["git", "push"], ["echo"], ["-n"]),
+    ("gw-lin-dq-roster-m", ["git", "commit", "-m"], ["echo"], ["-n"]),
+)
+
+
+def _gw_slice_failures():
+    """(gw-lin-slice-count, gw-lin-slice-pinned, gw-lin-slice-slack, gw-lin-slice-boundary) The slack's derivation
+    for the dequoted-word walk, its truncated last slice included (_GW_COUNT_SLACK). gw-lin-slice-count: on each
+    _GW_WALK_ROWS row at 11 and 22 units (11 puts roster-m's walk on the slice size 32, so its doubled walk crosses
+    two sizes), at _GW_REPS, at _GW_MUT_REPS and at twice each, the hook's count is the table fill (one per word),
+    the git-word pass (one per word before the -n) and one walk (_gw_walk_count), and the scan decides None.
+    gw-lin-slice-pinned: at _GW_REPS and at _GW_MUT_REPS each row's walk grows at most _GW_WALK_SLACK over twice.
+    gw-lin-slice-slack: that with _GW_LEX_SLACK is within _GW_COUNT_SLACK. gw-lin-slice-boundary: at 11 units
+    roster-m's walk grows more than _GW_COUNT_SLACK over twice, the boundary the pinned sizes keep off."""
+    out = []
+    for label, unit, prefix, suffix in _GW_WALK_ROWS:
+        for reps in (11, 22, _GW_REPS, 2 * _GW_REPS, _GW_MUT_REPS, 2 * _GW_MUT_REPS):
+            words = prefix + unit * reps + suffix
+            want = len(words) + (len(words) - 1) + _gw_walk_count(len(words) - 3)
+            got, _t, decision, _use = _gw_count_once(words, aiqt_hooks._gate_novrf_dequoted_bypass)
+            if got != want or decision is not None:
+                out.append("(gw-lin-slice-count) {} at {} units counted {} and decided {!r}, want {} (the table fill, "
+                           "the git-word pass and one walk over {} words) and None".format(
+                               label, reps, got, decision, want, len(words) - 3))
+        for reps in (_GW_REPS, _GW_MUT_REPS):
+            small = len(prefix + unit * reps + suffix) - 3
+            large = len(prefix + unit * (2 * reps) + suffix) - 3
+            grew = _gw_walk_count(large) - 2 * _gw_walk_count(small)
+            if grew > _GW_WALK_SLACK:
+                out.append("(gw-lin-slice-pinned) {} at {} units: the walk over {} then {} words grows {} over twice, "
+                           "past {}: the doubled walk's last slice crosses two slice sizes".format(
+                               label, reps, small, large, grew, _GW_WALK_SLACK))
+    if _GW_WALK_SLACK + _GW_LEX_SLACK > _GW_COUNT_SLACK:
+        out.append("(gw-lin-slice-slack) _GW_WALK_SLACK {} plus _GW_LEX_SLACK {} is over _GW_COUNT_SLACK {}".format(
+            _GW_WALK_SLACK, _GW_LEX_SLACK, _GW_COUNT_SLACK))
+    boundary = _gw_walk_count(3 * 22 - 1) - 2 * _gw_walk_count(3 * 11 - 1)
+    if boundary <= _GW_COUNT_SLACK:
+        out.append("(gw-lin-slice-boundary) roster-m's walk at the boundary size 11 grows {} over twice, want over "
+                   "{}: the derivation's two-size crossing is not where it says".format(boundary, _GW_COUNT_SLACK))
+    return out
+
+
+def _gw_counted(hooks, name, *args):
+    """(count, result) of hooks.<name>(*args), one call with the seam on (_gw_count_once)."""
+    count, _t, result, _use = _gw_count_once(args, lambda call_args: getattr(hooks, name)(*call_args), hooks)
+    return count, result
+
+
+def _gw_work_failures(hooks=None):
+    """(gw-cnt-split-cache, gw-cnt-walked, gw-cnt-git-skip, gw-cnt-runtime-skip, gw-cnt-piece-skip,
+    gw-cnt-masked-reuse, gw-cnt-assembly-skip, gw-cnt-heredoc-skip, gw-cnt-heredoc-split, gw-cnt-span-dedup,
+    gw-cnt-walk-first,
+    gw-cnt-verb-search, gw-cnt-dq-git-pass, gw-cnt-dq-git-hit, gw-cnt-sub-skip, gw-cnt-sub-unresolved,
+    gw-cnt-assembled-first, gw-cnt-doubt-first, gw-cnt-span-first, gw-cnt-scan-first) The work count of one call
+    on an input where a cache, a reuse, a skip, a start past the first word or an early stop of a counted scan
+    applies, against the passes the call makes there. The rows from gw-cnt-dq-git-pass on pin walks that stop
+    early or skip words: the dequoted scan's git-word pass reads only the words before the last one the spelling
+    test can read, and stops at its first bypass; the grammar's subcommand walk skips each separated option value
+    and copies only the words after the subcommand; the assembled-git walk stops at its first hit; the split's
+    doubt test stops at its first doubting piece; and the git-word regex passes over a quoted span's interior and
+    over a command stop at their first hit and first deny. Losing one of these costs a
+    fixed multiple of the input, not a growth the gw-lin rows can see, so each row pins the count itself: the
+    reading split once for the three bash-model readings that share one plain text, one walk for the four readings
+    with the same words, the translate alone where no reading can name git, the run-time test alone where no walk
+    can hit (for a whole text and for one piece), the readings of a piece with no standalone git serving the masked
+    walk too, no masked readings where the masked piece holds no quote, backslash or git, one split where there is
+    no here-document body to mask, one more split and one more doubt test where there is one, each distinct span of
+    the two splits read once, the any-word walk reading only the words after the word it is given, and the
+    run-time walk's verb search starting after that word too. hooks is the hook module (aiqt_hooks, or a mutated
+    copy run as a child's main module, _gw_mutant_child); the counts of the passes some rows add up are read from
+    it too, but the split rows (gw-cnt-heredoc-skip, gw-cnt-heredoc-split, and the split part of gw-cnt-span-dedup)
+    are worked out from their inputs, so a mutation that charges the split more cannot raise the expected count
+    with it."""
+    hooks = aiqt_hooks if hooks is None else hooks
+
+    def count(name, *args):
+        return _gw_counted(hooks, name, *args)[0]
+
+    plain = "git status x " * 20
+    no_git = "echo x " * 20
+    quoted = "$x 'a' log -m y " * 10 + "commit -m y"
+    bare = "$x git log -m y " * 10 + "commit -m y"
+    pieces = "echo x; " * 20
+    heredoc = "cat <<E\na$b\nE\n" + pieces
+    plain_words = ["x"] * 40  # read from word 20 on: 19 words after it, no git and no roster verb among them
+
+    def piece_want(piece, assembled_same):
+        # _gate_runtime_piece_hit on a piece no reading hits: the run-time test, the tilde search, the readings,
+        # the mask, then over each reading the run-time walk and the masked walk (over the same words, or none).
+        tilde = hooks._GATE_TILDE_START_RE.search(piece) is not None
+        readings = (hooks._gate_dequoted_words(piece),) + hooks._gate_bash_readings(piece)
+        want = (count("_gate_runtime_may_hit", piece) + len(piece) + count("_gate_dequoted_words", piece)
+                + count("_gate_bash_readings", piece) + count("_gate_runtime_masked_git", piece))
+        for words in readings:
+            want += count("_gate_runtime_reading", words, tilde)
+            want += count("_gate_assembled_reading", words if assembled_same else ())
+        return want
+
+    # What _gate_split_spans adds on pieces and on heredoc, worked out from the inputs, not read from the hook: no
+    # piece of either input holds a case word or "$'", so the doubt test (_gate_split_doubt_start) reads every piece
+    # but the last, each with its separator, which is all of the text but its last piece: the one blank after the
+    # last ';', in the split of the text and in the split of the masked text alike (masking 'a$b' to 'a_b' moves no
+    # cut). So pieces costs the split and the body mask (2 * len) and one doubt test (len - 1), and heredoc, whose
+    # body the mask changes, adds the masked split (len) and its doubt test (len - 1).
+    pieces_split = 2 * len(pieces) + (len(pieces) - 1)
+    heredoc_split = 3 * len(heredoc) + 2 * (len(heredoc) - 1)
+    dq_words = ["git", "push", "-n"] + ["x"] * 40  # the git-word pass reads the two words before the -n
+    # The pass stops at the git word, whose walk reads to the later -n (the last word the spelling test can read)
+    # and finds the bypass; a pass that read on would visit the 41 words after the verb as well.
+    dq_hit = ["git", "commit", "-n"] + ["x"] * 40 + ["-n"]
+    sub_skip = ["git", "-C", "-q", "status"] + ["x"] * 20  # -q is -C's value: walked past, never read
+    sub_open = ["git"] + ["-C", "dir"] * 20  # no subcommand: the walk reads the 20 options, not their values
+    assembled = ["git", "commit", "$O"] * 20  # every git word hits; the walk stops at the first
+    doubting = "case x; " + "echo x; " * 20  # the first piece holds a case word; the doubt test stops there
+    span_hit = "git commit " + "x " * 40  # the regex pass stops at the first git word, a roster git
+    denies = "git commit -n; " * 20  # the scan stops at the first git word, a bypass
+    # The results of the rows whose call gives one: each row's input keeps the result a full walk gives.
+    results = {
+        "gw-cnt-dq-git-hit": ("commit", hooks._no_verify_spelling("commit", ["-n"])),
+        "gw-cnt-sub-skip": ("status", ["x"] * 20, True),
+        "gw-cnt-sub-unresolved": (None, [], False),
+        "gw-cnt-assembled-first": ("git", "commit", "the word '$O', built at run time, which may expand to a "
+                                   "hook-skip spelling for it"),
+        "gw-cnt-span-first": True,
+        "gw-cnt-scan-first": ("bypass", "commit", hooks._no_verify_spelling("commit", ["-n"])),
+    }
+    spans = sorted(set(hooks._gate_split_spans(heredoc)[1]))
+    out = []
+    for label, name, text, want in (
+            ("gw-cnt-split-cache", "_gate_bash_readings", plain, 2 * len(plain)),
+            ("gw-cnt-walked", "_gate_text_bypass", plain, len(plain) + count("_gate_dequoted_words", plain)
+             + count("_gate_bash_readings", plain) + len(plain.split())),
+            ("gw-cnt-git-skip", "_gate_text_bypass", no_git, len(no_git)),
+            ("gw-cnt-runtime-skip", "_gate_runtime_bypass", no_git, len(no_git)),
+            ("gw-cnt-piece-skip", "_gate_runtime_piece_hit", no_git, len(no_git)),
+            ("gw-cnt-masked-reuse", "_gate_runtime_piece_hit", quoted, piece_want(quoted, True)),
+            ("gw-cnt-assembly-skip", "_gate_runtime_piece_hit", bare, piece_want(bare, False)),
+            ("gw-cnt-heredoc-skip", "_gate_split_spans", pieces, pieces_split),
+            ("gw-cnt-heredoc-split", "_gate_split_spans", heredoc, heredoc_split),
+            ("gw-cnt-span-dedup", "_gate_unread_bypass", heredoc,
+             heredoc_split + 2 * sum(end - start for start, end in spans)),
+            ("gw-cnt-walk-first", "_gate_any_word_bypass", (plain_words, 20), 19),
+            ("gw-cnt-verb-search", "_gate_runtime_hit", (plain_words, 20), 2 * 19),
+            # the table fill, the two words the git-word pass reads, and one walk over the -n (_gw_walk_count)
+            ("gw-cnt-dq-git-pass", "_gate_novrf_dequoted_bypass", (dq_words,), len(dq_words) + 2 + _gw_walk_count(1)),
+            # the table fill, the one word the pass reads before its walk returns the bypass, and that walk over the
+            # words from the first -n to the last
+            ("gw-cnt-dq-git-hit", "_gate_novrf_dequoted_bypass", (dq_hit,),
+             len(dq_hit) + 1 + _gw_walk_count(len(dq_hit) - 2)),
+            # -C and status walked, the 20 words after status copied
+            ("gw-cnt-sub-skip", "_gate_grammar_sub", (sub_skip,), 2 + 20),
+            ("gw-cnt-sub-unresolved", "_gate_grammar_sub", (sub_open,), 20),
+            # the pass finding the git words, the table fill, and the first git word the walk reads
+            ("gw-cnt-assembled-first", "_gate_assembled_reading", (assembled,), 2 * len(assembled) + 1),
+            # the split and the body mask, then the first piece and its separator
+            ("gw-cnt-doubt-first", "_gate_split_spans", doubting, 2 * len(doubting) + len("case x") + 1),
+            # the tokenizing pass and the table fill, then 'git' read and the one token walked past it
+            ("gw-cnt-span-first", "_gate_span_hides_roster_git", span_hit,
+             len(span_hit) + len(span_hit.split()) + len("git") + 1),
+            # the regex pass to the first git word, the lex of its segment (to the ';') and its subcommand walk (one
+            # word walked, one copied)
+            ("gw-cnt-scan-first", "_gate_closed_grammar_scan", denies, len("git") + len("git commit -n") + 2)):
+        args = text if isinstance(text, tuple) else (text,)
+        got, result = _gw_counted(hooks, name, *args)
+        if got != want:
+            out.append("({}) {} on an input of length {} counted {}, want {}".format(
+                label, name, len(args[0]), got, want))
+        if label in results:
+            if result != results[label]:
+                out.append("({}) {} on {!r} gave {!r}, want {!r}".format(
+                    label, name, args[0][:40], result, results[label]))
+        elif name not in ("_gate_split_spans", "_gate_bash_readings") and result is not None:
+            out.append("({}) {} on {!r} gave {!r}, want None".format(label, name, args[0][:40], result))
+    return out
+
+
+# One-line mutations of the hook, each losing one cache, reuse, skip or early stop a counted scan relies on: (label,
+# anchor, line, mutated line, row). The mutated line is the first occurrence of line (the anchor when line is None)
+# at or after the anchor, which the hook holds once. A row naming a gw-lin growth row runs that row on the mutated
+# copy at _GW_MUT_REPS units, and one naming a gw-cnt row runs _gw_work_failures on it; gw-lin-mut-<label> fails
+# unless that row fails on the copy, so a count that hides the lost work (a count read from a cached pointer, a
+# reading reused or passed over without being counted) is caught.
+_GW_MUTANTS = (
+    ("lex-restart", "            p = _sub_scan[0]\n", None, "            p = 1\n", "gw-lin-opts"),
+    ("span-restart", "        visited = 0\n        while base", "        visited = 0\n",
+     "        visited = base = 0\n", "gw-lin-span-roster"),
+    ("scan-watermark", "        if p < consumed:\n", None, "        if False:\n", "gw-lin-span-off"),
+    ("sq-off-roster-stop", "never re-walks the words from the start, so the stop stays O(1).",
+     "            if data_stop is not None and offroster_resolved():\n", "            if False:\n", "gw-dq-lin-sq"),
+    ("dq-off-roster-stop", "data_stop = i  # an all-literal interior still re-judged",
+     "            if data_stop is not None and offroster_resolved():\n", "            if False:\n", "gw-dq-lin-dq"),
+    ("dq-read-to", "        read_to[sub] = end\n", None, "        read_to[sub] = 0\n", "gw-lin-dq-roster-m"),
+    ("split-cache", "        if plain not in split:\n", None, "        if True:\n", "gw-cnt-split-cache"),
+    ("walked", "        if words in walked:\n", None, "        if False:\n", "gw-cnt-walked"),
+    ("git-skip", "    if not _gate_text_may_name_git(text):\n", None, "    if False:\n", "gw-cnt-git-skip"),
+    ("runtime-skip", "    if not _gate_runtime_may_hit(text):\n", None, "    if False:\n", "gw-cnt-runtime-skip"),
+    ("piece-skip", "    if not _gate_runtime_may_hit(piece):\n", None, "    if False:\n", "gw-cnt-piece-skip"),
+    ("masked-reuse", "    if masked == piece:\n", None, "    if False:\n", "gw-cnt-masked-reuse"),
+    ("assembly-skip", "    elif _GATE_ASSEMBLY_CHARS.isdisjoint(masked)", None,
+     "    elif False and _GATE_ASSEMBLY_CHARS.isdisjoint(masked)", "gw-cnt-assembly-skip"),
+    ("heredoc-skip", "    if masked != text:\n", None, "    if True:\n", "gw-cnt-heredoc-skip"),
+    ("span-dedup", "if span not in seen]", None, "if True]", "gw-cnt-span-dedup"),
+    ("walk-first", "    walk = range(len(words) - 1, first, -1)\n", None, "    walk = range(len(words) - 1, -1, -1)\n",
+     "gw-cnt-walk-first"),
+    ("verb-search-start", "    verb = _gate_scan_first(range(k + 1, len(words))", None,
+     "    verb = _gate_scan_first(range(1, len(words))", "gw-cnt-verb-search"),
+    # The git-word pass of the dequoted scan reads every word, not only those before the last spelling word.
+    ("dq-git-pass", "    for idx in range(max(last, 0)):\n", None, "    for idx in range(n):\n", "gw-cnt-dq-git-pass"),
+    # The grammar's subcommand walk reads a separated option's value as a word of its own.
+    ("sub-value-skip", "                i += 2  # a separated arg-consuming global option: skip its value word\n",
+     None, "                i += 1\n", "gw-cnt-sub-skip"),
+    # The assembled-git walk passes over every hit but the last, so it reads every git word.
+    ("assembled-first-hit", "        if s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:\n", None,
+     "        if g == gits[-1] and s < n and words[s] in _NOVERIFY_VERBS and runtime_at[s + 1] < n:\n",
+     "gw-cnt-assembled-first"),
+    # The split's doubt test keeps its first doubting piece but tests every piece.
+    ("doubt-first", "def _gate_split_doubt_start(",
+     "            start = spans[k][0]\n            break  # the first piece that holds such a construct ends the search\n",
+     "            start = spans[k][0] if start is None else start\n", "gw-cnt-doubt-first"),
+    # The git-word regex pass over a quoted span's interior keeps its hit but reads on to the end.
+    ("span-first", "def _gate_span_hides_roster_git(", "            break  # the first hit ends the pass\n",
+     "            continue\n", "gw-cnt-span-first"),
+    # The closed grammar scan returns a bypass only at the last git word, so it lexes every segment.
+    ("scan-first-deny", "def _gate_closed_grammar_scan(", "        if spelling is not None:\n",
+     "        if spelling is not None and _GATE_GIT_WORD_RE.search(command, end) is None:\n", "gw-cnt-scan-first"),
+    # The split of the masked text is charged twice its length (a second split, or a split that reads it twice).
+    ("masked-split-twice", "def _gate_split_spans(",
+     "        _gate_scan_count(len(text))  # the work count: the split of the masked text",
+     "        _gate_scan_count(2 * len(text))  # the work count: the split of the masked text", "gw-cnt-heredoc-split"),
+    # A second pass over the masked text after its split.
+    ("masked-split-extra", "def _gate_split_spans(", "        masked_pieces = _raw_push_segments(masked)\n",
+     "        masked_pieces = _raw_push_segments(masked)\n        _gate_scan_count(len(text))\n",
+     "gw-cnt-heredoc-split"),
+    # The doubt test of the masked split runs twice.
+    ("masked-doubt-twice", "def _gate_split_spans(",
+     "        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))\n",
+     "        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))\n"
+     "        starts.append(_gate_split_doubt_start(masked_pieces, masked_spans))\n", "gw-cnt-heredoc-split"),
+    # The dequoted scan's git-word pass keeps its first bypass but reads on to its end instead of returning it.
+    ("dq-first-hit", "def _gate_novrf_dequoted_bypass(",
+     "        if spelling is not None:\n            return sub, spelling\n        read_to[sub] = end\n    return None\n",
+     "        if spelling is not None:\n            read_to.setdefault(None, (sub, spelling))\n            continue\n"
+     "        read_to[sub] = end\n    return read_to.get(None)\n", "gw-cnt-dq-git-hit"),
+    # The grammar's subcommand walk steps onto each separated option's value word before passing it.
+    ("sub-value-step", "                i += 2  # a separated arg-consuming global option: skip its value word\n", None,
+     "                visited += 1\n                i += 2\n", "gw-cnt-sub-unresolved"),
+)
+
+
+# The hook's own entry guard, which it holds once, at its end. A mutated copy is written out as a script with
+# _GW_MUTANT_DRIVER ahead of that guard (_gw_mutant_source), so the copy run as the main module of a child
+# interpreter runs the row its mutation targets (_gw_mutant_child) and exits before the hook's main is reached.
+_GW_HOOK_MAIN_GUARD = '\n\nif __name__ == "__main__":\n'
+_GW_MUTANT_DRIVER = (
+    '\n\nif __name__ == "__main__":\n'
+    "    sys.path.insert(0, sys.argv[1])\n"
+    "    import selftest_aiqt_hooks\n"
+    "    sys.exit(selftest_aiqt_hooks._gw_mutant_child(sys.modules[__name__], sys.argv[2]))\n")
+# The most a child running one mutated copy may take (its compile of the hook, its import of this file, and one row).
+_GW_MUTANT_TIMEOUT = 300
+
+
+def _gw_mutant_source(anchor, line, mutated):
+    """The source of a copy of the hook with one line changed (_GW_MUTANTS) and _GW_MUTANT_DRIVER ahead of its
+    entry guard, or None when the anchor is not in the source exactly once, line does not follow it, or the
+    changed source does not hold the entry guard exactly once."""
+    source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        return None
+    at = source.find(line, source.index(anchor))
+    if at < 0:
+        return None
+    return _gw_driven_source(source[:at] + mutated + source[at + len(line):])
+
+
+def _gw_driven_source(source):
+    """source, a copy of the hook, with _GW_MUTANT_DRIVER ahead of its entry guard, or None when it does not hold
+    the entry guard exactly once."""
+    if source.count(_GW_HOOK_MAIN_GUARD) != 1:
+        return None
+    return source.replace(_GW_HOOK_MAIN_GUARD, _GW_MUTANT_DRIVER + _GW_HOOK_MAIN_GUARD)
+
+
+def _gw_mutant_case(by_label, row):
+    """The case _gw_mutant_run takes for row: [unit, prefix, suffix, scan name, want] for a gw-lin growth row in
+    by_label (label to gw-lin case), or None for a gw-cnt row."""
+    if row not in by_label:
+        return None
+    _row, unit, prefix, suffix, scan, want = by_label[row]
+    return [unit, prefix, suffix, scan.__name__, want]
+
+
+def _gw_mutant_child(hooks, spec):
+    """The child side of _gw_mutant_run. hooks is the mutated copy of the hook, the child's main module, and spec
+    the JSON of [row, case]: case is [unit, prefix, suffix, scan name, want] for a gw-lin growth row, run on the
+    copy at _GW_MUT_REPS units (_gw_lin_failures), or null for a gw-cnt row (_gw_work_failures on the copy).
+    Prints the JSON list of what the row got wrong on the copy as its last line and returns 0."""
+    row, case = json.loads(spec)
+    if case is None:
+        got = _gw_work_failures(hooks)
+    else:
+        unit, prefix, suffix, scan, want = case
+
+        def once(cmd, scan_fn):
+            return _gw_count_once(cmd, scan_fn, hooks)
+
+        got = _gw_lin_failures(((row, unit, prefix, suffix, getattr(hooks, scan), want),), once, _GW_MUT_REPS)
+    print(json.dumps(got))
+    return 0
+
+
+def _gw_mutant_run(path, row, case):
+    """(failures, None) for the row on the mutated copy of the hook at path, run as a script in a child interpreter
+    (_gw_mutant_child; case as there), or (None, why) when the child gave no such list: it did not exit within
+    _GW_MUTANT_TIMEOUT seconds, exited other than 0, or did not end its output with a JSON list of strings."""
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", str(path), str(Path(__file__).resolve().parent),
+                               json.dumps([row, case])], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=_GW_MUTANT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, "no exit within {}s".format(_GW_MUTANT_TIMEOUT)
+    lines = proc.stdout.splitlines()
+    try:
+        got = json.loads(lines[-1]) if proc.returncode == 0 and lines else None
+    except ValueError:
+        got = None
+    if not isinstance(got, list) or not all(isinstance(text, str) for text in got):
+        return None, "exit {}, output {!r}".format(proc.returncode, (proc.stdout + proc.stderr)[-1000:])
+    return got, None
+
+
+def _gw_mutant_failures(cases):
+    """(gw-lin-mut-control, gw-lin-mut-child-control-<part>, gw-lin-mut-<label>) Each _GW_MUTANTS mutation run on
+    a copy of the hook must fail the row it names; cases are the gw-lin growth rows. Each copy is written to a
+    temporary directory and run as a script in its own child interpreter (_gw_mutant_run), so no mutated source is
+    executed in this process; a child that gives no verdict fails its row. gw-lin-mut-control: every growth row
+    passes on the hook itself at _GW_MUT_REPS units, so a failure on a copy is the mutation's.
+    gw-lin-mut-child-control-<part>: the hook itself, run through the same child path with only the driver added,
+    fails none of the rows the mutations name (each gw-lin row they name, and _gw_work_failures once for the
+    gw-cnt rows), so a row a copy fails in its child is failed by the mutation, not by the child path; -guard when
+    the hook does not hold its entry guard once, -no-verdict when that child gives no verdict, -failed when it
+    reports a failure."""
+    out = []
+    by_label = {case[0]: case for case in cases}
+    for got in _gw_lin_failures(cases, size=_GW_MUT_REPS):
+        out.append("(gw-lin-mut-control) at {} units: {}".format(_GW_MUT_REPS, got))
+    with tempfile.TemporaryDirectory(prefix="gw-mutant-") as tmp:
+        path = Path(tmp) / "aiqt_hooks_mutant.py"
+        source = _gw_driven_source(Path(aiqt_hooks.__file__).read_text(encoding="utf-8"))
+        if source is None:
+            out.append("(gw-lin-mut-child-control-guard) the hook does not hold its entry guard {!r} once".format(
+                _GW_HOOK_MAIN_GUARD))
+        else:
+            path.write_text(source, encoding="utf-8")
+            rows = sorted({mutant[-1] for mutant in _GW_MUTANTS if mutant[-1] in by_label})
+            rows += sorted({mutant[-1] for mutant in _GW_MUTANTS if mutant[-1] not in by_label})[:1]
+            for row in rows:
+                got, why = _gw_mutant_run(path, row, _gw_mutant_case(by_label, row))
+                target = row if row in by_label else "the gw-cnt rows"
+                if got is None:
+                    out.append("(gw-lin-mut-child-control-no-verdict) the hook itself, run as a child for {}, gave "
+                               "no verdict: {}".format(target, why))
+                elif got != []:
+                    out.append("(gw-lin-mut-child-control-failed) the hook itself, run as a child for {}, failed: "
+                               "{!r}".format(target, got))
+        for label, anchor, line, mutated, row in _GW_MUTANTS:
+            name = "gw-lin-mut-" + label
+            line = anchor if line is None else line
+            source = _gw_mutant_source(anchor, line, mutated)
+            if source is None:
+                out.append("({}) the hook does not hold the anchor {!r} once with {!r} after it, and its entry guard "
+                           "{!r} once".format(name, anchor, line, _GW_HOOK_MAIN_GUARD))
+                continue
+            path.write_text(source, encoding="utf-8")
+            got, why = _gw_mutant_run(path, row, _gw_mutant_case(by_label, row))
+            if got is None:
+                out.append("({}) the child running a copy of the hook with {!r} made {!r} gave no verdict for {}: "
+                           "{}".format(name, line.strip(), mutated.strip(), row, why))
+                continue
+            if row in by_label:
+                caught = any(text.startswith("({}) doubling the input grew".format(row)) for text in got)
+            else:
+                # a count failure, not only a result failure, so the count itself shows the lost work
+                caught = any(text.startswith("({}) ".format(row)) and " counted " in text for text in got)
+            if not caught:
+                out.append("({}) a copy of the hook with {!r} made {!r} did not trigger the required count failure "
+                           "in {}, so its count does not show the lost work: {!r}".format(
+                               name, line.strip(), mutated.strip(), row, got))
     return out
 
 
@@ -7956,12 +9114,12 @@ def _gw_module_as(name, stand_in):
 
 def _gw_lin_usage_failures():
     """(gw-lin-usage-readable, gw-lin-usage-no-resource, gw-lin-usage-no-field, gw-lin-usage-no-collections)
-    The gw-lin rows' usage report, through stand-in scans that spend CPU time in proportion to the input
-    (linear) or to its square (super-linear). With every reading available, a super-linear row fails with each
-    usage field for both timed calls. With no resource module, with a getrusage result missing a field and
-    with collector statistics without 'collections' (each stood in through sys.modules), the rows still reach
-    their verdict instead of raising: a linear row passes and a super-linear one fails reporting 'usage
-    unavailable' for each reading it lost and the readings it kept."""
+    The gw-lin rows' diagnostic usage report, through stand-in scans whose work count grows in proportion to the
+    input (linear) or to its square (super-linear, _gw_count_scan). With every reading available, a super-linear
+    row fails with its CPU times and each usage field for both counted calls. With no resource module, with a
+    getrusage result missing a field and with collector statistics without 'collections' (each stood in through
+    sys.modules), the rows still reach their verdict instead of raising: a linear row passes and a super-linear
+    one fails reporting 'usage unavailable' for each reading it lost and the readings it kept."""
     pair_s = r"\d+\.\d{3}s then \d+\.\d{3}s"
     pair = r"\d+ then \d+"
     lost = "usage unavailable"
@@ -7985,12 +9143,13 @@ def _gw_lin_usage_failures():
             ("gw-lin-usage-no-collections", "gc", no_collections,
              "user CPU {0}, system CPU {0}, minor page faults {1}, involuntary context switches {1}, "
              "cyclic collections {2}".format(pair_s, pair, lost))):
-        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input scaled the scan "
-                          r"\d+\.\d\dx \(>3x, super-linear\): \d+\.\d{3}s then \d+\.\d{3}s, the least of "
-                          + str(_GW_TIMINGS) + r" timings of each, for an input of length 8000 \(" + clause + r"\)\Z")
-        rows = ((label + "-super", "x", "", "", _gw_spin_scan(2), None),)
+        want = re.compile(r"\(" + re.escape(label + "-super") + r"\) doubling the input grew the scan's work count "
+                          r"from 4000 to 16000, over twice that plus " + str(_GW_COUNT_SLACK) + r" \(super-linear\), "
+                          r"for inputs of length 4000 then 8000; diagnostics only, not judged: CPU \d+\.\d{3}s then "
+                          r"\d+\.\d{3}s, " + clause + r"\Z")
+        rows = ((label + "-super", "x", "", "", _gw_count_scan(2), None),)
         if module is not None:
-            rows = ((label + "-linear", "x", "", "", _gw_spin_scan(1), None),) + rows
+            rows = ((label + "-linear", "x", "", "", _gw_count_scan(1), None),) + rows
         try:
             with _gw_module_as(module, stand_in) if module is not None else contextlib.nullcontext():
                 got = _gw_lin_failures(rows)
@@ -25533,8 +26692,10 @@ def _main_isolated(monitor):
                      aiqt_hooks.gate_weakening, "{ git c --no-verify -m y; }", None, "allow"),
                     ("glx-wc-3", {}, aiqt_hooks.gate_weakening, "time git log -c alias.x=y", None, "allow"),
                     ("glx-wc-4", {}, aiqt_hooks.gate_weakening, "echo git -c alias.x=y", None, "deny"),
+                    # was allow: the sh segment's script word holds 'verify', a checker name part, so the segment
+                    # is checker-shaped and names git, which the interim check-then-git narrowing denies
                     ("glx-wc-5", {}, aiqt_hooks.gate_weakening, "sh -c 'git -c alias.c=commit c --no-verify -m y'", None,
-                     "allow")):
+                     "deny")):
                 for _glx_name in _glx_names:
                     os.environ.pop(_glx_name, None)
                 os.environ.update(_glw_env)
@@ -30798,48 +31959,47 @@ def _main_isolated(monitor):
         gexpect("(gw-dq-q2) a single quote inside a double-quoted span marks the pairing ambiguous, so the "
                 "hidden git commit -nv is re-judged and denies (pins the double-quote branch's \"'\" "
                 "trigger)", "git log \"a'\" git commit -nv", "deny")
-        # Timing: the whole-command scan, the hides-roster-git helper and the dequoted-word scan are linear in
-        # their input length on these shapes, so doubling the input should roughly double the time (ratio
-        # ~2); a quadratic re-walk quadruples it
-        # (ratio ~4). The assertion is a RATIO, not a fixed wall-clock bound, so a threshold between 2x and
-        # 4x discriminates regardless of host speed (a fixed bound passes a quadratic scan on a fast host).
-        # Each scan is timed with time.process_time (this process's CPU time, as in the lex-cost rows), so
-        # time the process spends waiting for a CPU on a busy runner is not counted. Because a short t_n gives
-        # a noisy ratio, n is DOUBLED (bounded: from 4000 repetitions, at most 9 sizes) until t_n clears a
-        # 0.1 s floor; if it never does, the check FAILS 'linearity not evaluated' rather than passing
-        # silently (the former early-pass path). The floor sets how much stray cost one comparison absorbs:
-        # extra work counted in t_2n moves a linear row's ratio of about 2 past 3 only when it costs more
-        # than t_n itself. With a 0.02 s floor and a wall clock, one CI row failed at 3.24x (0.030 s then
-        # 0.097 s); at 0.1 s the clock's resolution and the cost of the call itself are negligible against
-        # t_n. On one host the slowest-growing rows (gw-lin-dq-off, gw-lin-dq-chain) clear 0.1 s only at
-        # 512000 repetitions, so the cap of 1024000 leaves a host about twice as fast room to clear it too.
-        # What else a timed call is charged for was measured on Python 3.14.4 with the whole suite running:
-        # no cyclic collection ran inside any timed call (the dequoted-word scan makes no lasting
-        # collector-tracked allocation, so none starts there even with the collector's count at its
-        # threshold), and every row's ratio stayed between 1.93 and 2.09 with the collector left on and with
-        # it disabled around each call. The one cost that grew faster than the input was the kernel's work
-        # on the page faults that first touch the memory a scan allocates (about 2.5 times the faults per
-        # doubling), under a tenth of t_2n there. A ratio above 3 that a CI runner measured for gw-lin-dq-off
-        # was not reproduced that way, nor with other processes loading the same CPU, so its cause is not
-        # known. A failing row therefore reports what the process used across each of its two timed calls,
-        # read outside the timed region: user and system CPU time, minor page faults, involuntary context
-        # switches and cyclic collections. Those readings are best effort (_gw_usage): one the host cannot
-        # give (no resource module, a missing getrusage field, a collector statistic without 'collections')
-        # is reported as unavailable, never raised, and gw-lin-usage-* pins both the report and that.
-        # A CI runner later measured gw-lin-span-optgit at 3.01x (0.109 s then 0.327 s, with 2763 then 7290
-        # minor page faults) where 14 local runs gave 2.00 to 2.04x, so one call charged for stray work still
-        # failed a linear row. A ratio over 3 now times both sizes again, at most _GW_TIMINGS timings of each,
-        # and judges the least time of each size: stray work only adds time, so the least timing is the one
-        # nearest the scan's own cost, a linear row needs one clean timing of each size to pass, and a scan that
-        # grows faster than its input fails on every timing. A passing first ratio is final, so a passing run
-        # times what it did before. gw-lin-retime-edge pins the retiming over scripted times (each end of the
-        # bound, a slow timing of either size, the timing cap) and gw-lin-retime-linear/super in CPU time.
+        # Growth: the whole-command scan, the hides-roster-git helper, the dequoted-word scan, the de-quoted text
+        # reading and the run-time word reading are linear in their input length on these shapes, so doubling
+        # the input at most doubles the WORK the scan does, plus a fixed part; a quadratic re-walk or a copy of
+        # the suffix after each unit quadruples it. The verdict reads that work as a COUNT, not a time: the
+        # hook's work-count seam (_GATE_SCAN_COUNTER, off and None in the hook) adds the characters or words each
+        # counted pass reads (_gate_scan_count), and a row fails when the count on the doubled input is over
+        # twice the count on the smaller one plus _GW_COUNT_SLACK (its derivation is at the constant). A count
+        # does not depend on the host, its load, its clock or its collector, so a linear row gives the same
+        # verdict on a loaded runner as on an idle one. The rows judged CPU time before (a ratio of 3 over a
+        # 0.1 s floor, retimed up to three times), and a linear row failed on CI runners that charged one timed
+        # call for stray work: gw-lin-dq-off was reported at 3.21x on one lane, and gw-lin-span-optgit at 3.01x
+        # (0.109 s then 0.327 s) where local runs gave about 2x. Each row still times both counted calls with time.process_time and
+        # reads the process's usage around them, outside the timed region (_gw_usage: user and system CPU time,
+        # minor page faults, involuntary context switches and cyclic collections, each best effort and reported
+        # as unavailable when the host cannot give it); a failing row reports them as diagnostics, and no verdict
+        # reads them. A row whose smaller count is under its input's length fails 'growth not evaluated', since
+        # every scan's own pass over its input is counted, so a seam the scan never reaches cannot pass a row.
+        # Each row also runs its smaller input with the seam off and asserts the same decision. gw-lin-count-edge
+        # pins the verdict over scripted readings (each end of the bound, the length floor, a doubled call
+        # charged 50 times the CPU time, a quadratic count, a wrong decision), gw-lin-count-linear/super pin it
+        # through the seam with stand-in scans, gw-lin-count-off-default/inert pin the seam off by default and
+        # inert there, gw-lin-count-raise-propagates/restores pin a raising scan's exception passing through and
+        # the seam off again after it, and gw-lin-usage-* pin the report.
+        # The seam counts the passes it instruments: a new loop added to a scan outside every counted pass is
+        # not counted, so the rows catch a re-walk or a suffix copy made through a counted pass or helper. A
+        # counted walk adds the steps it takes, never how far a cached pointer moved, and a reading reused from a
+        # cache or passed over by a skip adds nothing, and a walk or regex pass that can stop early adds only what
+        # it read before it stopped, never its bound, so losing the cache, the skip or the stop shows as added
+        # work: gw-lin-mut-* run each such site's one-line mutation (_GW_MUTANTS) on a copy of the hook and require
+        # the row it names to fail there, a gw-lin growth row for a loss that makes a scan quadratic and a gw-cnt
+        # row (_gw_work_failures, which pins the count of one call) for a loss that costs a fixed multiple; a
+        # gw-cnt row must fail on its count, not only on its result.
+        # gw-lin-slice-count, -pinned, -slack and -boundary pin the slack's derivation for the dequoted-word walk's
+        # slices, its truncated last slice included, at the sizes the rows use and at a boundary size.
         # A ROSTER-verb-dense line is still super-linear by design and relies on the deadline's fail-closed,
         # as the scan docstring states.
         # gw-dq-lin-sq / gw-dq-lin-dq: the two originals, linear before this change and here.
         # gw-lin-opts (`git ` + `-C 'a;' `*n): the subcommand never resolves (all global options), so the
         #   off-roster stop never fires and the former per-quote re-walk of `words` was quadratic; the
-        #   cached offroster_resolved makes it linear. Quadratic before that cache.
+        #   cached offroster_resolved makes it linear. Quadratic before that cache, and quadratic again when the
+        #   walk restarts at the first option (gw-lin-mut-lex-restart), which its count now shows.
         # gw-lin-span-roster (`git commit -m '` + `git x `*n + `'`) and gw-lin-span-off (`git log '` +
         #   `git log `*n + `'`): one quoted span naming many inner git words. The former
         #   _gate_span_hides_roster_git re-split the suffix per 'git' match (quadratic); the one-pass token
@@ -30848,7 +32008,7 @@ def _main_isolated(monitor):
         #   ` -C git`*n + ` x'`): every option word holds a 'git' match, or each '-C' consumes a git word as
         #   its value, so an option walk per match crossed every later option word (quadratic). The helper
         #   now reads each match's walk outcome from a table filled once from the end, so both are linear.
-        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) time
+        # gw-lin-dq-off (`sudo` + `git log`*n) and gw-lin-dq-chain (`sudo git` + `-C git`*n + `log`) count
         #   _gate_novrf_dequoted_bypass over the word list itself: it copied the words after each git word
         #   and re-walked a '-C git' chain from each, both quadratic. It now reads each git word's
         #   subcommand from tables filled once from the end, so both are linear.
@@ -30856,28 +32016,29 @@ def _main_isolated(monitor):
         #   `-n`) pack ROSTER-verb git words before a '-n' that is a bypass for none of them (push's dry run,
         #   or -m's value): each git word's walk read every later word, quadratic. A walk that found no bypass
         #   now passes over every later git word of the same verb whose words it already read, so both are
-        #   linear. gw-lin-unread-roster times the de-quoted text reading over the quote-concatenated shape.
-        # gw-lin-runtime (`$x log -m y `*n + `commit -m y`) times the run-time word reading (_gate_runtime_bypass)
+        #   linear. gw-lin-unread-roster counts the de-quoted text reading over the quote-concatenated shape.
+        # gw-lin-runtime (`$x log -m y `*n + `commit -m y`) counts the run-time word reading (_gate_runtime_bypass)
         #   over one piece in which every unit holds a word built at run time and an off-roster verb, and a roster
         #   verb with no hook-skip spelling and no word built at run time after it ends the piece (a word built at
         #   run time after a roster verb denies, so no unit can repeat both): the walk and the verb search start
         #   at the first such word only, so they are linear; a walk restarted at every such word reads every later
-        #   word again, quadratic. gw-lin-runtime-extglob (`@(x);` + ` x commit -m y;`*n) times the whole-text
+        #   word again, quadratic. gw-lin-runtime-extglob (`@(x);` + ` x commit -m y;`*n) counts the whole-text
         #   read an extglob opener adds over many raw pieces that hold no word built at run time.
         #   gw-lin-runtime-tilde (`~ log -m y `*n + `commit -m y`) is gw-lin-runtime with a tilde word in each unit.
-        #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) times the
+        #   gw-lin-runtime-heredoc (`cat <<E` + a body line `'$x log` + `E`, *n, then `commit -m y`) counts the
         #   here-document mask and the second split it gives: each body's quote pairs with the next one for the
         #   first split, so the pieces of the two splits differ throughout. gw-lin-runtime-case (`case;` + ` $x log
-        #   -m y;`*n + ` commit -m y`) times the read from a case word's piece to the end of the text, over many
-        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) times the walk from each
+        #   -m y;`*n + ` commit -m y`) counts the read from a case word's piece to the end of the text, over many
+        #   raw pieces. gw-lin-runtime-assembled (` g'i't -C`*n + ` x log $x commit`) counts the walk from each
         #   quote-assembled git (_gate_assembled_reading) over one piece in which every git's -C takes the next git
         #   as its value, so each git's subcommand is the one log near the end: the tables built from the end find
         #   each in one step, where a subcommand search restarted at every git reads every later word again,
         #   quadratic. Every runtime row holds a roster verb with no hook-skip spelling and no word built at run
         #   time after it, since text with no roster verb is passed over before any reading (_gate_runtime_may_hit).
-        # Each timed scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
-        # gives each shape at every size: none of them names a refused segment or a bypass), so a scan made
-        # linear by deciding these shapes wrongly fails here instead of passing on its timing alone.
+        # Each counted scan's decision is asserted too (the last column of _gw_lin_cases, the decision the scan
+        # gives each shape at both sizes with the seam on and at the smaller with it off: none of them names a
+        # refused segment or a bypass), so a scan made linear by deciding these shapes wrongly fails here
+        # instead of passing on its count alone.
         _gw_cmd_scan = aiqt_hooks._gate_closed_grammar_scan
         _gw_dq_scan = aiqt_hooks._gate_novrf_dequoted_bypass
         _gw_unread_scan = aiqt_hooks._gate_unread_bypass
@@ -30902,10 +32063,13 @@ def _main_isolated(monitor):
             ("gw-lin-runtime-case", " $x log -m y;", "case;", " commit -m y", _gw_runtime_scan, None),
             ("gw-lin-runtime-assembled", " g'i't -C", "", " x log $x commit", _gw_runtime_scan, None),
         )
+        failures.extend(_gw_count_seam_failures())
         failures.extend(_gw_lin_failures(_gw_lin_cases))
+        failures.extend(_gw_slice_failures())
+        failures.extend(_gw_work_failures())
+        failures.extend(_gw_mutant_failures(_gw_lin_cases))
         failures.extend(_gw_lin_usage_failures())
-        failures.extend(_gw_retime_failures())
-        failures.extend(_gw_retime_cpu_failures())
+        failures.extend(_gw_count_edge_failures())
 
         # A glob character can match a filename that becomes an option word (a file named -n makes
         # 'git commit *-n' hand git a bare -n), so a glob or a quote glued to one denies.
@@ -31493,8 +32657,8 @@ def _main_isolated(monitor):
             ("(gw-ct-s6) sed 50q notes", "pytest | sed 50q", "allow-note"),
             ("(gw-ct-s7) sed 's/q/x/' substitutes, notes", "pytest | sed 's/q/x/'", "allow-note"),
             ("(gw-ct-s8) awk 'NR<=50' notes", "pytest | awk 'NR<=50'", "allow-note"),
-            ("(gw-ct-s9) awk '{print NR, $0}' compares nothing, notes", "pytest | awk '{print NR, $0}'",
-             "allow-note"),
+            ("(gw-ct-s9) awk '{print NR, $0}' compares nothing, and its '$' after the check denies under the interim "
+             "check-then-git narrowing (was a note)", "pytest | awk '{print NR, $0}'", "deny"),
             ("(gw-ct-s10) '| command tail' resolves through the wrapper, notes (outside the canonical deny shape)", "pytest | command tail",
              'allow-note'),
             ("(gw-ct-s11) an alias-suppressing '| \\tail' denies", "pytest | \\tail", "deny"),
@@ -31904,10 +33068,10 @@ def _main_isolated(monitor):
              'case x in a) echo ordinary;; pytest) echo ordinary;; esac | head', 'allow-note'),
             ('(gw-r4-c3.1) notes',
              '{ pytest > /abs/check.log 2>&1; echo ordinary; } | head', 'allow-note'),
-            ('(gw-r4-c4.1) notes',
-             'pytest | awk \'{print "exit", $0}\'', 'allow-note'),
-            ('(gw-r4-c4.2) notes',
-             "pytest | awk '{print $0} # exit'", 'allow-note'),
+            ('(gw-r4-c4.1) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             'pytest | awk \'{print "exit", $0}\'', 'deny'),
+            ('(gw-r4-c4.2) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             "pytest | awk '{print $0} # exit'", 'deny'),
             ('(gw-r4-c4.3) notes',
              "pytest | awk 'NR<=50'", 'allow-note'),
             ('(gw-r4-c4.4) notes',
@@ -32034,14 +33198,14 @@ def _main_isolated(monitor):
              'head <<< $(pytest)', 'allow-note'),
             ('(gw-r4-m4.9) notes',
              'echo "$(pytest)" | tail', 'allow-note'),
-            ('(gw-r4-m4.10) notes',
-             'x=$(pytest 2>&1); echo "$x" | tail', 'allow-note'),
+            ('(gw-r4-m4.10) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             'x=$(pytest 2>&1); echo "$x" | tail', 'deny'),
             ('(gw-r4-m4.11) notes',
              'echo "$(pytest | tail)"', 'allow-note'),
             ('(gw-r4-m4.12) notes',
              'echo `pytest | tail`', 'allow-note'),
-            ('(gw-r4-m4.13) notes',
-             'out=$(pytest | tail); echo "$out"', 'allow-note'),
+            ('(gw-r4-m4.13) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             'out=$(pytest | tail); echo "$out"', 'deny'),
             ('(gw-r4-m5.1) denies',
              'pytest | timeout 5 tail', 'deny'),
             ('(gw-r4-m5.2) notes',
@@ -32126,8 +33290,9 @@ def _main_isolated(monitor):
              'case x in a) :;; pytest|head) :;; esac', 'allow-note'),
             ('(gw-r4-k2) a producer whose stdout is redirected is outside the deny, notes',
              'pytest > /abs/check.log | head', 'allow-note'),
-            ('(gw-r4-k3) a substitution inside the sink stage is outside the deny, notes',
-             'pytest | head -n $(echo 5)', 'allow-note'),
+            ('(gw-r4-k3) a substitution inside the sink stage is outside the sink deny, and its $ after the check '
+             'denies under the interim check-then-git narrowing (was a note)',
+             'pytest | head -n $(echo 5)', 'deny'),
             ('(gw-r4-k4) a --check after a bare option may be its value, notes',
              'python3 tools/build.py -o --check | head', 'allow-note'),
             ('(gw-r4-k5) a pattern alternation spelling a pipe into head is not a pipeline, notes',
@@ -32144,10 +33309,10 @@ def _main_isolated(monitor):
              "pytest | sed 's/x/;q;/'", 'allow-note'),
             ('(gw-r5-x1.2) notes',
              "pytest | sed '# ;q;'", 'allow-note'),
-            ('(gw-r5-x2.1) notes',
-             "pytest | awk '{x=/exit/; print $0}'", 'allow-note'),
-            ('(gw-r5-x3.1) notes',
-             "pytest | awk '{print $0; x=NR==1}'", 'allow-note'),
+            ('(gw-r5-x2.1) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             "pytest | awk '{x=/exit/; print $0}'", 'deny'),
+            ('(gw-r5-x3.1) denies: a $ after the check, the interim check-then-git narrowing (was a note)',
+             "pytest | awk '{print $0; x=NR==1}'", 'deny'),
             ('(gw-r5-x4.1) notes',
              'pytest | sort -o /abs/log | tail', 'allow-note'),
             ('(gw-r5-x5.1) notes',
@@ -32330,8 +33495,9 @@ def _main_isolated(monitor):
              'pytest | grep FAIL | tail', 'allow-note'),
             ('(gw-r5-p37) a sed program behind a plain wrapper, notes',
              'pytest | env sed 5q', 'allow-note'),
-            ('(gw-r5-p38) a sed program that deletes all but the last line, notes',
-             "pytest | sed '$!d'", 'allow-note'),
+            ('(gw-r5-p38) a sed program that deletes all but the last line, and its $ after the check denies under '
+             'the interim check-then-git narrowing (was a note)',
+             "pytest | sed '$!d'", 'deny'),
             ('(gw-r5-p39) a plain grep filter as the last stage is residual R4, allows',
              'pytest | grep FAIL', 'allow'),
             ('(gw-r5-p40) grep -m as the sink, denies',
@@ -39305,6 +40471,7 @@ def _main_isolated(monitor):
         _test_inline_errexit(failures, tmp)
         _test_console_prefix(failures, tmp)
         _test_pgrep_self_match(failures)
+        _test_gate_check_git(failures, tmp)
         _test_trkasy_no_amp(failures, tmp)
         _test_trkasy_heredoc_body_data(failures, tmp)
         _test_trkasy_heredoc_consumer(failures, tmp)
@@ -39315,6 +40482,8 @@ def _main_isolated(monitor):
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
         _test_stream_failure_exits(failures)
+        _test_stdin_locale_decoding(failures, tmp)
+        _test_stdin_read_once(failures)
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)

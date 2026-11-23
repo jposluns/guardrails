@@ -257,6 +257,24 @@ on any patch release other than the one the file names. When the host interprete
 `python-host-patch` in `.aiqt/python-host.toml` and the `python-version` pin of every host job in
 `quality.yml` together, in one change.
 
+The git-side gate record (rule gatdis) binds a passing check run to the tree being committed. Install it once
+per clone with `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install` (it writes
+pre-commit, pre-merge-commit and pre-push stubs into the common git directory's hooks directory, never sets
+`core.hooksPath`, and refuses next to the OPF pre-commit stub, printing the manual chaining step). Then: stage
+everything the commit holds, run `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record run`
+(it runs the set HEAD's committed `.aiqt/gate-record.toml` names, `bash tools/run_all_checks.sh`, on a
+working tree that matches the index, and appends a record bound to the index tree and the HEAD commit), and
+commit. The hooks refuse a tree whose last record is missing, failed, for another tree, for another parent
+commit or for another set, or that has an earlier failed run, and read the set from the commit the change is
+built on; an orphan branch must keep the default branch's set and verifier. After `git commit --amend`, record
+the tree on its real parent (`git reset --soft HEAD^`, run the recorder, commit) before pushing. pre-push
+accepts a tip with no record here only when the remote it is pushed to already has that commit (read with
+`git ls-remote` of the push URL; an unreadable remote cannot be evaluated).
+`tools/doctor.py --require-gate-record` reports a missing or disabled stub. In every clone, stubs or not, the
+gate-weakening hook denies a check and git in one Bash command outside a short list of exact shapes, and git
+commit-tree, send-pack and http-push in any command (a quoted git commit, tag or merge message may name them);
+run a check and git as two calls.
+
 ## Git and writing conventions
 
 - Commits are authored `Jeff Posluns <jeff@posluns.ca>`, with NO AI author, committer, or co-author

@@ -333,7 +333,7 @@ def load_manifest(path):
             raise ValueError("{}: [[hook]] unknown key(s): {}".format(path.name, ", ".join(sorted(extra))))
         hid = _req_str(hook, "id", "{}: [[hook]]".format(path.name))
         where = "{}: [[hook]] {}".format(path.name, hid)
-        if not ID_RE.match(hid):
+        if not ID_RE.fullmatch(hid):
             raise ValueError("{}: id must match ^[a-z][a-z0-9-]*$ (a kebab-case control id)".format(where))
         if hid in seen_ids:
             raise ValueError("{}: duplicate hook id".format(where))
@@ -342,7 +342,7 @@ def load_manifest(path):
         if not isinstance(rules, list) or not rules or not all(isinstance(r, str) and r for r in rules):
             raise ValueError("{}: rules must be a non-empty list of corpus-id strings".format(where))
         for rule in rules:
-            if not CID_RE.match(rule):
+            if not CID_RE.fullmatch(rule):
                 raise ValueError("{}: rules entry '{}' is not a corpus-id shape (^[a-z0-9]{{6,}}$)"
                                  .format(where, rule))
         if _req_str(hook, "platform", where) not in PLATFORMS:
@@ -359,7 +359,7 @@ def load_manifest(path):
         elif "matcher" in hook:
             raise ValueError("{}: matcher is forbidden on the non-tool event {}".format(where, event))
         handler = _req_str(hook, "handler", where)
-        if not HANDLER_RE.match(handler):
+        if not HANDLER_RE.fullmatch(handler):
             raise ValueError("{}: handler must be a python identifier".format(where))
         if handler in seen_handlers:
             raise ValueError("{}: duplicate handler '{}' (each control has its own)".format(where, handler))
@@ -1958,6 +1958,15 @@ def self_test_main(_nested=False):
         _mutate(badhandler, 'handler = "test_handler"', 'handler = "missing_handler"')
         if run_quiet(badhandler, check=True) != 2:
             failures.append("missing handler expected exit 2 (fail-closed)")
+
+        # 8b. A hook id with a trailing newline (the TOML \n escape) fails closed: ID_RE ends in $,
+        #     which also matches just before a final newline, so only fullmatch refuses it.
+        nlid = tmp / "nlid"
+        nlid.mkdir()
+        _build_tree(nlid)
+        _mutate(nlid, 'id = "selftest-control"', 'id = "selftest-control\\n"')
+        if run_quiet(nlid, check=True) != 2:
+            failures.append("hook id with a trailing newline expected exit 2 (fail-closed)")
 
         # 9. A missing handler SCRIPT (the dispatcher file absent) fails closed.
         noscript = tmp / "noscript"

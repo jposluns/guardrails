@@ -6,7 +6,8 @@ path is DERIVED from that frontmatter per the two-axis taxonomy (aiqt/ numbered 
 coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check so the read tree can never
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
 
-RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and moves no text yet):
+RULE SOURCE FORMAT (the two-layer split; this step parses and validates it and renders the full text from
+it, and no live source uses it yet):
   A rule source is read from its raw bytes as UTF-8 with no newline translation, and a source holding
   any CR byte is refused (check_clauses reads it the same way, through read_rule_source and
   decode_rule_source, so both tools number lines alike). The split is the one body line that reads
@@ -119,6 +120,13 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
       letters and digits kept, case-folded (a title or prose line such as `# Details` or `DETAIL.`);
     - an empty detail layer (blank lines only).
   Every body is read in full, with or without the split.
+  FULL RENDER (full_body): each generated file is its source's full render. A source with no split renders
+  as itself, byte for byte. In a split source the detail layer holds the rule's current text verbatim, and
+  the source renders as its unsplit original, byte for byte: the frontmatter with every detail-trigger and
+  detail-reason line dropped, then the body through its title line, then every line below the `## Detail`
+  line (the core layer below the title and the split line are dropped). So the split is invisible in the
+  read tree, in write mode and in the --check drift compare. core_layer returns a split source's core text
+  below its title (blank lines at either end dropped), and None for a source with no split.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or manifest, a rule mapping
                          to an id its manifest marks withdrawn, or a read/write failure
@@ -128,7 +136,9 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
                             (exit 2), and the MAP_KEYS read refusal exits 2 with empty stdout under each
                             stderr condition; that each listed detail layout case gets its expected
                             exit, and that each guard in the revert table, put back in a scratch copy,
-                            changes its case's exit
+                            changes its case's exit; and that each listed split source renders byte-equal
+                            to its unsplit original in write and check mode, with core_layer giving its
+                            core, and that each split-render guard, put back, makes a split case fail
 """
 import sys
 
@@ -597,6 +607,61 @@ def check_detail(text, fm, name):
     return heading
 
 
+def _frontmatter_key(line):
+    """The key of one frontmatter line as parse_source_text reads it (the text before its first `:`, spaces
+    stripped), or None for a line with no `:`."""
+    return line.split(":", 1)[0].strip(" ") if ":" in line else None
+
+
+def _split_lines(text, name):
+    """(lines, first, title, split) for a rule source's text whose body holds the `## Detail` split, or None
+    when it has none: lines is the text split at LF, first the 1-based first body line, title the 1-based
+    title line (the first non-blank body line) and split the 1-based split line, so first <= title < split.
+    Raises ValueError as detail_heading_line does."""
+    split = detail_heading_line(text, name)
+    if split is None:
+        return None
+    first = body_first_line(text, name)
+    lines = text.split("\n")
+    title = next((number for number in range(first, split) if lines[number - 1] != ""), 0)
+    if not title:
+        raise ValueError("{}: the '{}' split has no title line above it".format(name, DETAIL_HEADING))
+    return lines, first, title, split
+
+
+def full_body(text, name):
+    """The full render of one rule source's text (decoded by read_rule_source): what gen_rules writes to
+    the .claude/rules/ read tree. A source with no `## Detail` split renders as itself, byte for byte. A
+    split source renders as its unsplit original: its frontmatter with every detail-trigger and
+    detail-reason line dropped, then its body through the title line, then every line below the split
+    line. The core layer below the title (every line between the title and the split) and the split line
+    are dropped, and the detail layer, which holds the rule's current text verbatim, follows the title
+    exactly as it did before the split. Raises ValueError as detail_heading_line does."""
+    found = _split_lines(text, name)
+    if found is None:
+        return text
+    lines, first, title, split = found
+    kept = [line for line in lines[1:first - 2] if _frontmatter_key(line) not in DETAIL_KEYS]
+    return "\n".join(lines[:1] + kept + lines[first - 2:title] + lines[split:])
+
+
+def core_layer(text, name):
+    """The core layer of one rule source's text below its title: the body lines between the title line
+    and the `## Detail` split, with blank lines at either end dropped, each ending in LF ("" when every
+    such line is blank). None for a source with no split, whose full text is its whole body (full_body).
+    Raises ValueError as detail_heading_line does."""
+    found = _split_lines(text, name)
+    if found is None:
+        return None
+    lines, _first, title, split = found
+    core = lines[title:split - 1]
+    while core and core[0] == "":
+        core.pop(0)
+    while core and core[-1] == "":
+        core.pop()
+    return "".join(line + "\n" for line in core)
+
+
 def load_corpus(src_dir):
     """Parse and fully validate every source (schema + unique corpus-id + unique derived path); raise
     ValueError on any malformed or duplicate. Returns [(path, frontmatter, derived_rel_path)]."""
@@ -647,14 +712,18 @@ def run(root, check):
             return 2
         if dir_present(src_dir, root=root):
             corpus = load_corpus(src_dir)
-            # Each source is copied whole, mapping ids included, so a rule mapping to an id its manifest
-            # marks withdrawn is refused here (exit 2, naming the rule, the key and the id), never written.
+            # Each source's frontmatter is written with its mapping ids, so a rule mapping to an id its
+            # manifest marks withdrawn is refused here (exit 2, naming the rule, the key and the id), never
+            # written.
             withdrawn = withdrawn_mappings(corpus, load_manifests(root / ".aiqt" / "standards", root=root))
             if withdrawn:
                 print("error: {}".format("; ".join(withdrawn)))
                 return 2
+            # Each generated file is the source's full render (full_body): a source with no split as
+            # itself, byte for byte, and a split source as its unsplit original, so the split is invisible
+            # in the read tree, in write mode and in the --check drift compare alike.
             for src, _fm, rel in corpus:
-                desired[rel] = src.read_text(encoding="utf-8")
+                desired[rel] = full_body(read_rule_source(src), src.name)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -2612,6 +2681,122 @@ _PARSE_REVERTS = (
     ("fm-r8-indented-under-empty",) + _revert("", "", _FMCOLON, _FMINDENT, _FMTYPE)[1:3]
     + ("r8-indented-under-empty",),
 )
+# The split is invisible in every generated output: a split source (the rule's current text moved below
+# `## Detail` unchanged, a core layer added between its title and the split, and the detail keys added to its
+# frontmatter) must render byte-equal to its unsplit original, in write mode and in the --check drift compare
+# (a target holding the unsplit original is in sync, and one holding the split source as written is drift).
+# Each original is also a source of its own, which renders as itself. core_layer() must return the core text
+# of the split source and None for the original. (name, family lines, detail key lines placed (before
+# corpus-id, before slug, after slug), body lines above the title, core section between the title and the
+# split, the current text below the title, the expected core_layer)
+_SPLIT_FM = ("---\n{head}corpus-id: selfs1\norigin: pack\n{family}{mid}slug: gen-rules-selftest-split\n{tail}"
+             "---\n")
+_SPLIT_NAME = "gen-rules-selftest-split.md"
+_SPLIT_AIQT = "family: aiqt\ntier: 10\nfacet: QUALI\n"
+_SPLIT_TITLE = "# Gen-rules split self-test rule\n"
+_SPLIT_TEXT = ("\nNever blend a measured figure with an estimated one; label which part is which.\n"
+               "Report an unknown as unknown, never as zero.\n\nA second paragraph, kept verbatim (it is the "
+               "rule's current text).\n")
+_SPLIT_CORE = "\nNever blend measured and estimated figures.\n\n"
+_SPLIT_CASES = (
+    ("split-aiqt-both-keys", _SPLIT_AIQT, ("", "", _TRIGGER + _REASON), "", _SPLIT_CORE, _SPLIT_TEXT,
+     "Never blend measured and estimated figures.\n"),
+    ("split-security-trigger-mid", "family: security\nfacet: SECI\n", ("", _TRIGGER, ""), "",
+     "\nCore one.\n\nCore two,\nstill core two.\n\n", _SPLIT_TEXT, "Core one.\n\nCore two,\nstill core two.\n"),
+    ("split-keys-first", _SPLIT_AIQT, (_REASON + _TRIGGER, "", ""), "", _SPLIT_CORE, _SPLIT_TEXT,
+     "Never blend measured and estimated figures.\n"),
+    ("split-quoted-spaced-keys", _SPLIT_AIQT,
+     ("", "", "detail-trigger: 'writing a self-test fixture'\ndetail-reason:   self-test only  \n"), "",
+     _SPLIT_CORE, _SPLIT_TEXT, "Never blend measured and estimated figures.\n"),
+    ("split-non-ascii-reason", _SPLIT_AIQT, ("", "", _TRIGGER + "detail-reason: caf" + chr(0xe9) + " review\n"),
+     "", _SPLIT_CORE, _SPLIT_TEXT, "Never blend measured and estimated figures.\n"),
+    ("split-blank-before-title", _SPLIT_AIQT, ("", "", _TRIGGER), "\n", _SPLIT_CORE, _SPLIT_TEXT,
+     "Never blend measured and estimated figures.\n"),
+    ("split-text-at-title", _SPLIT_AIQT, ("", "", _TRIGGER), "", _SPLIT_CORE,
+     "Text directly under the title.\n\nA second paragraph.\n", "Never blend measured and estimated figures.\n"),
+    ("split-wide-gaps", _SPLIT_AIQT, ("", "", _TRIGGER), "", "\n\nCore.\n\n\n", "\n\n" + _SPLIT_TEXT, "Core.\n"),
+)
+
+
+def _unsplit_reference(text):
+    """A second implementation of full_body for a split source that the corpus accepts, by text patterns
+    rather than line numbers: drop each frontmatter line that starts with a detail key and `:`, then drop
+    the text from the end of the title line through the end of the `## Detail` line."""
+    head, sep, body = text.partition("\n---\n")
+    head = "\n".join(line for line in head.split("\n")
+                     if not re.match(r"(?:detail-trigger|detail-reason) *:", line))
+    body = re.sub(r"\A(\n*# [^\n]*\n).*?^## Detail\n", r"\1", body, count=1, flags=re.S | re.M)
+    return head + sep + body
+
+
+def _split_case_texts(case):
+    """(unsplit original, split source) of one _SPLIT_CASES case."""
+    _name, family, (head, mid, tail), lead, core, text, _core = case
+    original = _SPLIT_FM.format(head="", mid="", tail="", family=family) + lead + _SPLIT_TITLE + text
+    split = (_SPLIT_FM.format(head=head, mid=mid, tail=tail, family=family) + lead + _SPLIT_TITLE + core
+             + DETAIL_HEADING + "\n" + text)
+    return original, split
+
+
+def _split_render_failures(module, base, run_quiet):
+    """One failure line per way module (this module, or one with a guard reverted) fails a _SPLIT_CASES case:
+    the split source written in write mode must give exit 0 and the unsplit original byte for byte, then
+    --check exit 0; --check over a target holding the original must exit 0 and over one holding the split
+    source must exit 1 (drift); the original as a source must render as itself; full_body() must give the
+    original for both texts and core_layer() the expected core for the split source and None for the
+    original. base is a directory this call may populate."""
+    failures = []
+    full, core = getattr(module, "full_body", None), getattr(module, "core_layer", None)
+    for case in _SPLIT_CASES:
+        name, expected_core = case[0], case[-1]
+        original, split = _split_case_texts(case)
+        rel = derive(parse_source_text(original, name), name)
+        for mode, source, prewrite, want in (("write", split, None, 0), ("control", original, None, 0),
+                                             ("check-original", split, original, 0),
+                                             ("check-leaked", split, split, 1)):
+            root = base / name / mode
+            (root / ".aiqt" / "core" / "rules").mkdir(parents=True)
+            (root / ".aiqt" / "core" / "rules" / _SPLIT_NAME).write_bytes(source.encode("utf-8"))
+            target = root / ".claude" / "rules" / rel
+            if prewrite is not None:
+                target.parent.mkdir(parents=True)
+                target.write_bytes(prewrite.encode("utf-8"))
+            got = run_quiet(root, prewrite is not None, runner=module.run)
+            if got != want:
+                failures.append("split case {} ({}): expected exit {}, got {!r}".format(name, mode, want, got))
+            elif prewrite is None:
+                held = target.read_bytes() if target.is_file() else None
+                if held != original.encode("utf-8"):
+                    failures.append("split case {} ({}): the generated file is not the unsplit original byte for "
+                                    "byte; got {!r}".format(name, mode, None if held is None else held[-300:]))
+                again = run_quiet(root, True, runner=module.run)
+                if again != 0:
+                    failures.append("split case {} ({}): --check after generation expected exit 0, got {!r}"
+                                    .format(name, mode, again))
+        if full is None or core is None:
+            failures.append("split case {}: full_body() and core_layer() must both be defined".format(name))
+            continue
+        try:
+            got = (full(split, name), full(original, name), core(split, name), core(original, name))
+        except Exception as exc:  # noqa: BLE001  a revert may surface as any exception
+            got = "raised {!r}".format(exc)
+        if got != (original, original, expected_core, None):
+            failures.append("split case {}: expected (full_body of the split source, full_body of the original, "
+                            "core_layer of the split source, core_layer of the original) to be (the original, the "
+                            "original, {!r}, None); got {!r}".format(name, expected_core, got))
+    return failures
+
+
+# Red on revert for the split render: each guard put back makes at least one _SPLIT_CASES case fail.
+# (name, fixed text, reverted text)
+_SPLIT_REVERTS = (
+    ("split-render-wiring", "desired[rel] = full_body(read_rule_source(src), src.name)",
+     "desired[rel] = read_rule_source(src)"),
+    ("split-drop-detail-keys", " if _frontmatter_key(line) not in DETAIL_KEYS]", "]"),
+    ("split-drop-core", "lines[first - 2:title] + lines[split:]", "lines[first - 2:split - 1] + lines[split:]"),
+    ("split-drop-heading", "lines[first - 2:title] + lines[split:]", "lines[first - 2:title] + lines[split - 1:]"),
+    ("split-core-below-title", "core = lines[title:split - 1]", "core = lines[title - 1:split - 1]"),
+)
 
 
 def _detail_case_root(base, name):
@@ -2747,7 +2932,9 @@ def self_test_main():
                                         else "pruned", got, kept, wrote))
 
         # The two-layer split: a well-formed detail rule generates and then checks clean, its generated
-        # file still the whole source byte for byte; every malformed layout is a malformed source (exit 2).
+        # file the whole source byte for byte when it has no split, and otherwise its unsplit render
+        # (_unsplit_reference, a second implementation of full_body); every malformed layout is a malformed
+        # source (exit 2).
         detail_base = tmp / "detail"
         for name, _keys, _body, expected in _DETAIL_CASES:
             root = _detail_case_root(detail_base, name)
@@ -2757,9 +2944,12 @@ def self_test_main():
             elif expected == 0:
                 source = root / ".aiqt" / "core" / "rules" / "gen-rules-selftest-detail.md"
                 generated = root / ".claude" / "rules" / derive(parse_source(source), source.name)
-                if not generated.is_file() or generated.read_bytes() != source.read_bytes():
-                    failures.append("detail case {}: the generated file is not the source byte for byte"
-                                    .format(name))
+                raw = source.read_bytes()
+                want = raw if b"\n" + DETAIL_HEADING.encode("ascii") + b"\n" not in raw else \
+                    _unsplit_reference(raw.decode("utf-8")).encode("utf-8")
+                if not generated.is_file() or generated.read_bytes() != want:
+                    failures.append("detail case {}: the generated file is not {} byte for byte".format(
+                        name, "the source" if want == raw else "the source's unsplit render"))
                 if run_quiet(root, check=True) != 0:
                     failures.append("detail case {}: --check after generation expected exit 0".format(name))
         revert_base = tmp / "reverted"
@@ -2774,6 +2964,19 @@ def self_test_main():
             if got != reverted_exit:
                 failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard is "
                                 "what decides it), got {!r}".format(label, case, reverted_exit, got))
+
+        # The split is invisible in the read tree: every split source renders byte-equal to its unsplit
+        # original in write and check mode (_SPLIT_CASES), and each split-render guard put back goes red.
+        failures.extend(_split_render_failures(sys.modules[__name__], tmp / "split", run_quiet))
+        for label, old, new in _SPLIT_REVERTS:
+            try:
+                mutant = _load_reverted(revert_base, label, old, new)
+            except AssertionError as exc:
+                failures.append(str(exc))
+                continue
+            if not _split_render_failures(mutant, revert_base / label, run_quiet):
+                failures.append("revert {}: with the guard removed, the split cases expected at least one failure, "
+                                "got none".format(label))
 
         # The adopter-shaped rule is accepted, and is refused once the ASCII-only value check is put back.
         adopter = tmp / "adopter" / _ADOPTER_NAME
@@ -2958,16 +3161,18 @@ def self_test_main():
           ".claude/, .claude/rules or family directory symlinked outside the root exits 2 in write mode with nothing "
           "written or deleted there, and one symlinked inside the root is read; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}); {} detail layout case(s) "
-          "hold and {} guard revert(s) each go red; an adopter-shaped rule with a non-ASCII value is accepted "
-          "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
-          "case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
+          "hold and {} guard revert(s) each go red; {} split source(s) render byte-equal to their unsplit "
+          "original in write and check mode, and {} split-render revert(s) each go red; an adopter-shaped "
+          "rule with a non-ASCII value is accepted and goes red under the ASCII-only revert; {} parse-level "
+          "revert(s) each go red; {} adopter-mode case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
           "nothing, here and in every tools/gen_*.py, each of which, on a tree made stale on purpose, ends at a "
           "write in its copy with no argument and exits 1 with nothing blocked under --check, and a valued option "
           "never takes a following flag as its value; "
           "{}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
-              len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
+              len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_SPLIT_CASES), len(_SPLIT_REVERTS),
+              len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),
               "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
               "PyYAML safe_load reads the same keys and values for {} live source(s), {} fuzzed "
