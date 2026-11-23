@@ -127,18 +127,61 @@ it, and no live source uses it yet):
   line (the core layer below the title and the split line are dropped). So the split is invisible in the
   read tree, in write mode and in the --check drift compare. core_layer returns a split source's core text
   below its title (blank lines at either end dropped), and None for a source with no split.
-  gen_rules.py           regenerate .claude/rules/{aiqt,security}/
+REFERENCE TREE (.aiqt/reference/rules/{aiqt,security}/, REFERENCE_DIR): the full-rule copies that the CORE
+  render's pointers name (tools/gen_rules_core.py REFERENCE_PREFIX). Each file is the same full render
+  (full_body) of its source at the same derived path as in .claude/rules/. The reference tree is compared
+  byte for byte (a CRLF or a lone CR in place of an LF is drift, and so is a target that is not UTF-8) and
+  written as bytes. Every read, write and deletion is confined to the two declared output trees
+  (REFERENCE_DIR/aiqt/ and REFERENCE_DIR/security/) and bound beneath directory descriptors with the
+  no-follow walk tools/_adapter_compose.py uses for its targets (each directory opened beneath its parent's
+  descriptor with O_DIRECTORY|O_NOFOLLOW; a write goes to a new temporary file renamed over the target).
+  Before anything is read, written or deleted in either tree, the whole of REFERENCE_DIR is classified
+  without following a link, and each of these is exit 2 in both modes, named, with nothing read, written or
+  deleted through it: a symbolic link (wherever it points, inside the root too) or another non-directory at
+  .aiqt/, .aiqt/reference/, REFERENCE_DIR or a family directory; a symbolic link, FIFO, socket or device
+  anywhere in a family directory; a reference target that is not a regular file; and any entry of
+  REFERENCE_DIR other than the two family directories, or of .aiqt/reference/ other than REFERENCE_DIR
+  (outside the declared trees, so it is never deleted: remove it by hand). Every file in a family directory
+  that no source renders is an orphan (drift), whatever its name, and so is every directory there that holds
+  no rendered file. Permission bits are not compared: a reference file whose mode alone differs (an added
+  execute bit, say) is not drift, and a rewrite keeps the existing file's mode. That nothing loads the
+  reference tree is inferred, not observed on a client: it is outside .claude/ and the paths the
+  instruction-budget gate models as loaded.
+READ TREE (.claude/rules/{aiqt,security}/, RULES_DIR): read, written and pruned through the same walk, confined
+  to its two declared output trees, and classified the same way before anything in either tree is read,
+  written or deleted: a symbolic link (wherever it points, inside the root too, such as a family directory
+  linked to .aiqt/core/rules/) or another non-directory at .claude/, RULES_DIR or a family directory, and a
+  symbolic link, FIFO, socket or device anywhere in a family directory, is exit 2 in both modes, named, with
+  nothing read, written or deleted through it; so is a read-tree target that is not a regular file. Its
+  compare is unchanged: each target is read as UTF-8 text with every CRLF and lone CR read as LF (a target
+  that is not UTF-8 is exit 2), only a *.md file no source renders is an orphan, and RULES_DIR's other entries
+  (its README.md) are neither judged nor touched. A target is rewritten as a new file renamed over it, never
+  written through a link or a second hard link.
+  gen_rules.py           regenerate .claude/rules/{aiqt,security}/ and .aiqt/reference/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or manifest, a rule mapping
                          to an id its manifest marks withdrawn, or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target, a source path that is not a
                             directory or a symlink to a directory inside the root, and a .claude/, a
-                            .claude/rules or a family directory symlinked outside the root fail closed
-                            (exit 2), and the MAP_KEYS read refusal exits 2 with empty stdout under each
+                            .claude/rules or a family directory symlinked outside or inside the root fail
+                            closed (exit 2), and the MAP_KEYS read refusal exits 2 with empty stdout under each
                             stderr condition; that each listed detail layout case gets its expected
                             exit, and that each guard in the revert table, put back in a scratch copy,
                             changes its case's exit; and that each listed split source renders byte-equal
                             to its unsplit original in write and check mode, with core_layer giving its
-                            core, and that each split-render guard, put back, makes a split case fail
+                            core, and that each split-render guard, put back, makes a split case fail;
+                            and that the reference tree is generated as each source's full render, a
+                            missing, edited, extra or CRLF-altered reference file, an empty or orphaned
+                            subdirectory is drift (exit 1) with --check writing nothing, a malformed
+                            source, a reference target that is a symbolic link, a reference directory
+                            linked outside the root, a family, REFERENCE_DIR or a subdirectory linked
+                            inside the root, an orphan symbolic link, a stray entry beside the families
+                            or beside REFERENCE_DIR and a family swapped for a link after the scan are
+                            exit 2 with nothing written or deleted, as is a platform that cannot list a
+                            directory descriptor; that in the read tree a family linked to the sources,
+                            .claude/rules or a subdirectory linked inside the root, a target or an orphan
+                            that is a symbolic link, a FIFO and a family swapped for a link after the scan
+                            are exit 2 with nothing written or deleted; and each generated-tree guard, put
+                            back, makes its named case fail by its verdict, not by an exception
 """
 import sys
 
@@ -157,6 +200,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import html
 import os
 import re
+import stat
 import unicodedata
 from pathlib import Path
 
@@ -164,6 +208,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _standards import (dir_chain_or_absent, dir_or_absent, dir_present, load_manifests, map_keys,  # noqa: E402
                         withdrawn_mappings)
+# The reference tree is read, written and pruned only through the no-follow, descriptor-bound walk the adapter
+# targets already use (each directory opened beneath its parent's descriptor with O_DIRECTORY|O_NOFOLLOW, the
+# final name judged absent, a regular file or refused), never a second implementation of it.
+from _adapter_compose import (ComposeError, _open_dir_component, _read_target, _require_dir_fd,  # noqa: E402
+                              _write_target)
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -262,7 +311,165 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
     {"target": ".claude/rules/security/", "kind": "tree",
      "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
+    {"target": ".aiqt/reference/rules/aiqt/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
+    {"target": ".aiqt/reference/rules/security/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
 )
+# The reference tree the CORE render's pointers name (see REFERENCE TREE above; tools/gen_rules_core.py
+# REFERENCE_PREFIX is this directory with a trailing slash).
+REFERENCE_DIR = ".aiqt/reference/rules"
+# The two declared reference output trees (the gensrc rows above): REFERENCE_DIR/<family>/.
+REFERENCE_FAMILIES = ("aiqt", "security")
+# The generated read tree and its two declared output trees (the first two gensrc rows above): RULES_DIR/<family>/,
+# read, written and pruned through the same descriptor-bound walk as the reference tree.
+RULES_DIR = ".claude/rules"
+RULES_FAMILIES = ("aiqt", "security")
+# The directory opener of the generated-tree scan: _adapter_compose's no-follow component open (a symlink or a
+# non-directory is a ComposeError naming it; an absent component raises FileNotFoundError).
+_ref_open = _open_dir_component
+
+
+def _reference_dir_fd(root, parts):
+    """A descriptor for the directory root/<parts>, which the caller closes, or None when a component is absent.
+    root is opened as named (the trusted anchor); every component below it is opened beneath the previous one's
+    descriptor by _ref_open, so a symlink (wherever it points, inside the root or not) or a non-directory at
+    ANY component (.aiqt/ included) is a ComposeError naming it, never followed."""
+    fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for i, part in enumerate(parts):
+            try:
+                child = _ref_open(fd, part, "/".join(parts), "/".join(parts[:i + 1]))
+            except FileNotFoundError:
+                return None
+            fd, parent = child, fd
+            os.close(parent)
+        held, fd = fd, None
+        return held
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _tree_entry_refusal(tree, rel, st):
+    """The refusal of an entry under the generated tree `tree` that is neither a directory nor a regular file."""
+    return ComposeError("{}/{} is {}; {} is never read, written or pruned through it, and neither mode touches it "
+                        "(remove it by hand)".format(
+                            tree, rel, "a symlink" if stat.S_ISLNK(st.st_mode)
+                            else "not a regular file or a directory", tree))
+
+
+def _tree_scan(root, tree, families, desired, every_name):
+    """Classify every entry of the family directories of the generated tree `tree` (REFERENCE_DIR or RULES_DIR)
+    beneath directory descriptors, following no link, before anything is read, written or deleted: return
+    (orphans, strays). With every_name (REFERENCE_DIR), orphans lists every regular file in a family directory that
+    no source renders and every directory there that holds no desired path, and strays lists every entry of `tree`
+    other than the family directories, whatever its kind (outside the declared output trees, so never deleted, by
+    their repo-relative path). Without it (RULES_DIR, whose contract predates the walk), orphans lists only the
+    regular files named *.md that no source renders, a directory is never an orphan, and the other entries of `tree`
+    (its README.md) are not listed. Each orphan is relative to `tree` and listed after its contents (so pruning in
+    order empties a directory before removing it). A symlink or other non-directory at any component of `tree` or
+    at a family directory, and a symlink, FIFO, socket or device anywhere in a family directory, raises
+    ComposeError naming it. An absent tree or family is no entries. A platform without descriptor-relative
+    resolution (the dir_fd forms _adapter_compose requires, os.scandir on a descriptor, and os.unlink and os.rmdir
+    with dir_fd) raises ComposeError first (exit 2 in both modes): there is no path-name fallback."""
+    _require_dir_fd()
+    if (os.scandir not in os.supports_fd or os.unlink not in os.supports_dir_fd
+            or os.rmdir not in os.supports_dir_fd):
+        raise ComposeError("this platform cannot list a directory descriptor or remove a name beneath one "
+                           "(os.scandir on a descriptor, os.unlink and os.rmdir with dir_fd); a generated tree "
+                           "is never read, written or pruned through a path name, so nothing was read or written")
+    keep = {rel.rsplit("/", 1)[0] for rel in desired if "/" in rel}
+    for rel in list(keep):
+        while "/" in rel:
+            rel = rel.rsplit("/", 1)[0]
+            keep.add(rel)
+    orphans, strays = [], []
+
+    def walk(dir_fd, rel):
+        with os.scandir(dir_fd) as listed:
+            names = sorted(entry.name for entry in listed)
+        for name in names:
+            sub = rel + "/" + name
+            st = os.lstat(name, dir_fd=dir_fd)
+            if stat.S_ISDIR(st.st_mode):
+                child = _ref_open(dir_fd, name, tree + "/" + sub, tree + "/" + sub)
+                try:
+                    walk(child, sub)
+                finally:
+                    os.close(child)
+                if every_name and sub not in keep:
+                    orphans.append(sub)
+            elif stat.S_ISREG(st.st_mode):
+                if sub not in desired and (every_name or name.endswith(".md")):
+                    orphans.append(sub)
+            else:
+                raise _tree_entry_refusal(tree, sub, st)
+
+    top = _reference_dir_fd(root, tuple(tree.split("/")))
+    if top is None:
+        return orphans, strays
+    try:
+        if every_name:
+            with os.scandir(top) as listed:
+                strays.extend(sorted(tree + "/" + entry.name for entry in listed if entry.name not in families))
+        for family in families:
+            try:
+                fam = _ref_open(top, family, tree + "/" + family, tree + "/" + family)
+            except FileNotFoundError:
+                continue
+            try:
+                walk(fam, family)
+            finally:
+                os.close(fam)
+    finally:
+        os.close(top)
+    return orphans, strays
+
+
+def _reference_scan(root, desired):
+    """_tree_scan of REFERENCE_DIR (every name in a family judged), whose strays also list every entry of
+    .aiqt/reference/ other than REFERENCE_DIR (outside the declared output trees, so never deleted)."""
+    orphans, strays = _tree_scan(root, REFERENCE_DIR, REFERENCE_FAMILIES, desired, every_name=True)
+    parent_dir, own = REFERENCE_DIR.rsplit("/", 1)
+    parent = _reference_dir_fd(root, tuple(parent_dir.split("/")))
+    if parent is not None:
+        try:
+            with os.scandir(parent) as listed:
+                strays[:0] = sorted(parent_dir + "/" + entry.name for entry in listed if entry.name != own)
+        finally:
+            os.close(parent)
+    return orphans, strays
+
+
+def _rules_scan(root, desired):
+    """_tree_scan of RULES_DIR: its orphans (the *.md files no source renders), every link and wrong-type entry at
+    .claude/, RULES_DIR, a family directory or anywhere in one refused."""
+    return _tree_scan(root, RULES_DIR, RULES_FAMILIES, desired, every_name=False)[0]
+
+
+def _tree_prune(root, tree, rel):
+    """Remove the orphan tree/rel by name beneath its parent's descriptor (_reference_dir_fd, so a symlink or
+    non-directory at any component above it is refused, never followed): os.rmdir for a directory (only an
+    empty one is removed) and os.unlink for a regular file (which removes the name, never the bytes a link
+    names). An entry gone since the scan is left gone; one that became anything else is refused."""
+    parts = tuple((tree + "/" + rel).split("/"))
+    parent = _reference_dir_fd(root, parts[:-1])
+    if parent is None:
+        return
+    try:
+        try:
+            st = os.lstat(parts[-1], dir_fd=parent)
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(st.st_mode):
+            os.rmdir(parts[-1], dir_fd=parent)
+        elif stat.S_ISREG(st.st_mode):
+            os.unlink(parts[-1], dir_fd=parent)
+        else:
+            raise _tree_entry_refusal(tree, rel, st)
+    finally:
+        os.close(parent)
 
 
 def _unquote(tok):
@@ -691,8 +898,11 @@ def load_corpus(src_dir):
 
 
 def run(root, check):
-    """Reconcile the .claude/rules/ read tree under root against the .aiqt/core/rules/ corpus. Exit 0 in
-    sync, 1 on drift (check mode), 2 on a malformed source or a read/write failure. Parameterized on root
+    """Reconcile the .claude/rules/ read tree and the REFERENCE_DIR reference tree under root against the
+    .aiqt/core/rules/ corpus. Exit 0 in sync, 1 on drift (check mode), 2 on a malformed source, a
+    generated target that is not a regular file, a symlink or wrong-type entry in or above either generated
+    tree, an entry of REFERENCE_DIR or .aiqt/reference/ outside the declared reference trees, or a read/write
+    failure. Parameterized on root
     (rather than calling repo_root() inline) so the self-test can drive it against a synthetic tempdir
     tree, never the real repo."""
     src_dir = root / ".aiqt" / "core" / "rules"
@@ -728,13 +938,9 @@ def run(root, check):
         print("error: {}".format(exc))
         return 2
     # Reconcile even when src_dir is absent (desired empty) so orphaned generated files are never concealed.
-    # The whole reconcile is fail-closed: an unreadable generated file (target.read_text) or an unreadable
-    # generated dir at ANY depth (os.walk(onerror=raise), not rglob, which silently skips an unlistable
-    # subdir) becomes a clean exit 2 rather than a traceback or a concealed orphan.
+    # The whole reconcile is fail-closed: an unreadable generated file or an unreadable generated dir at ANY
+    # depth (the descriptor walk raises) becomes a clean exit 2 rather than a traceback or a concealed orphan.
     drift = []
-
-    def _raise(exc):
-        raise exc
     try:
         # dir_chain_or_absent (not is_dir, dir_present or dir_or_absent), before the first read, write or delete
         # under out_dir: .claude/rules and each family directory in it (the directory holding every generated
@@ -742,36 +948,75 @@ def run(root, check):
         # but cannot be read as a directory (a regular file, or a symlink that is dangling, whose target is not
         # a directory or resolves outside the root) is exit 2 with nothing written or deleted, never followed
         # out of the repository, and an unreadable parent raises (exit 2 below), never skipping the orphan
-        # scan. A symlink to a directory inside the root is read. A family absent here can only be created
-        # below, holding desired files alone.
-        probed = {}
+        # scan. A family absent here can only be created below, holding desired files alone.
         for path in (out_dir, out_dir / "aiqt", out_dir / "security"):
-            probed[path], problem = dir_chain_or_absent(path, root)
+            _present, problem = dir_chain_or_absent(path, root)
             if problem is not None:
                 print("error: {} {} (cannot evaluate)".format(path, problem))
                 return 2
+        # The read tree is confined to its two declared output trees, RULES_DIR/{aiqt,security}/, and judged in
+        # full beneath directory descriptors before anything under it is read, written or deleted (_rules_scan,
+        # the reference tree's walk): a symlink (wherever it points, inside the root too, such as a family
+        # linked to the sources) or another non-directory at .claude/, RULES_DIR or a family directory, or a
+        # symlink, FIFO, socket or device anywhere in a family, is exit 2 in both modes, named and never followed.
+        rules_orphans = _rules_scan(root, desired)
+        # The reference tree is confined to its two declared output trees, REFERENCE_DIR/{aiqt,security}/, and
+        # is judged in full before anything under either tree is written or deleted: _reference_scan walks it
+        # beneath directory descriptors, so a symlink (wherever it points, inside the root too) or another
+        # non-directory at .aiqt/, .aiqt/reference/, REFERENCE_DIR or a family directory, or a symlink, FIFO,
+        # socket or device anywhere in a family, is exit 2 in both modes, named and never followed. Any other
+        # entry of REFERENCE_DIR or of .aiqt/reference/ is outside the declared trees: exit 2 in both modes, never
+        # deleted.
+        orphans, strays = _reference_scan(root, desired)
+        if strays:
+            print("error: {} outside the declared reference trees {}/{{{}}}/; neither mode reads, writes or deletes "
+                  "it (remove it by hand) (cannot evaluate)".format(
+                      ", ".join(strays), REFERENCE_DIR, ",".join(REFERENCE_FAMILIES)))
+            return 2
+        # Each reference target is read once, before anything is written, beneath the descriptors the walk
+        # holds (_read_target): absent is None, a regular file is its bytes, and anything else there (a
+        # symbolic link wherever it points, a directory or another kind) is exit 2 in both modes.
+        held = {}
+        for rel in sorted(desired):
+            held[rel] = _read_target(root, REFERENCE_DIR + "/" + rel)
+        # Each read-tree target is read the same way, before anything is written, and compared as text as before
+        # the walk: decoded as UTF-8 (a target that is not UTF-8 is exit 2) with every CRLF and lone CR read as
+        # LF, the newline translation Path.read_text applied, so a line-ending change alone is not drift here.
+        current = {}
+        for rel in sorted(desired):
+            raw = _read_target(root, RULES_DIR + "/" + rel)
+            current[rel] = None if raw is None else raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        # Written as the render's UTF-8 bytes (the bytes Path.write_text wrote) beneath the descriptors the walk
+        # holds (_write_target: missing directories made beneath the held descriptor, a new temporary file renamed
+        # over the target, never written through a link or a second hard link).
         for rel, content in sorted(desired.items()):
-            target = out_dir / rel
-            current = target.read_text(encoding="utf-8") if target.exists() else None
-            if current != content:
+            if current[rel] != content:
                 drift.append(rel)
                 if not check:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, encoding="utf-8")
-        for family in ("aiqt", "security"):
-            fam_dir = out_dir / family
-            if probed[fam_dir]:
-                for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
-                    for fn in sorted(f for f in filenames if f.endswith(".md")):
-                        f = Path(dirpath) / fn
-                        # as_posix(), not str(): desired keys are forward-slash derive() paths, so a
-                        # backslash from str() on Windows would flag every generated file as an orphan.
-                        rel = f.relative_to(out_dir).as_posix()
-                        if rel not in desired:
-                            drift.append("orphan " + rel)
-                            if not check:
-                                f.unlink()
-    except (OSError, UnicodeError) as exc:
+                    _write_target(root, RULES_DIR + "/" + rel, content.encode("utf-8"))
+        # Every *.md file in a read-tree family directory that no source renders is an orphan, pruned beneath its
+        # parent's descriptor (other names and directories there are left alone, as before the walk).
+        for orphan in rules_orphans:
+            drift.append("orphan " + orphan)
+            if not check:
+                _tree_prune(root, RULES_DIR, orphan)
+        # The reference tree: the same full render at the same derived path, compared byte for byte (the
+        # target's raw bytes against the render encoded as UTF-8, so a CRLF, a lone CR or a non-UTF-8 byte is
+        # drift) and written as bytes beneath the descriptors the walk holds (_write_target: missing directories
+        # made beneath the held descriptor, a new temporary file renamed over the target, never written through).
+        for rel, content in sorted(desired.items()):
+            want = content.encode("utf-8")
+            if held[rel] != want:
+                drift.append(REFERENCE_DIR + "/" + rel)
+                if not check:
+                    _write_target(root, REFERENCE_DIR + "/" + rel, want)
+        # Every file in a reference family directory that no source renders, whatever its name, and every
+        # directory there that holds no desired path, is an orphan, pruned beneath its parent's descriptor.
+        for orphan in orphans:
+            drift.append("orphan " + REFERENCE_DIR + "/" + orphan)
+            if not check:
+                _tree_prune(root, REFERENCE_DIR, orphan)
+    except (OSError, UnicodeError, ComposeError) as exc:
         # UnicodeError (UnicodeDecodeError) covers the generated-TARGET read above: a non-UTF-8 target
         # decodes as UTF-8 there, so a corrupt target fails closed (exit 2) rather than a raw traceback,
         # the same OSError path (a read-only fs, a permission error, a full disk) already fails closed on.
@@ -3040,8 +3285,11 @@ def _split_render_failures(module, base, run_quiet):
             (root / ".aiqt" / "core" / "rules" / _SPLIT_NAME).write_bytes(source.encode("utf-8"))
             target = root / ".claude" / "rules" / rel
             if prewrite is not None:
-                target.parent.mkdir(parents=True)
-                target.write_bytes(prewrite.encode("utf-8"))
+                # The same bytes in the read tree and in the reference tree, so each check case judges
+                # the one render in both.
+                for held_at in (target, root / REFERENCE_DIR / rel):
+                    held_at.parent.mkdir(parents=True)
+                    held_at.write_bytes(prewrite.encode("utf-8"))
             got = run_quiet(root, prewrite is not None, runner=module.run)
             if got != want:
                 failures.append("split case {} ({}): expected exit {}, got {!r}".format(name, mode, want, got))
@@ -3050,6 +3298,12 @@ def _split_render_failures(module, base, run_quiet):
                 if held != original.encode("utf-8"):
                     failures.append("split case {} ({}): the generated file is not the unsplit original byte for "
                                     "byte; got {!r}".format(name, mode, None if held is None else held[-300:]))
+                reference = root / REFERENCE_DIR / rel
+                ref_held = reference.read_bytes() if reference.is_file() else None
+                if ref_held != original.encode("utf-8"):
+                    failures.append("split case {} ({}): the reference file is not the unsplit original byte for "
+                                    "byte; got {!r}".format(name, mode,
+                                                            None if ref_held is None else ref_held[-300:]))
                 again = run_quiet(root, True, runner=module.run)
                 if again != 0:
                     failures.append("split case {} ({}): --check after generation expected exit 0, got {!r}"
@@ -3078,6 +3332,416 @@ _SPLIT_REVERTS = (
     ("split-drop-heading", "lines[first - 2:title] + lines[split:]", "lines[first - 2:title] + lines[split - 1:]"),
     ("split-core-below-title", "core = lines[title:split - 1]", "core = lines[title - 1:split - 1]"),
 )
+
+
+# The reference tree (REFERENCE TREE above). A fixture corpus of an unsplit aiqt rule (_RULE_SRC) and a split
+# security rule (the second _SPLIT_CASES case) is generated, then each drift case alters the generated reference
+# tree and must be exit 1 in --check with every byte of the fixture tree unchanged, then exit 0 in write mode
+# and exit 0 in --check again (the write repairs it). (name, alteration of the case root)
+_REFERENCE_SPLIT = _split_case_texts(_SPLIT_CASES[1])
+_REFERENCE_SPLIT_REL = "security/SECI-gen-rules-selftest-split.md"
+
+
+def _ref_missing(root):
+    (root / REFERENCE_DIR / _RULE_REL).unlink()
+
+
+def _ref_edited(root):
+    path = root / REFERENCE_DIR / _REFERENCE_SPLIT_REL
+    path.write_bytes(path.read_bytes() + b"An edited line.\n")
+
+
+def _ref_extra_md(root):
+    (root / REFERENCE_DIR / "aiqt" / "zz-extra-rule.md").write_bytes(b"# Extra\n")
+
+
+def _ref_extra_other(root):
+    (root / REFERENCE_DIR / "security" / "notes.txt").write_bytes(b"not a rule\n")
+
+
+def _ref_crlf(root):
+    path = root / REFERENCE_DIR / _RULE_REL
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+
+
+def _ref_lone_cr(root):
+    path = root / REFERENCE_DIR / _REFERENCE_SPLIT_REL
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r", 1))
+
+
+def _ref_not_utf8(root):
+    (root / REFERENCE_DIR / _RULE_REL).write_bytes(b"\xff\xfe not utf-8\n")
+
+
+def _ref_tree_gone(root):
+    import shutil
+    shutil.rmtree(root / ".aiqt" / "reference")
+
+
+def _ref_empty_subdir(root):
+    (root / REFERENCE_DIR / "aiqt" / "sub").mkdir()
+
+
+def _ref_nested_orphan(root):
+    (root / REFERENCE_DIR / "security" / "deep" / "deeper").mkdir(parents=True)
+    (root / REFERENCE_DIR / "security" / "deep" / "deeper" / "old.md").write_bytes(b"# Old\n")
+
+
+_REFERENCE_DRIFT_CASES = (("missing", _ref_missing), ("edited", _ref_edited), ("extra-md", _ref_extra_md),
+                          ("extra-other", _ref_extra_other), ("crlf", _ref_crlf), ("lone-cr", _ref_lone_cr),
+                          ("not-utf8", _ref_not_utf8), ("tree-gone", _ref_tree_gone),
+                          ("empty-subdir", _ref_empty_subdir), ("nested-orphan", _ref_nested_orphan))
+
+
+# The reference tree is confined to its two declared output trees and never followed through a link: each case
+# alters a generated fixture and must be exit 2 in --check and in write mode with every byte of the fixture tree
+# (its .aiqt/core/rules/ sources included) and of the outside directory unchanged. (name, alteration of
+# (root, outside))
+def _ref_family_link_in_root(root, _outside):
+    import shutil
+    shutil.rmtree(root / REFERENCE_DIR / "security")
+    (root / REFERENCE_DIR / "security").symlink_to(Path("..", "..", "core", "rules"))
+
+
+def _ref_rules_link_in_root(root, _outside):
+    import shutil
+    shutil.rmtree(root / REFERENCE_DIR)
+    (root / REFERENCE_DIR).symlink_to(Path("..", "core", "rules"))
+
+
+def _ref_subdir_link_in_root(root, _outside):
+    (root / REFERENCE_DIR / "aiqt" / "sub").symlink_to(Path("..", "..", "..", "core", "rules"))
+
+
+def _ref_orphan_symlink(root, outside):
+    (outside / "held.md").write_bytes(b"held outside\n")
+    (root / REFERENCE_DIR / "aiqt" / "zz-link.md").symlink_to(outside / "held.md")
+
+
+def _ref_stray_file(root, _outside):
+    (root / REFERENCE_DIR / "stray.md").write_bytes(b"# Stray\n")
+
+
+def _ref_stray_dir(root, _outside):
+    (root / REFERENCE_DIR / "extra").mkdir()
+    (root / REFERENCE_DIR / "extra" / "x.md").write_bytes(b"# Extra\n")
+
+
+def _ref_sibling_file(root, _outside):
+    (root / ".aiqt" / "reference" / "other.md").write_bytes(b"# Other\n")
+
+
+# The read tree (RULES_DIR) gets the same refusals: each was followed, read or pruned through before the walk.
+def _rules_family_link_in_root(root, _outside):
+    import shutil
+    shutil.rmtree(root / RULES_DIR / "security")
+    (root / RULES_DIR / "security").symlink_to(Path("..", "..", ".aiqt", "core", "rules"))
+
+
+def _rules_dir_link_in_root(root, _outside):
+    import shutil
+    shutil.rmtree(root / RULES_DIR)
+    (root / RULES_DIR).symlink_to(Path("..", ".aiqt", "core"))
+
+
+def _rules_subdir_link_in_root(root, _outside):
+    (root / RULES_DIR / "aiqt" / "sub").symlink_to(Path("..", "..", "..", ".aiqt", "core", "rules"))
+
+
+def _rules_target_symlink(root, outside):
+    target = root / RULES_DIR / _RULE_REL
+    target.unlink()
+    (outside / "held.md").write_bytes(b"held outside\n")
+    target.symlink_to(outside / "held.md")
+
+
+def _rules_orphan_symlink(root, outside):
+    (outside / "held.md").write_bytes(b"held outside\n")
+    (root / RULES_DIR / "aiqt" / "zz-link.md").symlink_to(outside / "held.md")
+
+
+def _rules_fifo(root, _outside):
+    os.mkfifo(root / RULES_DIR / "security" / "zz-fifo.md")
+
+
+_REFERENCE_REFUSED_CASES = (("family-link-in-root", _ref_family_link_in_root),
+                            ("rules-link-in-root", _ref_rules_link_in_root),
+                            ("subdir-link-in-root", _ref_subdir_link_in_root),
+                            ("orphan-symlink", _ref_orphan_symlink), ("stray-file", _ref_stray_file),
+                            ("stray-dir", _ref_stray_dir), ("sibling-file", _ref_sibling_file),
+                            ("rules-family-link-in-root", _rules_family_link_in_root),
+                            ("rules-dir-link-in-root", _rules_dir_link_in_root),
+                            ("rules-subdir-link-in-root", _rules_subdir_link_in_root),
+                            ("rules-target-symlink", _rules_target_symlink),
+                            ("rules-orphan-symlink", _rules_orphan_symlink)) + (
+                            (("rules-fifo", _rules_fifo),) if hasattr(os, "mkfifo") else ())
+
+
+def _tree_bytes(root):
+    """Every entry under root, followed by no link: {relative path: bytes for a file, ('link', target) for a
+    symbolic link, 'dir' for a directory, ('special', file type) for a FIFO, socket or device (never opened)}."""
+    held = {}
+    for dirpath, dirs, filenames in os.walk(root):
+        for name in dirs + filenames:
+            path = Path(dirpath) / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                held[rel] = ("link", os.readlink(path))
+            elif path.is_dir():
+                held[rel] = "dir"
+            elif not path.is_file():
+                held[rel] = ("special", stat.S_IFMT(path.lstat().st_mode))
+            else:
+                held[rel] = path.read_bytes()
+    return held
+
+
+def _reference_root(base, name):
+    """A fixture corpus at base/name holding the unsplit aiqt rule and the split security rule; returns it."""
+    root = base / name
+    src = root / ".aiqt" / "core" / "rules"
+    src.mkdir(parents=True)
+    (src / "gen-rules-selftest-target.md").write_bytes(_RULE_SRC.encode("utf-8"))
+    (src / _SPLIT_NAME).write_bytes(_REFERENCE_SPLIT[1].encode("utf-8"))
+    return root
+
+
+def _reference_failures(module, base, run_quiet):
+    """One failure line per way module (this module, or one with a guard reverted) fails a reference-tree case.
+    base is a directory this call may populate."""
+    failures = []
+    expected = {_RULE_REL: _RULE_SRC.encode("utf-8"), _REFERENCE_SPLIT_REL: _REFERENCE_SPLIT[0].encode("utf-8")}
+
+    def ref_files(root):
+        ref = root / REFERENCE_DIR
+        return {path.relative_to(ref).as_posix(): path.read_bytes()
+                for path in sorted(ref.rglob("*")) if path.is_file()} if ref.is_dir() else None
+
+    def not_generated(root):
+        # None when a write-mode run generates the fixture (exit 0, the reference tree as expected), else the
+        # failure text, carrying the exit so an exception from module shows as run_quiet's 'raised ...'.
+        got = run_quiet(root, False, runner=module.run)
+        if got == 0 and ref_files(root) == expected:
+            return None
+        return "the fixture did not generate (write exit {!r})".format(got)
+
+    # Generated: each reference file is its source's full render (the split source as its unsplit original),
+    # equal to the read tree's file, and nothing else is there; --check is then clean.
+    root = _reference_root(base, "generated")
+    got = (run_quiet(root, False, runner=module.run), run_quiet(root, True, runner=module.run))
+    claude = {rel: (root / ".claude" / "rules" / rel).read_bytes() if (root / ".claude" / "rules" / rel).is_file()
+              else None for rel in expected}
+    if got != (0, 0) or ref_files(root) != expected or claude != expected:
+        failures.append("reference generated: expected write and --check exit 0, the reference tree holding each "
+                        "source's full render and the read tree the same bytes; got exits {!r}, reference {!r}"
+                        .format(got, ref_files(root)))
+    for name, alter in _REFERENCE_DRIFT_CASES:
+        root = _reference_root(base, "drift-" + name)
+        problem = not_generated(root)
+        if problem is not None:
+            failures.append("reference {}: {}".format(name, problem))
+            continue
+        alter(root)
+        before = _tree_bytes(root)
+        checked = run_quiet(root, True, runner=module.run)
+        unchanged = _tree_bytes(root) == before
+        written = run_quiet(root, False, runner=module.run)
+        again = run_quiet(root, True, runner=module.run)
+        if (checked, unchanged, written, again, ref_files(root)) != (1, True, 0, 0, expected):
+            failures.append("reference {}: expected --check exit 1 with nothing written, then write exit 0 and "
+                            "--check exit 0 with the reference tree restored; got --check {!r}, tree unchanged {}, "
+                            "write {!r}, --check {!r}".format(name, checked, unchanged, written, again))
+    # A malformed source, a reference target that is a symbolic link, and a reference directory linked outside
+    # the root: exit 2 in both modes with every byte of the fixture tree (and the outside directory) unchanged.
+    for name in ("malformed-source", "target-symlink", "reference-dir-outside"):
+        root = _reference_root(base, "refused-" + name)
+        outside = base / ("outside-" + name)
+        outside.mkdir()
+        problem = None if name == "reference-dir-outside" else not_generated(root)
+        if problem is not None:
+            failures.append("reference {}: {}".format(name, problem))
+            continue
+        if name == "malformed-source":
+            (root / ".aiqt" / "core" / "rules" / "gen-rules-selftest-target.md").write_bytes(
+                _RULE_SRC.replace("tier: 10", "tier: 11").encode("utf-8"))
+        elif name == "target-symlink":
+            target = root / REFERENCE_DIR / _RULE_REL
+            target.unlink()
+            (outside / "held.md").write_bytes(b"held outside\n")
+            target.symlink_to(outside / "held.md")
+        else:
+            (root / ".aiqt" / "reference").symlink_to(outside)
+        before, outside_before = _tree_bytes(root), _tree_bytes(outside)
+        got = (run_quiet(root, True, runner=module.run), run_quiet(root, False, runner=module.run))
+        if got != (2, 2) or _tree_bytes(root) != before or _tree_bytes(outside) != outside_before:
+            failures.append("reference {}: expected exit 2 in --check and in write mode with nothing written; got "
+                            "{!r}, tree unchanged {}, outside unchanged {}".format(
+                                name, got, _tree_bytes(root) == before, _tree_bytes(outside) == outside_before))
+    # A symlink or an entry outside the two declared reference trees: exit 2 in both modes, nothing followed,
+    # written or deleted, the sources included.
+    for name, alter in _REFERENCE_REFUSED_CASES:
+        root = _reference_root(base, "refused-" + name)
+        outside = base / ("outside-" + name)
+        outside.mkdir()
+        problem = not_generated(root)
+        if problem is not None:
+            failures.append("reference {}: {}".format(name, problem))
+            continue
+        alter(root, outside)
+        before, outside_before = _tree_bytes(root), _tree_bytes(outside)
+        got = (run_quiet(root, True, runner=module.run), run_quiet(root, False, runner=module.run))
+        if got != (2, 2) or _tree_bytes(root) != before or _tree_bytes(outside) != outside_before:
+            failures.append("reference {}: expected exit 2 in --check and in write mode with nothing written or "
+                            "deleted; got {!r}, tree unchanged {}, outside unchanged {}".format(
+                                name, got, _tree_bytes(root) == before, _tree_bytes(outside) == outside_before))
+    # The aiqt family swapped for a symlink to an outside directory after the scan judged the tree and before
+    # anything is read, written or pruned (a stand-in for module._reference_scan does the swap): the reads, the
+    # writes and the pruning are bound beneath descriptors, so both modes are exit 2 with the outside directory
+    # unchanged, never read, written or pruned through the link.
+    for mode, check in (("check", True), ("write", False)):
+        name = "swap-after-scan-" + mode
+        root = _reference_root(base, name)
+        outside = base / ("outside-" + name)
+        outside.mkdir()
+        problem = not_generated(root)
+        if problem is not None:
+            failures.append("reference {}: {}".format(name, problem))
+            continue
+        _ref_missing(root)
+        (root / REFERENCE_DIR / "aiqt" / "zz-orphan.md").write_bytes(b"# Orphan\n")
+        (outside / "zz-orphan.md").write_bytes(b"held outside\n")
+        outside_before = _tree_bytes(outside)
+        scan = module._reference_scan
+
+        def swapped(root_arg, desired, _scan=scan, _root=root, _outside=outside):
+            found = _scan(root_arg, desired)
+            family = _root / REFERENCE_DIR / "aiqt"
+            family.rename(_root / ".aiqt" / "reference" / "aiqt-moved")
+            family.symlink_to(_outside)
+            return found
+        module._reference_scan = swapped
+        try:
+            got = run_quiet(root, check, runner=module.run)
+        finally:
+            module._reference_scan = scan
+        if got != 2 or _tree_bytes(outside) != outside_before:
+            failures.append("reference {}: expected exit 2 with the outside directory unchanged; got {!r}, outside "
+                            "unchanged {}".format(name, got, _tree_bytes(outside) == outside_before))
+    # The same for the read tree: its aiqt family swapped for a symlink to an outside directory after the read-tree
+    # scan (a stand-in for module._rules_scan does the swap) is exit 2 in both modes with the outside unchanged.
+    for mode, check in (("check", True), ("write", False)):
+        name = "rules-swap-after-scan-" + mode
+        root = _reference_root(base, name)
+        outside = base / ("outside-" + name)
+        outside.mkdir()
+        problem = not_generated(root)
+        if problem is not None:
+            failures.append("reference {}: {}".format(name, problem))
+            continue
+        (root / RULES_DIR / _RULE_REL).unlink()
+        (root / RULES_DIR / "aiqt" / "zz-orphan.md").write_bytes(b"# Orphan\n")
+        (outside / "zz-orphan.md").write_bytes(b"held outside\n")
+        outside_before = _tree_bytes(outside)
+        rules_scan = module._rules_scan
+
+        def rules_swapped(root_arg, desired, _scan=rules_scan, _root=root, _outside=outside):
+            found = _scan(root_arg, desired)
+            family = _root / RULES_DIR / "aiqt"
+            family.rename(_root / RULES_DIR / "aiqt-moved")
+            family.symlink_to(_outside)
+            return found
+        module._rules_scan = rules_swapped
+        try:
+            got = run_quiet(root, check, runner=module.run)
+        finally:
+            module._rules_scan = rules_scan
+        if got != 2 or _tree_bytes(outside) != outside_before:
+            failures.append("reference {}: expected exit 2 with the outside directory unchanged; got {!r}, outside "
+                            "unchanged {}".format(name, got, _tree_bytes(outside) == outside_before))
+    # A platform that cannot list a directory descriptor (stood in for by taking os.scandir out of os.supports_fd
+    # for the two runs): exit 2 in both modes with nothing written, never a path-name fallback or a traceback.
+    if os.scandir in os.supports_fd:
+        root = _reference_root(base, "no-dir-fd")
+        before = _tree_bytes(root)
+        os.supports_fd.discard(os.scandir)
+        try:
+            got = (run_quiet(root, True, runner=module.run), run_quiet(root, False, runner=module.run))
+        finally:
+            os.supports_fd.add(os.scandir)
+        if got != (2, 2) or _tree_bytes(root) != before:
+            failures.append("reference no-dir-fd: expected exit 2 in --check and in write mode with nothing written; "
+                            "got {!r}, tree unchanged {}".format(got, _tree_bytes(root) == before))
+    return failures
+
+
+# Red on revert for the reference tree: each guard put back makes its named reference case fail, and fail by its
+# verdict (an exit, a byte or a tree compare), never because the mutant raised. The no-follow revert puts back
+# path-name reads, writes and pruning that follow links together with a scan that follows them (the code before
+# the descriptor-bound walk); the descriptor-io revert puts back only the path-name reads, writes and pruning.
+# (name, fixed text, reverted text, the case that must fail)
+_REF_FOLLOWING_IO = (
+    ("            held[rel] = _read_target(root, REFERENCE_DIR + \"/\" + rel)\n",
+     "                    _write_target(root, REFERENCE_DIR + \"/\" + rel, want)\n",
+     "                _tree_prune(root, REFERENCE_DIR, orphan)\n"),
+    ("            held[rel] = (root / REFERENCE_DIR / rel).read_bytes() if (root / REFERENCE_DIR / rel).is_file() "
+     "else None\n",
+     "                    (root / REFERENCE_DIR / rel).parent.mkdir(parents=True, exist_ok=True)\n"
+     "                    (root / REFERENCE_DIR / rel).write_bytes(want)\n",
+     "                (root / REFERENCE_DIR / orphan).unlink() if not (root / REFERENCE_DIR / orphan).is_dir() "
+     "else (root / REFERENCE_DIR / orphan).rmdir()\n"))
+# The read tree's descriptor-bound reads, writes and pruning (fixed), and the path-name forms they replaced, which
+# follow links (reverted).
+_RULES_FOLLOWING_IO = (
+    ("            raw = _read_target(root, RULES_DIR + \"/\" + rel)\n",
+     "                    _write_target(root, RULES_DIR + \"/\" + rel, content.encode(\"utf-8\"))\n",
+     "                _tree_prune(root, RULES_DIR, orphan)\n"),
+    ("            raw = (out_dir / rel).read_bytes() if (out_dir / rel).exists() else None\n",
+     "                    (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)\n"
+     "                    (out_dir / rel).write_bytes(content.encode(\"utf-8\"))\n",
+     "                (out_dir / orphan).unlink()\n"))
+# The read-tree scan (fixed), and the listing it replaced, which follows a linked .claude/, RULES_DIR or family
+# (reverted).
+_RULES_FOLLOWING_SCAN = (
+    "        rules_orphans = _rules_scan(root, desired)\n",
+    "        rules_orphans = sorted(p.relative_to(out_dir).as_posix() for fam in RULES_FAMILIES "
+    "if (out_dir / fam).is_dir() for p in (out_dir / fam).rglob(\"*.md\") "
+    "if p.is_file() and p.relative_to(out_dir).as_posix() not in desired)\n")
+_REFERENCE_REVERTS = (
+    ("reference-byte-compare", "            if held[rel] != want:\n",
+     "            if (held[rel] or b\"\").replace(b\"\\r\", b\"\") != want:\n", "crlf"),
+    ("reference-write", "                    _write_target(root, REFERENCE_DIR + \"/\" + rel, want)\n",
+     "                    pass\n", "missing"),
+    ("reference-orphan", "drift.append(\"orphan \" + REFERENCE_DIR + \"/\" + orphan)", "pass", "extra-md"),
+    ("reference-orphan-dir", "                if every_name and sub not in keep:\n", "                if False:\n",
+     "empty-subdir"),
+    ("reference-entry-kind", "                raise _tree_entry_refusal(tree, sub, st)\n", "                pass\n",
+     "orphan-symlink"),
+    ("reference-stray", "        if strays:\n", "        if False:\n", "stray-file"),
+    ("reference-sibling",
+     "                strays[:0] = sorted(parent_dir + \"/\" + entry.name for entry in listed if entry.name != own)\n",
+     "                pass\n", "sibling-file"),
+    ("rules-scan", _RULES_FOLLOWING_SCAN[0], _RULES_FOLLOWING_SCAN[1], "rules-subdir-link-in-root"),
+    ("rules-no-follow", (_RULES_FOLLOWING_SCAN[0],) + _RULES_FOLLOWING_IO[0],
+     (_RULES_FOLLOWING_SCAN[1],) + _RULES_FOLLOWING_IO[1], "rules-family-link-in-root"),
+    ("rules-descriptor-io", _RULES_FOLLOWING_IO[0], _RULES_FOLLOWING_IO[1], "rules-swap-after-scan-write"),
+    ("rules-entry-kind", "                raise _tree_entry_refusal(tree, sub, st)\n", "                pass\n",
+     "rules-orphan-symlink"),
+    ("reference-no-follow", ("_ref_open = _open_dir_component\n",) + _REF_FOLLOWING_IO[0],
+     ("_ref_open = lambda fd, part, _rel, _upto: os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)\n",)
+     + _REF_FOLLOWING_IO[1], "family-link-in-root"),
+    ("reference-descriptor-io", _REF_FOLLOWING_IO[0], _REF_FOLLOWING_IO[1], "swap-after-scan-write"),
+    ("reference-dir-fd-guard", ("    _require_dir_fd()\n",
+                                "    if (os.scandir not in os.supports_fd or os.unlink not in os.supports_dir_fd\n"),
+     ("    pass\n", "    if False and (os.scandir not in os.supports_fd or os.unlink not in os.supports_dir_fd\n"),
+     "no-dir-fd"),
+)
+
+
+def _named_case_failed(failures, case):
+    """True when a failure line names case (a 'reference <case>:' line) and none of its lines records an
+    exception from the module under test ('raised ...', run_quiet's sentinel)."""
+    named = [line for line in failures if line.startswith("reference {}:".format(case))]
+    return bool(named) and not any("'raised " in line for line in named)
 
 
 def _detail_case_root(base, name):
@@ -3173,6 +3837,9 @@ def self_test_main():
             kept = linked / ".claude" / "rules" / _RULE_REL
             kept.parent.mkdir(parents=True)
             kept.write_text(_RULE_SRC, encoding="utf-8")
+            # The reference copy too, so the in-root --check case is in sync in both trees.
+            (linked / REFERENCE_DIR / _RULE_REL).parent.mkdir(parents=True)
+            (linked / REFERENCE_DIR / _RULE_REL).write_bytes(_RULE_SRC.encode("utf-8"))
             (linked / "shared" / "rules").mkdir(parents=True)
             (linked / "shared" / "rules" / "gen-rules-selftest-target.md").write_text(_RULE_SRC, encoding="utf-8")
             (linked / "shared" / "file.txt").write_text("not a directory\n", encoding="utf-8")
@@ -3186,12 +3853,11 @@ def self_test_main():
                                 "kept, got {}".format(shape, want, got))
         # The .claude/ directory above the read tree, the read tree, or a family directory in it, that is a
         # symlink to a directory holding a planted orphan and lacking the generated rule, in write mode: outside
-        # the root, it is exit 2 with the orphan kept and the rule not written there, never followed to prune or
-        # write out of the repository; inside the root, it is read (exit 0, the orphan pruned and, but for the
-        # security family, the rule written there).
+        # the root or inside it, it is exit 2 with the orphan kept and the rule not written there, never followed
+        # to prune or write (the descriptor walk refuses a link wherever it points).
         for linked_rel, sub in ((".claude", ("rules", "aiqt")), (".claude/rules", ("aiqt",)),
                                 (".claude/rules/aiqt", ()), (".claude/rules/security", ())):
-            for where, want in (("outside", 2), ("in-root", 0)):
+            for where, want in (("outside", 2), ("in-root", 2)):
                 out = tmp / ("out-" + linked_rel.lstrip(".").replace("/", "-") + "-" + where)
                 (out / ".aiqt" / "core" / "rules").mkdir(parents=True)
                 (out / ".aiqt" / "core" / "rules" / "gen-rules-selftest-target.md").write_text(
@@ -3258,6 +3924,27 @@ def self_test_main():
             if not _split_render_failures(mutant, revert_base / label, run_quiet):
                 failures.append("revert {}: with the guard removed, the split cases expected at least one failure, "
                                 "got none".format(label))
+
+        # The generated trees: the reference tree is generated as each source's full render; a missing, edited,
+        # extra, CRLF-altered, lone-CR, non-UTF-8 or removed reference tree, or an empty or orphaned subdirectory,
+        # is drift with --check writing nothing; a malformed source, a linked reference target and a reference
+        # directory linked outside the root (3 cases), every _REFERENCE_REFUSED_CASES entry (a link at or in a
+        # reference or read-tree family, REFERENCE_DIR or RULES_DIR linked inside the root, an orphan or target
+        # that is a link, a FIFO, a stray entry beside the families or beside REFERENCE_DIR), a family of either
+        # tree swapped for a link after its scan (4 cases) and a platform that cannot list a directory descriptor
+        # (1 case) are exit 2 with nothing written or deleted; and each guard put back makes its named case fail.
+        (tmp / "reference").mkdir()
+        failures.extend(_reference_failures(sys.modules[__name__], tmp / "reference", run_quiet))
+        for label, old, new, case in _REFERENCE_REVERTS:
+            try:
+                mutant = _load_reverted(revert_base, label, old, new)
+            except AssertionError as exc:
+                failures.append(str(exc))
+                continue
+            (revert_base / label).mkdir()
+            if not _named_case_failed(_reference_failures(mutant, revert_base / label, run_quiet), case):
+                failures.append("revert {}: with the guard removed, reference case {} expected to fail by its verdict "
+                                "(not by an exception), and did not".format(label, case))
 
         # The adopter-shaped rule is accepted, and is refused once the ASCII-only value check is put back.
         adopter = tmp / "adopter" / _ADOPTER_NAME
@@ -3442,11 +4129,17 @@ def self_test_main():
           "UnicodeDecodeError traceback (guards the widened reconcile arm); a source path that is a regular "
           "file or a symlink that is dangling, to a regular file or to a directory outside the root exits 2 "
           "with the generated target kept, and one symlinked to a directory inside the root is read; a "
-          ".claude/, .claude/rules or family directory symlinked outside the root exits 2 in write mode with nothing "
-          "written or deleted there, and one symlinked inside the root is read; the MAP_KEYS read refusal "
+          ".claude/, .claude/rules or family directory symlinked outside or inside the root exits 2 in write mode "
+          "with nothing written or deleted there; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}); {} detail layout case(s) "
           "hold and {} guard revert(s) each go red; {} split source(s) render byte-equal to their unsplit "
-          "original in write and check mode, and {} split-render revert(s) each go red; an adopter-shaped "
+          "original in write and check mode, and {} split-render revert(s) each go red; the reference tree "
+          "holds each source's full render, {} reference drift case(s) each exit 1 in --check with nothing "
+          "written and are repaired in write mode, {} generated-tree refusal case(s) (a malformed source, a "
+          "linked reference target, a reference directory linked outside the root, {} link, FIFO or stray "
+          "case(s) across the reference and read trees, 4 swap-after-scan cases and a platform that cannot list "
+          "a directory descriptor) each exit 2 with nothing written or deleted, and {} generated-tree "
+          "revert(s) each go red; an adopter-shaped "
           "rule with a non-ASCII value is accepted and goes red under the ASCII-only revert; {} parse-level "
           "revert(s) each go red; {} adopter-mode case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
@@ -3458,7 +4151,8 @@ def self_test_main():
           "{}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_SPLIT_CASES), len(_SPLIT_REVERTS),
-              len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
+              len(_REFERENCE_DRIFT_CASES), 3 + len(_REFERENCE_REFUSED_CASES) + 4 + (os.scandir in os.supports_fd),
+              len(_REFERENCE_REFUSED_CASES), len(_REFERENCE_REVERTS), len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),
               "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
               "PyYAML safe_load reads the same keys and values for {} live source(s), {} fuzzed "

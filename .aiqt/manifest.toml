@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a09c44834bf08fc92bd10591e69150e03b100fdc241485fb40b5faac229d9580"
+tree-sha256 = "481bec5e3ce7247f39c4c0c834154889199af8417f254fb5b57a4f26005d737a"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -87,8 +87,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 666822
-sha256 = "bf2ffcf20ef175b578d63c00a8585ab449df4baaa47d22c0d87771bc459720f7"
+bytes = 667167
+sha256 = "7734903cd120398361d891b27358a6f0ea249a6d7c99e4b3a67c17781e70a049"
 
 [[sources]]
 path = ".aiqt/core/githooks/manifest.toml"
@@ -142,8 +142,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 30244
-sha256 = "a6190d0aee4548e8c87269cc488eb6671a12d138d77f64331571aa3f585fc650"
+bytes = 31116
+sha256 = "9f781ed390a5af927a01cf3a6397efd4f64fd93e183f59c1b8347a9207b001a5"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -167,8 +167,8 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 
 [[sources]]
 path = ".aiqt/core/renderers.toml"
-bytes = 3903
-sha256 = "ef400b9e723b1cf67e1fc404923b9e7daaa8cf93572ebcb229e19b8b3e44f317"
+bytes = 4056
+sha256 = "321d6fc2fee67685d1ae6923b0b1db60eba381993a3832b7f4e6f8a762c106a2"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -847,8 +847,8 @@ sha256 = "622683b912a6c2720502d096f737f59326fa2b6319776dfdaf029cdd2243d1b7"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1312596
-sha256 = "c8b2e97d92ec46ec3ca68a78f230e05d58e943fdbf9c6e5df7ed0989af12e190"
+bytes = 1312941
+sha256 = "b0ce125212784e7fcd1a42730ac35a9fa3fd37de810c96308c9e1744e79e08ba"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -857,13 +857,678 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 16860
-sha256 = "abc6d0a6a05e5011758b14690fe358d85747531217ae68b4c6ddf428d99580c6"
+bytes = 17238
+sha256 = "2f7d4f2ff27476fc16bf8f2fe9c56dcaf9db0f2ca7cd369d09e0e0c21cd74162"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
 bytes = 3523
 sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/00-project-integrity.md"
+bytes = 622
+sha256 = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-citation-from-opened-file.md"
+bytes = 905
+sha256 = "8f10de006546da9103ddb49c6cabaf6497ca18a8ef1c2aef91bfbb258fdea3c2"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-claims-rest-on-observation.md"
+bytes = 675
+sha256 = "81df92a591d35d1caa71e8cd27c352eeaf2037218c10e37f38b77e1513fa03ff"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md"
+bytes = 3121
+sha256 = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-corroborate-external-claims.md"
+bytes = 455
+sha256 = "3d658972537ae2a5cbdbd5f5902a09e328b52c3d97e25d8a722ce3ed8128096a"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-count-carries-its-predicate.md"
+bytes = 1745
+sha256 = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-disclose-guard-residuals.md"
+bytes = 659
+sha256 = "651255b4c0eca59ba33666d95e24fa37f2fad318091dbfe6c5e724b5b26d14e8"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
+bytes = 4342
+sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-guard-input-soundness.md"
+bytes = 5150
+sha256 = "28681d5391c4cd2544abf1680ee8c320ca1d8c9ba968e50b0f35c6b68c827295"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
+bytes = 1155
+sha256 = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-no-fabrication.md"
+bytes = 450
+sha256 = "45e14b4c516cbe6969867102c239f895e9047794a90231cf6a18b1db489f4a26"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md"
+bytes = 2135
+sha256 = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md"
+bytes = 1257
+sha256 = "1c8eba842cf43ab8c8f2b8a6e691b967115f6f922cd264209644d3daa055ed1f"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-read-before-characterizing.md"
+bytes = 529
+sha256 = "0f3ab20e561d75181f5e5c573688f78154add9c115e51a2eeaa85aaabc7fffb5"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-reference-capture.md"
+bytes = 553
+sha256 = "4d45e16e1508cb2daa42f6265d987e86075ad21f50b609e99bc3f3bb63f60b3e"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-reproduce-before-fix.md"
+bytes = 463
+sha256 = "ba9cf2790a14e0b1b754fdd7924bf86b895c25043b9f2ee324579f9f8a568069"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-timestamp-from-clock.md"
+bytes = 632
+sha256 = "4cd20aa307683a46425e4c1e00f0da58ca05248f4a154fd771d6cf38430a1910"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-validate-inference-before-action.md"
+bytes = 268
+sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
+bytes = 6683
+sha256 = "1f83586c6dc941e82e64efe5c7ff5c78abe8ddafab8ee5d77496094c5cae79c4"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
+bytes = 541
+sha256 = "4e95c008fcab5286105681e0e69d161fd9c9351895dea5a4253d1f738555247b"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-attestation-is-harness-owned.md"
+bytes = 566
+sha256 = "dd3eab3381071080c059d31e998280fb3b29d5b07af6b3ea54a9ddbc7c8fa9b4"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-branch-and-merge-on-green.md"
+bytes = 696
+sha256 = "9431000ff868bce53bab838c9965278942750a97a6a164da0f0a2be05defebaf"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md"
+bytes = 1254
+sha256 = "f1191d8f2d4f927b51b3fbb2eb64bbf87bb0d4c39c8aff711280dfb16f4cf822"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md"
+bytes = 1318
+sha256 = "ad4ce8d6056ae129e78948f1a95b0195534b9d94512e48307335d5ba632d1030"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-commit-identity.md"
+bytes = 504
+sha256 = "f3744ff276b5328b520affe828c4bb854092d74e15d241206b8e79986c7522a7"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-consumer-follows-its-producer.md"
+bytes = 808
+sha256 = "74953e6518c0ee9d3c86299c7c725f533bcbb841e6539e6506ef8e495eeb82c5"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-explicit-binding-over-ambient-context.md"
+bytes = 3734
+sha256 = "678543ec25d53e688cbee5b14ec10eea1a39c5f38fc1b2cdf842eb7aaef2e556"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-gate-discipline.md"
+bytes = 5007
+sha256 = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-generated-artefact-source-only.md"
+bytes = 602
+sha256 = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-licence-compatibility.md"
+bytes = 575
+sha256 = "994e4425fa85075bfde2951bbd22c2fffd7e74da95b016ee61df4e462140a5b4"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-no-concealed-failure.md"
+bytes = 483
+sha256 = "acb6eb0066816d2de380fe50bf9dbd40c550570790485884461ad6fd8f10d186"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-preserve-uncommitted-work.md"
+bytes = 799
+sha256 = "69501adaae10b476dd8906b03ad2bf633ba301549f4cfc9ee67dad8df9b77c02"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-protected-branch-integrity.md"
+bytes = 603
+sha256 = "46bc3a84cc694e91f1afe337d6efa8abdbaec1c968c59ea13085ce4a0d1059ad"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-required-step-remains-required.md"
+bytes = 1347
+sha256 = "5735aad82efb742eab3616415ca429e4e82d6e20594b0ad405e6c0f92a47ab79"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md"
+bytes = 601
+sha256 = "2acc526be5ddcc93802409588ffbbfd6d6f60567c9f4266f5bc5efa27e350383"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-review-in-flight-pins-its-artefact.md"
+bytes = 1121
+sha256 = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-safe-retries.md"
+bytes = 431
+sha256 = "edfecac461bab41a3514c596b291c453fe01f49bd8f5613b95cb2aac98829549"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-separate-task-changes.md"
+bytes = 686
+sha256 = "a2e1df7edebc43fc90bf023efe316a2e3fc0aded3af28cc00936fcd50b513d52"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-stage-then-promote-on-green.md"
+bytes = 1571
+sha256 = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-track-launched-work.md"
+bytes = 1718
+sha256 = "ac0e2ddcdb71b71a963989ef0be72381fffcac02116739870940e14b5d9855e8"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-validation-gates-apply.md"
+bytes = 658
+sha256 = "874209d608f0f0dbed646012bb661700d586b55d569d48e160dafe7044d8075c"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-INTEG-workers-produce-inert-data.md"
+bytes = 5242
+sha256 = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-absolute-paths.md"
+bytes = 558
+sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-change-carries-check.md"
+bytes = 3065
+sha256 = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-compatibility-or-migration.md"
+bytes = 446
+sha256 = "172d1c6ae6f644bdcdad7a1a9d5a912cc94951ce2c63128a95b71ae5dd9ff9d1"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-confirm-execution-target.md"
+bytes = 1572
+sha256 = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-defence-in-depth-default.md"
+bytes = 1321
+sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
+bytes = 1989
+sha256 = "a3e63913a6c51a518b4dcd6d64451eaf08202fa134d1e7ab6af35b0327214ad2"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
+bytes = 605
+sha256 = "cb878ce64e396647e5d8d7a3c7a882106ff6800fdbcdef900900d68a95091ab4"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md"
+bytes = 928
+sha256 = "57eba929d16870f286470300a85da43683b5d14d71e7335cecda4d10daebc092"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-high-assurance-verification.md"
+bytes = 431
+sha256 = "7c8ecfb90a7c616fe5edde76deba14ab3889544edb2b5392c730f23257d8fe07"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
+bytes = 1732
+sha256 = "b5abc8e7aff81715c11ed49241607a5063adbdf933f215609d5060f4b7418756"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
+bytes = 560
+sha256 = "8130dffb7ed200c34a55f877250082ea14036bce473cb6b34fe842cd07217572"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-match-surrounding-code.md"
+bytes = 381
+sha256 = "a5efa2d1c098f87119de27b85a57ba6dd72185a1f08acbbab4b8ff738363193c"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-minimize-dependencies.md"
+bytes = 666
+sha256 = "47e861371c23b173a0c24e2cfc2f77e4a6934630dc785cd0adbed2ce70f7aa1d"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-self-guardrail-from-error.md"
+bytes = 570
+sha256 = "894f3ae85725b30a8d08d68c8ab71b6e75646cdd6bc8de49839ff9b72efdaf67"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-smallest-correct-change.md"
+bytes = 324
+sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
+bytes = 615
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-test-hermeticity.md"
+bytes = 4335
+sha256 = "3272a70e653ac9506b278ef69c0f7e182348e10e1a2da4ba8c65d27d19fe6552"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
+bytes = 2329
+sha256 = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-QUALI-verifier-diversity.md"
+bytes = 997
+sha256 = "b9d0fa9a991d84fbe673a56208ef0c3f63dbea20425ace2b8ff3d43cf7f4071d"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-ai-toolchain-register.md"
+bytes = 538
+sha256 = "3e52b6bf3d53bc55ab6231ec441c4e448875315361005d6b3c11a2492deec972"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-assess-advise-discussion-only.md"
+bytes = 538
+sha256 = "2c4aa11e75020d497b687679f9c0d83690da29c12761e8bbf7b1c9265fbf3e56"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-atomic-claim-from-pool.md"
+bytes = 742
+sha256 = "4b797e29b0c95684ed6084d224fb461c9f6581e6e40279b85dfa743c9c42a0fe"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-change-record.md"
+bytes = 502
+sha256 = "7d5b4cffe72c0c23e2e08579a24f5bfe5b91ee5c31ae520954c97a9321e11eca"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-change-tracking-ext.md"
+bytes = 481
+sha256 = "fa3bba508acadc6ca5f710c341e02ba479ab56a8307efe3a1603af62a094e520"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-clarify-before-acting.md"
+bytes = 449
+sha256 = "312ff02f82a73f48eea1289fffb0c716da8d7dbe932ec0d158072ec5636ed426"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-concurrency-lease.md"
+bytes = 365
+sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-continue-by-default.md"
+bytes = 10232
+sha256 = "2d26e8dee5c542079bae6930b50ef07d8232094c44dd1b033bbb7514b0b3d28c"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
+bytes = 399
+sha256 = "0b4b235c936219010fda0629e5820600042dd1649845fcdc40e57468426bb45d"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md"
+bytes = 721
+sha256 = "500ec46b68c02422a357694f908dda4796e32e2d6092056509d94b63c2394c39"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-no-console-diff-dumps.md"
+bytes = 577
+sha256 = "308e6e2db143f234176832620768ea9e5d1b9b6ff8823f41e34fe692e637849d"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-orchestrator-mistakes-register.md"
+bytes = 640
+sha256 = "e65e499ccfb80d2d95aea11ec28e196043f109c66e3a4c9c7881de69f9514b0f"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-reconcile-record-against-reality.md"
+bytes = 888
+sha256 = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-records-first.md"
+bytes = 448
+sha256 = "afe0521394bf04158001c998382617e72a6dc8e188c04834083e8215dd8d5954"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-session-close-on-green.md"
+bytes = 394
+sha256 = "888ecba6a01eceddf160c102b1f9434f9ef16f7e18e775dbd9ce1bb5b2ff1e56"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-session-resume-from-handoff.md"
+bytes = 307
+sha256 = "9036dc8e9c4bddec87b50df099ee7b426f0c50cb9651c926375729a6c814d163"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-standing-constraints-persist.md"
+bytes = 1757
+sha256 = "d1fc619136c3fea415cb78219972411accfd5fa54ed80c9f995f2b60e22bec5f"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-trust-recovery-escalation.md"
+bytes = 408
+sha256 = "77b1575dbd52a13940e209fb8d0b624b41ea4192a56cca2a43f838027de6e6e0"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/10-TRUST-trust-recovery-ext.md"
+bytes = 591
+sha256 = "9e5a1a67a3705baa9769b796280d811e9f1000fe7801f50e6a3fd163023e91aa"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
+bytes = 1710
+sha256 = "97513a6f2b8b2066c42c0becdbb113b8ac16911c58970ccb29ac8cbaf1e58004"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
+bytes = 497
+sha256 = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/30-SPEED-background-work-during-ci-waits.md"
+bytes = 513
+sha256 = "bb9f3b8e737355cec4f8e48e81ffb645ac04eebf9b6fe4ab867709f781034c10"
+
+[[sources]]
+path = ".aiqt/reference/rules/aiqt/40-COST-cost-tier.md"
+bytes = 328
+sha256 = "75399e14d8cf70ec1a9cfdd598eaab44b07721355b29f7c1e09d5aef483e1e8b"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECA-resource-bounds.md"
+bytes = 1267
+sha256 = "0b2b4c237f74eed5d4bd1cc41a74cfc19484d17bfb718be515b4b6a1e69fa7e3"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECA-verified-restore-path.md"
+bytes = 923
+sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-data-boundary.md"
+bytes = 712
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-egress-destinations.md"
+bytes = 934
+sha256 = "c1b18d883729b2f1871a3575265763fe5470ed1ebd90080e7bfa8e44e9a7f9f6"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-keep-secrets-out.md"
+bytes = 1247
+sha256 = "6f31df12c785933be40bd56faa88f571f2b6e5c65d1153a2a29f3e78f7da60e3"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-least-privilege-retrieval.md"
+bytes = 788
+sha256 = "2ee45c09d6c39305d75f5eedac84aa41156be19e02be8a49f88e32b04b0c8536"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-no-cross-context-bleed.md"
+bytes = 727
+sha256 = "75d749475d12c9fb9c8a9c494d9b1c9cbbc0a084a4b0d8adfebcbb07e88a6c60"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-no-hidden-context-disclosure.md"
+bytes = 768
+sha256 = "fe6dd2133268f7d6b515ca2946814ad03e662a6a7443a94f4ccfc00c340305cb"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECC-rotate-leaked-secret.md"
+bytes = 729
+sha256 = "b03f7cd179249653bcb83f2a4c993c2fb718693c0010ec5fb4b2e7cc77bc351f"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-authentication.md"
+bytes = 955
+sha256 = "c1242a5b7349fef209c802f566ea6d32a679ca94d3198cd6e6c358d7f07ebd1c"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-authorization.md"
+bytes = 1085
+sha256 = "1dd3b3c4060293ffe6fccee8f340a42285e8c238db38210712a29491709f260d"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-config-is-executable-trust-gate.md"
+bytes = 1249
+sha256 = "36e1cf8fbd46ec3ecc59bdfa4b2c2ac8c54797fe45db9afc8b6a568be1330acb"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-cryptography.md"
+bytes = 1839
+sha256 = "c3fd2aa547848e9c053b82b77beffbb1d6d69c3e3282b38539bea908b01f13f5"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-dependency-provenance.md"
+bytes = 1813
+sha256 = "eb58c906acc1e6979a41db957327386d00ec3ad516ec651996e5df0827def145"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-fail-closed.md"
+bytes = 1127
+sha256 = "c0c2c4d60d1c430c467fe838f5a32f4c537542f1d800700894eeef8ef78c4519"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-federated-identity-flow.md"
+bytes = 793
+sha256 = "8238939745c20d777bf212cd161ecceccf02f90dec29684b1fd6ac4f3372ade3"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-file-upload-handling.md"
+bytes = 921
+sha256 = "31619a3ad20c7afd16cc84ce9f659a9ab010f2bd2eceb3993551335b0fc908e0"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-guardrail-config-integrity.md"
+bytes = 952
+sha256 = "e43fb68e2b997c5233d9943a1fd0c0147d620829c2b123e9f5e6ab0777dc1f5b"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-human-authorization.md"
+bytes = 1063
+sha256 = "598ea63876bbb66885f68a9b64efea5f01a5aeb1c60782b2bbc1edb42e7ab05e"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-input-validation.md"
+bytes = 857
+sha256 = "f65d0ba41722a198e942491441824a12861b5dfa5699cadfb5bdeb026a67a6b9"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-inter-agent-trust.md"
+bytes = 1045
+sha256 = "3a23e23522d4c3bda4690bf177b5bca89676665d1246b45342bb16b63ac08f60"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-key-management.md"
+bytes = 789
+sha256 = "d5c1c8e43e88c379a1758841b38e13766274e446235484762fd92d82eb37be82"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-least-privilege-tools.md"
+bytes = 1007
+sha256 = "09ca4700df36898564294b9649dd61cdaa2fd1c5120017011b0ea0835191b7fd"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-log-redaction.md"
+bytes = 734
+sha256 = "84ccc7661a54b6c219914ad9d2d03a6494cd50d7ef92107f8811e4917c4714d4"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-operator-deception.md"
+bytes = 344
+sha256 = "b669f30ff4741c7994ae168794bee076d447145b662f8a5cb54c78f13b0c050d"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-output-encoding.md"
+bytes = 759
+sha256 = "a2d5e04b028824562e42e38c359198ba0975a5597f00c99b77dd42be0145ef15"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-output-handling.md"
+bytes = 1236
+sha256 = "0dc7e308a55c07171bb06bc4c244dcb3b19ef8e301ce8d4aef4f6f4b348a60ab"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-pin-referenced-instructions.md"
+bytes = 1370
+sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-poisoning-resistance.md"
+bytes = 1118
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-prefer-removing-a-path.md"
+bytes = 1401
+sha256 = "7318a8f5900c32ac72f956831f2aa38fdd207daa9436547852f845263ff0e0a6"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-preview-has-no-side-effects.md"
+bytes = 1629
+sha256 = "bd30e609265b7fd7181a0ffba8c3b88d348efee12ef34a261a4557a7dc221e5e"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-prompt-trust-hierarchy.md"
+bytes = 1579
+sha256 = "8093ba5d7f2e282cc9f4a3bbd47d1100513496403be61ed13a79cd98a272d6ee"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-protect-audit-records.md"
+bytes = 739
+sha256 = "e819796064dbfe636ace49f01c96c16c04c0a7aaf612a7cfee4aee5851b93961"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-reject-vulnerable-versions.md"
+bytes = 940
+sha256 = "9b185a1465660c9419e5f51751e1dcf3704be82b592a118f3008fb43740dec4b"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-release-integrity.md"
+bytes = 659
+sha256 = "95d5f0507d5817c8e90632b8358904fa258f43e073bc688297202bb1c3902ade"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-safe-deserialization.md"
+bytes = 657
+sha256 = "e5bb570b9897db069f376fa7948ebb911098cf4c0e57ee143a9a8ecedc44d2ab"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-secure-configuration.md"
+bytes = 937
+sha256 = "0f9d9e6d3a24ae11895deae197f0322123070be683c2176af726c7053847f519"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-security-logging.md"
+bytes = 859
+sha256 = "fc27fa7d42667d7eb89a46fe510ccb0a8aa852bb219196ccacb5df60e3c9e4d9"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-session-token-management.md"
+bytes = 1213
+sha256 = "16e4193f0d180db1002f7fe51df260fbe996d53c9aa71922506adf74aa7be84a"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-ssrf-prevention.md"
+bytes = 696
+sha256 = "5b814dd41917601fd949fe32e025b0e8b11fee1c34a1e811506c064e59e9a34f"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-symlink-resolution.md"
+bytes = 2071
+sha256 = "fec1beb6357dcdcfe6faf5f17f35fe045baa3c4340ff3352495828cd00e36a63"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-threat-model-boundaries.md"
+bytes = 742
+sha256 = "0abb54b2758c2bc6b613c8a034a66a72028093f4375b9f9a267426bc170badb1"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-tool-argument-validation.md"
+bytes = 791
+sha256 = "bb74b0180f38faa794e4a06f3ca071044cc79e1c9f21b990bc0a7f7a02a45140"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-untrusted-content.md"
+bytes = 1629
+sha256 = "0f0289f17562c6a2cfc1442b7da4cd0f5bbe6ecd2faa740c16ee22164b9f5288"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECI-verify-dependency-exists.md"
+bytes = 722
+sha256 = "833c55564758cbba6a6870c944cec51609a3392b834430c2b5ee2e000f9af73b"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECP-data-minimization.md"
+bytes = 795
+sha256 = "593e4d9e38f84b815cf1c535e727d122e0277d5d1ade52cc1e91d3e41a250cb0"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECP-data-residency-retention.md"
+bytes = 648
+sha256 = "28996ae27468df4a9b8ddf93baf472696e3f3675284e3aac3d42263a961faa55"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECP-purpose-limitation.md"
+bytes = 610
+sha256 = "4ec35140f4b98d42c186ee5f5208fb286c55e905f53a8cd77b3b9daa59abdf2d"
+
+[[sources]]
+path = ".aiqt/reference/rules/security/SECP-synthetic-fixture-data.md"
+bytes = 651
+sha256 = "220c7bb505f47c4e11fd826aa8bc6350e59dfdd01893f404bfd2f86c172818f7"
 
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
@@ -2387,8 +3052,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 55505
-sha256 = "ff846414b82b2b31f7d5be924c27cb805794b142d9fe6a014242744beb58aab8"
+bytes = 65484
+sha256 = "3f2f05cf1f7a420ff5b0b9146e542b8443411bdc4fa31ae45a0bd0ed6e32abc6"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2472,8 +3137,8 @@ sha256 = "b845e896ec04415f73c65ed5c52ccd0e03db62bc889f8d9a1e5cc72c196117c4"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 762355
-sha256 = "9edc77a391c187c9cd79c2aa2e406bdd2827b0ca69ad2f24101668194467f9a1"
+bytes = 762700
+sha256 = "43148878800eb53fc0865805ddbcfd5687e6f094f2cebec2d81a0630390c1efd"
 
 [[sources]]
 path = "GEMINI.md"
@@ -4077,8 +4742,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 829035
-sha256 = "f834a6d2b278ec2a7c58f0395bed0670977f96c8816e1d3661a1693781fdedd3"
+bytes = 829380
+sha256 = "5420d64df9e064011501ebdc0acbb103e0189ebea5afe5b298264d4abf22a52f"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4717,13 +5382,13 @@ sha256 = "261656f81c19a24605113a0afb39d242f23e0b005ce08561a5ef1a8370c5929c"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 224340
-sha256 = "1707e09c9db7ab62d94643936e6ccc8b7f7a276a0b7ecc22f9834a49a432842a"
+bytes = 266305
+sha256 = "0f2b57632f29b85ca738853fd79c6c8eac156d58bae21e6cb7974091e3724abd"
 
 [[sources]]
 path = "tools/gen_rules_core.py"
-bytes = 120623
-sha256 = "b913d31e9bac92b6c8b4859e554112e17b9e6be99695c5da335f0a151740be3f"
+bytes = 122798
+sha256 = "9dd2954455c4b6baced8933bc361de30d3156f898d9dc051a8b7512f08e4a7c2"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
@@ -4842,8 +5507,8 @@ sha256 = "7d1b7ea926570aa38d80823faf007a148ec659640b17eaf2579c4f471ca5bf58"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 343433
-sha256 = "f2367b7a70815982ff9661c10bbcaca87c97e129c25fcad4aa8f89e35cb00804"
+bytes = 343888
+sha256 = "35a59894ccb6cedd6e755a09eea1dbed6421f95f0f85e180fa1dd6a6162128f0"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4909,6 +5574,804 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 path = "tools/tomllib_parse_sites.toml"
 bytes = 29966
 sha256 = "e6772e2935b78c56eee653275a022211f116568484d93b6645434e3ebba9a972"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/00-project-integrity.md"
+path = ".aiqt/reference/rules/aiqt/00-project-integrity.md"
+kind = "file"
+sha256 = "3cb951f3c0cbccc6a68feb7c6ba56ff0c02c27724c9aa665d7b87624b1c0fb3e"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-citation-from-opened-file.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-citation-from-opened-file.md"
+kind = "file"
+sha256 = "8f10de006546da9103ddb49c6cabaf6497ca18a8ef1c2aef91bfbb258fdea3c2"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-claims-rest-on-observation.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-claims-rest-on-observation.md"
+kind = "file"
+sha256 = "81df92a591d35d1caa71e8cd27c352eeaf2037218c10e37f38b77e1513fa03ff"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md"
+kind = "file"
+sha256 = "f1fd587cf0d31974e1905c0bc76f35d2b6c5ad3149550c415874fe740e5fff92"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-corroborate-external-claims.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-corroborate-external-claims.md"
+kind = "file"
+sha256 = "3d658972537ae2a5cbdbd5f5902a09e328b52c3d97e25d8a722ce3ed8128096a"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-count-carries-its-predicate.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-count-carries-its-predicate.md"
+kind = "file"
+sha256 = "0acbd49e4173c33393cb9fd2e31b9e1665e425fd7b5442f7e2ed327daf7445aa"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-disclose-guard-residuals.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-disclose-guard-residuals.md"
+kind = "file"
+sha256 = "651255b4c0eca59ba33666d95e24fa37f2fad318091dbfe6c5e724b5b26d14e8"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-evidence-grounded-completion.md"
+kind = "file"
+sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-guard-input-soundness.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-guard-input-soundness.md"
+kind = "file"
+sha256 = "28681d5391c4cd2544abf1680ee8c320ca1d8c9ba968e50b0f35c6b68c827295"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
+kind = "file"
+sha256 = "c5bb9e32e68286eb65af30ecf46fbfcc9f370e9ca1db4607e7532d8f7e420e2b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-no-fabrication.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-no-fabrication.md"
+kind = "file"
+sha256 = "45e14b4c516cbe6969867102c239f895e9047794a90231cf6a18b1db489f4a26"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-observe-before-asserting-behaviour.md"
+kind = "file"
+sha256 = "289035b0a883696a13b6e07eecdee0301a424a003b8c3c3ed8b65b0dcb1e0beb"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-partial-read-is-not-the-whole.md"
+kind = "file"
+sha256 = "1c8eba842cf43ab8c8f2b8a6e691b967115f6f922cd264209644d3daa055ed1f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-read-before-characterizing.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-read-before-characterizing.md"
+kind = "file"
+sha256 = "0f3ab20e561d75181f5e5c573688f78154add9c115e51a2eeaa85aaabc7fffb5"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-reference-capture.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-reference-capture.md"
+kind = "file"
+sha256 = "4d45e16e1508cb2daa42f6265d987e86075ad21f50b609e99bc3f3bb63f60b3e"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-reproduce-before-fix.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-reproduce-before-fix.md"
+kind = "file"
+sha256 = "ba9cf2790a14e0b1b754fdd7924bf86b895c25043b9f2ee324579f9f8a568069"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-timestamp-from-clock.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-timestamp-from-clock.md"
+kind = "file"
+sha256 = "4cd20aa307683a46425e4c1e00f0da58ca05248f4a154fd771d6cf38430a1910"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-validate-inference-before-action.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-validate-inference-before-action.md"
+kind = "file"
+sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
+path = ".aiqt/reference/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
+kind = "file"
+sha256 = "1f83586c6dc941e82e64efe5c7ff5c78abe8ddafab8ee5d77496094c5cae79c4"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
+kind = "file"
+sha256 = "4e95c008fcab5286105681e0e69d161fd9c9351895dea5a4253d1f738555247b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-attestation-is-harness-owned.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-attestation-is-harness-owned.md"
+kind = "file"
+sha256 = "dd3eab3381071080c059d31e998280fb3b29d5b07af6b3ea54a9ddbc7c8fa9b4"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-branch-and-merge-on-green.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-branch-and-merge-on-green.md"
+kind = "file"
+sha256 = "9431000ff868bce53bab838c9965278942750a97a6a164da0f0a2be05defebaf"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md"
+kind = "file"
+sha256 = "f1191d8f2d4f927b51b3fbb2eb64bbf87bb0d4c39c8aff711280dfb16f4cf822"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md"
+kind = "file"
+sha256 = "ad4ce8d6056ae129e78948f1a95b0195534b9d94512e48307335d5ba632d1030"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-commit-identity.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-commit-identity.md"
+kind = "file"
+sha256 = "f3744ff276b5328b520affe828c4bb854092d74e15d241206b8e79986c7522a7"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-consumer-follows-its-producer.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-consumer-follows-its-producer.md"
+kind = "file"
+sha256 = "74953e6518c0ee9d3c86299c7c725f533bcbb841e6539e6506ef8e495eeb82c5"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-explicit-binding-over-ambient-context.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-explicit-binding-over-ambient-context.md"
+kind = "file"
+sha256 = "678543ec25d53e688cbee5b14ec10eea1a39c5f38fc1b2cdf842eb7aaef2e556"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-gate-discipline.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-gate-discipline.md"
+kind = "file"
+sha256 = "b2bab95f6edf6f4b93c00b0b8ea49163ed77abef0becf58c1aefc78a5e21c39b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-generated-artefact-source-only.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-generated-artefact-source-only.md"
+kind = "file"
+sha256 = "b1426ec6d6697039df495fdf5d5f8d14620bb4aa93ca36ce4d131132e58523e9"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-licence-compatibility.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-licence-compatibility.md"
+kind = "file"
+sha256 = "994e4425fa85075bfde2951bbd22c2fffd7e74da95b016ee61df4e462140a5b4"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-no-concealed-failure.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-no-concealed-failure.md"
+kind = "file"
+sha256 = "acb6eb0066816d2de380fe50bf9dbd40c550570790485884461ad6fd8f10d186"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-preserve-uncommitted-work.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-preserve-uncommitted-work.md"
+kind = "file"
+sha256 = "69501adaae10b476dd8906b03ad2bf633ba301549f4cfc9ee67dad8df9b77c02"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-protected-branch-integrity.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-protected-branch-integrity.md"
+kind = "file"
+sha256 = "46bc3a84cc694e91f1afe337d6efa8abdbaec1c968c59ea13085ce4a0d1059ad"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-required-step-remains-required.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-required-step-remains-required.md"
+kind = "file"
+sha256 = "5735aad82efb742eab3616415ca429e4e82d6e20594b0ad405e6c0f92a47ab79"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-rerun-pass-is-still-failure.md"
+kind = "file"
+sha256 = "2acc526be5ddcc93802409588ffbbfd6d6f60567c9f4266f5bc5efa27e350383"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-review-in-flight-pins-its-artefact.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-review-in-flight-pins-its-artefact.md"
+kind = "file"
+sha256 = "66a13ad6f2a36a1362465ed34cdaa342bd53eee2b78d813c92d7fd6f8a2bed79"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-safe-retries.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-safe-retries.md"
+kind = "file"
+sha256 = "edfecac461bab41a3514c596b291c453fe01f49bd8f5613b95cb2aac98829549"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-separate-task-changes.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-separate-task-changes.md"
+kind = "file"
+sha256 = "a2e1df7edebc43fc90bf023efe316a2e3fc0aded3af28cc00936fcd50b513d52"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-stage-then-promote-on-green.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-stage-then-promote-on-green.md"
+kind = "file"
+sha256 = "cc7308cf029b61f6901f0fc3416660cecb5c6a47a6fea30feaf9f8abbb2922a0"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-track-launched-work.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-track-launched-work.md"
+kind = "file"
+sha256 = "ac0e2ddcdb71b71a963989ef0be72381fffcac02116739870940e14b5d9855e8"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-validation-gates-apply.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-validation-gates-apply.md"
+kind = "file"
+sha256 = "874209d608f0f0dbed646012bb661700d586b55d569d48e160dafe7044d8075c"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-INTEG-workers-produce-inert-data.md"
+path = ".aiqt/reference/rules/aiqt/10-INTEG-workers-produce-inert-data.md"
+kind = "file"
+sha256 = "a1afc075482b8a3b6904d5842c77cbc8a6a8d2fa398b314c1ebd574790f63295"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-absolute-paths.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-absolute-paths.md"
+kind = "file"
+sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-change-carries-check.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-change-carries-check.md"
+kind = "file"
+sha256 = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-compatibility-or-migration.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-compatibility-or-migration.md"
+kind = "file"
+sha256 = "172d1c6ae6f644bdcdad7a1a9d5a912cc94951ce2c63128a95b71ae5dd9ff9d1"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-confirm-execution-target.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-confirm-execution-target.md"
+kind = "file"
+sha256 = "d5c77943670abf446d40b528e75b2e4226c1ff231c1347ea959dd1d782240f8f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-defence-in-depth-default.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-defence-in-depth-default.md"
+kind = "file"
+sha256 = "869083e9ef683c85b8eb380961c656ce727214fa20b1d599c559559904c4e0d6"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-elapsed-aware-timer-restore.md"
+kind = "file"
+sha256 = "a3e63913a6c51a518b4dcd6d64451eaf08202fa134d1e7ab6af35b0327214ad2"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md"
+kind = "file"
+sha256 = "cb878ce64e396647e5d8d7a3c7a882106ff6800fdbcdef900900d68a95091ab4"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-goal-fidelity-across-trajectory.md"
+kind = "file"
+sha256 = "57eba929d16870f286470300a85da43683b5d14d71e7335cecda4d10daebc092"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-high-assurance-verification.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-high-assurance-verification.md"
+kind = "file"
+sha256 = "7c8ecfb90a7c616fe5edde76deba14ab3889544edb2b5392c730f23257d8fe07"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-kill-timeout-exceeds-callee-wait.md"
+kind = "file"
+sha256 = "b5abc8e7aff81715c11ed49241607a5063adbdf933f215609d5060f4b7418756"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-lightweight-verifier-workers.md"
+kind = "file"
+sha256 = "8130dffb7ed200c34a55f877250082ea14036bce473cb6b34fe842cd07217572"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-match-surrounding-code.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-match-surrounding-code.md"
+kind = "file"
+sha256 = "a5efa2d1c098f87119de27b85a57ba6dd72185a1f08acbbab4b8ff738363193c"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-minimize-dependencies.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-minimize-dependencies.md"
+kind = "file"
+sha256 = "47e861371c23b173a0c24e2cfc2f77e4a6934630dc785cd0adbed2ce70f7aa1d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-self-guardrail-from-error.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-self-guardrail-from-error.md"
+kind = "file"
+sha256 = "894f3ae85725b30a8d08d68c8ab71b6e75646cdd6bc8de49839ff9b72efdaf67"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-smallest-correct-change.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-smallest-correct-change.md"
+kind = "file"
+sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
+kind = "file"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-test-hermeticity.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-test-hermeticity.md"
+kind = "file"
+sha256 = "3272a70e653ac9506b278ef69c0f7e182348e10e1a2da4ba8c65d27d19fe6552"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
+kind = "file"
+sha256 = "53ef601aa90474904622ba69b7f8abf8c412c8f2e0b7b305c45c009ac844ad36"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-QUALI-verifier-diversity.md"
+path = ".aiqt/reference/rules/aiqt/10-QUALI-verifier-diversity.md"
+kind = "file"
+sha256 = "b9d0fa9a991d84fbe673a56208ef0c3f63dbea20425ace2b8ff3d43cf7f4071d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-ai-toolchain-register.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-ai-toolchain-register.md"
+kind = "file"
+sha256 = "3e52b6bf3d53bc55ab6231ec441c4e448875315361005d6b3c11a2492deec972"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-assess-advise-discussion-only.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-assess-advise-discussion-only.md"
+kind = "file"
+sha256 = "2c4aa11e75020d497b687679f9c0d83690da29c12761e8bbf7b1c9265fbf3e56"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-atomic-claim-from-pool.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-atomic-claim-from-pool.md"
+kind = "file"
+sha256 = "4b797e29b0c95684ed6084d224fb461c9f6581e6e40279b85dfa743c9c42a0fe"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-change-record.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-change-record.md"
+kind = "file"
+sha256 = "7d5b4cffe72c0c23e2e08579a24f5bfe5b91ee5c31ae520954c97a9321e11eca"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-change-tracking-ext.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-change-tracking-ext.md"
+kind = "file"
+sha256 = "fa3bba508acadc6ca5f710c341e02ba479ab56a8307efe3a1603af62a094e520"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-clarify-before-acting.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-clarify-before-acting.md"
+kind = "file"
+sha256 = "312ff02f82a73f48eea1289fffb0c716da8d7dbe932ec0d158072ec5636ed426"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-concurrency-lease.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-concurrency-lease.md"
+kind = "file"
+sha256 = "20c201093daf82185da0b45339bfa565acc96a9d81b327580804c7976b99c2ae"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-continue-by-default.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-continue-by-default.md"
+kind = "file"
+sha256 = "2d26e8dee5c542079bae6930b50ef07d8232094c44dd1b033bbb7514b0b3d28c"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-express-authorization-before-execution.md"
+kind = "file"
+sha256 = "0b4b235c936219010fda0629e5820600042dd1649845fcdc40e57468426bb45d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-human-oversight-and-autonomy-threshold.md"
+kind = "file"
+sha256 = "500ec46b68c02422a357694f908dda4796e32e2d6092056509d94b63c2394c39"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-no-console-diff-dumps.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-no-console-diff-dumps.md"
+kind = "file"
+sha256 = "308e6e2db143f234176832620768ea9e5d1b9b6ff8823f41e34fe692e637849d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-orchestrator-mistakes-register.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-orchestrator-mistakes-register.md"
+kind = "file"
+sha256 = "e65e499ccfb80d2d95aea11ec28e196043f109c66e3a4c9c7881de69f9514b0f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-reconcile-record-against-reality.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-reconcile-record-against-reality.md"
+kind = "file"
+sha256 = "bffe77e19fcd63baccbc40d5f8abd92d518ac571f5e337f2c57b4f8d9dd9bbe7"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-records-first.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-records-first.md"
+kind = "file"
+sha256 = "afe0521394bf04158001c998382617e72a6dc8e188c04834083e8215dd8d5954"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-session-close-on-green.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-session-close-on-green.md"
+kind = "file"
+sha256 = "888ecba6a01eceddf160c102b1f9434f9ef16f7e18e775dbd9ce1bb5b2ff1e56"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-session-resume-from-handoff.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-session-resume-from-handoff.md"
+kind = "file"
+sha256 = "9036dc8e9c4bddec87b50df099ee7b426f0c50cb9651c926375729a6c814d163"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-standing-constraints-persist.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-standing-constraints-persist.md"
+kind = "file"
+sha256 = "d1fc619136c3fea415cb78219972411accfd5fa54ed80c9f995f2b60e22bec5f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-trust-recovery-escalation.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-trust-recovery-escalation.md"
+kind = "file"
+sha256 = "77b1575dbd52a13940e209fb8d0b624b41ea4192a56cca2a43f838027de6e6e0"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/10-TRUST-trust-recovery-ext.md"
+path = ".aiqt/reference/rules/aiqt/10-TRUST-trust-recovery-ext.md"
+kind = "file"
+sha256 = "9e5a1a67a3705baa9769b796280d811e9f1000fe7801f50e6a3fd163023e91aa"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
+path = ".aiqt/reference/rules/aiqt/20-PROGR-decision-classification-before-enacting.md"
+kind = "file"
+sha256 = "97513a6f2b8b2066c42c0becdbb113b8ac16911c58970ccb29ac8cbaf1e58004"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
+path = ".aiqt/reference/rules/aiqt/20-PROGR-repeated-failure-triggers-premise-review.md"
+kind = "file"
+sha256 = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/30-SPEED-background-work-during-ci-waits.md"
+path = ".aiqt/reference/rules/aiqt/30-SPEED-background-work-during-ci-waits.md"
+kind = "file"
+sha256 = "bb9f3b8e737355cec4f8e48e81ffb645ac04eebf9b6fe4ab867709f781034c10"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/aiqt/40-COST-cost-tier.md"
+path = ".aiqt/reference/rules/aiqt/40-COST-cost-tier.md"
+kind = "file"
+sha256 = "75399e14d8cf70ec1a9cfdd598eaab44b07721355b29f7c1e09d5aef483e1e8b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECA-resource-bounds.md"
+path = ".aiqt/reference/rules/security/SECA-resource-bounds.md"
+kind = "file"
+sha256 = "0b2b4c237f74eed5d4bd1cc41a74cfc19484d17bfb718be515b4b6a1e69fa7e3"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECA-verified-restore-path.md"
+path = ".aiqt/reference/rules/security/SECA-verified-restore-path.md"
+kind = "file"
+sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-data-boundary.md"
+path = ".aiqt/reference/rules/security/SECC-data-boundary.md"
+kind = "file"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-egress-destinations.md"
+path = ".aiqt/reference/rules/security/SECC-egress-destinations.md"
+kind = "file"
+sha256 = "c1b18d883729b2f1871a3575265763fe5470ed1ebd90080e7bfa8e44e9a7f9f6"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-keep-secrets-out.md"
+path = ".aiqt/reference/rules/security/SECC-keep-secrets-out.md"
+kind = "file"
+sha256 = "6f31df12c785933be40bd56faa88f571f2b6e5c65d1153a2a29f3e78f7da60e3"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-least-privilege-retrieval.md"
+path = ".aiqt/reference/rules/security/SECC-least-privilege-retrieval.md"
+kind = "file"
+sha256 = "2ee45c09d6c39305d75f5eedac84aa41156be19e02be8a49f88e32b04b0c8536"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-no-cross-context-bleed.md"
+path = ".aiqt/reference/rules/security/SECC-no-cross-context-bleed.md"
+kind = "file"
+sha256 = "75d749475d12c9fb9c8a9c494d9b1c9cbbc0a084a4b0d8adfebcbb07e88a6c60"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-no-hidden-context-disclosure.md"
+path = ".aiqt/reference/rules/security/SECC-no-hidden-context-disclosure.md"
+kind = "file"
+sha256 = "fe6dd2133268f7d6b515ca2946814ad03e662a6a7443a94f4ccfc00c340305cb"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECC-rotate-leaked-secret.md"
+path = ".aiqt/reference/rules/security/SECC-rotate-leaked-secret.md"
+kind = "file"
+sha256 = "b03f7cd179249653bcb83f2a4c993c2fb718693c0010ec5fb4b2e7cc77bc351f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-authentication.md"
+path = ".aiqt/reference/rules/security/SECI-authentication.md"
+kind = "file"
+sha256 = "c1242a5b7349fef209c802f566ea6d32a679ca94d3198cd6e6c358d7f07ebd1c"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-authorization.md"
+path = ".aiqt/reference/rules/security/SECI-authorization.md"
+kind = "file"
+sha256 = "1dd3b3c4060293ffe6fccee8f340a42285e8c238db38210712a29491709f260d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-config-is-executable-trust-gate.md"
+path = ".aiqt/reference/rules/security/SECI-config-is-executable-trust-gate.md"
+kind = "file"
+sha256 = "36e1cf8fbd46ec3ecc59bdfa4b2c2ac8c54797fe45db9afc8b6a568be1330acb"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-cryptography.md"
+path = ".aiqt/reference/rules/security/SECI-cryptography.md"
+kind = "file"
+sha256 = "c3fd2aa547848e9c053b82b77beffbb1d6d69c3e3282b38539bea908b01f13f5"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-dependency-provenance.md"
+path = ".aiqt/reference/rules/security/SECI-dependency-provenance.md"
+kind = "file"
+sha256 = "eb58c906acc1e6979a41db957327386d00ec3ad516ec651996e5df0827def145"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-fail-closed.md"
+path = ".aiqt/reference/rules/security/SECI-fail-closed.md"
+kind = "file"
+sha256 = "c0c2c4d60d1c430c467fe838f5a32f4c537542f1d800700894eeef8ef78c4519"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-federated-identity-flow.md"
+path = ".aiqt/reference/rules/security/SECI-federated-identity-flow.md"
+kind = "file"
+sha256 = "8238939745c20d777bf212cd161ecceccf02f90dec29684b1fd6ac4f3372ade3"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-file-upload-handling.md"
+path = ".aiqt/reference/rules/security/SECI-file-upload-handling.md"
+kind = "file"
+sha256 = "31619a3ad20c7afd16cc84ce9f659a9ab010f2bd2eceb3993551335b0fc908e0"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-guardrail-config-integrity.md"
+path = ".aiqt/reference/rules/security/SECI-guardrail-config-integrity.md"
+kind = "file"
+sha256 = "e43fb68e2b997c5233d9943a1fd0c0147d620829c2b123e9f5e6ab0777dc1f5b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-human-authorization.md"
+path = ".aiqt/reference/rules/security/SECI-human-authorization.md"
+kind = "file"
+sha256 = "598ea63876bbb66885f68a9b64efea5f01a5aeb1c60782b2bbc1edb42e7ab05e"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-input-validation.md"
+path = ".aiqt/reference/rules/security/SECI-input-validation.md"
+kind = "file"
+sha256 = "f65d0ba41722a198e942491441824a12861b5dfa5699cadfb5bdeb026a67a6b9"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-inter-agent-trust.md"
+path = ".aiqt/reference/rules/security/SECI-inter-agent-trust.md"
+kind = "file"
+sha256 = "3a23e23522d4c3bda4690bf177b5bca89676665d1246b45342bb16b63ac08f60"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-key-management.md"
+path = ".aiqt/reference/rules/security/SECI-key-management.md"
+kind = "file"
+sha256 = "d5c1c8e43e88c379a1758841b38e13766274e446235484762fd92d82eb37be82"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-least-privilege-tools.md"
+path = ".aiqt/reference/rules/security/SECI-least-privilege-tools.md"
+kind = "file"
+sha256 = "09ca4700df36898564294b9649dd61cdaa2fd1c5120017011b0ea0835191b7fd"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-log-redaction.md"
+path = ".aiqt/reference/rules/security/SECI-log-redaction.md"
+kind = "file"
+sha256 = "84ccc7661a54b6c219914ad9d2d03a6494cd50d7ef92107f8811e4917c4714d4"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-operator-deception.md"
+path = ".aiqt/reference/rules/security/SECI-operator-deception.md"
+kind = "file"
+sha256 = "b669f30ff4741c7994ae168794bee076d447145b662f8a5cb54c78f13b0c050d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-output-encoding.md"
+path = ".aiqt/reference/rules/security/SECI-output-encoding.md"
+kind = "file"
+sha256 = "a2d5e04b028824562e42e38c359198ba0975a5597f00c99b77dd42be0145ef15"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-output-handling.md"
+path = ".aiqt/reference/rules/security/SECI-output-handling.md"
+kind = "file"
+sha256 = "0dc7e308a55c07171bb06bc4c244dcb3b19ef8e301ce8d4aef4f6f4b348a60ab"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-pin-referenced-instructions.md"
+path = ".aiqt/reference/rules/security/SECI-pin-referenced-instructions.md"
+kind = "file"
+sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-poisoning-resistance.md"
+path = ".aiqt/reference/rules/security/SECI-poisoning-resistance.md"
+kind = "file"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-prefer-removing-a-path.md"
+path = ".aiqt/reference/rules/security/SECI-prefer-removing-a-path.md"
+kind = "file"
+sha256 = "7318a8f5900c32ac72f956831f2aa38fdd207daa9436547852f845263ff0e0a6"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-preview-has-no-side-effects.md"
+path = ".aiqt/reference/rules/security/SECI-preview-has-no-side-effects.md"
+kind = "file"
+sha256 = "bd30e609265b7fd7181a0ffba8c3b88d348efee12ef34a261a4557a7dc221e5e"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-prompt-trust-hierarchy.md"
+path = ".aiqt/reference/rules/security/SECI-prompt-trust-hierarchy.md"
+kind = "file"
+sha256 = "8093ba5d7f2e282cc9f4a3bbd47d1100513496403be61ed13a79cd98a272d6ee"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-protect-audit-records.md"
+path = ".aiqt/reference/rules/security/SECI-protect-audit-records.md"
+kind = "file"
+sha256 = "e819796064dbfe636ace49f01c96c16c04c0a7aaf612a7cfee4aee5851b93961"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-reject-vulnerable-versions.md"
+path = ".aiqt/reference/rules/security/SECI-reject-vulnerable-versions.md"
+kind = "file"
+sha256 = "9b185a1465660c9419e5f51751e1dcf3704be82b592a118f3008fb43740dec4b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-release-integrity.md"
+path = ".aiqt/reference/rules/security/SECI-release-integrity.md"
+kind = "file"
+sha256 = "95d5f0507d5817c8e90632b8358904fa258f43e073bc688297202bb1c3902ade"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-safe-deserialization.md"
+path = ".aiqt/reference/rules/security/SECI-safe-deserialization.md"
+kind = "file"
+sha256 = "e5bb570b9897db069f376fa7948ebb911098cf4c0e57ee143a9a8ecedc44d2ab"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-secure-configuration.md"
+path = ".aiqt/reference/rules/security/SECI-secure-configuration.md"
+kind = "file"
+sha256 = "0f9d9e6d3a24ae11895deae197f0322123070be683c2176af726c7053847f519"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-security-logging.md"
+path = ".aiqt/reference/rules/security/SECI-security-logging.md"
+kind = "file"
+sha256 = "fc27fa7d42667d7eb89a46fe510ccb0a8aa852bb219196ccacb5df60e3c9e4d9"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-session-token-management.md"
+path = ".aiqt/reference/rules/security/SECI-session-token-management.md"
+kind = "file"
+sha256 = "16e4193f0d180db1002f7fe51df260fbe996d53c9aa71922506adf74aa7be84a"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-ssrf-prevention.md"
+path = ".aiqt/reference/rules/security/SECI-ssrf-prevention.md"
+kind = "file"
+sha256 = "5b814dd41917601fd949fe32e025b0e8b11fee1c34a1e811506c064e59e9a34f"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-symlink-resolution.md"
+path = ".aiqt/reference/rules/security/SECI-symlink-resolution.md"
+kind = "file"
+sha256 = "fec1beb6357dcdcfe6faf5f17f35fe045baa3c4340ff3352495828cd00e36a63"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-threat-model-boundaries.md"
+path = ".aiqt/reference/rules/security/SECI-threat-model-boundaries.md"
+kind = "file"
+sha256 = "0abb54b2758c2bc6b613c8a034a66a72028093f4375b9f9a267426bc170badb1"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-tool-argument-validation.md"
+path = ".aiqt/reference/rules/security/SECI-tool-argument-validation.md"
+kind = "file"
+sha256 = "bb74b0180f38faa794e4a06f3ca071044cc79e1c9f21b990bc0a7f7a02a45140"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-untrusted-content.md"
+path = ".aiqt/reference/rules/security/SECI-untrusted-content.md"
+kind = "file"
+sha256 = "0f0289f17562c6a2cfc1442b7da4cd0f5bbe6ecd2faa740c16ee22164b9f5288"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECI-verify-dependency-exists.md"
+path = ".aiqt/reference/rules/security/SECI-verify-dependency-exists.md"
+kind = "file"
+sha256 = "833c55564758cbba6a6870c944cec51609a3392b834430c2b5ee2e000f9af73b"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECP-data-minimization.md"
+path = ".aiqt/reference/rules/security/SECP-data-minimization.md"
+kind = "file"
+sha256 = "593e4d9e38f84b815cf1c535e727d122e0277d5d1ade52cc1e91d3e41a250cb0"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECP-data-residency-retention.md"
+path = ".aiqt/reference/rules/security/SECP-data-residency-retention.md"
+kind = "file"
+sha256 = "28996ae27468df4a9b8ddf93baf472696e3f3675284e3aac3d42263a961faa55"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECP-purpose-limitation.md"
+path = ".aiqt/reference/rules/security/SECP-purpose-limitation.md"
+kind = "file"
+sha256 = "4ec35140f4b98d42c186ee5f5208fb286c55e905f53a8cd77b3b9daa59abdf2d"
+
+[[artifacts]]
+artifact-id = "rules:.aiqt/reference/rules/security/SECP-synthetic-fixture-data.md"
+path = ".aiqt/reference/rules/security/SECP-synthetic-fixture-data.md"
+kind = "file"
+sha256 = "220c7bb505f47c4e11fd826aa8bc6350e59dfdd01893f404bfd2f86c172818f7"
 
 [[artifacts]]
 artifact-id = "rules-core:.aiqt/renders/aiqt-core.md"
