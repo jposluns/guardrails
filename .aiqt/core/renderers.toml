@@ -12,7 +12,7 @@ entrypoint = "tools/gen_agents.py"
 semantics-revision = 1
 targets = ["AGENTS.md"]
 closure = ["tools/gen_agents.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py", "tools/gen_adapters.py", "tools/gen_rules.py"]
-code-digest = "084e63d81307d12da2a6b8bb0964ce1d64c5c03d0eea3e29e49597d4eac3e119"
+code-digest = "b51ee15c19243a0ae3df6acf4dfc5cb576a60cbb5aef86c95e457537c21142ed"
 
 [[renderer]]
 renderer-id = "adapters"
@@ -20,7 +20,7 @@ entrypoint = "tools/gen_adapters.py"
 semantics-revision = 1
 targets = ["GEMINI.md", ".github/copilot-instructions.md"]
 closure = ["tools/gen_adapters.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "0afa6611360c496255bd4bb91f455c5a86cd92665fa84b510c734ddcd1eac098"
+code-digest = "49c1a1a2fa38f90cdf5edb4074b7e8ddd5afc3a9f4bb28ac31a6018c43209604"
 
 [[renderer]]
 renderer-id = "claude"
@@ -28,7 +28,7 @@ entrypoint = "tools/gen_claude.py"
 semantics-revision = 1
 targets = [".claude/RULES-INDEX.md", "CLAUDE.md"]
 closure = ["tools/gen_claude.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py", "tools/gen_adapters.py", "tools/gen_agents.py", "tools/gen_rules.py"]
-code-digest = "6c0350359f82c112633b8d601551e046008c8e997fb55b0e49a2aa4e02d486b5"
+code-digest = "76ca393fdafc5b72cb577a2b9427f8da7fbbde4a6fa22827d89485f2a57fe9a7"
 
 [[renderer]]
 renderer-id = "cursor"
@@ -36,7 +36,7 @@ entrypoint = "tools/gen_cursor.py"
 semantics-revision = 1
 targets = [".cursor/rules/aiqt-guardrails/"]
 closure = ["tools/gen_cursor.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "0130a90444b5b6ec6763e2c4cff1c398f40b00618ee0852417615e8e176ffd8a"
+code-digest = "1cb1a8f32a287c98f26f830ae3ae8052125c7bfa5e6e9dbe933458ec035aad30"
 
 [[renderer]]
 renderer-id = "rules"
@@ -44,7 +44,7 @@ entrypoint = "tools/gen_rules.py"
 semantics-revision = 1
 targets = [".claude/rules/aiqt/", ".claude/rules/security/"]
 closure = ["tools/gen_rules.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py"]
-code-digest = "77ec9de3ddb666649089651ccfbf69c9bca48478a570f2fed2aa1815026e1066"
+code-digest = "e9698e8bbbf99b6df1f3a1472e6cf5056b524e4a8d19083941170f16bf14c38d"
 
 [[renderer]]
 renderer-id = "rules-core"
@@ -52,7 +52,7 @@ entrypoint = "tools/gen_rules_core.py"
 semantics-revision = 1
 targets = [".aiqt/renders/aiqt-core.md"]
 closure = ["tools/gen_rules_core.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_selftest_exit_report.py", "tools/_standards.py", "tools/gen_adapters.py", "tools/gen_agents.py", "tools/gen_claude.py", "tools/gen_rules.py"]
-code-digest = "f6726954c41e508fdf67068531daf41015516ace873bccd048a04cbdc32fdd6e"
+code-digest = "7b2c59ff5ec437508da2a24e85fa8cf48b852c317096b28b238c0c65ca205f1c"
 
 [[renderer]]
 renderer-id = "skill"
@@ -60,7 +60,7 @@ entrypoint = "tools/gen_skill.py"
 semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "plugin/aiqt-guardrails-hooks/skills/"]
 closure = ["tools/gen_skill.py", "tools/_adapter_compose.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py", "tools/check_sized_instructions.py", "tools/gen_adapters.py", "tools/gen_agents.py", "tools/gen_hooks.py", "tools/gen_mappings.py", "tools/gen_rules.py"]
-code-digest = "9b74608b473d23c0ef69c23652601e819e590a5a82bcbbce4acb2fd393efcbd6"
+code-digest = "b4057d01b8f6e6070cc90ba4c8f96b0a0b5a2c7401c2c5151829c22e67cc6172"
 
 [[renderer]]
 renderer-id = "worker-pack"
@@ -68,4 +68,4 @@ entrypoint = "tools/gen_worker_pack.py"
 semantics-revision = 1
 targets = [".claude/worker-pack.md"]
 closure = ["tools/gen_worker_pack.py", "tools/_gen_common.py", "tools/_git_fixture_env.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "0720cd19b606fa3013a9f417eed1b61172596873b387ab1ffb6acd11719912f8"
+code-digest = "c38dfae4e7b321093a33ecc4aefd4dd9dc5152664ad55c30e0ca9f80513239e9"

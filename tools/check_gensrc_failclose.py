@@ -2793,7 +2793,14 @@ def _self_test_main_isolated():
             shutil.copytree(repo_root(), fpr, symlinks=False, ignore=_copy_ignore)
             budget = fpr / ".aiqt" / "core" / "core-budget.toml"
             seed_text = budget.read_text(encoding="utf-8")
-            in_force = tomllib.loads(seed_text)["accepted"][-1]
+            # A budget log that does not parse (tomllib raises a BARE ValueError as well as TOMLDecodeError, and
+            # RecursionError or MemoryError on a deep or huge body) or holds no accepted entry is a setup failure:
+            # _setup_vector names it cannot-evaluate, never a pass.
+            try:
+                in_force = tomllib.loads(seed_text)["accepted"][-1]
+            except (RecursionError, MemoryError, ValueError, KeyError, IndexError, TypeError) as exc:
+                raise ValueError("the budget log {} cannot be read ({}: {}); fail-closed".format(
+                    budget, type(exc).__name__, exc)) from None
             _git_fixture(fpr, "init", "-q", "--template=")
             _git_fixture(fpr, "add", "-A")
             _git_fixture(fpr, "commit", "-q", "-m", "fp0 copy", "--no-verify")

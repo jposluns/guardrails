@@ -1587,7 +1587,14 @@ def _gen_argv_first_parent_failures():
             return ["first-parent rows: " + problem]
         budget = source / ".aiqt" / "core" / "core-budget.toml"
         seed_text = budget.read_text(encoding="utf-8")
-        in_force = tomllib.loads(seed_text)["accepted"][-1]
+        # A budget log that does not parse (tomllib raises a BARE ValueError as well as TOMLDecodeError, and
+        # RecursionError or MemoryError on a deep or huge body) or holds no accepted entry is a failure line,
+        # never a pass.
+        try:
+            in_force = tomllib.loads(seed_text)["accepted"][-1]
+        except (RecursionError, MemoryError, ValueError, KeyError, IndexError, TypeError) as exc:
+            return ["first-parent rows: the budget log {} cannot be read ({}: {}); fail-closed".format(
+                budget, type(exc).__name__, exc)]
         budget.write_text(seed_text + (
             '\n[[accepted]]\nkind = "shrink"\nnote = "self-test: file-cap lowered by one"\nentry-cap = {}\n'
             "trigger-cap = {}\nfile-cap = {}\npending = {}\n").format(
