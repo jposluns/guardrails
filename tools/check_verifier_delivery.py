@@ -460,18 +460,18 @@ list-item fences, blockquotes, the answer's names, absent references in an answe
 the findings section and its names, quoted text naming nothing, bare-name binding, absolute repository
 paths, excerpts, indentation, examples and their closing ")", the example openers, CRLF tree files,
 the quote shape refusal (one flip/ check over fourteen fixtures, each holding a quote a reader may
-see that the scan's one pairing leaves unread, each passing with the refusal removed: the 979d11ff
-review's findings 1 to 3 (a blank pair against its shape, a quote over two lines of two marks, a
-gap pair against its shape, "(e.g." and ")" inside code spans, two marks shaped for both roles
-between two pairs), an inch mark opening a quote whose pair is on the next line, four straight
+see that the scan's one pairing leaves unread, each passing with the refusal removed: a blank pair
+against its shape, a quote over two lines of two marks, a gap pair against its shape, "(e.g." and
+")" inside code spans, two marks shaped for both roles between two pairs, an inch mark opening a
+quote whose pair is on the next line, four straight
 marks paired against their shape, four spaced straight marks, a nested curly quote, an empty pair,
 straight and curly openers with no closer on their line, and quotes breaking across lines after a
 code span run across lines and between escaped backticks; each row also asserts the reason the
 refusal names, though the shape's conditions are not removed one at a time in the suite), with
 controls that keep their outcome (straight and curly one-line quotes, a lone inch mark, fenced and
 blockquote multi-line excerpts) and over-refusal rows (two quotes on one line, a quote beside a code
-span, an example or an inch mark), the bf7d72db reading of a refused line (one flip/ check over the
-review's finding 4 fixtures: quote marks on a line holding an escaped backtick, on a line after a
+span, an example or an inch mark), the bf7d72db reading of a refused line (one flip/ check over its
+fixtures: quote marks on a line holding an escaped backtick, on a line after a
 code span run across lines, and after superscript digits, each FAIL with the refusal listed, and
 CANNOT_EVALUATE with that reading removed), the head reading's code masks (one flip/ check over
 three fixtures: a quote after a code span run across lines, between backslash-escaped backticks and
@@ -488,13 +488,13 @@ answers are CANNOT_EVALUATE; its flip/ check has the bf7d72db code spans mask no
 refusal is raised in the FAIL's place), the quote cap counted as the bf7d72db reading counts it
 (with MAX_QUOTES at 5, five quotes of that reading and six that only the head reading finds, one of
 them dropped with a deferred refusal, FAIL on the fabricated quote; CANNOT_EVALUATE at d3d06d0b),
-the head reading's own quotes counted occurrence by occurrence (the f9c3161f review's finding 3:
-with MAX_QUOTES at 5, thirteen occurrences of one text the bf7d72db reading finds once check ten
-quotes, not seventeen), the bf7d72db reading's file names on a refused line (the review's finding
-4: a file name or an absent reference inside a quote only the head reading finds still binds the
+the head reading's own quotes counted occurrence by occurrence (with MAX_QUOTES at 5, thirteen
+occurrences of one text the bf7d72db reading finds once check ten quotes, not seventeen), the
+bf7d72db reading's file names on a refused line (a file name or an absent reference inside a quote
+only the head reading finds still binds the
 bf7d72db reading's quote, so each of three fixtures FAILs; its flip/ check reads the head
 reading's names alone, and each is CANNOT_EVALUATE), the NO_VOTE that wins over a deferred refusal
-(the review's finding 5: every answer UNVERIFIABLE beside a quote shape refusal or a deferred
+(every answer UNVERIFIABLE beside a quote shape refusal or a deferred
 hidden construct, and an UNVERIFIABLE answer over a declared input beside a quote shape refusal,
 each NO_VOTE with the refusal listed; its flip/ check raises the refusal in the NO_VOTE's place)
 and the bf7d72db reading's answer count (a quote question answered only by a head reading quote
@@ -3610,7 +3610,7 @@ def _self_test_cases(fx):
     check("flip/c2-quote-code-masks", tuple(verdict(_patched("_code_masks", per_line, lambda: fx.run(delivery)))
                                             for delivery in (span_hidden, escaped_ticks, autolink_tick)),
           ("CANNOT_EVALUATE",) * 3)
-    # The 4563 review's finding 2 (D01): "<1`2>" is no CommonMark autolink (a scheme starts with a
+    # D01: "<1`2>" is no CommonMark autolink (a scheme starts with a
     # letter), so the code span "`<b>`" before it stays masked and the fabricated quote above it
     # FAILs, as at bf7d72db; it was CANNOT_EVALUATE (raw HTML) at d3d06d0b.
     not_autolink = "x `<b>` sits by <1`2>."
@@ -3641,7 +3641,7 @@ def _self_test_cases(fx):
                               + '\nIt reads "return FABRICATED" in src/beta.py.'})
     check("c2/quote-cap-counts-base-reading-fails", refusal(_patched("MAX_QUOTES", 5, lambda: fx.run(over_cap)),
                                                             "more than 5 quotes only the head reading"), ("FAIL", True))
-    # The f9c3161f review's finding 3: a head reading occurrence of a text the bf7d72db reading also
+    # A head reading occurrence of a text the bf7d72db reading also
     # finds on its line is matched occurrence by occurrence, so of thirteen copies of one text (twelve
     # in code spans, one bare, which the bf7d72db reading finds once) one is that reading's and twelve
     # the head reading's own: with MAX_QUOTES at 5, ten quotes are checked (at most twice MAX_QUOTES),
@@ -3650,7 +3650,7 @@ def _self_test_cases(fx):
     report = _patched("MAX_QUOTES", 5, lambda: fx.run(repeated))
     check("c2/quote-cap-counts-every-occurrence-cannot-evaluate",
           (verdict(report), report["quotes_checked"], report["quotes_checked"] <= 2 * 5), ("CANNOT_EVALUATE", 10, True))
-    # The f9c3161f review's finding 4: on a refused line, a token inside a quote only the head reading
+    # On a refused line, a token inside a quote only the head reading
     # finds still names a file for the bf7d72db reading, whose quote is held to it as at bf7d72db, so a
     # quote absent from that file, or an absent file that reading names, FAILs, the refusal listed.
     # Each was CANNOT_EVALUATE at f9c3161f, the quote bound to the question's file alone.
@@ -3676,7 +3676,7 @@ def _self_test_cases(fx):
         "_quote_targets", lambda item, questions, tree, key="names_text": head_targets(item, questions, tree),
         lambda: fx.run(_delivery(sha, answer), BRIEF_BINDING))) for answer in binding_answers),
         ("CANNOT_EVALUATE",) * 3)
-    # The f9c3161f review's finding 5: a NO_VOTE outranks a deferred refusal as a FAIL does (a
+    # A NO_VOTE outranks a deferred refusal as a FAIL does (a
     # deferred refusal is one bf7d72db did not raise, so it never turns that reading's NO_VOTE, exit
     # 1, into CANNOT_EVALUATE, exit 2), the refusal listed. Each was CANNOT_EVALUATE at f9c3161f.
     no_vote_deliveries = (
@@ -3708,8 +3708,8 @@ def _self_test_cases(fx):
     # The certain shape is built, not a list of ambiguous shapes. In each fixture below a reader may
     # see a quote of "return FABRICATED" that the scan's one pairing leaves unread (its own pairs are
     # gap texts of docs/marks.md or src/beta.py, which verify), so each passes with the refusal
-    # removed. The first five are the 979d11ff review's findings 1 to 3 (X01, X03, X02, X05, X06),
-    # each of which passed there; each row also asserts the reason the refusal gives.
+    # removed. The first five are X01, X03, X02, X05 and X06, each of which passed at 979d11ff;
+    # each row also asserts the reason the refusal gives.
     shape_deliveries = []
 
     def shape_row(vector, why, lead=None, after=None, answer=None):
@@ -3723,19 +3723,19 @@ def _self_test_cases(fx):
         reasons = " ".join(report["reasons"])
         return verdict(report), "delivery line {}: {}".format(at_line, shape_words) in reasons and why in reasons
     against_shape = "not shaped as an opener then a closer"
-    # finding 1: a blank pair of marks against their shape hid the quote after it (X01)
+    # a blank pair of marks against their shape hid the quote after it (X01)
     check("c2/quote-shape-blank-pair-against-shape-cannot-evaluate", shape_row(
         'In src/beta.py and docs/marks.md x" "return FABRICATED when not ready.', against_shape), refused)
-    # finding 1: a quote broken over two lines of two marks each, every pair blank (X03)
+    # a quote broken over two lines of two marks each, every pair blank (X03)
     check("c2/quote-shape-quote-over-two-mark-lines-cannot-evaluate", shape_row(
         'x" "return FABRICATED when', against_shape, after='not ready" "y holds.'), refused)
-    # finding 1: the same with a gap text that is in the tree (X02)
+    # a pair of marks against their shape around a gap text that is in the tree (X02)
     check("c2/quote-shape-gap-pair-against-shape-cannot-evaluate", shape_row(
         'In src/beta.py and docs/marks.md x" or "return FABRICATED when not ready.', against_shape), refused)
-    # finding 2: "(e.g." and ")" inside code spans masked a prose quote (X05)
+    # "(e.g." and ")" inside code spans masked a prose quote (X05)
     check("c2/quote-shape-example-in-code-spans-cannot-evaluate", shape_row(
         'The flag `(e.g.` reads "return FABRICATED" and `)` ends it.', "the line holds a backtick"), refused)
-    # finding 3: two marks shaped for both roles between two pairs (X06)
+    # two marks shaped for both roles between two pairs (X06)
     check("c2/quote-shape-both-role-marks-between-pairs-cannot-evaluate", shape_row(
         '"a"return FABRICATED"b" holds.', "4 straight double quote marks"), refused)
     # an inch mark followed by a letter, its pair on the next line
@@ -3765,7 +3765,7 @@ def _self_test_cases(fx):
     check("flip/c2-quote-shape-refusal", tuple(verdict(_patched(
         "_quote_shape_refusal", lambda line: None, lambda: fx.run(delivery))) for delivery in hidden_quotes),
         ("PASS",) * len(hidden_quotes))
-    # The 979d11ff review's finding 4: on a refused line, a fabricated quote the bf7d72db scan read
+    # On a refused line, a fabricated quote the bf7d72db scan read
     # (and reported as FAIL) still FAILs, the refusal listed: the bf7d72db reading
     # (_base_reading_quotes: every per-line code span masked, a mark after any str.isdigit digit an
     # inch mark) is checked beside the head reading. Each was CANNOT_EVALUATE at 979d11ff.
