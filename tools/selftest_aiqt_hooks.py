@@ -30796,6 +30796,42 @@ def _main_isolated(monitor):
         # scan cannot see g'i't and the peel returns the sudo-led argv, so only the dequoted scan gives it.
         gdeny_names("(gw-wr-concat4) sudo with a quote-concatenated git commit -nv denies (unlisted wrapper)",
                     "sudo g'i't commit -nv", "this git commit carries")
+        # GATDIS-WRAPPER-NOVERIFY (row found 2026-10-14, bash 5.3.9): a git commit --no-verify run through a
+        # command-word wrapper (env, env with assignments, command, exec -a, nice, nice -n 5, nohup, time,
+        # timeout) once allowed while the backslash-newline spelling denied. Every form the row names, with the
+        # long --no-verify and the short -n (git commit reads -n as --no-verify), must deny on the parsed path
+        # after the wrapper peel (_gate_novrf_peel), so each pins the parsed path's own message. Under a flip
+        # that removes the unwrapping (the peel returning the wrapper-led argv) each still denies, but through
+        # the de-quoted reading behind any word and its other message, so every gw-wnv-* deny below goes red,
+        # and the gw-wnv-ctl-msgn control (a -n inside the message value) flips to an over-deny.
+        for _wnv_label, _wnv_wrap in (
+                ("env", "env"), ("env-a1", "env A=1"), ("env-a1b2", "env A=1 B=2"), ("command", "command"),
+                ("exec-a", "exec -a name"), ("nice", "nice"), ("nice-n5", "nice -n 5"), ("nohup", "nohup"),
+                ("time", "time"), ("timeout", "timeout 60"),
+                ("stacked", "command env A=1 nice -n 5 nohup timeout 60")):
+            for _wnv_form, _wnv_tail, _wnv_needle in (
+                    ("long", "git commit --no-verify -m x", "this git commit carries a --no-verify spelling"),
+                    ("long-bare", "git commit --no-verify", "this git commit carries a --no-verify spelling"),
+                    ("short-n", "git commit -n -m x", "this git commit carries the short -n"),
+                    ("short-nm", "git commit -nm x", "this git commit carries the short -n")):
+                gdeny_names("(gw-wnv-{}-{}) {} + {} denies after the wrapper peel".format(
+                    _wnv_label, _wnv_form, _wnv_wrap, _wnv_tail), _wnv_wrap + " " + _wnv_tail, _wnv_needle)
+        gdeny_names("(gw-wnv-bsnl) the backslash-newline spelling the row compared against still denies",
+                    "git commit \\\n--no-verify -m x", "this git commit carries a --no-verify spelling")
+        gexpect("(gw-wnv-ctl-msgn) nice -n 5 + git commit with a -n inside the message value allows (peeled,"
+                " value-aware; no over-deny)", "nice -n 5 git commit -m 'fix -n'", "allow")
+        gexpect("(gw-wnv-ctl-plain) env A=1 B=2 + a plain git commit allows (no over-deny)",
+                "env A=1 B=2 git commit -m x", "allow")
+        gexpect("(gw-wnv-ctl-push-n) timeout + git push -n (--dry-run there) allows (no over-deny)",
+                "timeout 60 git push -n origin topic", "allow")
+        # Open item 4 of the same row: a '#' right after the ')' of a command substitution. bash 5.3.9 reads
+        # '$(true)#' as one word (the '#' is word text, not a comment) and '$(true) #' as a comment; the lexer
+        # reads the adjacent '#' both ways (_lex_readings) and the spaced one as a comment, so a roster git
+        # bypass on the next line denies either way and a commented-out one is not run.
+        gdeny_names("(gw-wnv-i4-adj) a '#' after a substitution's ')' then a wrapped git commit -n denies",
+                    "echo $(echo a)#\nenv git commit -n -m x", "this git commit carries the short -n")
+        gdeny_names("(gw-wnv-i4-sp) a comment after a substitution's ')' then a wrapped git commit -n denies",
+                    "echo $(echo ')') # c\nnice -n 5 git commit -n -m x", "this git commit carries the short -n")
         # The span/global-option vectors: a quoted global-option value between the real 'git' and its verb
         # (git --namespace ' x' commit -nv) behind a wrapper the peel does not resolve or does not list.
         # These allowed before the hides-roster-git run-out rule (the span's option walk ran off its
