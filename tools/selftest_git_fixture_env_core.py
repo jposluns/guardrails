@@ -313,15 +313,128 @@ def _roster_checks():
           (got_declared.startswith("unaccounted bare suite runner: 'tools/ci_build_bash.py'"),
            got_excluded.startswith("unaccounted bare suite runner: 'tools/merge_pr.py'")),
           (True, True))
-    # A stale entry (a runner no suite keeps bare: tools/check_secrets.py, a registered bare gate
-    # and no suite runner) and an unreasoned one (a blank reason) are each refused.
+    # A stale entry and an unreasoned one, each a well-formed (reason, check id) pair whose id a
+    # suite row of that runner lists (so the not-a-pair fallback and the check id rule pass it, and
+    # only the stale or unreasoned clause can refuse it), are each refused:
+    # - tools/merge_pr.py: a suite runner no suite keeps bare (CONFIG_EXCLUSIONS["all"] excludes
+    #   its bare launch), refused by the stale-runner clause alone;
+    # - tools/selftest_ci_status.py: a selftest_ module no suite row of which carries args, which
+    #   the selftest_ route already accounts;
+    # - tools/check_secrets.py: a registered bare gate and no suite runner;
+    # - tools/ci_build_bash.py with a blank reason, and with a reason that is not a string.
     got = []
-    for runner, reason in (("tools/check_secrets.py", "Synthetic stale entry."),
-                           ("tools/ci_build_bash.py", "  ")):
-        with patch.dict(bare_runners, {runner: reason}):
-            got.append(refusal().startswith(
-                "stale or unreasoned bare suite runner entry: {!r}".format(runner)))
-    check("roster/stale-bare-runner-entry-refused", got, [True, True])
+    for runner, entry in (
+            ("tools/merge_pr.py", ("Synthetic stale entry.", "cli/unrecognized-arguments-exit-2")),
+            ("tools/selftest_ci_status.py",
+             ("Synthetic stale entry.", "ci/jq-filter-direct-cases")),
+            ("tools/check_secrets.py", ("Synthetic stale entry.", "main/bare-runs-self-test")),
+            ("tools/ci_build_bash.py", ("  ", "main/bare-runs-self-test")),
+            ("tools/ci_build_bash.py", (None, "main/bare-runs-self-test"))):
+        with patch.dict(bare_runners, {runner: entry}):
+            got.append((runner, refusal().startswith(
+                "stale or unreasoned bare suite runner entry: {!r}".format(runner))))
+    check("roster/stale-bare-runner-entry-refused", got,
+          [("tools/merge_pr.py", True), ("tools/selftest_ci_status.py", True),
+           ("tools/check_secrets.py", True), ("tools/ci_build_bash.py", True),
+           ("tools/ci_build_bash.py", True)])
+
+    # Each declared bare runner's cited check id resolves against tools/selftest_checks.toml: an id
+    # no suite row of that runner lists (a misspelt id, a real id of another suite's runner, and an
+    # id that is not a string) is refused with that reason, as is an entry that is not a
+    # (reason, check id) pair (the old free-text shape) with the stale or unreasoned reason.
+    got = []
+    for entry in (("Synthetic reason.", "main/no-such-check"),
+                  ("Synthetic reason.", "cli/bare-ok-exit-0"),
+                  ("Synthetic reason.", None),
+                  "Synthetic free-text reason (its self-test pins that as main/bare-runs-self-test)."):
+        with patch.dict(bare_runners, {"tools/ci_build_bash.py": entry}):
+            got.append(refusal())
+    check("roster/bare-runner-check-id-resolved",
+          [text.split(":")[0] for text in got],
+          ["unresolved bare suite runner check id", "unresolved bare suite runner check id",
+           "unresolved bare suite runner check id", "stale or unreasoned bare suite runner entry"])
+
+    # The selftest_ route is taken from the registry, not from the name alone: a selftest_ module
+    # whose suite row carries args (so no registered launch is its bare entry point) is refused.
+    probe = {"id": "roster-selftest-args-probe", "runner": "tools/selftest_ci_status.py",
+             "args": ["--probe"], "expected-check-ids": ["probe"]}
+    extra = ('\nrun_gate "selftest-args-probe" python3 -I -B ./tools/check_selftest_execution.py'
+             ' --suite roster-selftest-args-probe\n')
+    with patch.object(check_ci_parity, "read_runner_text",
+                      disk_reader("roster-selftest-args-probe", local, add_local(extra))), \
+            patch.object(check_selftest_execution, "_manifest_suites",
+                         return_value=suites + [probe]):
+        got = refusal()
+    check("roster/selftest-route-row-args-refused",
+          got.startswith("unaccounted bare suite runner: 'tools/selftest_ci_status.py'"), True)
+    # The declared route stays open to that module: the same args-bearing selftest_ runner, named
+    # in CONFIG_BARE_SUITE_RUNNERS with a reason and an id its own suite row lists, builds the
+    # roster with its bare launch and the probe suite step kept. Only this declared case is
+    # accepted; the same declaration of a selftest_ module whose rows carry no args stays stale
+    # (roster/stale-bare-runner-entry-refused).
+    with patch.object(check_ci_parity, "read_runner_text",
+                      disk_reader("roster-selftest-args-declared", local, add_local(extra))), \
+            patch.object(check_selftest_execution, "_manifest_suites",
+                         return_value=suites + [probe]), \
+            patch.dict(bare_runners, {"tools/selftest_ci_status.py": (
+                "Synthetic reason: its bare launch runs its whole self-test.", "probe")}):
+        try:
+            roster = _registered_selftests()
+        except ValueError as exc:
+            got = str(exc)
+        else:
+            got = (("tools/selftest_ci_status.py",) in roster,
+                   ("./tools/check_selftest_execution.py", "--suite", "roster-selftest-args-probe")
+                   in roster)
+    check("roster/selftest-route-declared-args-accepted", got, (True, True))
+
+    # Every route that keeps an excluded bare runner's self-test in the lanes is required: removing
+    # any one CONFIG_DIRECT_SELFTESTS entry, or the CONFIG_SUITE_STEP_ONLY opt-out, must refuse the
+    # roster rather than build one with that runner silently gone from every lane.
+    uncovered = []
+    for table in (_gfe.CONFIG_DIRECT_SELFTESTS, _gfe.CONFIG_SUITE_STEP_ONLY):
+        for key in sorted(table):
+            with patch.dict(table):
+                del table[key]
+                got = refusal()
+            uncovered.append((key, got.startswith("uncovered excluded bare runner:")))
+    check("roster/uncovered-excluded-runner-refused",
+          (len(uncovered) >= 2, uncovered), (True, [(key, True) for key, _ in uncovered]))
+
+    # A direct launch covers only the lanes that run it: excluding a covering direct launch (a
+    # CONFIG_DIRECT_SELFTESTS entry, and a registered --self-test launch) from the malformed lane
+    # refuses the roster as uncovered, and naming that runner in CONFIG_SUITE_STEP_ONLY as well is
+    # refused as stale (the other lanes still run that launch), so no roster is built whose
+    # malformed lane silently never enters that runner's self-test.
+    lane_cover = []
+    for launch in (("tools/merge_pr.py", "--self-test"), ("tools/ci_site_scope.py", "--self-test")):
+        with patch.dict(CONFIG_EXCLUSIONS["malformed"], {launch: "Synthetic lane exclusion."}):
+            uncovered_got = refusal()
+            with patch.dict(_gfe.CONFIG_SUITE_STEP_ONLY, {launch[0]: "Synthetic opt-out."}):
+                opted_got = refusal()
+        lane_cover.append((launch[0],
+                           uncovered_got.startswith(
+                               "uncovered excluded bare runner: {!r}".format(launch[0])),
+                           opted_got.startswith(
+                               "stale or unreasoned suite-step-only entry: {!r}".format(launch[0]))))
+    check("roster/lane-excluded-direct-launch-uncovered", lane_cover,
+          [("tools/merge_pr.py", True, True), ("tools/ci_site_scope.py", True, True)])
+
+    # An opt-out entry is stale when its runner already has a direct launch or is no excluded bare
+    # runner of a rostered suite, and unreasoned when its reason is blank or not a string; each
+    # refuses the roster with that reason (a non-string reason must not crash the build).
+    stale_opt_outs = []
+    for runner, reason in (("tools/check_hook_coverage.py", "Synthetic covered opt-out."),
+                           ("tools/check_secrets.py", "Synthetic unexcluded opt-out."),
+                           (sorted(_gfe.CONFIG_SUITE_STEP_ONLY)[0], " "),
+                           (sorted(_gfe.CONFIG_SUITE_STEP_ONLY)[0], None)):
+        with patch.dict(_gfe.CONFIG_SUITE_STEP_ONLY, {runner: reason}):
+            try:
+                got = refusal()
+            except Exception as exc:  # a crash is this check's failure, not the suite's
+                got = "{}: {}".format(type(exc).__name__, exc)
+        stale_opt_outs.append(got.startswith("stale or unreasoned suite-step-only entry:"))
+    check("roster/stale-suite-step-only-refused", stale_opt_outs, [True, True, True, True])
     check("roster/live-roster-accounted", refusal(), "")
     shutil.rmtree(scratch, ignore_errors=True)
 
@@ -1390,7 +1503,8 @@ def _member_close_controls(fixture):
         # stood-down observation, so a merely slow positive control whose evidence is at its
         # want is cannot-evaluate, never a definite mismatch. That the child's evidence IS
         # at its want under a slow positive control rests on "producer-map" and the
-        # "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers).
+        # "failed-stalled" value pin, short of THE RESIDUAL, what neither net catches
+        # (_allowlist_producers).
         _stood_down_wants([slow_down], [slow_want]) == [slow_down],
         # The deliberate empty send list (round 20): "failed-stalled" owes no signal by
         # construction, so its False timeliness field alone records nothing and the whole
@@ -1608,7 +1722,9 @@ def _member_close_controls(fixture):
     # test, whose body also runs only in the lock scenario).
     # Last, seven instances of routes the reader does NOT read (instances, not the
     # class, which the NOT READ text of _slow_control_record states by construction),
-    # held AT [] so a reader that starts catching one must update that text: an
+    # held AT [] so a reader change that starts catching one alters that probe's entry,
+    # fails the "slow-control" pin and must update that text (these probes only parse
+    # mutated sources; a route outside the seven is not detected here): an
     # exception name the handlers use rebound ahead of the try (exceptbind), contextlib
     # rebound by a class whose redirect_stdout turns a TimeoutExpired into RuntimeError
     # on exit (ctxclass), outcome stored through the child's own module attribute
@@ -1921,8 +2037,10 @@ def _member_close_controls(fixture):
                 # through dottedimport), names the fact it breaks; the last seven
                 # (exceptbind, ctxclass, mainattr, wildcard, exitafter, clsname,
                 # funcglobals) are instances of disclosed routes the reader does not read,
-                # held at [] so a reader that starts catching one must update the NOT READ
-                # text of _slow_control_record.
+                # held at [] so a reader change that starts catching one alters that
+                # probe's entry, fails this pin and must update the NOT READ text of
+                # _slow_control_record; a route outside the seven is not detected here
+                # (these probes only parse mutated sources).
                 ("slow-control", [[], ["gate"], ["gate", "record"], ["gate"], ["outcome"],
                                   ["outcome"], ["outcome"], ["outcome"], ["outcome"],
                                   ["outcome"], ["outcome"], ["outcome"], ["outcome"],

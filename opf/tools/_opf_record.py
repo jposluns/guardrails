@@ -620,8 +620,8 @@ def _require_canonical(operand):
     or non-canonical serialization refuses and is left untouched. It proves SERIALIZATION only: a hand edit
     or hand merge that leaves canonical bytes is not detectable here, so spec 5.7's integration-base merge
     policy remains a separate requirement this check does not enforce. A file an earlier emitter wrote with
-    a literal U+2028 or U+2029 inside a basic string still passes, and only when that is its sole difference
-    (_opf_emit.matches_store_bytes); this operation's write re-spells it with the escapes."""
+    a literal U+2028, U+2029 or U+00AD inside a basic string still passes, and only when that is its sole
+    difference (_opf_emit.matches_store_bytes); this operation's write re-spells it with the escapes."""
     if not _opf_emit.matches_store_bytes(operand.raw, _emit_bytes(operand.model)):
         raise RecordError("{} is not in canonical new-document form (it carries comments or non-canonical "
                           "serialization); refusing a whole-document rewrite that could lose content. "

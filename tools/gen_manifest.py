@@ -276,21 +276,40 @@ def parse_ownership(data):
     return exclusions, release, namespace, binary_set
 
 
-def git_tracked(root):
+def git_env_pins():
+    """The GIT_* variables a supplied launch environment may keep, each only at exactly this value:
+    derived from check_release_cut.git_environment() (its GIT_* entries), never a hand copy, so a pin
+    the shared helper gains is kept here too. Any other GIT_* entry of a supplied mapping is dropped, so
+    a caller cannot hand this read a GIT_DIR, GIT_INDEX_FILE, GIT_CONFIG_* or alternates value. Imported
+    only on the supplied-environment path, so the env=None callers never load check_release_cut."""
+    from check_release_cut import git_environment
+    return {k: v for k, v in git_environment().items() if k.startswith("GIT_")}
+
+
+def git_tracked(root, env=None):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
-    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels:
-    core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
-    must never run under a gate read; the genesis and delta branches of check_release_delta consume
-    this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
-    never a transport), atop the GIT_* environment scrub."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels
+    (check_release_cut.git): --no-replace-objects, core.commitGraph=false and core.fsmonitor=false (a
+    repo-config fsmonitor hook is attacker-chosen code and must never run under a gate read; the genesis
+    and delta branches of check_release_delta consume this enumerator), protocol.allow=never and
+    GIT_NO_LAZY_FETCH=1 (a missing object is a refusal, never a transport), atop the GIT_* environment
+    scrub. `env` is the launch environment: None (every caller but one) keeps that scrub of os.environ,
+    so the caller's on-disk git configuration is still read; check_byte_canon passes
+    check_release_cut.git_environment(), so no home, XDG or system git configuration reaches its read.
+    A supplied mapping is scrubbed too: every GIT_* entry is dropped unless it is one of git_env_pins()
+    at exactly its pinned value. GIT_NO_LAZY_FETCH=1 is applied over either."""
+    if env is None:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    else:
+        pins = git_env_pins()
+        env = {k: v for k, v in env.items() if not k.startswith("GIT_") or pins.get(k) == v}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
-                               "-c", "protocol.allow=never",
-                               "ls-files", "-z", "--cached", "--stage"],
+        proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-C", str(root), "ls-files", "-z", "--cached", "--stage"],
                               capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files ({}); fail-closed".format(exc))
@@ -333,8 +352,10 @@ def check_output_modes(root):
     to the generated outputs: run_all_checks.sh and other *.sh are legitimately executable and are NEVER
     touched. An output not yet tracked (genesis, before the release commit git-adds it) is not in the index
     and is skipped, never an error. GateError (exit 2) on a non-100644 tracked output or an unusable git read.
-    Pinned exactly as git_tracked (the sibling index read): core.fsmonitor=false,
-    protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub."""
+    Pinned like git_tracked (the sibling index read) on the hook and transport options only:
+    core.fsmonitor=false, protocol.allow=never and GIT_NO_LAZY_FETCH=1 atop the GIT_* scrub; unlike
+    git_tracked it passes neither --no-replace-objects nor core.commitGraph=false (ls-files --stage reads
+    the index, not objects or the commit graph)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
