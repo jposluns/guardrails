@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "a74f3c4261b47eb542bbeb8e0429fab714d376d0102fa357240f23307de2d4cb"
+tree-sha256 = "e7f19decc7475fc3f81e6c506e7eb57f090471c7961a49bb843992a7e84b431c"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4297,8 +4297,8 @@ sha256 = "0a30385485f8ee7db5d200846b72e264130ad489752c736c1f5d280cb3a2ee3c"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 282924
-sha256 = "c2f049bfe32c8e252d31bcad68b0d81bbad424a008440ecbc4fd647d05d94802"
+bytes = 294990
+sha256 = "a6170005ceebf18fdb499afcaf7f2322ea6deea76682a634f1cc1ff5999973cb"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
