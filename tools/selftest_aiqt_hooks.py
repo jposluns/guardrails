@@ -30800,10 +30800,16 @@ def _main_isolated(monitor):
         # command-word wrapper (env, env with assignments, command, exec -a, nice, nice -n 5, nohup, time,
         # timeout) once allowed while the backslash-newline spelling denied. Every form the row names, with the
         # long --no-verify and the short -n (git commit reads -n as --no-verify), must deny on the parsed path
-        # after the wrapper peel (_gate_novrf_peel), so each pins the parsed path's own message. Under a flip
-        # that removes the unwrapping (the peel returning the wrapper-led argv) each still denies, but through
-        # the de-quoted reading behind any word and its other message, so every gw-wnv-* deny below goes red,
-        # and the gw-wnv-ctl-msgn control (a -n inside the message value) flips to an over-deny.
+        # after the wrapper peel (_gate_novrf_peel). The needle is the message of _gate_novrf_segment_bypass's
+        # deny ("this git commit carries"). It tells that deny apart from the de-quoted reading behind any word
+        # (_gate_behind_bypass, another message), but NOT from the fail-closed de-quoted branch inside
+        # _gate_novrf_segment_bypass (_gate_novrf_dequoted_bypass), which gives the same message: a flip that
+        # sends every listed wrapper to that branch keeps these denies green, and of this block only the
+        # gw-wnv-ctl-msgn control (a -n inside the message value) catches it, as an over-deny. Under a flip
+        # that removes the unwrapping (the peel returning the wrapper-led argv), 47 of the block's first 50
+        # vectors go red: the 44 wrapper-by-spelling denies, gw-wnv-i4-adj, gw-wnv-i4-sp and the
+        # gw-wnv-ctl-msgn control (an over-deny). gw-wnv-bsnl (no wrapper), gw-wnv-ctl-plain and
+        # gw-wnv-ctl-push-n stay green. gw-wnv-i4-same, added later, is not in that count.
         for _wnv_label, _wnv_wrap in (
                 ("env", "env"), ("env-a1", "env A=1"), ("env-a1b2", "env A=1 B=2"), ("command", "command"),
                 ("exec-a", "exec -a name"), ("nice", "nice"), ("nice-n5", "nice -n 5"), ("nohup", "nohup"),
@@ -30826,12 +30832,20 @@ def _main_isolated(monitor):
                 "timeout 60 git push -n origin topic", "allow")
         # Open item 4 of the same row: a '#' right after the ')' of a command substitution. bash 5.3.9 reads
         # '$(true)#' as one word (the '#' is word text, not a comment) and '$(true) #' as a comment; the lexer
-        # reads the adjacent '#' both ways (_lex_readings) and the spaced one as a comment, so a roster git
-        # bypass on the next line denies either way and a commented-out one is not run.
+        # reads the adjacent '#' both ways (_lex_readings) and the spaced one as a comment. gw-wnv-i4-adj and
+        # gw-wnv-i4-sp put the bypass on the NEXT line, which both readings of '#' see, so they cannot tell the
+        # readings apart. gw-wnv-i4-same puts it on the SAME line after '#;', where only the word-text reading
+        # sees that git commit; the needle is the parsed path's message, which a comment-only reading of the
+        # adjacent '#' would not give (the spaced same-line form denies only through the raw-text scan's other
+        # message). No vector here pins that a commented-out bypass is allowed: the spaced same-line form
+        # ('$(true) # ; git commit -n') still denies through that raw-text scan, an over-deny.
         gdeny_names("(gw-wnv-i4-adj) a '#' after a substitution's ')' then a wrapped git commit -n denies",
                     "echo $(echo a)#\nenv git commit -n -m x", "this git commit carries the short -n")
         gdeny_names("(gw-wnv-i4-sp) a comment after a substitution's ')' then a wrapped git commit -n denies",
                     "echo $(echo ')') # c\nnice -n 5 git commit -n -m x", "this git commit carries the short -n")
+        gdeny_names("(gw-wnv-i4-same) a '#' after a substitution's ')' then ';' and git commit -n on the same"
+                    " line denies (word-text reading)", "echo $(true)#; git commit -n -m x",
+                    "this git commit carries the short -n")
         # The span/global-option vectors: a quoted global-option value between the real 'git' and its verb
         # (git --namespace ' x' commit -nv) behind a wrapper the peel does not resolve or does not list.
         # These allowed before the hides-roster-git run-out rule (the span's option walk ran off its
