@@ -25,14 +25,28 @@ copy of the checkout's index and an objects/info/alternates entry naming the che
 So the repository's $GIT_DIR/info/attributes and its config (a core.attributesFile set there included)
 cannot steer it, while the .gitattributes files are read as from the checkout's own git directory: from
 the work tree, and, for a tracked one missing from the work tree, from the index (git's check-in
-direction falls back to it). Every launch also carries the same pinned options (GIT_READ_PINS:
---no-replace-objects, core.commitGraph=false, core.fsmonitor=false, protocol.allow=never) and a timeout,
-so no core.fsmonitor hook, commit graph or replace ref, from any configuration level including the
-repository's own, runs or changes their input. The scope read and the index lookup still read the
-repository's own config. Residuals, each a git failure here (exit 2), never a pass: no safe.directory
-trust comes from the caller, so a checkout owned by another uid fails; and the private git directory
-carries no repository extension, so an index it cannot read (a split index, or a SHA-256 repository)
-fails the coverage read.
+direction falls back to it). The one repository setting that changes which .gitattributes line matches a
+path, core.ignoreCase (git init sets it true on a case-insensitive file system), is not taken from the
+checkout either: the coverage read runs twice, under core.ignoreCase=false and under core.ignoreCase=true
+(CASE_FOLD_VALUES), and a path is covered only if both reads cover it. So the gate judges the attributes as
+a checkout on a case-sensitive and on a case-insensitive file system would, whatever the checkout it runs
+in says; a path whose attributes depend on case folding is a finding on every platform. Every launch
+also carries the same pinned options (GIT_READ_PINS: --no-replace-objects, core.commitGraph=false,
+core.fsmonitor=false, protocol.allow=never) and a timeout, so no core.fsmonitor hook, commit graph or
+replace ref, from any configuration level including the repository's own, runs or changes their input.
+
+Residuals (the complete list; each of the first four is a git failure here, exit 2, never a pass):
+  - no safe.directory trust comes from the caller, so a checkout owned by another uid fails (the scope
+    read, the index lookup and the coverage read alike);
+  - the private git directory carries no repository extension, so an index it cannot read (a split index,
+    whose sharedindex file is not copied, or a SHA-256 repository) fails the coverage read;
+  - a checkout with no index file (a --no-checkout clone) fails the index lookup, where a read through the
+    checkout's own git directory would still evaluate the work tree's .gitattributes;
+  - the scope read and the index lookup still read the repository's own config (only the GIT_READ_PINS
+    settings are overridden there), so a malformed repository config fails them;
+  - no repository setting other than core.ignoreCase reaches or is varied in the coverage read.
+    core.precomposeUnicode, which takes effect only on macOS, is the one other setting known to change
+    how git spells a path; it is neither read nor varied here, and its effect on this read is untested.
 
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
@@ -97,6 +111,11 @@ from check_release_cut import git_environment  # noqa: E402
 GIT_READ_PINS = ("--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
                  "-c", "protocol.allow=never")
 GIT_TIMEOUT = 60
+# The coverage read runs once per case-folding setting: core.ignoreCase decides whether a .gitattributes
+# pattern matches a path that differs only in letter case, and the private git directory holds no config, so
+# the checkout's own value never reaches the read. Reading under both values judges the attributes as a
+# checkout on either kind of file system would; a path is covered only if it is covered under both.
+CASE_FOLD_VALUES = ("false", "true")
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
 from _byte_canon import (  # noqa: E402
@@ -385,10 +404,13 @@ def _private_git_dir(parent, index, objects):
 
 
 def effective_attributes(root, scope_paths):
-    """{path: {"text": v, "eol": v}} via `git check-attr -z --stdin`, the engine evaluation. A
-    process-launch failure (git absent) is fail-closed like the other git legs, and the NUL-delimited
-    response must have exactly the shape requested (one record per requested path x attribute, plus
-    the trailing empty field); a malformed response is fail-closed rather than a partial map."""
+    """{path: {"text": v, "eol": v}} via `git check-attr -z --stdin`, the engine evaluation, run once per
+    core.ignoreCase value in CASE_FOLD_VALUES. Where the two reads agree the value is git's; where they
+    differ the value names both (a string no attribute value can equal, since a value holds no space), so
+    coverage_findings reports the path. A process-launch failure (git absent) is fail-closed like the
+    other git legs, and each NUL-delimited response must have exactly the shape requested (one record per
+    requested path x attribute, plus the trailing empty field); a malformed response is fail-closed rather
+    than a partial map."""
     if not (root / ".gitattributes").is_file():
         raise GateError(".gitattributes is missing; 3.3 coverage cannot be evaluated")
     attrs = ("text", "eol")
@@ -399,22 +421,39 @@ def effective_attributes(root, scope_paths):
     # is given, and the private one holds neither. It holds a copy of the checkout's index (its objects
     # reached through alternates), so the .gitattributes files are read as under the checkout's own git
     # directory: from the work tree, and a tracked one missing there from the index, which git's
-    # check-in direction falls back to.
+    # check-in direction falls back to. The checkout's core.ignoreCase is not in it, so the read runs
+    # under each value of that setting in turn.
     index, objects = _index_and_objects(root)
+    maps = []
     try:
         with tempfile.TemporaryDirectory() as private:
             git_dir = _private_git_dir(Path(private), index, objects)
-            proc = subprocess.run(["git", *GIT_READ_PINS, "--git-dir", str(git_dir),
-                                   "--work-tree", str(root), "-C", str(root), "check-attr", "-z",
-                                   "--stdin", *attrs],
-                                  input=payload, capture_output=True, timeout=GIT_TIMEOUT,
-                                  env=git_environment())
+            for case_fold in CASE_FOLD_VALUES:
+                proc = subprocess.run(["git", *GIT_READ_PINS, "-c", f"core.ignoreCase={case_fold}",
+                                       "--git-dir", str(git_dir), "--work-tree", str(root), "-C", str(root),
+                                       "check-attr", "-z", "--stdin", *attrs],
+                                      input=payload, capture_output=True, timeout=GIT_TIMEOUT,
+                                      env=git_environment())
+                if proc.returncode != 0:
+                    raise GateError("git check-attr (core.ignoreCase={}) failed: {}".format(
+                        case_fold, proc.stderr.decode("utf-8", errors="replace").strip()))
+                maps.append(_check_attr_map(proc.stdout, ordered, attrs, scope_paths))
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("git check-attr could not be prepared or launched ({})".format(exc))
-    if proc.returncode != 0:
-        raise GateError("git check-attr failed: {}".format(
-            proc.stderr.decode("utf-8", errors="replace").strip()))
-    fields = proc.stdout.split(b"\0")
+    out = {}
+    for path in ordered:
+        for attr in attrs:
+            values = [m[path][attr] for m in maps]
+            out.setdefault(path, {})[attr] = values[0] if len(set(values)) == 1 else ", ".join(
+                "{} under core.ignoreCase={}".format(v, case_fold)
+                for v, case_fold in zip(values, CASE_FOLD_VALUES))
+    return out
+
+
+def _check_attr_map(stdout, ordered, attrs, scope_paths):
+    """Parse one `git check-attr -z` response into {path: {attr: value}}; fail-closed (GateError) on any
+    shape other than exactly one record per requested path x attribute plus the trailing empty field."""
+    fields = stdout.split(b"\0")
     # -z output is <path>\0<attr>\0<value>\0 per record; the trailing \0 makes a final empty field.
     expected = 3 * len(ordered) * len(attrs) + 1
     if len(fields) != expected or fields[-1] != b"":
@@ -938,6 +977,29 @@ def self_test_main():
             pass
         except Exception as exc:
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
+        # The coverage read runs once under each CASE_FOLD_VALUES setting, and a path whose attributes differ
+        # between the two reads is not covered: answered text=set under core.ignoreCase=false and
+        # text=unset under core.ignoreCase=true, README.md must come back as a finding.
+        folds = []
+
+        def _fold_answer(argv, **_k):
+            answer = _rev_parse_answer(argv)
+            if answer is not None:
+                return answer
+            folds.append([a for a in argv if a.startswith("core.ignoreCase=")])
+            text_v = b"unset" if "core.ignoreCase=true" in argv else b"set"
+            return _Proc(b"README.md\x00text\x00" + text_v + b"\x00README.md\x00eol\x00lf\x00")
+        subprocess.run = _fold_answer
+        try:
+            folded = effective_attributes(repo_root(), {"README.md"})
+            if folds != [["core.ignoreCase=false"], ["core.ignoreCase=true"]]:
+                failures.append("check-attr read: not run once under each core.ignoreCase value: {}".format(
+                    folds))
+            if not coverage_findings({"README.md"}, set(), folded):
+                failures.append("check-attr read: a path set only under core.ignoreCase=false was judged "
+                                "covered ({})".format(folded))
+        except GateError as exc:
+            failures.append("check-attr read: the two-setting stub read failed: {}".format(exc))
         # Every git launch of the gate (the scope read through gen_manifest.git_tracked and the check-attr
         # read) carries GIT_READ_PINS ahead of -C, a timeout, and every HOME, XDG_CONFIG_HOME and GIT_*
         # entry of git_environment() at its value (GIT_ATTR_NOSYSTEM among them); the check-attr read
@@ -1153,6 +1215,41 @@ def self_test_main():
             if seen[1][0] != 0 or not seen[1][1]:
                 failures.append("isolation fixture: control failed: git var {} named no file with the "
                                 "NOSYSTEM pins removed (exit {})".format(name, seen[1][0]))
+        # Case folding against real git (rows F10 and F9): a .gitattributes whose later line differs from an
+        # earlier one only in letter case (an exact path in F10, a glob in F9) unsets text on the path under
+        # core.ignoreCase=true, the value git init writes on a case-insensitive file system. The checkout's
+        # own check-attr reports text unset there (the control), and the coverage read must report the path
+        # as uncovered whatever the checkout's own core.ignoreCase says. Red if the read drops the
+        # case-folding setting (a single read under the private git directory's default, false).
+        for row, rules, path in (("F10", b"README.md text eol=lf\nreadme.MD -text\n", "README.md"),
+                                 ("F9", b"*.txt text eol=lf\n*.TXT -text\n", "a.txt")):
+            fold = tmp / "fold-{}".format(row)
+            fold.mkdir()
+            (fold / ".gitattributes").write_bytes(rules)
+            (fold / path).write_bytes(b"x\n")
+            for args in (("init", "-q"), ("config", "core.ignoreCase", "true"), ("add", "-A"),
+                         ("commit", "-q", "-m", "fixture")):
+                proc = gen_manifest._git(fold, *args)
+                if proc.returncode != 0:
+                    failures.append("case-fold fixture {}: git {} failed: {}".format(
+                        row, args[0], proc.stderr.decode("utf-8", "replace").strip()))
+            proc = gen_manifest._git(fold, "check-attr", "text", "--", path)
+            if proc.stdout != "{}: text: unset\n".format(path).encode("utf-8"):
+                failures.append("case-fold fixture {}: control failed: the checkout's own check-attr under "
+                                "core.ignoreCase=true gave {!r}".format(row, proc.stdout))
+            for setting in ("true", "false"):
+                if gen_manifest._git(fold, "config", "core.ignoreCase", setting).returncode != 0:
+                    failures.append("case-fold fixture {}: could not set core.ignoreCase={}".format(
+                        row, setting))
+                try:
+                    folded = effective_attributes(fold, {path})
+                except GateError as exc:
+                    failures.append("case-fold fixture {}: read failed: {}".format(row, exc))
+                    continue
+                if not coverage_findings({path}, set(), folded):
+                    failures.append("case-fold fixture {}: with the checkout's core.ignoreCase={}, {} was "
+                                    "judged covered ({}), but a case-insensitive checkout unsets its text "
+                                    "attribute".format(row, setting, path, folded.get(path)))
     check("git-read-isolation-fixture")
     # _load_vectors strict rows: a malformed row and a missing required class each fail closed.
     def _vectors_reject(fake_rows):

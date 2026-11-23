@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "b5e695391f11ffb46aa39a6a72b37606fdcd4f6ad1757978e84b6d2f53aef3db"
+tree-sha256 = "053b9d0d78b449ffbe20ae54d693456a8958099ffdcc35f1ee25f5156c1cf86b"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4277,8 +4277,8 @@ sha256 = "92153b428dcfcb12b60262e46bf382e87dcf7ccd60fdcff8b8e5333de0b229eb"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 80177
-sha256 = "3aa32eab55c5280ecd9e2714b425ee7410ec611c3e1e51ab2c250402128c460b"
+bytes = 87354
+sha256 = "d3a2187402505350fc24fe0e30cd807ffe0de75172af8844057c55a5a45f456f"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
