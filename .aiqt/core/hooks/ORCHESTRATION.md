@@ -1162,22 +1162,29 @@ export or the brief names):
   system attributes file), binary content deflated at level 1 whatever `core.compression` or
   `core.loosecompression` says, no external diff, no textconv, no colour, three context lines, no
   rename or copy detection (a rename is a deletion and an addition), binary content in full, and
-  quoted path names. The hook also takes the diff with the fixed options alone, so with the
-  repository's own attributes and configuration; where the two differ (a `binary`, `-diff` or diff
-  driver attribute, or a compression setting), or a changed path has a `diff` attribute in
-  `$GIT_DIR/info/attributes`, which no option switches off, the export is withheld as
-  `UNVERIFIABLE:`. So no attribute can render a text change as a binary patch that passes. The bytes
-  are compared as they are, with no line-ending, byte-order-mark or whitespace change, so the genuine
-  diff of a commit that changes a CRLF file passes. A diff from another base, a merge's second parent
-  or a series base, a diff with a section that is only a `Binary files` line, mode lines or an empty
-  hunk, and a diff taken with other options are refused, even where they name the same paths; a
-  refusal names the paths that differ where the headers name another path set.
+  quoted path names. So a `binary`, `-diff` or diff driver attribute the repository commits does not
+  shape it, and the check is usable on files the repository marks binary. The bytes are compared as
+  they are, with no line-ending, byte-order-mark or whitespace change, so the genuine diff of a commit
+  that changes a CRLF file passes. A diff from another base, a merge's second parent or a series base,
+  a diff with a section that is only a `Binary files` line, mode lines or an empty hunk, and a diff
+  taken with other options are refused, even where they name the same paths; a refusal names the
+  paths that differ where the headers name another path set. P1 only refuses: git configuration can
+  still change the form of this diff, so whether the export matches the commit is decided by bytes
+  (P2 and P3), never by the diff's text.
 - P2: every changed path is exported (a head copy where the pin has the path, a base copy where the
   base has it); every head copy, a regular file under the root outside the diff file and the
-  base-copy directory, is byte-identical to the pin's blob at its path; every base copy, a regular
-  file under the base-copy directory, is byte-identical to the derived base's blob at its path, so a
-  path the base lacks has none; every copy's owner execute bit matches its blob's mode (set for
-  100755, clear for 100644); and a root commit's export holds no base copy. Each mismatch is refused.
+  base-copy directory, is byte for byte the content of the pin's blob at its path; every base copy, a
+  regular file under the base-copy directory, is byte for byte the content of the derived base's blob
+  at its path, so a path the base lacks has none; every copy's owner execute bit matches its blob's
+  mode (set for 100755, clear for 100644); and a root commit's export holds no base copy. Each mismatch
+  is refused. The hook reads the blobs with one `git cat-file --batch` under the same pinned options,
+  which reads an object's own bytes with no filter, textconv, diff driver or external program, and
+  compares each copy with those bytes, never by object id.
+- P3: no changed path whose blob bytes are text on every side that has it (no NUL in the first 8000
+  bytes, git's own test) has a binary section (`Binary files` or `GIT binary patch`) in the diff. So
+  no diff driver setting (such as `diff.default.binary`), size threshold or
+  `$GIT_DIR/info/attributes` entry can show a text change as a binary section that passes; such an
+  export is refused.
 
 The hook walks the root itself, opening each directory and file by name from its parent's descriptor
 without following a symlink, so no path it reads escapes the root. Withheld as `UNVERIFIABLE:`: a
@@ -1187,15 +1194,19 @@ file or base-copy directory that is missing or cannot be read, a diff file or a 
 `max_brief_bytes`, a diff file that differs from the hook's diff and that the census cannot read (not
 UTF-8, a NUL, a malformed section), a symlink, FIFO, device or socket anywhere under the root, a
 changed path that is a symlink or submodule entry or that the diff file or base-copy directory stands
-in place of, attributes or configuration that change git's diff (P1 above), a failed git read (the
-hook's own diff included), more than 50000 entries under the root, and the 8 second budget.
+in place of, a failed git read (the hook's own diff and its blob read included), more than 50000
+entries under the root, and the 8 second budget.
 
 The check applies to a `revision` target only, and a brief that names no export is reconciled as
-before. Its residual: edits between the check and the reviewers' reads are not caught. A
-repository whose attributes or configuration change git's diff of the pin is withheld, never
-checked. A binary section's bytes are zlib output, so they also depend on the zlib and git builds:
-a diff another build took can differ, and P1 then refuses it (a false refusal, never a pass).
-Copies are compared by content and owner execute bit only. The brief's
+before. Its residual: edits between the check and the reviewers' reads are not caught. Git
+configuration the options do not pin (a diff driver's hunk-header pattern, `diff.default.binary`, a
+size threshold, `$GIT_DIR/info/attributes`) changes the hook's diff as well as the worker's, so a diff
+taken without it is refused (a false refusal), and one taken with it passes only where P2 and P3 hold;
+a text change it shows as a binary section is refused by P3. A file that is binary by git's test may
+be shown as a binary section, and its change is then checked only through its copies. A binary
+section's bytes are zlib output, so they also depend on the zlib and git builds: a diff another build
+took can differ, and P1 then refuses it (a false refusal, never a pass). Copies are compared by
+content and owner execute bit only. The brief's
 "unchanged" prose is not parsed. A series whose pin's first-parent diff is not the whole task still
 passes (the self-test row `rdp/export-first-parent-base-copies-allows`). Only the adopter's authority
 command and the rule text decide the pin. Context files and sealers that never call the preflight or
@@ -1304,9 +1315,11 @@ Limits:
 - A review export is checked only where the brief names it. Edits between the check and the
   reviewers' reads, the brief's "unchanged" prose, earlier commits of a series outside the pin's
   first-parent diff, and context files and sealers that never call the preflight or a declared
-  dispatch command are not caught (the review export check above). A repository whose attributes
-  or configuration change git's diff is withheld, and an export whose binary sections another zlib
-  or git build deflated differently is refused.
+  dispatch command are not caught (the review export check above). Copies are compared with the
+  blob bytes and a text change shown as a binary section is refused, but git configuration the
+  hook's options do not pin still shapes its diff, so an export taken without that configuration,
+  or whose binary sections another zlib or git build deflated differently, is refused, and a file
+  binary by git's test is checked only through its copies.
 
 ## Review holds
 

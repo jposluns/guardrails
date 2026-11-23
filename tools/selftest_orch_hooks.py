@@ -63,6 +63,7 @@ import time
 import datetime
 import hashlib
 import unicodedata
+import zlib
 from fractions import Fraction
 from pathlib import Path
 try:
@@ -5578,12 +5579,14 @@ def _rdp_export_bytes_cases(base):
     check("rdp/export-symlink-submodule-unverifiable", [named(run(r, pin, changed), special, "'" + changed[0] + "'")
                                                         for r, pin, changed in sp_rows],
           [("unverifiable", True)] * 3)
-    # Attributes and compression. A text change to A.txt and a binary change to B.bin, genuinely exported, are
-    # allowed. An untracked .gitattributes marking A.txt -diff renders git's diff of A.txt with the
-    # repository's own attributes as a binary patch: the export holding that patch and the one holding the
-    # hook's text diff are each a cannot-evaluate, as is the text export under a core.compression of 9 (B.bin's
-    # binary patch then differs), and A.txt marked -diff in .git/info/attributes, which no option switches off,
-    # with the binary-patch export the hook's own diff then matches.
+    # Attributes, compression and diff driver settings. A text change to A.txt and a binary change to B.bin,
+    # genuinely exported, are allowed. A .gitattributes in the working tree marking A.txt binary, as this
+    # repository's own one marks text files, does not shape the hook's diff, so the genuine export is still
+    # allowed and the export holding git's binary patch of A.txt is refused (P1); so is the genuine export
+    # under a core.compression of 9. Where git's diff of A.txt is a binary patch whatever the options say (a
+    # diff.default.binary setting in the repository configuration, or A.txt marked -diff in
+    # .git/info/attributes), the export holding that patch matches the hook's own diff and is refused by the
+    # blob bytes (P3: A.txt is text on both sides), and the genuine text export differs and is refused too.
     ab = ["A.txt", "B.bin"]
     a0 = commit("attr 0", [("A.txt", b"a\nb\n"), ("B.bin", bytes(range(256)) * 4)])
     a1 = commit("attr 1", [("A.txt", b"a\nc\n"), ("B.bin", bytes(range(255, -1, -1)) * 4)])
@@ -5591,49 +5594,86 @@ def _rdp_export_bytes_cases(base):
     at_good = export("attr-good", a1, a0, at_text, ab)
     attrs = ez.root / ".gitattributes"
     info = ez.root / ".git" / "info" / "attributes"
-    attrs.write_text("A.txt -diff\n", encoding="utf-8")
+    attrs.write_text("A.txt binary\n", encoding="utf-8")
     at_bin = _rdp_export_diff(ez.root, a0, a1, ambient=True)
     attrs.unlink()
     at_patch = export("attr-patch", a1, a0, at_bin, ab)
-    ambient = "with the repository's own attributes and configuration differs"
+    _rdp_git(ez.root, "config", "diff.default.binary", "true")
+    at_cfg_diff = _rdp_export_diff(ez.root, a0, a1)
+    _rdp_git(ez.root, "config", "--unset", "diff.default.binary")
+    at_cfg = export("attr-config", a1, a0, at_cfg_diff, ab)
+    hidden = "shows the text change to 'A.txt' as a binary section"
 
     def attr_rows():
         got = [named(run(at_good, a1, ab))]
-        attrs.write_text("A.txt -diff\n", encoding="utf-8")
+        attrs.write_text("A.txt binary\n", encoding="utf-8")
         try:
-            got += [named(run(r, a1, ab), ambient) for r in (at_patch, at_good)]
+            got += [named(run(at_good, a1, ab)), named(run(at_patch, a1, ab), differs)]
         finally:
             attrs.unlink()
         _rdp_git(ez.root, "config", "core.compression", "9")
         try:
-            got.append(named(run(at_good, a1, ab), ambient))
+            got.append(named(run(at_good, a1, ab)))
         finally:
             _rdp_git(ez.root, "config", "--unset", "core.compression")
+        _rdp_git(ez.root, "config", "diff.default.binary", "true")
+        try:
+            got += [named(run(at_cfg, a1, ab), hidden), named(run(at_good, a1, ab), differs)]
+        finally:
+            _rdp_git(ez.root, "config", "--unset", "diff.default.binary")
         info.parent.mkdir(exist_ok=True)
         info.write_text("A.txt -diff\n", encoding="utf-8")
         try:
-            got.append(named(run(at_patch, a1, ab), "'A.txt' carry a diff attribute from $GIT_DIR/info/attributes"))
+            got += [named(run(at_patch, a1, ab), hidden), named(run(at_good, a1, ab), differs)]
         finally:
             info.unlink()
         return got
-    check("rdp/export-attributes-unverifiable", [
+    check("rdp/export-text-shown-binary-denies", [
         b"GIT binary patch" in at_bin.split(b"diff --git a/B.bin")[0],
+        b"GIT binary patch" in at_cfg_diff.split(b"diff --git a/B.bin")[0],
         b"GIT binary patch" not in at_text.split(b"diff --git a/B.bin")[0]] + attr_rows(),
-        [True, True, ("allow", True)] + [("unverifiable", True)] * 4)
-    # Each part is load bearing. With the hook's diff taken as before (no neutralizing option) and no ambient
-    # check, the binary-patch export passes under both attribute sources (the round's MEDIUM 1); with the
-    # ambient comparison alone patched out, the text export passes where the repository's attributes and
-    # compression setting shape git's diff (an export the hook refused before); with the info/attributes read
-    # patched out, the binary-patch export passes under it.
+        [True, True, True] + [("allow", True)] * 2 + [("deny", True)] + [("allow", True)] + [("deny", True)] * 4)
+    # Each change is load bearing. With P3 patched out, the binary-patch export passes under the diff driver
+    # setting and under info/attributes (the round's MEDIUM 1); with the comparison of the repository's own
+    # diff put back in front of P1 (as the hook made it before), the genuine export under a binary attribute
+    # or a compression setting is refused again (the round's MINOR 3).
     kinds = lambda: [k for k, _n in attr_rows()]  # noqa: E731
-    check("rdp/export-attributes-revert-allows", [
-        _rdp_mutant([("_rdp_export_diff_args", lambda fmt: aiqt_hooks._RDP_EXPORT_DIFF_ARGS),
-                     ("_rdp_export_ambient", lambda *args: None)], kinds),
-        _rdp_mutant([("_rdp_export_ambient_differs", lambda own, ambient: False)], kinds),
-        _rdp_mutant([("_rdp_export_marked", lambda *args: [])], kinds)], [
-        ["allow", "allow", "deny", "deny", "allow"],
-        ["allow", "deny", "allow", "allow", "unverifiable"],
-        ["allow", "unverifiable", "unverifiable", "unverifiable", "allow"]])
+
+    def ambient_differs(blob, own):
+        ambient = _rdp_export_diff(ez.root, a0, a1, ambient=True)
+        return blob != own or own != ambient
+    check("rdp/export-text-shown-binary-revert-allows", [
+        _rdp_mutant([("_rdp_export_binary_shown", lambda own: set())], kinds),
+        _rdp_mutant([("_rdp_export_diff_differs", ambient_differs)], kinds)], [
+        ["allow", "allow", "deny", "allow", "allow", "deny", "allow", "deny"],
+        ["allow", "deny", "deny", "deny", "deny", "deny", "deny", "deny"]])
+    # The copies are compared with the bytes git cat-file reads, never by object id: where the object store
+    # holds other bytes under the pin's blob id for W.txt (here written over the loose object, as a colliding
+    # blob would be), the genuine copy of the committed bytes is refused, and with the comparison by object
+    # id put back it passes. A blob read that fails is a cannot-evaluate.
+    w0 = commit("w 0", [("W.txt", b"w\n1\n")])
+    w1 = commit("w 1", [("W.txt", b"w\n2\n")])
+    w_root = export("blob-other-bytes", w1, w0, b"", ["W.txt"])
+    oid = _rdp_git(ez.root, "rev-parse", w1 + ":W.txt")
+    loose = ez.root / ".git" / "objects" / oid[:2] / oid[2:]
+    loose_found = loose.is_file()
+    if loose_found:
+        os.chmod(str(loose), 0o644)
+        loose.write_bytes(zlib.compress(b"blob 4\0w\n9\n"))
+    (w_root / "CHANGE.diff").write_bytes(_rdp_export_diff(ez.root, w0, w1))
+    fmt = _rdp_git(ez.root, "rev-parse", "--show-object-format")
+
+    def by_id(copies, entries, blobs):
+        return [p for p, (data, _exe) in copies.items() if entries.get(p, ("", ""))[0] not in ("100644", "100755")
+                or entries[p][1] != hashlib.new(fmt, b"blob %d\0" % len(data) + data).hexdigest()]
+    check("rdp/export-copy-bytes-not-id", [loose_found, named(run(w_root, w1, ["W.txt"]), "head copies 'W.txt' are "
+                                                              "not byte-identical"),
+                                           _rdp_mutant([("_rdp_export_stale", by_id)],
+                                                       lambda: named(run(w_root, w1, ["W.txt"]))),
+                                           _rdp_mutant([("_rdp_export_blobs", lambda *args: None)],
+                                                       lambda: named(run(w_root, w1, ["W.txt"]), "blobs of",
+                                                                     "cannot be read"))],
+          [True, ("deny", True), ("allow", True), ("unverifiable", True)])
 
 
 def _rdp_ls(cwd, background):
