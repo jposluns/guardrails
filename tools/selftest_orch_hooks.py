@@ -5647,13 +5647,29 @@ def _rdp_export_bytes_cases(base):
         _rdp_mutant([("_rdp_export_diff_differs", ambient_differs)], kinds)], [
         ["allow", "allow", "deny", "allow", "allow", "deny", "allow", "deny"],
         ["allow", "deny", "deny", "deny", "deny", "deny", "deny", "deny"]])
-    # The copies are compared with the bytes git cat-file reads, never by object id: where the object store
-    # holds other bytes under the pin's blob id for W.txt (here written over the loose object, as a colliding
-    # blob would be), the genuine copy of the committed bytes is refused, and with the comparison by object
-    # id put back it passes. A blob read that fails is a cannot-evaluate.
     w0 = commit("w 0", [("W.txt", b"w\n1\n")])
     w1 = commit("w 1", [("W.txt", b"w\n2\n")])
     w_root = export("blob-other-bytes", w1, w0, b"", ["W.txt"])
+    (w_root / "CHANGE.diff").write_bytes(_rdp_export_diff(ez.root, w0, w1))
+    w_short = copy(w_root, "blob-held-short")
+    (w_short / "W.txt").write_bytes(b"w")
+    (w_short / "base" / "W.txt").write_bytes(b"w")
+    # The bytes the check holds are bounded: with the limit at 7 bytes, the genuine export of a 4-byte change
+    # (8 bytes of copies) is withheld by the walk before the copies are read, and a one-byte head and base copy
+    # pair (2 bytes) is withheld because cat-file reports 8 bytes of blobs, before their content is read. With
+    # the limit as shipped, the first passes and the second is refused.
+    held = [("_RDP_EXPORT_MAX_HELD_BYTES", 7)]
+    check("rdp/export-held-bytes-withheld", [
+        _rdp_mutant(held, lambda: named(run(w_root, w1, ["W.txt"]), "copies under", "more than 7 bytes")),
+        _rdp_mutant(held, lambda: named(run(w_short, w1, ["W.txt"]), "blobs of", "more than 7 bytes")),
+        named(run(w_root, w1, ["W.txt"])), named(run(w_short, w1, ["W.txt"]), "not byte-identical")],
+        [("unverifiable", True), ("unverifiable", True), ("allow", True), ("deny", True)])
+    # The copies are compared with the bytes git cat-file reads, never by object id, and each record read is
+    # hashed and held to the object id it was read for: where the object store holds other bytes under the
+    # pin's blob id for W.txt (here written over the loose object, as a colliding blob would be), the export
+    # of the committed bytes and the export of the store's bytes are both a cannot-evaluate. With the hash
+    # check patched out, the first is refused and the second passes (the round's MEDIUM 1); with the
+    # comparison by object id put back as well, the first passes. A blob read that fails is a cannot-evaluate.
     oid = _rdp_git(ez.root, "rev-parse", w1 + ":W.txt")
     loose = ez.root / ".git" / "objects" / oid[:2] / oid[2:]
     loose_found = loose.is_file()
@@ -5661,19 +5677,26 @@ def _rdp_export_bytes_cases(base):
         os.chmod(str(loose), 0o644)
         loose.write_bytes(zlib.compress(b"blob 4\0w\n9\n"))
     (w_root / "CHANGE.diff").write_bytes(_rdp_export_diff(ez.root, w0, w1))
+    w_forged = copy(w_root, "blob-store-bytes")
+    (w_forged / "W.txt").write_bytes(b"w\n9\n")
     fmt = _rdp_git(ez.root, "rev-parse", "--show-object-format")
 
     def by_id(copies, entries, blobs):
         return [p for p, (data, _exe) in copies.items() if entries.get(p, ("", ""))[0] not in ("100644", "100755")
                 or entries[p][1] != hashlib.new(fmt, b"blob %d\0" % len(data) + data).hexdigest()]
-    check("rdp/export-copy-bytes-not-id", [loose_found, named(run(w_root, w1, ["W.txt"]), "head copies 'W.txt' are "
-                                                              "not byte-identical"),
-                                           _rdp_mutant([("_rdp_export_stale", by_id)],
-                                                       lambda: named(run(w_root, w1, ["W.txt"]))),
-                                           _rdp_mutant([("_rdp_export_blobs", lambda *args: None)],
-                                                       lambda: named(run(w_root, w1, ["W.txt"]), "blobs of",
-                                                                     "cannot be read"))],
-          [True, ("deny", True), ("allow", True), ("unverifiable", True)])
+    unhashed = [("_rdp_export_blob_ok", lambda fmt, oid, data: True)]
+    forged = "do not hash to that object id"
+    check("rdp/export-copy-bytes-not-id", [
+        loose_found, named(run(w_root, w1, ["W.txt"]), "blobs of", forged),
+        named(run(w_forged, w1, ["W.txt"]), "blobs of", forged),
+        _rdp_mutant(unhashed, lambda: named(run(w_root, w1, ["W.txt"]),
+                                            "head copies 'W.txt' are not byte-identical")),
+        _rdp_mutant(unhashed, lambda: named(run(w_forged, w1, ["W.txt"]))),
+        _rdp_mutant(unhashed + [("_rdp_export_stale", by_id)], lambda: named(run(w_root, w1, ["W.txt"]))),
+        _rdp_mutant([("_rdp_export_blobs", lambda *args: (None, "cannot be read"))],
+                    lambda: named(run(w_root, w1, ["W.txt"]), "blobs of", "cannot be read"))],
+        [True, ("unverifiable", True), ("unverifiable", True), ("deny", True), ("allow", True), ("allow", True),
+         ("unverifiable", True)])
 
 
 def _rdp_ls(cwd, background):

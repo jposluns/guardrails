@@ -1799,6 +1799,7 @@ expected-check-ids = [
   "rdp/export-symlink-submodule-unverifiable",
   "rdp/export-text-shown-binary-denies",
   "rdp/export-text-shown-binary-revert-allows",
+  "rdp/export-held-bytes-withheld",
   "rdp/export-copy-bytes-not-id",
   "rdp/abbreviated-brief-before-last-denies",
   "rdp/compound-or-redirected-dispatch-unverifiable",

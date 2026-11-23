@@ -1178,13 +1178,16 @@ export or the brief names):
   at its path, so a path the base lacks has none; every copy's owner execute bit matches its blob's
   mode (set for 100755, clear for 100644); and a root commit's export holds no base copy. Each mismatch
   is refused. The hook reads the blobs with one `git cat-file --batch` under the same pinned options,
-  which reads an object's own bytes with no filter, textconv, diff driver or external program, and
-  compares each copy with those bytes, never by object id.
+  which reads an object's own bytes with no filter, textconv, diff driver or external program, hashes
+  each record as a blob in the repository's object format and holds it to the object id it was read
+  for, and compares each copy with those verified bytes, never by object id. An object store that
+  returns other bytes under a blob's id is a cannot-evaluate, never a pass. Only the blob bytes are
+  verified this way: the trees, the commits and the hook's own diff are taken as git reads them, so
+  object-store integrity is otherwise assumed.
 - P3: no changed path whose blob bytes are text on every side that has it (no NUL in the first 8000
   bytes, git's own test) has a binary section (`Binary files` or `GIT binary patch`) in the diff. So
-  no diff driver setting (such as `diff.default.binary`), size threshold or
-  `$GIT_DIR/info/attributes` entry can show a text change as a binary section that passes; such an
-  export is refused.
+  no diff driver setting (such as `diff.default.binary`) or `$GIT_DIR/info/attributes` entry can
+  show a text change as a binary section that passes; such an export is refused.
 
 The hook walks the root itself, opening each directory and file by name from its parent's descriptor
 without following a symlink, so no path it reads escapes the root. Withheld as `UNVERIFIABLE:`: a
@@ -1194,19 +1197,25 @@ file or base-copy directory that is missing or cannot be read, a diff file or a 
 `max_brief_bytes`, a diff file that differs from the hook's diff and that the census cannot read (not
 UTF-8, a NUL, a malformed section), a symlink, FIFO, device or socket anywhere under the root, a
 changed path that is a symlink or submodule entry or that the diff file or base-copy directory stands
-in place of, a failed git read (the hook's own diff and its blob read included), more than 50000
-entries under the root, and the 8 second budget.
+in place of, a failed git read (the hook's own diff and its blob read included), a blob read whose
+bytes do not hash to its object id, copies or blobs over 128 MiB together on either side (the copies
+counted by size before they are read, the blobs by the sizes `git cat-file --batch-check` reports
+first), more than 50000 entries under the root, and the 8 second budget.
 
 The check applies to a `revision` target only, and a brief that names no export is reconciled as
 before. Its residual: edits between the check and the reviewers' reads are not caught. Git
-configuration the options do not pin (a diff driver's hunk-header pattern, `diff.default.binary`, a
-size threshold, `$GIT_DIR/info/attributes`) changes the hook's diff as well as the worker's, so a diff
+configuration the options do not pin (a diff driver's hunk-header pattern, `diff.default.binary`,
+`$GIT_DIR/info/attributes`) changes the hook's diff as well as the worker's, so a diff
 taken without it is refused (a false refusal), and one taken with it passes only where P2 and P3 hold;
 a text change it shows as a binary section is refused by P3. A file that is binary by git's test may
 be shown as a binary section, and its change is then checked only through its copies. A binary
 section's bytes are zlib output, so they also depend on the zlib and git builds: a diff another build
 took can differ, and P1 then refuses it (a false refusal, never a pass). Copies are compared by
-content and owner execute bit only. The brief's
+content and owner execute bit only, with the content read from blobs whose bytes hash to their
+object ids; the trees, commits and diff git reads are trusted as the object store gives them. An
+export whose copies or blobs exceed 128 MiB is withheld (a false cannot-evaluate for a large
+genuine export), and an object store rewritten between the size read and the content read is
+outside that bound. The brief's
 "unchanged" prose is not parsed. A series whose pin's first-parent diff is not the whole task still
 passes (the self-test row `rdp/export-first-parent-base-copies-allows`). Only the adopter's authority
 command and the rule text decide the pin. Context files and sealers that never call the preflight or

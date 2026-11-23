@@ -324,6 +324,7 @@ import collections
 import datetime
 import errno
 import fnmatch
+import hashlib
 import itertools
 import json
 import math
@@ -33916,6 +33917,11 @@ _RDP_DRAFT_LABEL_KEYS = frozenset(("draft", "skip"))
 _RDP_EXPORT_LABEL_KEYS = frozenset(("export", "export_diff", "export_base"))
 # The entries the export walk reads at most (files and directories together); one more is a cannot-evaluate.
 _RDP_EXPORT_MAX_ENTRIES = 50000
+# The bytes the export check reads into memory at most on each side: the copies the walk holds (the diff
+# file apart, which max_brief_bytes bounds) and, separately, the blobs git cat-file returns, whose sizes are
+# read first. One byte more on either side is a cannot-evaluate, so a large export is withheld, never read
+# without bound.
+_RDP_EXPORT_MAX_HELD_BYTES = 128 * 1048576
 _RDP_AUTHORITY_KEYS = frozenset(("argv", "timeout"))
 _RDP_TARGETS = frozenset(("revision", "working-tree", "not-a-review"))
 # Line boundaries to Unicode that are not physical newlines (VT, FF, FS, GS, RS, NEL, LINE and PARAGRAPH
@@ -34917,8 +34923,8 @@ def _rdp_draft_census(cfg, found, changed, pin):
 #   changing a CRLF file passes with its genuine diff. A diff that differs is then read by the draft census
 #   parser (_rdp_draft_paths) only to report why (_rdp_export_p1). P1 only ever refuses: whether the export
 #   matches the commit is decided by bytes (P2 and P3), never by the diff's text, whose form git
-#   configuration can still change (a diff driver setting such as diff.default.binary or xfuncname, a size
-#   threshold, $GIT_DIR/info/attributes);
+#   configuration can still change (a diff driver setting such as diff.default.binary or xfuncname,
+#   $GIT_DIR/info/attributes);
 # - P2: every changed path is exported (a head copy where the pin has the path, a base copy where the base
 #   has it); every head copy, a regular file under the root outside the diff file and the base-copy
 #   directory, is byte for byte the content git cat-file reads for the pin's blob at its path; every base
@@ -34926,14 +34932,19 @@ def _rdp_draft_census(cfg, found, changed, pin):
 #   path the base lacks has none; every copy's owner execute bit matches its blob's mode (set for 100755,
 #   clear for 100644); and a root commit has no base copy at all (_rdp_export_p2). The blobs are read by one
 #   cat-file under the pinned options (_rdp_export_blobs), which reads an object's own bytes with no
-#   filter, textconv, diff driver or external program, and the copies are compared with those bytes, never
-#   by object id;
+#   filter, textconv, diff driver or external program; each record is hashed as a blob in the repository's
+#   object format and must be the object id it was read for (_rdp_export_blob_ok), so an object store that
+#   returns other bytes under a blob's id is a cannot-evaluate, never a pass; and the copies are compared
+#   with those verified bytes, never by object id. Only the blob bytes are verified this way: the trees,
+#   the commits and the hook's own diff are taken as git reads them, so object-store integrity is otherwise
+#   assumed;
 # - P3: no changed path whose blob bytes are text on every side (no NUL in the first 8000 bytes, git's own
 #   test) has a binary section in the diff (_rdp_export_hidden), so no configuration or attribute can show
 #   a text change as a binary patch or marker that passes.
 # A brief naming the export only in part, a value that is not an absolute root or a plain relative path, an
 # unreadable or malformed input (the root, the diff file, the base-copy directory), a symlink, a FIFO, device
-# or socket anywhere under the root, a changed path that is a symlink or submodule entry, a failed git read
+# or socket anywhere under the root, a changed path that is a symlink or submodule entry, a failed git read,
+# a blob read whose bytes do not hash to its object id, copies or blobs over _RDP_EXPORT_MAX_HELD_BYTES bytes
 # and a walk past _RDP_EXPORT_MAX_ENTRIES entries or the decision's deadline are each a cannot-evaluate. Every
 # directory under the root is opened without following a symlink and read by its descriptor, so no path the
 # walk reads escapes the root.
@@ -35008,22 +35019,24 @@ def _rdp_export_declared(cfg, found):
     return ((root, diff, base), None)
 
 
-def _rdp_export_walk(root, fmt, diff, max_bytes):
+def _rdp_export_walk(root, diff, max_bytes):
     """(files, dirs, text, None) for the export under root: files maps each regular file's slash-separated
     bytes path under root, the diff file's excepted, to its bytes and whether its owner execute bit is set;
     dirs is the set of directory paths;
     text is the diff file's bytes (None when there is no regular file at diff). (None, None, None, reason)
     for a cannot-evaluate: a root that cannot be opened as a directory, a symlink, FIFO, device or socket
-    under it, an entry that cannot be read, a diff file over max_bytes, more than _RDP_EXPORT_MAX_ENTRIES
-    entries, or the decision's deadline. Each directory is opened without following a symlink, by name from
-    its parent's descriptor, and each file the same way, its type checked on the open descriptor."""
+    under it, an entry that cannot be read, a diff file over max_bytes, files other than the diff file over
+    _RDP_EXPORT_MAX_HELD_BYTES bytes together (checked from each file's size before it is read), more than
+    _RDP_EXPORT_MAX_ENTRIES entries, or the decision's deadline. Each directory is opened without following a
+    symlink, by name from its parent's descriptor, and each file the same way, its type checked on the open
+    descriptor."""
     dir_flags = _RDP_OPEN_FLAGS | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
         _rdp_check_deadline()
         top = os.open(root, dir_flags)
     except (OSError, ValueError) as exc:
         return (None, None, None, "the export root {} cannot be opened as a directory ({})".format(root, exc))
-    files, dirs, text, count = {}, set(), None, 0
+    files, dirs, text, count, held = {}, set(), None, 0, 0
     stack = [(top, b"")]
     try:
         while stack:
@@ -35060,6 +35073,11 @@ def _rdp_export_walk(root, fmt, diff, max_bytes):
                                 return (None, None, None, "the export's diff file {!r} is larger than "
                                         "max_brief_bytes ({})".format(shown, max_bytes))
                         else:
+                            held += fst.st_size
+                            if held > _RDP_EXPORT_MAX_HELD_BYTES:
+                                return (None, None, None, "the export's copies under {} come to more than {} "
+                                        "bytes together, more than the check reads".format(
+                                            root, _RDP_EXPORT_MAX_HELD_BYTES))
                             data = _rdp_read_fd(fd, fst.st_size + 1)
                             if len(data) != fst.st_size:
                                 raise OSError("{!r} changed size while it was read".format(shown))
@@ -35092,33 +35110,71 @@ def _rdp_export_tree(repo, rev):
     return entries
 
 
+def _rdp_export_blob_ok(fmt, oid, data):
+    """Whether bytes data are the content of the blob oid: git's object hash in format fmt (sha1 or sha256)
+    of the blob header and data, the way git names a blob, is oid. So bytes an object store returns under
+    another blob's id are told apart from the committed content."""
+    digest = hashlib.new(fmt)
+    digest.update(b"blob %d\0" % len(data))
+    digest.update(data)
+    return digest.hexdigest() == oid
+
+
 def _rdp_export_blobs(repo, fmt, oids):
-    """Each object id in oids mapped to the content of its blob, read by one git cat-file --batch under the
-    hook's pinned options (_RDP_EXPORT_NEUTRAL_ARGS, attributes read from the empty tree, no system
-    attributes file); cat-file reads the object's own bytes, with no filter, textconv, diff driver or
-    external program. None when the read fails or its output is not one blob record per id."""
+    """(blobs, None): each object id in oids mapped to the content of its blob, read by one git cat-file
+    --batch under the hook's pinned options (_RDP_EXPORT_NEUTRAL_ARGS, attributes read from the empty tree,
+    no system attributes file); cat-file reads the object's own bytes, with no filter, textconv, diff driver
+    or external program. Their sizes are read first (cat-file --batch-check), and the content is read only
+    when the blobs come to _RDP_EXPORT_MAX_HELD_BYTES bytes or less. Each record is then hashed as a blob in
+    format fmt and must be the id it was read for (_rdp_export_blob_ok). (None, reason) for a cannot-evaluate:
+    a read that fails, output that is not one blob record per id of the size first read, blobs over the
+    limit, or a record whose bytes do not hash to its id (an object store holding other bytes under it)."""
     want = sorted(set(oids))
     if not want:
-        return {}
-    p = _review_git(repo, *_RDP_EXPORT_NEUTRAL_ARGS, "--attr-source=" + _RDP_EMPTY_TREE[fmt], "cat-file",
-                    "--batch", stdin=b"".join(oid.encode("ascii") + b"\n" for oid in want),
-                    env_extra=_RDP_EXPORT_NEUTRAL_ENV)
+        return ({}, None)
+    pinned = (*_RDP_EXPORT_NEUTRAL_ARGS, "--attr-source=" + _RDP_EMPTY_TREE[fmt], "cat-file")
+    stdin = b"".join(oid.encode("ascii") + b"\n" for oid in want)
+    unread = (None, "cannot be read")
+    p = _review_git(repo, *pinned, "--batch-check", stdin=stdin, env_extra=_RDP_EXPORT_NEUTRAL_ENV)
     if p is None or p.returncode != 0:
-        return None
+        return unread
+    lines = p.stdout.split(b"\n")
+    if len(lines) != len(want) + 1 or lines[-1]:
+        return unread
+    sizes = {}
+    for oid, line in zip(want, lines):
+        fields = line.split(b" ")
+        if len(fields) != 3 or fields[0] != oid.encode("ascii") or fields[1] != b"blob" \
+                or not fields[2].isdigit():
+            return unread
+        sizes[oid] = int(fields[2])
+    if sum(sizes.values()) > _RDP_EXPORT_MAX_HELD_BYTES:
+        return (None, "come to more than {} bytes together, more than the check reads".format(
+            _RDP_EXPORT_MAX_HELD_BYTES))
+    p = _review_git(repo, *pinned, "--batch", stdin=stdin, env_extra=_RDP_EXPORT_NEUTRAL_ENV)
+    if p is None or p.returncode != 0:
+        return unread
     out, pos, got = p.stdout, 0, {}
     for oid in want:
         end = out.find(b"\n", pos)
         fields = out[pos:end].split(b" ") if end >= 0 else []
         if len(fields) != 3 or fields[0] != oid.encode("ascii") or fields[1] != b"blob" \
-                or not fields[2].isdigit():
-            return None
+                or fields[2] != b"%d" % sizes[oid]:
+            return unread
         start = end + 1
-        end = start + int(fields[2])
+        end = start + sizes[oid]
         if out[end:end + 1] != b"\n":
-            return None
+            return unread
         got[oid] = out[start:end]
         pos = end + 1
-    return got if pos == len(out) else None
+    if pos != len(out):
+        return unread
+    forged = [oid for oid in want if not _rdp_export_blob_ok(fmt, oid, got[oid])]
+    if forged:
+        return (None, "cannot be verified: the object store returns bytes for {} that do not hash to {}, so "
+                "it does not hold the committed content".format(
+                    _rdp_listing(forged), "that object id" if len(forged) == 1 else "those object ids"))
+    return (got, None)
 
 
 def _rdp_export_stale(copies, entries, blobs):
@@ -35149,7 +35205,7 @@ def _rdp_export_text(data):
 def _rdp_export_hidden(own, changed, pin_entries, base_entries, blobs):
     """The changed paths (bytes, sorted) whose content is text on every side that has it, by the blob bytes
     cat-file read, but whose section of the diff own is binary, so no reader sees the text change: the
-    form a diff driver setting, a size threshold or the one attribute source no option switches off
+    form a diff driver setting or the one attribute source no option switches off
     ($GIT_DIR/info/attributes) can give a text file. Decided from the bytes, not from any attribute or
     configuration value."""
     binary = _rdp_export_binary_shown(own)
@@ -35208,7 +35264,7 @@ def _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, 
 def _rdp_export_mode_stale(copies, entries):
     """The copies (bytes paths) whose owner execute bit differs from their blob's mode in entries, every
     copy's entry being a regular blob already."""
-    return [p for p, (_oid, exe) in copies.items() if exe != (entries[p][0] == "100755")]
+    return [p for p, (_data, exe) in copies.items() if exe != (entries[p][0] == "100755")]
 
 
 def _rdp_export_diff_differs(blob, own):
@@ -35253,8 +35309,9 @@ def _rdp_export_p1(blob, changed, pin, base):
 
 def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
     """None when the revision brief names no review export (or the binding declares no export labels), or
-    when the export it names passes P1 and P2 against the pin and its derived base; otherwise (kind,
-    message) for the first failure. changed is the pin's changed set (bytes paths)."""
+    when the export it names passes P1, P2 and P3 against the pin and its derived base; otherwise (kind,
+    message) for the first failure, a blob read that is over the size limit or does not hash to its object
+    id being a cannot-evaluate. changed is the pin's changed set (bytes paths)."""
     declared, failed = _rdp_export_declared(cfg, found)
     if failed is not None:
         return failed
@@ -35269,7 +35326,7 @@ def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
                 "{}, so its head copy cannot be told apart".format(diff.decode("utf-8", "replace"),
                                                                    base_dir.decode("utf-8", "replace"), pin,
                                                                    _rdp_listing(shadowed)))
-    files, dirs, blob, why = _rdp_export_walk(root, fmt, diff, cfg["max_brief_bytes"])
+    files, dirs, blob, why = _rdp_export_walk(root, diff, cfg["max_brief_bytes"])
     if why is not None:
         return ("unverifiable", why)
     if blob is None:
@@ -35293,20 +35350,20 @@ def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
     prefix = base_dir + b"/"
     heads = {p: copy for p, copy in files.items() if not p.startswith(prefix)}
     bases = {p[len(prefix):]: copy for p, copy in files.items() if p.startswith(prefix)}
-    blobs = _rdp_export_blobs(repo, fmt, [entries[p][1] for copies, entries in (
+    blobs, why = _rdp_export_blobs(repo, fmt, [entries[p][1] for copies, entries in (
         (heads, pin_entries), (bases, base_entries), (dict.fromkeys(changed), pin_entries),
         (dict.fromkeys(changed), base_entries)) for p in copies
         if entries.get(p, ("", ""))[0] in ("100644", "100755")])
     if blobs is None:
-        return ("unverifiable", "the blobs of {} and its base {} cannot be read".format(pin, base))
+        return ("unverifiable", "the blobs of {} and its base {} {}".format(pin, base, why))
     failed = _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, root_commit, blobs)
     if failed is not None:
         return failed
     hidden = _rdp_export_hidden(own.stdout, changed, pin_entries, base_entries, blobs)
     if hidden:
         return ("deny", "the export's diff shows the text change to {} as a binary section, so no reader sees it "
-                "(git took the diff under a diff driver setting, a size threshold or a $GIT_DIR/info/attributes "
-                "entry; the blob bytes are text); remove the setting".format(
+                "(git took the diff under a diff driver setting or a $GIT_DIR/info/attributes entry; the blob "
+                "bytes are text); remove the setting".format(
                     _rdp_listing(sorted(h.decode("utf-8", "replace") for h in hidden))))
     return None
 
