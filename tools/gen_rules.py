@@ -870,7 +870,8 @@ def _valued_option_failures():
 # raise one) or a child process, so a generator whose guard is reverted shows as exit 97 (or a non-2 exit).
 # The same check then confirms the defined modes still run, each in its own child under the same hook, which here
 # lets one child process through: the exact git index read the generators make, `git -C <dir>`, then only the
-# pins `-c core.fsmonitor=false` and `-c protocol.allow=never`, then `ls-files` with only -z, --cached and --stage
+# pins `-c core.fsmonitor=false` and `-c protocol.allow=never` (or the gen_manifest.git_tracked form, `git
+# --no-replace-objects -c core.commitGraph=false`, then only those two pins, then `-C <dir>`), then `ls-files` with only -z, --cached and --stage
 # before an optional `--` and its pathspecs, launched as git with no GIT_* variable in its environment but
 # GIT_NO_LAZY_FETCH; that read writes nothing. Any other git command is blocked. A write
 # here is an open for writing, a directory creation, a delete, a rename or a truncation whose path lies in the
@@ -980,11 +981,21 @@ def _git_listing(args):
         return False
     if (exe is not None and os.path.basename(exe) != "git") or len(argv) < 4 or os.path.basename(argv[0]) != "git":
         return False
-    if argv[1] != "-C" or any(k.startswith("GIT_") and k != "GIT_NO_LAZY_FETCH" for k in env):
+    if any(k.startswith("GIT_") and k != "GIT_NO_LAZY_FETCH" for k in env):
         return False
-    i = 3
-    while argv[i:i + 1] == ["-c"] and argv[i + 1:i + 2] in (["core.fsmonitor=false"], ["protocol.allow=never"]):
+    if argv[1:4] == ["--no-replace-objects", "-c", "core.commitGraph=false"]:
+        i = 4
+        while argv[i:i + 1] == ["-c"] and argv[i + 1:i + 2] in (["core.fsmonitor=false"], ["protocol.allow=never"]):
+            i += 2
+        if argv[i:i + 1] != ["-C"] or len(argv) < i + 3:
+            return False
         i += 2
+    elif argv[1] != "-C":
+        return False
+    else:
+        i = 3
+        while argv[i:i + 1] == ["-c"] and argv[i + 1:i + 2] in (["core.fsmonitor=false"], ["protocol.allow=never"]):
+            i += 2
     if argv[i:i + 1] != ["ls-files"]:
         return False
     rest = argv[i + 1:]

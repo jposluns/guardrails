@@ -943,16 +943,16 @@ def _record_digest(body):
 
 def _record_digest_matches(body, recorded):
     """True iff `recorded` is the per-record digest of `body` (_record_digest), or the digest of the same
-    canonical serialization as an emitter before the U+2028/U+2029 escape spelled it (the escape of each
-    written as the literal character, _opf_emit.prior_separator_spelling), so a digest recorded over a body
-    holding one of those characters before that escape still reconciles. Either spelling is a function of
-    the parsed body alone, so a changed body matches neither. Raises `_opf_emit.EmitError` as _record_digest
-    does."""
+    canonical serialization as an earlier emitter spelled it (_opf_emit.prior_spellings: before the U+00AD
+    escape, the soft hyphen written literally; before the U+2028/U+2029 escape, those and the soft hyphen
+    written literally), so a digest recorded over a body holding one of those characters before its escape
+    still reconciles. Every spelling is a function of the parsed body alone, so a changed body matches none.
+    Raises `_opf_emit.EmitError` as _record_digest does."""
     text = _opf_emit.emit(body)
     if recorded == "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
         return True
-    prior = _opf_emit.prior_separator_spelling(text)
-    return prior != text and recorded == "sha256:" + hashlib.sha256(prior.encode("utf-8")).hexdigest()
+    return any(recorded == "sha256:" + hashlib.sha256(prior.encode("utf-8")).hexdigest()
+               for prior in _opf_emit.prior_spellings(text))
 
 
 def _under_any(p, prefixes):
@@ -3796,16 +3796,19 @@ def _prove_adoption_plan(raw, run_id):
         canonical = _opf_emit.emit_checked(plan).encode("utf-8")
         body = dict(plan)
         claimed = body.pop("plan_digest", None)
-        sealed = "sha256:" + hashlib.sha256(_opf_emit.emit_checked(body).encode("utf-8")).hexdigest()
+        sealed = _opf_emit.matches_recorded_digest(_opf_emit.emit_checked(body), claimed)
     except (TypeError, ValueError, RecursionError, MemoryError, _opf_emit.EmitError) as exc:
         raise ValueError("the adoption bundle's {} is malformed TOML ({})".format(ADOPTION_PLAN_NAME, exc))
-    if canonical != raw or claimed != sealed:
+    # A plan an earlier emitter froze (a literal U+2028, U+2029 or U+00AD inside a basic string, sealed over
+    # that spelling) is accepted as the writers accept it (_opf_emit.matches_store_bytes and
+    # matches_recorded_digest); any other byte difference or seal still refuses.
+    if not _opf_emit.matches_store_bytes(raw, canonical) or not sealed:
         raise ValueError("the adoption bundle's {} is not a canonical plan whose plan_digest seals its own "
                          "bytes (an edited plan, spec 4.2)".format(ADOPTION_PLAN_NAME))
     if plan.get("run_id") != run_id:
         raise ValueError("the adoption bundle's {} names run {!r}, not the bundle run {!r} (a plan of "
                          "another run, spec 4.2)".format(ADOPTION_PLAN_NAME, plan.get("run_id"), run_id))
-    return sealed
+    return claimed
 
 
 def _evidence_rows(bundle, kind, run_id, doc):
@@ -4277,10 +4280,10 @@ def _check_canonical_store_files(root_fd, machine_rel, manifest_data, rep, impor
     the byte-reproduction rule each sanctioned writer re-proves before a rewrite (spec 5.7, 9.2). A hand
     edit that leaves the content readable (an appended comment, re-flowed formatting) is therefore a
     finding here, at the next doctor run and over a pre-commit snapshot, rather than passing until the
-    next write refuses it. A file an earlier emitter wrote with a literal U+2028 or U+2029 inside a basic
-    string passes, as it does for the writers (_opf_emit.matches_store_bytes). A file whose bytes a check
-    already read (rep.toml_reads: _read_toml and the worklog ledger reads) is proven from those same bytes
-    and never read again, so the manifest and each worklog ledger keep one content read per validation
+    next write refuses it. A file an earlier emitter wrote with a literal U+2028, U+2029 or U+00AD inside a
+    basic string passes, as it does for the writers (_opf_emit.matches_store_bytes). A file whose bytes a
+    check already read (rep.toml_reads: _read_toml and the worklog ledger reads) is proven from those same
+    bytes and never read again, so the manifest and each worklog ledger keep one content read per validation
     (store discovery reads the manifest separately, before it); a file no check read is read here, once.
     The walk covers only the machine store, never the evidence homes or the journals beside it. NOT every
     machine-store TOML file is graded, by design: a path under a valid [unmanaged] declaration and the
@@ -5893,6 +5896,37 @@ def self_test():
     check("adoption-plan-deep-nesting-refused-as-valueerror",
           deep_why is not None and "malformed TOML" in deep_why)
 
+    # An adoption plan an earlier emitter froze: a literal U+00AD (and U+2028) inside a basic string, sealed
+    # over that spelling, still proves its own digest (the claimed one), as does the current spelling; a
+    # plan whose bytes differ otherwise, or whose seal is over no emitter's spelling, still refuses.
+    def _plan_proof(raw):
+        try:
+            return _prove_adoption_plan(raw, _ap_run), None
+        except ValueError as exc:
+            return None, str(exc)
+
+    def _ap_sha(text):
+        return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    _ap_run = "adopt-20260917T120000Z-0123456789abcdef"
+    _ap_body = {"format": "x", "run_id": _ap_run, "note": "co" + chr(0x00AD) + "op" + chr(0x2028) + "x"}
+    _ap_now = _opf_emit.emit_checked(_ap_body)
+    _ap_g1 = _ap_now.replace("\\u00AD", chr(0x00AD))
+    _ap_g0 = _ap_g1.replace("\\u2028", chr(0x2028))
+    for _ap_label, _ap_spell in (("current", lambda t: t), ("before-soft-hyphen-escape",
+                                 lambda t: t.replace("\\u00AD", chr(0x00AD))),
+                                 ("before-separator-escape", lambda t: t.replace("\\u00AD", chr(0x00AD))
+                                  .replace("\\u2028", chr(0x2028)))):
+        _ap_seal = _ap_sha(_ap_spell(_ap_now))
+        _ap_raw = _ap_spell(_opf_emit.emit_checked(dict(_ap_body, plan_digest=_ap_seal))).encode("utf-8")
+        _ap_got, _ap_why = _plan_proof(_ap_raw)
+        check("adoption-plan-{}-spelling-proves".format(_ap_label), _ap_got == _ap_seal and _ap_why is None)
+    _ap_bad = _opf_emit.emit_checked(dict(_ap_body, plan_digest=_ap_sha(_ap_g0.replace("x\"", "y\""))))
+    check("adoption-plan-foreign-seal-refused", _plan_proof(_ap_bad.encode("utf-8"))[0] is None)
+    _ap_edit = _opf_emit.emit_checked(dict(_ap_body, plan_digest=_ap_sha(_ap_g1))).replace(
+        "\\u00AD", chr(0x00AD)).replace("run_id = ", "run_id  = ")
+    check("adoption-plan-other-byte-difference-refused", _plan_proof(_ap_edit.encode("utf-8"))[0] is None)
+
     TS = "2026-06-01T00:00:00Z"
 
     def wl(n):
@@ -6484,6 +6518,72 @@ def self_test():
         check("history-immutable-body-prior-separator-digest-changed-invalid",
               hist_r is not None and any("C-HISTORY-RESURRECTION" in f and "body changed" in f
                                          for f in hist_r.findings))
+        # U+00AD SOFT HYPHEN through the same readers. Both earlier serializations are built here by plain
+        # text replacement over the current emission (exact for these fixtures, which hold no other
+        # backslash-u text), independently of _opf_emit.prior_spellings: g1, the emitter between the two
+        # escapes (separators escaped, the soft hyphen literal); g0, the emitter before the separator escape
+        # (all three literal). Each reconciles alone and mixed with the separators; a spelling no emitter
+        # wrote (the separators literal, the soft hyphen escaped), a changed body, and a naive replacement
+        # over a literal backslash-u00AD text are each a digest mismatch.
+        shy, ls, ps = chr(0x00AD), chr(0x2028), chr(0x2029)
+
+        def _g1(text):
+            return text.replace("\\u00AD", shy)
+
+        def _g0(text):
+            return _g1(text).replace("\\u2028", ls).replace("\\u2029", ps)
+
+        for label, summary, spellings in (
+                ("soft-hyphen-only", "co" + shy + "op", (("g1", _g1),)),
+                ("soft-hyphen-and-separators", "a" + shy + "b" + ls + "c" + ps + "d",
+                 (("g1", _g1), ("g0", _g0)))):
+            shy_fn = envelope("FN-1", "finding", "open", summary=summary)
+            shy_now = _opf_emit.emit(shy_fn)
+            for sp_name, spell in spellings:
+                prs = copy.deepcopy(pr_machine)
+                prs["finding/FN-1.toml"] = shy_fn
+                prs["finding.index.toml"]["record"][0]["digest"] = _sha_text(spell(shy_now))
+                check("per-record-prior-{}-{}-digest-valid".format(label, sp_name),
+                      spell(shy_now) != shy_now
+                      and run(prs, product=pr_product, obs=pr_obs).status == VALID)
+                prc = copy.deepcopy(pr_machine)
+                prc["finding/FN-1.toml"] = envelope("FN-1", "finding", "open", summary=summary + "x")
+                prc["finding.index.toml"]["record"][0]["digest"] = _sha_text(spell(shy_now))
+                prc_r = run(prc, product=pr_product, obs=pr_obs)
+                check("per-record-prior-{}-{}-digest-changed-body-invalid".format(label, sp_name),
+                      prc_r.status == INVALID and any("digest mismatch" in f for f in prc_r.findings))
+        hyb_fn = envelope("FN-1", "finding", "open", summary="a" + shy + "b" + ls + "c")
+        prh = copy.deepcopy(pr_machine)
+        prh["finding/FN-1.toml"] = hyb_fn
+        prh["finding.index.toml"]["record"][0]["digest"] = _sha_text(
+            _opf_emit.emit(hyb_fn).replace("\\u2028", ls))
+        prh_r = run(prh, product=pr_product, obs=pr_obs)
+        check("per-record-no-emitter-soft-hyphen-spelling-invalid",
+              prh_r.status == INVALID and any("digest mismatch" in f for f in prh_r.findings))
+        shy_slash_fn = envelope("FN-1", "finding", "open", summary="x\\u00ADy")
+        prq = copy.deepcopy(pr_machine)
+        prq["finding/FN-1.toml"] = shy_slash_fn
+        prq["finding.index.toml"]["record"][0]["digest"] = _sha_text(_g1(_opf_emit.emit(shy_slash_fn)))
+        prq_r = run(prq, product=pr_product, obs=pr_obs)
+        check("per-record-naive-soft-hyphen-digest-invalid",
+              _g1(_opf_emit.emit(shy_slash_fn)) != _opf_emit.emit(shy_slash_fn)
+              and prq_r.status == INVALID and any("digest mismatch" in f for f in prq_r.findings))
+        # C-HISTORY-RESURRECTION over U+00AD: a prior body digest over either earlier spelling proves the
+        # immutable body unchanged; the same digest against a changed body is still a finding.
+        shy_dn = dict(dn(1, "BI-1"), summary="do" + shy + "ne" + ls + "now")
+        for sp_name, spell in (("g1", _g1), ("g0", _g0)):
+            shy_hist = clean_machine()
+            shy_hist["done.index.toml"] = idx([shy_dn])
+            shy_obs = copy.deepcopy(clean_prior())
+            shy_obs["prior"]["digests"]["DN-1"] = _sha_text(spell(_opf_emit.emit(shy_dn)))
+            shy_r = run(shy_hist, obs=shy_obs)
+            check("history-immutable-body-prior-soft-hyphen-{}-digest-valid".format(sp_name),
+                  shy_r is not None and shy_r.status == VALID)
+            shy_hist["done.index.toml"] = idx([dict(shy_dn, summary="do" + shy + "ne" + ls + "later")])
+            shy_r = run(shy_hist, obs=shy_obs)
+            check("history-immutable-body-prior-soft-hyphen-{}-digest-changed-invalid".format(sp_name),
+                  shy_r is not None and any("C-HISTORY-RESURRECTION" in f and "body changed" in f
+                                            for f in shy_r.findings))
         # two-field row (missing state, path) -> INVALID
         prk = copy.deepcopy(pr_machine)
         prk["finding.index.toml"]["record"][0] = {"id": "FN-1", "digest": d1}

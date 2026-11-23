@@ -8229,6 +8229,38 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "byte-canon-selftest"
+runner = "tools/check_byte_canon.py"
+args = ["--self-test"]
+expected-check-ids = [
+  # each completed leg of check_byte_canon.py --self-test, in run order (hand-authored from its source)
+  "single-source-pin",
+  "pure-cases",
+  "allowance-span",
+  "separator-leg",
+  "soft-hyphen-leg",
+  "run-temp-tree",
+  "gate-only-sets",
+  "controls",
+  "coverage-logic",
+  "containment-mode-table-and-probe",
+  "policy-schema",
+  "allowance-schema",
+  "allowance-gate-only-rejected",
+  "hardbreak-legs",
+  "hardbreak-schema",
+  "hardbreak-read-legs",
+  "check-attr-fail-closed",
+  "git-read-pins",
+  "git-read-isolation-fixture",
+  "vector-schema",
+  "class-binding",
+  "published-vectors",
+  "soft-hyphen-vector-flip",
+  "no-reduction",
+]
+
+[[suite]]
 # The ENF-ROUND-PROGRESS-GATE record reader (tools/orch_round_gate.py validate): every fc/ refusal is
 # cannot-evaluate with its named reason, and its flip/ twin, one value changed, validates.
 id = "round-gate-selftest"

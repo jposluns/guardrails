@@ -3064,6 +3064,9 @@ jobs:
       - name: Byte canon self-test
         shell: bash
         run: python3 -I -B tools/check_byte_canon.py --self-test
+      - name: Byte canon self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite byte-canon-selftest
       - name: Byte canon
         shell: bash
         run: python3 -I -B tools/check_byte_canon.py

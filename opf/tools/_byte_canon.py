@@ -24,6 +24,13 @@ BOM = b"\xef\xbb\xbf"
 # a store that holds one. opf's record emitter escapes them as it escapes FORBIDDEN, and AIQT's
 # tools/check_byte_canon.py refuses a literal one in its release scope; scan_bytes does not report them.
 LINE_SEPARATORS = {ch.encode("utf-8"): ch for ch in (chr(0x2028), chr(0x2029))}
+# U+00AD SOFT HYPHEN: a format character that renders nothing except at a line break, so a literal one hides
+# inside a word. It is kept OUT of FORBIDDEN for the separators' reason: opf's view generator refuses a render
+# carrying any FORBIDDEN member, opf's record writer renders after every write, and an adopter's store may
+# already hold one (an imported or done record cannot be changed), so refusing it there would leave doctor,
+# render and record failing for that store. opf's record emitter escapes it, and AIQT's
+# tools/check_byte_canon.py refuses a literal one in its release scope; scan_bytes does not report it.
+SOFT_HYPHEN = {chr(0x00AD).encode("utf-8"): chr(0x00AD)}
 
 
 # --- pure legs (always exercised by --self-test) ----------------------------------------------------
