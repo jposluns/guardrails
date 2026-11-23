@@ -12,13 +12,50 @@ ownership map's [checkout].binary roster. Coverage is evaluated through git's ow
 gen_manifest, and the engine evaluation additionally catches a nested tracked .gitattributes
 overriding the root one.
 
+Every git launch of the live gate (gen_manifest.git_tracked's `git ls-files` scope enumeration, the
+`git rev-parse --git-path` lookup of the checkout's index and object directory, and the `git check-attr`
+coverage read) runs under check_release_cut.git_environment(), the isolated read environment the release
+gates share: every GIT_* variable dropped (GIT_DIR, GIT_INDEX_FILE, GIT_ATTR_SOURCE, GIT_CONFIG_*
+included), the system and global configuration off (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL), the
+system-wide attributes file off (GIT_ATTR_NOSYSTEM), HOME and XDG_CONFIG_HOME at an empty location. So no
+home, XDG or system git configuration or attributes file (a malformed one, a global core.attributesFile,
+or $(prefix)/etc/gitattributes) can fail or steer the gate. The coverage read also runs against a private
+git directory (--git-dir) over the checkout's work tree, holding no config and no info/attributes, only a
+copy of the checkout's index and an objects/info/alternates entry naming the checkout's object directory.
+So the repository's $GIT_DIR/info/attributes and its config (a core.attributesFile set there included)
+cannot steer it, while the .gitattributes files are read as from the checkout's own git directory: from
+the work tree, and, for a tracked one missing from the work tree, from the index (git's check-in
+direction falls back to it). The one repository setting that changes which .gitattributes line matches a
+path, core.ignoreCase (git init sets it true on a case-insensitive file system), is not taken from the
+checkout either: the coverage read runs twice, under core.ignoreCase=false and under core.ignoreCase=true
+(CASE_FOLD_VALUES), and a path is covered only if both reads cover it. So the gate judges the attributes as
+a checkout on a case-sensitive and on a case-insensitive file system would, whatever the checkout it runs
+in says; a path whose attributes depend on case folding is a finding on every platform. Every launch
+also carries the same pinned options (GIT_READ_PINS: --no-replace-objects, core.commitGraph=false,
+core.fsmonitor=false, protocol.allow=never) and a timeout, so no core.fsmonitor hook, commit graph or
+replace ref, from any configuration level including the repository's own, runs or changes their input.
+
+Residuals (the complete list; each of the first four is a git failure here, exit 2, never a pass):
+  - no safe.directory trust comes from the caller, so a checkout owned by another uid fails (the scope
+    read, the index lookup and the coverage read alike);
+  - the private git directory carries no repository extension, so an index it cannot read (a split index,
+    whose sharedindex file is not copied, or a SHA-256 repository) fails the coverage read;
+  - a checkout with no index file (a --no-checkout clone) fails the index lookup, where a read through the
+    checkout's own git directory would still evaluate the work tree's .gitattributes;
+  - the scope read and the index lookup still read the repository's own config (only the GIT_READ_PINS
+    settings are overridden there), so a malformed repository config fails them;
+  - no repository setting other than core.ignoreCase reaches or is varied in the coverage read.
+    core.precomposeUnicode, which takes effect only on macOS, is the one other setting known to change
+    how git spells a path; it is neither read nor varied here, and its effect on this read is untested.
+
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
-splits on both), held in _byte_canon.LINE_SEPARATORS. The separators stay out of FORBIDDEN because opf's
-view generator reads that set (opf's record emitter escapes both sets); no allowance clears them. Like the
-rest of the 3.1 scan, the separator scan reads every in-scope path except the [checkout].binary roster, and
-it matches only the UTF-8 encoding of each separator: a file in another encoding (UTF-16, say) that holds
-one is not reported.
+splits on both), held in _byte_canon.LINE_SEPARATORS, and a literal U+00AD SOFT HYPHEN, held in
+_byte_canon.SOFT_HYPHEN. The separators and the soft hyphen stay out of FORBIDDEN because opf's view
+generator reads that set (opf's record emitter escapes all three sets); no allowance clears them. Like the
+rest of the 3.1 scan, these gate-only scans read every in-scope path except the [checkout].binary roster,
+and they match only the UTF-8 encoding of each character: a file in another encoding (UTF-16, say) that
+holds one is not reported.
 
 check_no_dashes.py stays separate (3.1). Hashing elsewhere stays byte-literal (3.2): this gate
 canonicalizes at release; no verifier normalizes.
@@ -50,8 +87,11 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import base64
 import hashlib
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,10 +101,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools")
 from _gen_common import repo_root, load_toml  # noqa: E402
 import _containment  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated scope loader; never a second parser
+# The isolated git read environment the release gates share (check_selftest_removal reads through it
+# too): every git call of this gate runs under it, so the caller's git configuration never reaches one.
+from check_release_cut import git_environment  # noqa: E402
+# The pinned git options every git call of this gate carries, the set gen_manifest.git_tracked() pins
+# (check_release_cut.git()'s set plus protocol.allow=never): no replace refs, no commit graph, and no
+# fsmonitor hook (a hook set in the checkout's own config is attacker-chosen code and must never run under a
+# gate read), no transport.
+GIT_READ_PINS = ("--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
+                 "-c", "protocol.allow=never")
+GIT_TIMEOUT = 60
+# The coverage read runs once per case-folding setting: core.ignoreCase decides whether a .gitattributes
+# pattern matches a path that differs only in letter case, and the private git directory holds no config, so
+# the checkout's own value never reaches the read. Reading under both values judges the attributes as a
+# checkout on either kind of file system would; a path is covered only if it is covered under both.
+CASE_FOLD_VALUES = ("false", "true")
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
 from _byte_canon import (  # noqa: E402
-    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, scan_bytes, _is_two_space_break,
+    ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, SOFT_HYPHEN, scan_bytes,
+    _is_two_space_break,
 )
 
 POLICY_REL = ".aiqt/core/gates/byte-canon.toml"
@@ -73,12 +129,13 @@ SUPPORTED = ("linux", "macos")
 ROADMAP = ("windows",)
 # Every vector class the published set may carry (3.4); each fail class names the scan leg it exercises.
 VECTOR_CLASSES = ("pass", "crlf", "bare-cr", "trailing-whitespace", "zero-width", "bidi", "bidi-mark",
-                  "word-joiner", "bom", "no-final-newline", "double-final-newline", "invalid-utf8",
-                  "empty")
+                  "word-joiner", "soft-hyphen", "bom", "no-final-newline", "double-final-newline",
+                  "invalid-utf8", "empty")
 # Classes that MUST appear in the published set (a missing one is fail-closed): one per released leg,
-# including the newly-covered bidi marks and the word joiner so those controls cannot silently drop.
+# including the newly-covered bidi marks, the word joiner and the soft hyphen so those controls cannot
+# silently drop.
 REQUIRED_VECTOR_CLASSES = ("pass", "crlf", "trailing-whitespace", "zero-width", "bidi", "bidi-mark",
-                           "word-joiner", "invalid-utf8", "empty")
+                           "word-joiner", "soft-hyphen", "invalid-utf8", "empty")
 # Each non-"pass" class is bound to a substring of the SPECIFIC scan_bytes finding it must provoke, so a
 # vector's class name proves its own scan leg fired, not merely that some finding did. The overlapping
 # codepoint classes name their exact U+codepoint (the U+{:04X} the scan emits), so swapping one class's
@@ -89,6 +146,7 @@ CLASS_FINDING = {
     "trailing-whitespace": "trailing whitespace",
     "zero-width": "U+200B",
     "word-joiner": "U+2060",
+    "soft-hyphen": "U+00AD",
     "bidi": "U+202E",
     "bidi-mark": "U+200E",
     "bom": "leading UTF-8 BOM",
@@ -106,6 +164,11 @@ CLASS_FINDING = {
 # generator (it refuses a render carrying any member), so widening it would make opf refuse to render or
 # record in an adopter's store that holds one. No allowance can clear them; write the escape text instead.
 LINE_SEPARATORS_RE = re.compile(b"|".join(re.escape(b) for b in sorted(LINE_SEPARATORS)))
+# U+00AD SOFT HYPHEN (_byte_canon.SOFT_HYPHEN): it renders nothing except at a line break, so a literal one
+# hides inside a word. For the separators' reason it is never added to _byte_canon.FORBIDDEN (an adopter's
+# store may already hold one, and an imported or done record cannot be changed), so only THIS gate refuses a
+# literal one. No allowance can clear it; write the escape text (or, in Markdown, &shy;) instead.
+SOFT_HYPHEN_RE = re.compile(b"|".join(re.escape(b) for b in sorted(SOFT_HYPHEN)))
 
 
 class GateError(Exception):
@@ -122,6 +185,21 @@ def scan_line_separators(data):
             "write the escape text".format(m.start(), ord(LINE_SEPARATORS[m.group(0)]))
             for m in LINE_SEPARATORS_RE.finditer(data)]
 
+
+def scan_soft_hyphen(data):
+    """The repository-only leg over one file's raw bytes: one finding per literal U+00AD SOFT HYPHEN. Like
+    scan_line_separators it runs on the raw bytes, so it reports one in a file that is not valid UTF-8 too.
+    Returns a list of finding strings."""
+    return ["byte offset {}: soft hyphen U+{:04X} (invisible except at a line break); write the escape "
+            "text".format(m.start(), ord(SOFT_HYPHEN[m.group(0)]))
+            for m in SOFT_HYPHEN_RE.finditer(data)]
+
+
+def scan_release_bytes(data, allowances=(), hardbreak=False):
+    """Every 3.1 leg this gate runs over one released file's raw bytes: the shared scan_bytes legs (with
+    the file's validated allowances and hard-break permission), then the repository-only separator and
+    soft-hyphen legs, which no allowance clears."""
+    return scan_bytes(data, allowances, hardbreak) + scan_line_separators(data) + scan_soft_hyphen(data)
 
 
 def coverage_findings(scope_paths, binary_set, effective):
@@ -152,7 +230,7 @@ def release_scope(root):
     the merged step 2: gen_manifest.classify returns a two-tuple)."""
     try:
         exclusions, release, namespace, binary_set = gen_manifest.load_ownership(root)
-        tracked = gen_manifest.git_tracked(root)
+        tracked = gen_manifest.git_tracked(root, env=git_environment())
         classes, _excluded = gen_manifest.classify(tracked, exclusions, release, namespace, root)
     except gen_manifest.GateError as exc:
         raise GateError("scope enumeration failed: {}".format(exc))
@@ -286,25 +364,96 @@ def validate_hardbreak(root, rows, scope_paths):
         out.add(path)
     return out
 
+def _index_and_objects(root):
+    """(index file, object directory) of the checkout at `root`, as git itself resolves them (`git
+    rev-parse --git-path index --git-path objects`, a linked worktree's own index included), under the
+    same pins, timeout and environment as the other gate reads; a relative answer is relative to `root`.
+    Fail-closed (GateError) on a launch failure, a nonzero exit, a response that is not exactly two
+    lines, a missing index file or a missing object directory."""
+    try:
+        proc = subprocess.run(["git", *GIT_READ_PINS, "-C", str(root), "rev-parse", "--git-path", "index",
+                               "--git-path", "objects"], capture_output=True, timeout=GIT_TIMEOUT,
+                              env=git_environment())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GateError("git rev-parse could not be launched ({})".format(exc))
+    if proc.returncode != 0:
+        raise GateError("git rev-parse --git-path failed: {}".format(
+            proc.stderr.decode("utf-8", errors="replace").strip()))
+    lines = proc.stdout.split(b"\n")
+    if len(lines) != 3 or lines[2] != b"" or not lines[0] or not lines[1]:
+        raise GateError("git rev-parse --git-path returned a malformed response ({!r})".format(proc.stdout))
+    index, objects = ((Path(root) / os.fsdecode(line)).resolve() for line in lines[:2])
+    if not index.is_file() or not objects.is_dir():
+        raise GateError("the checkout's index {} or object directory {} is missing".format(index, objects))
+    return index, objects
+
+
+def _private_git_dir(parent, index, objects):
+    """A minimal git directory under `parent` (the three entries git requires of one: HEAD, objects/ and
+    refs/), holding no config and no info/attributes: only a copy of the checkout's `index` and an
+    objects/info/alternates entry naming the checkout's object directory `objects` (absolute), so a tracked
+    .gitattributes missing from the work tree is read from the index exactly as under the checkout's own
+    git directory, and nothing the repository's config or info/attributes says reaches the read."""
+    git_dir = parent / "attr-read.git"
+    (git_dir / "objects" / "info").mkdir(parents=True)
+    (git_dir / "refs").mkdir()
+    (git_dir / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    shutil.copyfile(index, git_dir / "index")
+    (git_dir / "objects" / "info" / "alternates").write_bytes(os.fsencode(objects) + b"\n")
+    return git_dir
+
+
 def effective_attributes(root, scope_paths):
-    """{path: {"text": v, "eol": v}} via `git check-attr -z --stdin`, the engine evaluation. A
-    process-launch failure (git absent) is fail-closed like the other git legs, and the NUL-delimited
-    response must have exactly the shape requested (one record per requested path x attribute, plus
-    the trailing empty field); a malformed response is fail-closed rather than a partial map."""
+    """{path: {"text": v, "eol": v}} via `git check-attr -z --stdin`, the engine evaluation, run once per
+    core.ignoreCase value in CASE_FOLD_VALUES. Where the two reads agree the value is git's; where they
+    differ the value names both (a string no attribute value can equal, since a value holds no space), so
+    coverage_findings reports the path. A process-launch failure (git absent) is fail-closed like the
+    other git legs, and each NUL-delimited response must have exactly the shape requested (one record per
+    requested path x attribute, plus the trailing empty field); a malformed response is fail-closed rather
+    than a partial map."""
     if not (root / ".gitattributes").is_file():
         raise GateError(".gitattributes is missing; 3.3 coverage cannot be evaluated")
     attrs = ("text", "eol")
     ordered = sorted(scope_paths)
     payload = b"".join(p.encode("utf-8") + b"\0" for p in ordered)
+    # The read runs against a private git directory over the checkout's work tree: git reads
+    # $GIT_DIR/info/attributes and the repository config (core.attributesFile) from the git directory it
+    # is given, and the private one holds neither. It holds a copy of the checkout's index (its objects
+    # reached through alternates), so the .gitattributes files are read as under the checkout's own git
+    # directory: from the work tree, and a tracked one missing there from the index, which git's
+    # check-in direction falls back to. The checkout's core.ignoreCase is not in it, so the read runs
+    # under each value of that setting in turn.
+    index, objects = _index_and_objects(root)
+    maps = []
     try:
-        proc = subprocess.run(["git", "-C", str(root), "check-attr", "-z", "--stdin", *attrs],
-                              input=payload, capture_output=True)
+        with tempfile.TemporaryDirectory() as private:
+            git_dir = _private_git_dir(Path(private), index, objects)
+            for case_fold in CASE_FOLD_VALUES:
+                proc = subprocess.run(["git", *GIT_READ_PINS, "-c", f"core.ignoreCase={case_fold}",
+                                       "--git-dir", str(git_dir), "--work-tree", str(root), "-C", str(root),
+                                       "check-attr", "-z", "--stdin", *attrs],
+                                      input=payload, capture_output=True, timeout=GIT_TIMEOUT,
+                                      env=git_environment())
+                if proc.returncode != 0:
+                    raise GateError("git check-attr (core.ignoreCase={}) failed: {}".format(
+                        case_fold, proc.stderr.decode("utf-8", errors="replace").strip()))
+                maps.append(_check_attr_map(proc.stdout, ordered, attrs, scope_paths))
     except (OSError, subprocess.SubprocessError) as exc:
-        raise GateError("git check-attr could not be launched ({})".format(exc))
-    if proc.returncode != 0:
-        raise GateError("git check-attr failed: {}".format(
-            proc.stderr.decode("utf-8", errors="replace").strip()))
-    fields = proc.stdout.split(b"\0")
+        raise GateError("git check-attr could not be prepared or launched ({})".format(exc))
+    out = {}
+    for path in ordered:
+        for attr in attrs:
+            values = [m[path][attr] for m in maps]
+            out.setdefault(path, {})[attr] = values[0] if len(set(values)) == 1 else ", ".join(
+                "{} under core.ignoreCase={}".format(v, case_fold)
+                for v, case_fold in zip(values, CASE_FOLD_VALUES))
+    return out
+
+
+def _check_attr_map(stdout, ordered, attrs, scope_paths):
+    """Parse one `git check-attr -z` response into {path: {attr: value}}; fail-closed (GateError) on any
+    shape other than exactly one record per requested path x attribute plus the trailing empty field."""
+    fields = stdout.split(b"\0")
     # -z output is <path>\0<attr>\0<value>\0 per record; the trailing \0 makes a final empty field.
     expected = 3 * len(ordered) * len(attrs) + 1
     if len(fields) != expected or fields[-1] != b"":
@@ -362,8 +511,7 @@ def run(root):
             except OSError as exc:
                 raise GateError("cannot read in-scope file {} ({})".format(path, exc))
             findings += ["{}: {}".format(path, f) for f in
-                         scan_bytes(data, allowances.get(path, ()), path in hardbreak_paths)
-                         + scan_line_separators(data)]
+                         scan_release_bytes(data, allowances.get(path, ()), path in hardbreak_paths)]
     except GateError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
@@ -378,6 +526,21 @@ def run(root):
 
 
 # --- self-test --------------------------------------------------------------------------------------
+
+# The registered execution-suite identity (tools/selftest_checks.toml) and the executed-leg record each
+# completed self-test leg appends to (check); tools/check_selftest_execution.py reconciles the report against
+# the registry, so a leg that silently stops running (the soft-hyphen flip, the no-reduction pin) fails it.
+SUITE_ID = "byte-canon-selftest"
+EXECUTED = []
+
+
+def check(name):
+    """Record one self-test leg as executed (after its assertions ran); a duplicate id is a harness error."""
+    if name in EXECUTED:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    EXECUTED.append(name)
+
 
 VECTOR_ROW_KEYS = frozenset(("name", "class", "payload-base64", "sha256"))
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -431,9 +594,10 @@ def self_test_main():
     if not (scan_bytes is _bc.scan_bytes and FORBIDDEN is _bc.FORBIDDEN
             and FORBIDDEN_RE is _bc.FORBIDDEN_RE and BOM is _bc.BOM
             and ZERO_WIDTH is _bc.ZERO_WIDTH and BIDI is _bc.BIDI
-            and LINE_SEPARATORS is _bc.LINE_SEPARATORS
+            and LINE_SEPARATORS is _bc.LINE_SEPARATORS and SOFT_HYPHEN is _bc.SOFT_HYPHEN
             and _is_two_space_break is _bc._is_two_space_break):
         failures.append("byte-canon primitives are not the single _byte_canon source (a silent fork)")
+    check("single-source-pin")
     # Pure 3.1 cases: (name, bytes, expect_finding).
     cases = [
         ("clean", b"a\n", False),
@@ -458,6 +622,7 @@ def self_test_main():
         got = bool(scan_bytes(data))
         if got != expect:
             failures.append("scan_bytes[{}] finding={}; expected {}".format(name, got, expect))
+    check("pure-cases")
     # An allowance clears exactly its span and codepoint, nothing else.
     zw = "a{}b\n".format(chr(0x200B)).encode("utf-8")
     off = zw.find(chr(0x200B).encode("utf-8"))
@@ -465,6 +630,7 @@ def self_test_main():
         failures.append("an in-span allowance failed to clear its codepoint")
     if not scan_bytes(zw, ((0, 1, frozenset(chr(0x200B))),)):
         failures.append("an out-of-span allowance wrongly cleared a codepoint")
+    check("allowance-span")
     # Line and paragraph separators: the repository-only leg flags each literal U+2028 and U+2029, in a
     # string and in a comment, one finding per occurrence. They stay outside _byte_canon.FORBIDDEN (opf's
     # view generator reads that set), so scan_bytes alone must still pass them.
@@ -486,15 +652,45 @@ def self_test_main():
     if [f.split(":")[0] for f in scan_line_separators(both)] != ["byte offset 1", "byte offset 5"]:
         failures.append("scan_line_separators did not report each of two separators once at its "
                         "byte offset")
-    # The gate's own run() path, over an isolated temp tree: run() must report each separator under its
-    # path and byte offset and exit 1, and pass the same tree without them. Only the inputs that need git
-    # or the live policy (the scope, the policy, the attribute map, the platform probe) are replaced; the
-    # per-file read and judgement are run()'s own, so a run() that drops the separator scan fails here.
+    check("separator-leg")
+    # U+00AD SOFT HYPHEN: the repository-only soft-hyphen leg flags each literal one, in a string, in a
+    # comment and in prose, one finding per occurrence at its byte offset; it stays outside
+    # _byte_canon.FORBIDDEN (opf's view generator reads that set), so scan_bytes alone must still pass it.
+    # The escape text and the neighbours U+00AC and U+00AE are not flagged.
+    shy = chr(0x00AD)
+    for name, text in (("soft-hyphen-in-string", 'x = "co{}op"\n'.format(shy)),
+                       ("soft-hyphen-in-comment", "# co{}op\n".format(shy)),
+                       ("soft-hyphen-in-prose", "co{}op\n".format(shy))):
+        data = text.encode("utf-8")
+        want = "byte offset {}: soft hyphen U+00AD ".format(data.find(shy.encode("utf-8")))
+        if [f[:len(want)] for f in scan_soft_hyphen(data)] != [want]:
+            failures.append("scan_soft_hyphen[{}] did not report U+00AD once at its byte offset "
+                            "({!r})".format(name, want))
+        if scan_bytes(data):
+            failures.append("scan_bytes[{}] reported a soft hyphen; it must stay out of the shared "
+                            "forbidden set".format(name))
+    two_shy = "a{}b{}c\n".format(shy, shy).encode("utf-8")
+    if [f.split(":")[0] for f in scan_soft_hyphen(two_shy)] != ["byte offset 1", "byte offset 4"]:
+        failures.append("scan_soft_hyphen did not report each of two soft hyphens once at its byte offset")
+    for name, data in (("soft-hyphen-escape-text", b'x = "co\\u00ADop"\n'),
+                       ("soft-hyphen-neighbours",
+                        "a{}{}b\n".format(chr(0x00AC), chr(0x00AE)).encode("utf-8"))):
+        if scan_release_bytes(data):
+            failures.append("control[{}] was flagged: {}".format(name, scan_release_bytes(data)))
+    check("soft-hyphen-leg")
+    # The gate's own run() path, over an isolated temp tree: run() must report each separator and the soft
+    # hyphen under its path and byte offset and exit 1, and pass the same tree without them. Only the inputs
+    # that need git or the live policy (the scope, the policy, the attribute map, the platform probe) are
+    # replaced; the per-file read and judgement are run()'s own, so a run() that drops the separator or the
+    # soft-hyphen scan fails here.
     import contextlib as _cl
     import io as _io
     import tempfile as _tf
-    sep_files = {"ls.py": ('x = "a{}b"\n'.format(chr(0x2028)), "byte offset 6: ", "U+2028"),
-                 "ps.md": ("# a{}b\n".format(chr(0x2029)), "byte offset 3: ", "U+2029")}
+    sep_files = {"ls.py": ('x = "a{}b"\n'.format(chr(0x2028)), "byte offset 6: ",
+                           "line or paragraph separator U+2028"),
+                 "ps.md": ("# a{}b\n".format(chr(0x2029)), "byte offset 3: ",
+                           "line or paragraph separator U+2029"),
+                 "sh.txt": ("co{}op\n".format(chr(0x00AD)), "byte offset 2: ", "soft hyphen U+00AD")}
     g = globals()
     saved_inputs = {k: g[k] for k in ("release_scope", "load_policy", "effective_attributes",
                                       "check_matrix")}
@@ -510,7 +706,7 @@ def self_test_main():
             for scope, want_rc, want_lines in (
                     ({"clean.txt"}, 0, []),
                     ({"clean.txt"} | set(sep_files), 1,
-                     ["  {}: {}line or paragraph separator {} ".format(name, off, cp)
+                     ["  {}: {}{} ".format(name, off, cp)
                       for name, (_t, off, cp) in sorted(sep_files.items())])):
                 g["release_scope"] = lambda _r, _s=scope: (set(_s), set())
                 out = _io.StringIO()
@@ -524,6 +720,7 @@ def self_test_main():
                                                                      want_lines))
     finally:
         g.update(saved_inputs)
+    check("run-temp-tree")
     for cp in (0x2028, 0x2029):
         if chr(cp) in FORBIDDEN.values():
             failures.append("U+{:04X} is in _byte_canon.FORBIDDEN, which also drives opf's view "
@@ -533,11 +730,17 @@ def self_test_main():
     if len(LINE_SEPARATORS) != 2:
         failures.append("_byte_canon.LINE_SEPARATORS holds {} entries; expected exactly U+2028 and "
                         "U+2029".format(len(LINE_SEPARATORS)))
+    if chr(0x00AD) in FORBIDDEN.values():
+        failures.append("U+00AD is in _byte_canon.FORBIDDEN, which also drives opf's view generator")
+    if SOFT_HYPHEN != {chr(0x00AD).encode("utf-8"): chr(0x00AD)}:
+        failures.append("_byte_canon.SOFT_HYPHEN is not exactly U+00AD ({!r})".format(SOFT_HYPHEN))
+    check("gate-only-sets")
     # Control: a printable non-ASCII letter (U+00E9) passes both legs, and the escape text passes too.
     for name, data in (("e-acute", 'x = "caf{}"\n'.format(chr(0x00E9)).encode("utf-8")),
                        ("escape-text", b'x = "a\\u2028b\\u2029c"\n')):
         if scan_bytes(data) or scan_line_separators(data):
             failures.append("control[{}] was flagged".format(name))
+    check("controls")
     # Coverage logic, synthetic effective maps.
     eff = {"a.md": {"text": "set", "eol": "lf"}, "b.zip": {"text": "unset", "eol": "unspecified"},
            "c.md": {"text": "unspecified", "eol": "unspecified"}}
@@ -549,6 +752,7 @@ def self_test_main():
         failures.append("coverage passed an uncovered path")
     if not coverage_findings({"b.zip"}, set(), eff):
         failures.append("coverage passed a binary-attributed path missing from the roster")
+    check("coverage-logic")
     # Mode table: every class x both containment states, unknown fails closed in BOTH states.
     for cls in (_containment.READ_ONLY,) + _containment.MUTATING_CLASSES:
         for cont, expect in ((True, "contained"),
@@ -574,6 +778,7 @@ def self_test_main():
         failures.append("probe raised instead of failing safe: {!r}".format(exc))
     finally:
         _containment.os.supports_dir_fd = saved_supports
+    check("containment-mode-table-and-probe")
     # load_policy strict schema: a valid policy passes; each malformation fails closed.
     def _policy_rejects(fake_data):
         g = globals()
@@ -604,6 +809,7 @@ def self_test_main():
         failures.append("an unknown [platforms] key was not rejected")
     if not _policy_rejects(dict(base_policy, hardbreak={"not": "a list"})):
         failures.append("a non-array hardbreak policy value was not rejected")
+    check("policy-schema")
     # validate_allowances row schema: an unknown key and a bool offset each fail closed.
     # The path does not exist, so a downstream read would also raise GateError; assert the SPECIFIC
     # schema rejection reason so the test isolates the key/type check, not the file-read failure.
@@ -632,8 +838,9 @@ def self_test_main():
                             "{}".format(exc))
     except Exception as exc:  # a non-GateError (e.g. TypeError) is the exact pre-fix escape
         failures.append("a nested allowance codepoint raised {!r} instead of GateError".format(exc))
-    # No allowance row can clear a line or paragraph separator.
-    for cp in ("U+2028", "U+2029"):
+    check("allowance-schema")
+    # No allowance row can clear a line or paragraph separator or the soft hyphen.
+    for cp in ("U+2028", "U+2029", "U+00AD"):
         try:
             validate_allowances(repo_root(), [dict(good_row, codepoints=[cp])], {"x"})
             failures.append("an allowance naming {} was not rejected".format(cp))
@@ -641,6 +848,7 @@ def self_test_main():
             if "outside the forbidden sets" not in str(exc):
                 failures.append("an allowance naming {} was not rejected on its own terms: {}".format(
                     cp, exc))
+    check("allowance-gate-only-rejected")
     # Two-space CommonMark hard break: cleared only with hardbreak=True, and ONLY for exactly two
     # trailing spaces on a non-blank line. Every other trailing-whitespace vector still fails, even on a
     # hardbreak-allowed path. This is the durable guard for the SKILL.md five-line header render.
@@ -662,6 +870,7 @@ def self_test_main():
         failures.append("_has_two_space_break missed a present hard break")
     if _has_two_space_break(b"Version: 1\nx\n"):
         failures.append("_has_two_space_break saw a hard break where none exists")
+    check("hardbreak-legs")
     # validate_hardbreak schema: an unknown key, a missing field, and an out-of-scope path fail closed.
     hb_good = {"path": "x", "rationale": "r"}
     for bad, reason in ((dict(hb_good, extra=1), "unknown key"),
@@ -679,6 +888,7 @@ def self_test_main():
     except GateError as exc:
         if "in-scope" not in str(exc):
             failures.append("validate_hardbreak out-of-scope rejection on wrong terms: {}".format(exc))
+    check("hardbreak-schema")
     # validate_hardbreak read-dependent legs: a valid used row passes; duplicate, unused/stale, and
     # unreadable rows each fail closed. Exercised against a temp root so the mutation guard is real.
     import tempfile as _tf
@@ -707,6 +917,7 @@ def self_test_main():
         except GateError as exc:
             if "cannot read" not in str(exc):
                 failures.append("validate_hardbreak unreadable rejection on wrong terms: {}".format(exc))
+    check("hardbreak-read-legs")
     # effective_attributes fail-closed: launch failure and malformed response each -> GateError.
     def _boom(*_a, **_k):
         raise FileNotFoundError("injected git launch failure")
@@ -714,6 +925,17 @@ def self_test_main():
     class _Proc:
         def __init__(self, stdout):
             self.returncode, self.stdout, self.stderr = 0, stdout, b""
+    # A stand-in for the checkout's index file and object directory, answered for the stubbed index
+    # lookup (`git rev-parse --git-path`), so the stubbed check-attr launch can be checked for the copy.
+    fake_git = _tf.TemporaryDirectory()
+    fake_index, fake_objects = Path(fake_git.name) / "index", Path(fake_git.name) / "objects"
+    fake_index.write_bytes(b"DIRC stand-in index\n")
+    fake_objects.mkdir()
+
+    def _rev_parse_answer(argv):
+        if "rev-parse" in argv:
+            return _Proc(os.fsencode(fake_index) + b"\n" + os.fsencode(fake_objects) + b"\n")
+        return None
     saved_run = subprocess.run
     try:
         subprocess.run = _boom
@@ -724,7 +946,30 @@ def self_test_main():
             pass
         except Exception as exc:
             failures.append("check-attr launch failure raised {!r} not GateError".format(exc))
-        subprocess.run = lambda *a, **k: _Proc(b"README.md\x00text\x00set\x00")  # too few fields
+        subprocess.run = lambda argv, **k: _rev_parse_answer(argv) or _boom()
+        try:
+            effective_attributes(repo_root(), {"README.md"})
+            failures.append("a check-attr launch failure after the index lookup did not fail closed")
+        except GateError:
+            pass
+        except Exception as exc:
+            failures.append("check-attr launch failure raised {!r} not GateError".format(exc))
+        for bad in (b"", b"one-line\n", b"a\nb\nc\n", b"\n\n"):
+            subprocess.run = lambda argv, _b=bad, **k: _Proc(_b)
+            try:
+                _index_and_objects(repo_root())
+                failures.append("a malformed index lookup response {!r} did not fail closed".format(bad))
+            except GateError:
+                pass
+        subprocess.run = lambda argv, **k: _Proc(os.fsencode(fake_index) + b"\n"
+                                                 + os.fsencode(Path(fake_git.name) / "none") + b"\n")
+        try:
+            _index_and_objects(repo_root())
+            failures.append("an index lookup naming a missing object directory did not fail closed")
+        except GateError:
+            pass
+        subprocess.run = lambda argv, **k: (_rev_parse_answer(argv)
+                                            or _Proc(b"README.md\x00text\x00set\x00"))  # too few fields
         try:
             effective_attributes(repo_root(), {"README.md"})
             failures.append("a malformed check-attr response did not fail closed")
@@ -732,8 +977,280 @@ def self_test_main():
             pass
         except Exception as exc:
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
+        # The coverage read runs once under each CASE_FOLD_VALUES setting, and a path whose attributes differ
+        # between the two reads is not covered: answered text=set under core.ignoreCase=false and
+        # text=unset under core.ignoreCase=true, README.md must come back as a finding.
+        folds = []
+
+        def _fold_answer(argv, **_k):
+            answer = _rev_parse_answer(argv)
+            if answer is not None:
+                return answer
+            folds.append([a for a in argv if a.startswith("core.ignoreCase=")])
+            text_v = b"unset" if "core.ignoreCase=true" in argv else b"set"
+            return _Proc(b"README.md\x00text\x00" + text_v + b"\x00README.md\x00eol\x00lf\x00")
+        subprocess.run = _fold_answer
+        try:
+            folded = effective_attributes(repo_root(), {"README.md"})
+            if folds != [["core.ignoreCase=false"], ["core.ignoreCase=true"]]:
+                failures.append("check-attr read: not run once under each core.ignoreCase value: {}".format(
+                    folds))
+            if not coverage_findings({"README.md"}, set(), folded):
+                failures.append("check-attr read: a path set only under core.ignoreCase=false was judged "
+                                "covered ({})".format(folded))
+        except GateError as exc:
+            failures.append("check-attr read: the two-setting stub read failed: {}".format(exc))
+        # Every git launch of the gate (the scope read through gen_manifest.git_tracked and the check-attr
+        # read) carries GIT_READ_PINS ahead of -C, a timeout, and every HOME, XDG_CONFIG_HOME and GIT_*
+        # entry of git_environment() at its value (GIT_ATTR_NOSYSTEM among them); the check-attr read
+        # also names a private git directory outside the checkout; a supplied launch environment keeps
+        # no GIT_* entry outside gen_manifest.git_env_pins(), which is exactly git_environment()'s GIT_*.
+        shared = git_environment()
+        if shared.get("GIT_ATTR_NOSYSTEM") != "1" or shared.get("GIT_CONFIG_NOSYSTEM") != "1":
+            failures.append("git_environment() does not pin the system config and attributes files off")
+        if gen_manifest.git_env_pins() != {k: v for k, v in shared.items() if k.startswith("GIT_")}:
+            failures.append("gen_manifest.git_env_pins() is not git_environment()'s GIT_* pin set")
+        pinned_keys = sorted(k for k in shared if k.startswith("GIT_") or k in ("HOME", "XDG_CONFIG_HOME"))
+        launches = []
+        handed = []
+
+        def _record(argv, **kwargs):
+            launches.append((list(argv), kwargs))
+            answer = _rev_parse_answer(argv)
+            if answer is not None:
+                return answer
+            for i, a in enumerate(argv[:-1]):
+                if a == "--git-dir":
+                    gd = Path(argv[i + 1])
+                    alt = gd / "objects" / "info" / "alternates"
+                    handed.append(((gd / "index").read_bytes() if (gd / "index").is_file() else None,
+                                   alt.read_bytes() if alt.is_file() else None))
+            raise FileNotFoundError("recorded git launch")
+        subprocess.run = _record
+        # The scope read is one launch; the check-attr read is the index lookup, then check-attr itself.
+        for label, call, verbs in (
+                ("scope read", lambda: release_scope(repo_root()), ["ls-files"]),
+                ("check-attr read", lambda: effective_attributes(repo_root(), {"README.md"}),
+                 ["rev-parse", "check-attr"])):
+            del launches[:]
+            del handed[:]
+            try:
+                call()
+                failures.append("{}: a recorded launch failure did not fail closed".format(label))
+            except GateError:
+                pass
+            got = [next((v for v in verbs if v in argv), None) for argv, _k in launches]
+            if got != verbs:
+                failures.append("{}: expected the git launches {}, recorded {}".format(label, verbs, got))
+                continue
+            for argv, kwargs in launches:
+                env = kwargs.get("env") or {}
+                if argv[:1 + len(GIT_READ_PINS)] != ["git", *GIT_READ_PINS]:
+                    failures.append("{}: git launched without the pinned options: {}".format(label, argv))
+                if not kwargs.get("timeout"):
+                    failures.append("{}: git launched without a timeout: {}".format(label, argv))
+                want = dict(shared, GIT_NO_LAZY_FETCH="1")
+                missing = [k for k in pinned_keys if env.get(k) != want[k]]
+                if missing:
+                    failures.append("{}: git launched outside git_environment() ({}): {}".format(
+                        label, ", ".join(missing), argv))
+            if label == "check-attr read":
+                argv = launches[-1][0]
+                git_dirs = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--git-dir"]
+                if len(git_dirs) != 1 or Path(git_dirs[0]).resolve().is_relative_to(repo_root()):
+                    failures.append("check-attr read: not launched against a private git directory: "
+                                    "{}".format(argv))
+                # The private git directory holds a copy of the checkout's index and names its object
+                # directory, so a tracked .gitattributes missing from the work tree is read from the index.
+                if handed != [(fake_index.read_bytes(), os.fsencode(fake_objects.resolve()) + b"\n")]:
+                    failures.append("check-attr read: the private git directory does not carry the "
+                                    "checkout's index and object directory: {}".format(handed))
+        hostile = {"PATH": os.environ.get("PATH", ""), "GIT_DIR": "/nonexistent",
+                   "GIT_INDEX_FILE": "/nonexistent", "GIT_CONFIG_GLOBAL": "/nonexistent",
+                   "GIT_CONFIG_COUNT": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+        del launches[:]
+        try:
+            gen_manifest.git_tracked(repo_root(), env=hostile)
+        except gen_manifest.GateError:
+            pass
+        kept = sorted(k for k in (launches[0][1].get("env") or {}) if k.startswith("GIT_")) \
+            if launches else None
+        if kept != ["GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS"]:
+            failures.append("git_tracked kept GIT_* entries {} from a supplied environment".format(kept))
     finally:
         subprocess.run = saved_run
+        fake_git.cleanup()
+    check("check-attr-fail-closed")
+    check("git-read-pins")
+    # The pins hold against real git: a fixture repository whose own config sets a core.fsmonitor hook
+    # that writes a marker, read with a hostile HOME, XDG_CONFIG_HOME and GIT_* caller environment, gives
+    # the same scope and attribute map as a clean read, and the hook never runs. The fixture's
+    # .gitattributes leaves c.dat unset, and every attribute source outside the work tree's
+    # .gitattributes (the global core.attributesFile, the XDG attributes file, a GIT_CONFIG_COUNT
+    # core.attributesFile, the repository's info/attributes and a repository-config core.attributesFile)
+    # sets it, so any one of them reaching the coverage read changes the map.
+    steer = "c.dat text eol=lf\n"
+    unset = {"text": "unspecified", "eol": "unspecified"}
+    with _tf.TemporaryDirectory() as _d:
+        tmp = Path(_d)
+        fx = tmp / "fixture"
+        fx.mkdir()
+        (fx / ".gitattributes").write_bytes(b"*.txt text eol=lf\n*.bin -text\n")
+        (fx / "a.txt").write_bytes(b"a\n")
+        (fx / "b.bin").write_bytes(b"\x00\x01")
+        (fx / "c.dat").write_bytes(b"c\n")
+        (fx / "sub").mkdir()
+        (fx / "sub" / ".gitattributes").write_bytes(b"x.txt -text\n")
+        (fx / "sub" / "x.txt").write_bytes(b"x\n")
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "fixture")):
+            proc = gen_manifest._git(fx, *args)
+            if proc.returncode != 0:
+                failures.append("isolation fixture: git {} failed: {}".format(
+                    args[0], proc.stderr.decode("utf-8", "replace").strip()))
+
+        def _reads():
+            scope = gen_manifest.git_tracked(fx, env=git_environment())
+            return scope, effective_attributes(fx, scope)
+        try:
+            clean = _reads()
+        except (GateError, gen_manifest.GateError) as exc:
+            clean = None
+            failures.append("isolation fixture: clean read failed: {}".format(exc))
+        if clean is not None and clean[1].get("c.dat") != unset:
+            failures.append("isolation fixture: c.dat must be left unset by the fixture's .gitattributes, "
+                            "got {}".format(clean[1].get("c.dat")))
+        if clean is not None and clean[1].get("sub/x.txt", {}).get("text") != "unset":
+            failures.append("isolation fixture: the nested sub/.gitattributes must unset text on sub/x.txt, "
+                            "got {}".format(clean[1].get("sub/x.txt")))
+        marker = tmp / "fsmonitor-ran.marker"
+        hook = tmp / "fsmonitor.sh"
+        hook.write_text("#!/bin/sh\necho ran >> '{}'\nexit 1\n".format(marker), encoding="utf-8")
+        hook.chmod(0o755)
+        if gen_manifest._git(fx, "config", "core.fsmonitor", str(hook)).returncode != 0:
+            failures.append("isolation fixture: could not set the repository core.fsmonitor hook")
+        (tmp / "repo-attrs").write_text(steer, encoding="utf-8")
+        if gen_manifest._git(fx, "config", "core.attributesFile", str(tmp / "repo-attrs")).returncode != 0:
+            failures.append("isolation fixture: could not set the repository core.attributesFile")
+        (fx / ".git" / "info").mkdir(exist_ok=True)
+        (fx / ".git" / "info" / "attributes").write_text(steer, encoding="utf-8")
+        home = tmp / "home"
+        (home / "xdg" / "git").mkdir(parents=True)
+        (home / ".gitconfig").write_text("[core]\n\tfsmonitor = {}\n\tattributesFile = {}\n".format(
+            hook, home / "attrs"), encoding="utf-8")
+        (home / "attrs").write_text(steer, encoding="utf-8")
+        (home / "xdg" / "git" / "config").write_text("[core\n", encoding="utf-8")  # malformed
+        (home / "xdg" / "git" / "attributes").write_text(steer, encoding="utf-8")
+        poison = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg"),
+                  "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_DIR": str(tmp / "missing"),
+                  "GIT_CONFIG_SYSTEM": str(home / ".gitconfig"), "GIT_ATTR_SOURCE": "refs/heads/missing",
+                  "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                  "GIT_CONFIG_VALUE_0": str(hook), "GIT_CONFIG_KEY_1": "core.attributesFile",
+                  "GIT_CONFIG_VALUE_1": str(home / "attrs")}
+        saved_env = {k: os.environ.get(k) for k in poison}
+        try:
+            os.environ.update(poison)
+            hostile_read = _reads()
+        except (GateError, gen_manifest.GateError) as exc:
+            hostile_read = None
+            failures.append("isolation fixture: hostile read failed: {}".format(exc))
+        finally:
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        if clean is None or hostile_read != clean:
+            failures.append("isolation fixture: the hostile read {} differs from the clean read {}".format(
+                hostile_read, clean))
+        # A tracked .gitattributes missing from the work tree is still read from the index, as under the
+        # checkout's own git directory (git's check-in direction falls back to the index): with the
+        # committed sub/.gitattributes deleted from the work tree only, sub/x.txt keeps text unset rather
+        # than the root rule's text set. Red if the private git directory carries no copy of the index.
+        (fx / "sub" / ".gitattributes").unlink()
+        try:
+            gone = effective_attributes(fx, gen_manifest.git_tracked(fx, env=git_environment()))
+        except (GateError, gen_manifest.GateError) as exc:
+            gone = {}
+            failures.append("isolation fixture: read with sub/.gitattributes missing from the work tree "
+                            "failed: {}".format(exc))
+        if gone.get("sub/x.txt", {}).get("text") != "unset":
+            failures.append("isolation fixture: a tracked sub/.gitattributes missing from the work tree was "
+                            "not read from the index (sub/x.txt: {})".format(gone.get("sub/x.txt")))
+        if marker.exists():
+            failures.append("isolation fixture: the core.fsmonitor hook ran under a gate git read")
+        # The system-wide config and attributes files are root-owned, so no fixture can plant one; git's
+        # own report stands in: `git var GIT_ATTR_SYSTEM` and `git var GIT_CONFIG_SYSTEM` name the file
+        # git reads only while that file is enabled. Under git_environment() neither is named, even with
+        # GIT_CONFIG_SYSTEM pointed at a file on top; with the two NOSYSTEM pins taken out both are (the
+        # control that proves the probe can see the file). A git that does not know the variable answers
+        # both launches with a usage error (exit 129, git's usage exit) and no output on stdout;
+        # that git cannot exercise the probe, so it is skipped with that reason printed, never passed
+        # silently and never failed as a broken control. The git-read-pins leg above still asserts both
+        # NOSYSTEM pins in git_environment() on every git. Any other control answer fails.
+        pinned_env = dict(git_environment(), GIT_CONFIG_SYSTEM=str(home / ".gitconfig"))
+        open_env = {k: v for k, v in pinned_env.items()
+                    if k not in ("GIT_ATTR_NOSYSTEM", "GIT_CONFIG_NOSYSTEM")}
+        for name in ("GIT_ATTR_SYSTEM", "GIT_CONFIG_SYSTEM"):
+            seen = []
+            for env in (pinned_env, open_env):
+                try:
+                    proc = subprocess.run(["git", "var", name], capture_output=True, timeout=GIT_TIMEOUT,
+                                          env=env, cwd=str(tmp))
+                    seen.append((proc.returncode, proc.stdout.strip()))
+                except (OSError, subprocess.SubprocessError) as exc:
+                    seen.append(None)
+                    failures.append("isolation fixture: git var {} could not be launched ({})".format(
+                        name, exc))
+            if None in seen:
+                continue
+            if seen == [(129, b""), (129, b"")]:
+                print("isolation fixture: SKIPPED the git var {} system-file probe: this git answers "
+                      "`git var {}` with a usage error (exit 129), so it cannot report that file; the "
+                      "NOSYSTEM pins are still asserted by git-read-pins".format(name, name),
+                      file=sys.stderr)
+                continue
+            if seen[0][1] != b"":
+                failures.append("isolation fixture: under git_environment() git still reads the system "
+                                "file {} ({!r})".format(name, seen[0][1]))
+            if seen[1][0] != 0 or not seen[1][1]:
+                failures.append("isolation fixture: control failed: git var {} named no file with the "
+                                "NOSYSTEM pins removed (exit {})".format(name, seen[1][0]))
+        # Case folding against real git (rows F10 and F9): a .gitattributes whose later line differs from an
+        # earlier one only in letter case (an exact path in F10, a glob in F9) unsets text on the path under
+        # core.ignoreCase=true, the value git init writes on a case-insensitive file system. The checkout's
+        # own check-attr reports text unset there (the control), and the coverage read must report the path
+        # as uncovered whatever the checkout's own core.ignoreCase says. Red if the read drops the
+        # case-folding setting (a single read under the private git directory's default, false).
+        for row, rules, path in (("F10", b"README.md text eol=lf\nreadme.MD -text\n", "README.md"),
+                                 ("F9", b"*.txt text eol=lf\n*.TXT -text\n", "a.txt")):
+            fold = tmp / "fold-{}".format(row)
+            fold.mkdir()
+            (fold / ".gitattributes").write_bytes(rules)
+            (fold / path).write_bytes(b"x\n")
+            for args in (("init", "-q"), ("config", "core.ignoreCase", "true"), ("add", "-A"),
+                         ("commit", "-q", "-m", "fixture")):
+                proc = gen_manifest._git(fold, *args)
+                if proc.returncode != 0:
+                    failures.append("case-fold fixture {}: git {} failed: {}".format(
+                        row, args[0], proc.stderr.decode("utf-8", "replace").strip()))
+            proc = gen_manifest._git(fold, "check-attr", "text", "--", path)
+            if proc.stdout != "{}: text: unset\n".format(path).encode("utf-8"):
+                failures.append("case-fold fixture {}: control failed: the checkout's own check-attr under "
+                                "core.ignoreCase=true gave {!r}".format(row, proc.stdout))
+            for setting in ("true", "false"):
+                if gen_manifest._git(fold, "config", "core.ignoreCase", setting).returncode != 0:
+                    failures.append("case-fold fixture {}: could not set core.ignoreCase={}".format(
+                        row, setting))
+                try:
+                    folded = effective_attributes(fold, {path})
+                except GateError as exc:
+                    failures.append("case-fold fixture {}: read failed: {}".format(row, exc))
+                    continue
+                if not coverage_findings({path}, set(), folded):
+                    failures.append("case-fold fixture {}: with the checkout's core.ignoreCase={}, {} was "
+                                    "judged covered ({}), but a case-insensitive checkout unsets its text "
+                                    "attribute".format(row, setting, path, folded.get(path)))
+    check("git-read-isolation-fixture")
     # _load_vectors strict rows: a malformed row and a missing required class each fail closed.
     def _vectors_reject(fake_rows):
         g = globals()
@@ -780,6 +1297,7 @@ def self_test_main():
         bad_sha[0]["sha256"] = bad
         if not _vectors_reject(bad_sha):
             failures.append("a malformed pass-vector sha256 {!r} was not rejected".format(bad))
+    check("vector-schema")
     # Completeness guard (fail-closed, exit 2): every non-pass class MUST carry a CLASS_FINDING
     # binding, so a class added to VECTOR_CLASSES cannot silently ship unbound. It runs before any
     # CLASS_FINDING lookup below, so a gap fails closed here rather than raising a bare KeyError later.
@@ -800,21 +1318,24 @@ def self_test_main():
     own_bytes = {"crlf": b"bad\r\n", "bare-cr": b"bad\rx\n", "trailing-whitespace": b"bad \n",
                  "zero-width": "a{}b\n".format(chr(0x200B)).encode("utf-8"),
                  "word-joiner": "a{}b\n".format(chr(0x2060)).encode("utf-8"),
+                 "soft-hyphen": "co{}op\n".format(chr(0x00AD)).encode("utf-8"),
                  "bidi": "a{}b\n".format(chr(0x202E)).encode("utf-8"),
                  "bidi-mark": "a{}b\n".format(chr(0x200E)).encode("utf-8"),
                  "bom": BOM + b"a\n", "no-final-newline": b"abc", "double-final-newline": b"abc\n\n",
                  "invalid-utf8": b"\xff\xfe\n", "empty": b""}
     for cls, sub in CLASS_FINDING.items():
-        if not any(sub in f for f in scan_bytes(own_bytes[cls])):
+        if not any(sub in f for f in scan_release_bytes(own_bytes[cls])):
             failures.append("class {!r} failed to bind to its own scan leg".format(cls))
-    # The published vectors (3.4), run through the same scan. Each non-pass class is bound to the
+    check("class-binding")
+    # The published vectors (3.4), run through the same scan run() applies (scan_release_bytes: the shared
+    # legs plus the repository-only separator and soft-hyphen legs). Each non-pass class is bound to the
     # SPECIFIC finding its scan leg emits (CLASS_FINDING), so a class name proves its own leg fired: a
     # cross-class payload swap (every failure payload replaced with identical CRLF bytes)
     # does not pass.
     try:
         for row in _load_vectors(repo_root()):
             data = base64.b64decode(row["payload-base64"], validate=True)
-            found = scan_bytes(data)
+            found = scan_release_bytes(data)
             if row["class"] == "pass":
                 if found:
                     failures.append("vector {}: expected clean, got {}".format(row["name"], found))
@@ -823,25 +1344,72 @@ def self_test_main():
             elif not any(CLASS_FINDING[row["class"]] in f for f in found):
                 failures.append("vector {}: class {!r} did not provoke its scan leg (findings: {})".format(
                     row["name"], row["class"], found))
+        check("published-vectors")
+        # Flip: with the gate's soft-hyphen leg emptied (its pattern matching nothing), every published
+        # soft-hyphen vector must stop provoking its leg (red), and must provoke it again once the leg is
+        # restored, so the class row proves this gate's own leg fired, not merely that some finding did.
+        shy_rows = [r for r in _load_vectors(repo_root()) if r["class"] == "soft-hyphen"]
+        if not shy_rows:
+            failures.append("no published soft-hyphen vector to flip")
+        g = globals()
+        saved_re = g["SOFT_HYPHEN_RE"]
+        try:
+            g["SOFT_HYPHEN_RE"] = re.compile(b"(?!)")
+            for row in shy_rows:
+                data = base64.b64decode(row["payload-base64"], validate=True)
+                if any(CLASS_FINDING["soft-hyphen"] in f for f in scan_release_bytes(data)):
+                    failures.append("vector {}: still provoked U+00AD with the soft-hyphen leg emptied "
+                                    "(the flip did not go red)".format(row["name"]))
+        finally:
+            g["SOFT_HYPHEN_RE"] = saved_re
+        for row in shy_rows:
+            data = base64.b64decode(row["payload-base64"], validate=True)
+            if not any(CLASS_FINDING["soft-hyphen"] in f for f in scan_release_bytes(data)):
+                failures.append("vector {}: did not provoke U+00AD after the flip was restored".format(
+                    row["name"]))
+        check("soft-hyphen-vector-flip")
     except (GateError, KeyError, ValueError) as exc:
         print("error: vectors unusable ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
+    # No reduction: every codepoint the shared set holds is still in it, and every codepoint this gate
+    # refuses (the 17 shared ones, the two separators and the soft hyphen) is reported by the scan run()
+    # applies, at its byte offset, with an empty allowance table.
+    shared = (0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F),
+              *range(0x2066, 0x206A))
+    for cp in shared:
+        if FORBIDDEN.get(chr(cp).encode("utf-8")) != chr(cp):
+            failures.append("U+{:04X} is missing from _byte_canon.FORBIDDEN".format(cp))
+    for cp in shared + (0x2028, 0x2029, 0x00AD):
+        data = "a{}b\n".format(chr(cp)).encode("utf-8")
+        if not any(f.startswith("byte offset 1: ") and "U+{:04X}".format(cp) in f
+                   for f in scan_release_bytes(data)):
+            failures.append("U+{:04X} is no longer refused by the release gate's scan".format(cp))
+    check("no-reduction")
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
             print("  - " + f)
         return 1
-    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg (direct and through "
-          "run() over a temp tree), allowance scoping, "
-          "coverage logic, the containment "
-          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, and the "
-          "published vectors all hold")
+    print("SELF-TEST PASS: byte-format legs, the line and paragraph separator and soft-hyphen legs (direct "
+          "and through run() over a temp tree), allowance scoping, "
+          "coverage logic, the pinned and isolated git reads (a repository fsmonitor hook and a hostile "
+          "home, XDG and GIT_* environment), the containment "
+          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, the "
+          "published vectors and the soft-hyphen vector flip all hold")
     return 0
 
 
 def main():
     args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:  # --selftest: the spec spelling (3.4)
+    # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
+    # that trailing two-token form, with an absolute path, alone or after --self-test.
+    if len(args) >= 2 and args[-2] == "--execution-report" and os.path.isabs(args[-1]) \
+            and args[:-2] in ([], ["--self-test"]):
+        # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
+        import _selftest_exit_report
+        _selftest_exit_report.arm(args[-1], SUITE_ID, EXECUTED)
+        return self_test_main()
+    if args in (["--self-test"], ["--selftest"]):  # --selftest: the spec spelling (3.4)
         return self_test_main()
     if args:
         print("usage: check_byte_canon.py [--self-test]; fail-closed", file=sys.stderr)
@@ -850,4 +1418,6 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _code = main()
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

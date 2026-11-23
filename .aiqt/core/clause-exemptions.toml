@@ -150,16 +150,16 @@ reason = "Scope bound restating vfxcmt.9, whose cleanliness check runs over each
 [[exempt]]
 corpus-id = "vfxcmt"
 text = "This reconciliation answers only what the declaration and the repository can answer."
-reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11; no obligation of its own."
+reason = "Opens the disclosed-residual paragraph of vfxcmt.3 to vfxcmt.11 and vfxcmt.13; no obligation of its own."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
-reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
+text = "It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, earlier series commits outside the pinned commit's first-parent diff, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it."
+reason = "Disclosed residuals of vfxcmt.3 to vfxcmt.11 and vfxcmt.13; the closing clause restates vfxcmt.10 (the verifier reads the declared revision)."
 
 [[exempt]]
 corpus-id = "vfxcmt"
-text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, so no replacement ref, grafts entry, or commit-graph cache can rewrite the parent the base is taken against; in a shallow or partial clone lacking a needed parent object, the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
+text = "Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, and in a shallow or partial clone lacking a needed parent object the reconciliation is a cannot-evaluate, not a review against a wrong or empty base."
 reason = "Restates vfxcmt.7 and its cannot-evaluate case inside the disclosure paragraph; it adds no obligation."
 
 [[exempt]]

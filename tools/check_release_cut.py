@@ -409,14 +409,15 @@ def evaluate_transition(base_changelog_bytes_or_absent, head_changelog_bytes,
 
 def git_environment():
     # No caller configuration surface reaches a read: every GIT_ variable is dropped, the system and
-    # global config are pinned off, and HOME and XDG_CONFIG_HOME name a fixed empty location, so no
-    # per-user file (XDG attributes or ignore, a ~/ path in repository config) is resolved through the
-    # caller's home. No safe.directory trust comes from the caller either way: with the global config
-    # pinned to os.devnull, git reads none from HOME or XDG_CONFIG_HOME.
+    # global config and the system-wide attributes file ($(prefix)/etc/gitattributes) are pinned off,
+    # and HOME and XDG_CONFIG_HOME name a fixed empty location, so no per-user file (XDG attributes or
+    # ignore, a ~/ path in repository config) is resolved through the caller's home. No safe.directory
+    # trust comes from the caller either way: with the global config pinned to os.devnull, git reads
+    # none from HOME or XDG_CONFIG_HOME.
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update({
         "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1",
-        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_ATTR_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         "HOME": os.devnull, "XDG_CONFIG_HOME": os.devnull,
         "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C",
     })

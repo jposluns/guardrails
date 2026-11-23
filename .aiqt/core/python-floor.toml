@@ -131,6 +131,7 @@ guarded-surfaces = [
     "tools/check_links.py",
     "tools/check_manifest.py",
     "tools/check_mappings.py",
+    "tools/check_merge_result.py",
     "tools/check_mistakes_register.py",
     "tools/check_msg_leaks.py",
     "tools/check_must_deliver.py",

@@ -242,7 +242,22 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         it renders as, so '&#32;' between two sentences joins them into one unit and the ';'
                         of '&amp; ' reads as a clause separator; a checked line that ends with a backslash,
                         which the vendored renderer reads as a hard line break ('<br />'), so a sentence end
-                        before it is no cut to the grammar; a body with no frontmatter; a title
+                        before it is no cut to the grammar (a hard break written as two or more spaces at the
+                        line end is not refused: the spaces are whitespace to the grammar, so it cuts after a
+                        sentence end there, as the renderer shows two sentences); a checked line holding a
+                        backslash directly before a backtick ('\\`') outside a code span as the enclosure scan
+                        reads it, which the vendored renderer reads as an escaped backtick it shows as text,
+                        while the enclosure scan reads that backtick as a code span delimiter, so sentences the
+                        renderer shows apart join into one unit ('Type \\` then stop. Go on \\` now.') and the
+                        code spans after it pair differently (inside a code span both read the backslash as
+                        code, so '`C:\\data\\`' is the code 'C:\\data\\' and is not refused); a checked line
+                        holding a backtick inside a raw HTML tag or an autolink, matched by shape from a '<'
+                        outside a code span to its '>' within the paragraph (_AUTOLINK_SHAPE_RE, _TAG_SHAPE_RE,
+                        each wider than the renderer's own pattern), which the vendored renderer reads as part
+                        of the tag or link while the enclosure scan reads it as a code span delimiter, so
+                        sentences the renderer shows apart join into one unit ('Use <https://a.test/`> now.
+                        Beta uses <https://b.test/`> too.', or a span whose title attribute holds a backtick)
+                        and the code spans after it pair differently; a body with no frontmatter; a title
                         heading with no blank line after it; a line the splitter cannot classify; a
                         paragraph that ends with an opener still open (an inch mark, a stray backtick); and
                         a unit with no letter (str.isalpha) or decimal digit (str.isdecimal), so an
@@ -304,9 +319,12 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         backslash (shown as typed, since the renderer decodes neither), a reference whose run
                         to ';' is broken by emphasis, strikethrough, a code span or a backslash ('&reg*x*;', '&reg`x`;',
                         '&copy\\;'), which the renderer splits into pieces and decodes none of, so it shows the
-                        reference as typed, a backslash at the line end of a paragraph's last line or after another backslash, and
-                        a task marker with no text after it in its paragraph are refused, though the
-                        renderer shows each as text.
+                        reference as typed, a backslash at the line end of a paragraph's last line or after another backslash, a
+                        backslash before a backtick after another backslash outside a code span ('\\\\`a`', a
+                        shown backslash and then a code span delimiter), a backtick between a '<' and a '>'
+                        that open no tag or autolink to the renderer ('Compare <a `b` c> now.', shown as text
+                        and the code 'b'), and a task marker with no text after it in its paragraph are
+                        refused, though the renderer shows each as text.
                         RESIDUAL, disclosed: coverage is positional, not semantic. A unit counts as covered
                         when any row's resolved text contains it, whatever obligation that row names, and an
                         exemption's reason is read by a reviewer, never judged by the gate. The title
@@ -316,7 +334,15 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         which must then be covered or exempted. Inline raw HTML other than '<!' and '<?' (a
                         tag mid-line, such as a span with a hidden attribute, or a script or style element
                         opened mid-line) is read as text its unit holds; whether a renderer shows it is not
-                        judged. Likewise a link destination, a link title and an image's alt text (in
+                        judged. To the grammar a tag is text that is neither whitespace nor a capital nor an
+                        opener, so a tag that renders as a line break ('<br>') between two sentences joins
+                        them into one unit, which a row must then cover whole, when no whitespace sits between
+                        the first sentence's end and the tag, whatever follows the tag ('Alpha holds.<br>Beta
+                        holds.' and 'Alpha holds.<br> Beta holds.' are each one unit), and when whitespace
+                        sits there but the end has a closing quote or bracket, which needs a capital after the
+                        whitespace ('"Alpha holds." <br>Beta holds.' is one unit); after a bare sentence end
+                        and whitespace the cut falls before the tag, which then opens the second unit ('Alpha
+                        holds. <br>Beta holds.' is 'Alpha holds.' and '<br>Beta holds.'). Likewise a link destination, a link title and an image's alt text (in
                         '[text](destination "title")' and '![alt](source)') are read as text their unit holds,
                         though the vendored renderer emits them only as the href, title and alt attributes, not
                         as page text, so they can hold unit text a reader does not see on the page (a title shows
@@ -1212,6 +1238,23 @@ _HIDDEN_INLINE_RE = re.compile(r"<[!?]")
 # hidden from the boundary grammar, since no whitespace follows the sentence end on that line (the backslash
 # does) and the LF after the backslash is a hard break, not the plain line ending the grammar cuts at
 _HARD_BREAK_MARK = "\\"
+# a backslash directly before a backtick, which the vendored inline parser (Literal in
+# opf/tools/_vendor/marko/inline.py) reads, outside a code span, as an escaped backtick it shows as text, while the
+# enclosure scan (_enclosures) reads that backtick as a code span delimiter: the scan then holds plain text inside a
+# code span it does not have, so sentences the renderer shows apart join into one unit ('Type \` then stop. Go on
+# \` now.'), and the code spans after it pair differently from the renderer's. Inside a code span, as the scan reads
+# it (_escaped_code_mark), both read the backslash as code and the backtick by its run (CodeSpan wins over the
+# Literal it holds), so '`C:\data\`' is the code 'C:\data\' to both and is not refused
+_ESCAPED_CODE_MARK = "\\`"
+# a raw HTML open or closing tag and an autolink, matched by shape: every match of the vendored renderer's own
+# patterns (InlineHTML and AutoLink in opf/tools/_vendor/marko/inline.py, built from tag_name, attribute, uri and
+# email in patterns.py) is also a match of one of these, from the same '<' to the same '>', since a tag holds no
+# '<' or '>' outside a quoted attribute value and an autolink holds no whitespace, '<' or '>'. The renderer reads
+# a backtick inside one as part of the tag or link, while the enclosure scan reads it as a code span delimiter,
+# so sentences the renderer shows apart join into one unit ('Use <https://a.test/`> now. Beta uses
+# <https://b.test/`> too.') and the code spans after it pair differently (_code_mark_in_tag)
+_AUTOLINK_SHAPE_RE = re.compile(r"<[^\s<>]*>")
+_TAG_SHAPE_RE = re.compile(r"<[A-Za-z/](?:[^<>\"']|\"[^\"]*\"|'[^']*')*>")
 # the character-reference pattern the vendored renderer decodes with, copied from Renderer._charref in
 # opf/tools/_vendor/marko/renderer.py (Renderer.__enter__ swaps it into html._charref while it renders, in place
 # of the wider standard one): it matches only a reference ending in ';' (a decimal one of 1 to 7 digits, a
@@ -1279,6 +1322,48 @@ def _decoded_reference(line):
     return None
 
 
+def _in_code_span(source, pos):
+    """True when position pos of the whole source lies inside an inline code span as _enclosures reads it,
+    scanned from pos's paragraph start."""
+    still_open, _closed = _enclosures(source, pos)
+    return bool(still_open) and still_open[-1][0][0] == CODE_MARK
+
+
+def _escaped_code_mark(source, start, line):
+    """The index in line (which begins at index start of source) of the first backslash directly before a
+    backtick (_ESCAPED_CODE_MARK) that stands outside an inline code span (_in_code_span), or None. Inside a
+    code span the vendored renderer, like the enclosure scan, reads the backslash as code and the backtick by
+    its run, so '`C:\\data\\`' and '``a\\`b``' are not refused; outside one the backslash escapes the backtick
+    for the renderer only. The escape is matched, not parsed, so a backtick after an escaped backslash
+    ('\\\\`', a delimiter to both) is refused too."""
+    at = line.find(_ESCAPED_CODE_MARK)
+    while at != -1:
+        if not _in_code_span(source, start + at):
+            return at
+        at = line.find(_ESCAPED_CODE_MARK, at + 1)
+    return None
+
+
+def _code_mark_in_tag(source, start, line):
+    """The index in line (which begins at index start of source) of the first '<' outside an inline code span
+    (_in_code_span) where _AUTOLINK_SHAPE_RE or _TAG_SHAPE_RE matches, within that '<''s paragraph (a tag may
+    span lines), a text holding a backtick, or None. A '<' inside a code span is code to the renderer too,
+    since the code span opens first (CodeSpan and InlineHTML share one priority, so the earlier token stays).
+    The shapes are wider than the renderer's patterns, so a backtick between a '<' and a '>' where the
+    renderer reads no tag or autolink ('Compare <a `b` c> now.') is refused too."""
+    gap = _PARAGRAPH_GAP_RE.search(source, start)
+    end = gap.start() if gap else len(source)
+    at = line.find("<")
+    while at != -1:
+        pos = start + at
+        for shape in (_AUTOLINK_SHAPE_RE, _TAG_SHAPE_RE):
+            match = shape.match(source, pos, end)
+            if match and CODE_MARK in match.group() and not _in_code_span(source, pos):
+                return at
+        at = line.find("<", at + 1)
+    return None
+
+
 def _has_letter_or_digit(text):
     """True when text holds a letter (str.isalpha) or a decimal digit (str.isdecimal). An underscore, which
     the regex class \\w admits, and punctuation or a symbol alone are neither, so such a unit is no sentence
@@ -1323,6 +1408,10 @@ def rule_units(source, where):
     frontmatter; a title with no blank line after it; a line _UNCLASSIFIABLE_LINE_RE matches or
     _is_table_delimiter_row accepts; a checked line holding '<!' or '<?' (_HIDDEN_INLINE_RE); a checked line that
     ends with a backslash (_HARD_BREAK_MARK, a hard line break to the vendored renderer); a checked line holding a
+    backslash before a backtick outside a code span (_escaped_code_mark, an escaped backtick the vendored renderer
+    shows as text, which _enclosures reads as a code span delimiter); a checked line holding a backtick inside a
+    raw HTML tag or an autolink matched by shape from a '<' outside a code span (_code_mark_in_tag, part of the
+    tag or link to the renderer, a code span delimiter to _enclosures); a checked line holding a
     character reference the vendored renderer decodes when it sees it whole in plain text (_decoded_reference: a match of the
     renderer's own pattern,
     _RENDERER_CHARREF_RE, so one ending in ';', that html.unescape changes; a reference with no ';' such as
@@ -1371,6 +1460,18 @@ def rule_units(source, where):
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a backslash at the "
                                 "line end, which the vendored renderer reads as a hard line break); cannot "
                                 "evaluate".format(where, number, line))
+            elif _escaped_code_mark(source, offset, line) is not None:
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a backslash before a "
+                                "backtick outside a code span, which the vendored renderer reads as an escaped "
+                                "backtick it shows as text while the enclosure scan reads it as a code span "
+                                "delimiter; the check does not parse escapes, so it is refused also after another "
+                                "backslash); cannot evaluate".format(where, number, line))
+            elif _code_mark_in_tag(source, offset, line) is not None:
+                raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a backtick inside a "
+                                "raw HTML tag or an autolink, which the vendored renderer reads as part of the tag "
+                                "or link while the enclosure scan reads it as a code span delimiter; the check "
+                                "matches the tag or autolink by shape, not by parsing it, so it is refused also "
+                                "where the renderer reads none); cannot evaluate".format(where, number, line))
             elif _decoded_reference(line) is not None:
                 raise GateError("{} line {}: the text-coverage splitter cannot classify {!r} (a character "
                                 "reference ending in ';', {!r}: a match of the renderer's own pattern that "
@@ -2361,6 +2462,94 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
     except GateError as exc:
         if "character reference" not in str(exc) or "cannot classify" not in str(exc):
             failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # A backslash before a backtick outside a code span is an escaped backtick the vendored renderer shows as text,
+    # but the enclosure scan reads a code span delimiter there: 'Type \` then stop. Go on \` now.' renders as two
+    # sentences and would be one unit. It is refused on a first or a wrapped line, after a closed code span too;
+    # after another backslash ('\\`a`') too, the over-refusal the help text discloses, which these vectors hold.
+    for line in ("Type \\` then stop. Go on \\` now.", "Type \\` x `a. B` y \\` now.", "Use the \\` key.",
+                 "Type `x` then \\` stop. Go \\` on.", "Type \\\\`a` now.", "Type \\\\\\` then stop. Go on \\` now."):
+        for text in (line + "\nGamma ends.\n", "See the start of the PR\n" + line + "\nGamma ends.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: the escaped backtick in {!r} was not refused".format(text))
+            except GateError as exc:
+                if ("backslash before a backtick outside a code span" not in str(exc)
+                        or "cannot classify" not in str(exc)):
+                    failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # A backtick inside a raw HTML tag or an autolink is part of the tag or link to the vendored renderer, but a
+    # code span delimiter to the enclosure scan: 'Use <https://a.test/`> now. Beta uses <https://b.test/`> too.'
+    # renders as two sentences and would be one unit. It is refused on a first or a wrapped line, for an autolink
+    # (one holding a '"' too, which _TAG_SHAPE_RE does not match), an email autolink (one opening with a digit,
+    # which only _AUTOLINK_SHAPE_RE matches) and a tag (a double or single quoted attribute, a tag across a line
+    # break, a closing tag); a backtick between a '<' and a '>' the renderer reads as no tag ('Compare <a `b` c>
+    # now.') too, the over-refusal the help text discloses, which these vectors hold.
+    for line in ("Use <https://a.test/`> now. Beta uses <https://b.test/`> too.",
+                 "Use <https://a.test/\"`> now. Beta uses <https://b.test/\"`> too.",
+                 "Use <a`b@c.test> now. Beta waits.",
+                 "Mail <1`b@c.test> now. Beta mails <2`c@d.test> too.",
+                 "Use <span title=\"`\">a</span> now. Beta uses <span title=\"`\">b</span> too.",
+                 "Use <span title='`'>a</span> now. Beta waits.",
+                 "Run `a` then <b title=\"`\"> now. Beta `c` waits.",
+                 "Use <span\ntitle=\"`\">a</span> now. Beta uses `b` too.",
+                 "Use </span `> now. Beta waits.",
+                 "Compare <a `b` c> now. Beta waits."):
+        for text in (line + "\nGamma ends.\n", "See the start of the PR\n" + line + "\nGamma ends.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: the backtick in a tag or autolink in {!r} was not refused".format(text))
+            except GateError as exc:
+                if ("backtick inside a raw HTML tag or an autolink" not in str(exc)
+                        or "cannot classify" not in str(exc)):
+                    failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # An escaped '<!' and a '<?' that opens no processing instruction render as text, but the check matches them
+    # and does not parse them: refused, with the wording that says so (the help text's disclosure).
+    for line in ("Escaped \\<!-- here. Beta waits.", "Type a <? b to start. Beta waits."):
+        for text in (line + "\nGamma ends.\n", "See the start of the PR\n" + line + "\nGamma ends.\n"):
+            try:
+                rule_units(head + text, "probe")
+                failures.append("rule_units: the '<!' or '<?' in {!r} was not refused".format(text))
+            except GateError as exc:
+                if ("refused even when escaped or not HTML" not in str(exc) or "potential inline HTML" not in str(exc)
+                        or "cannot classify" not in str(exc)):
+                    failures.append("rule_units: {!r} was refused for another reason: {}".format(text, exc))
+    # ... while a code span with no backslash before a backtick stays prose, and so does one ending in a backslash
+    # or holding a backslash before a single backtick inside a longer run, which the renderer shows as that code
+    # ('`C:\data\`' is the code 'C:\data\'); a '<' inside a code span is code to the renderer too, whatever
+    # backtick follows; a hard break written as two spaces at a line end is whitespace to the grammar, which cuts
+    # after a sentence end there as the renderer shows it; an inline tag that renders as a line break joins its
+    # two sentences into one unit when no whitespace sits between the first sentence end and the tag, whatever
+    # follows the tag, or when the end has a closing quote, while after a bare sentence end and whitespace the
+    # cut falls before the tag (the inline raw HTML residual the help text discloses); and a link title, a link
+    # destination and an image's alt text are text their unit holds (the link residual the help text discloses).
+    for text, want in (("Run `a` now. Beta waits.\n", ["Run `a` now.", "Beta waits."]),
+                       ("Store it under `C:\\data\\` only. Beta waits.\n",
+                        ["Store it under `C:\\data\\` only.", "Beta waits."]),
+                       ("See the start of the PR\nStore it under `C:\\data\\` only. Beta waits.\n",
+                        ["See the start of the PR\nStore it under `C:\\data\\` only.", "Beta waits."]),
+                       ("Run `a\\` now. Beta waits.\n", ["Run `a\\` now.", "Beta waits."]),
+                       ("Type `a\\\\` now. Beta waits.\n", ["Type `a\\\\` now.", "Beta waits."]),
+                       ("Run ``a\\`b`` now. Beta waits.\n", ["Run ``a\\`b`` now.", "Beta waits."]),
+                       ("Use `a<b` and `c>d` now. Beta waits.\n", ["Use `a<b` and `c>d` now.", "Beta waits."]),
+                       ("Run `x <y` and `z> w` now. Beta waits.\n", ["Run `x <y` and `z> w` now.", "Beta waits."]),
+                       ("Alpha holds.  \nBeta waits.\n", ["Alpha holds.", "Beta waits."]),
+                       ("Alpha holds  \nbeta waits.\n", ["Alpha holds  \nbeta waits."]),
+                       ("Alpha holds.<br>Beta waits.\n", ["Alpha holds.<br>Beta waits."]),
+                       ("Alpha holds.<br> Beta waits.\n", ["Alpha holds.<br> Beta waits."]),
+                       ("\"Alpha holds.\" <br>Beta waits.\n", ["\"Alpha holds.\" <br>Beta waits."]),
+                       ("Alpha holds. <br>Beta waits.\n", ["Alpha holds.", "<br>Beta waits."]),
+                       ("See [the note](https://a.test/x \"Alpha holds. Beta waits.\") now. Gamma ends.\n",
+                        ["See [the note](https://a.test/x \"Alpha holds. Beta waits.\") now.", "Gamma ends."]),
+                       ("See [the note](<Alpha holds. Beta waits.>) now. Gamma ends.\n",
+                        ["See [the note](<Alpha holds. Beta waits.>) now.", "Gamma ends."]),
+                       ("See ![Alpha holds. Beta waits.](a.png) now. Gamma ends.\n",
+                        ["See ![Alpha holds. Beta waits.](a.png) now.", "Gamma ends."])):
+        try:
+            _at, probe_units = rule_units(head + text, "probe")
+            got = [(head + text)[b:e] for b, e in probe_units]
+            if got != want:
+                failures.append("rule_units: {!r} expected units {!r}, got {!r}".format(text, want, got))
+        except GateError as exc:
+            failures.append("rule_units: {!r} was refused: {}".format(text, exc))
     # _RENDERER_CHARREF_RE is a copy of the vendored renderer's Renderer._charref: this file never imports the
     # vendored module, so its source is read with ast and the re.compile argument of that class attribute compared.
     vendored = Path(__file__).resolve().parent.parent.joinpath(*_RENDERER_SOURCE_REL)
@@ -3840,7 +4029,16 @@ def self_test_main(_mkdtemp=None, _vectors=True):  # noqa: C901  a flat sequence
           "first or a wrapped line, '&#32;' and '&amp;' also when exempted, while plain whitespace, a mid-line backslash, an '&' that "
           "opens no reference and a reference with no ';', which the renderer shows as typed ('&#32Beta', "
           "'cut&copy', '&region=eu', 'PR&#507'), stay prose, and the copied renderer pattern equals the vendored "
-          "Renderer._charref read with ast; and a GFM task marker "
+          "Renderer._charref read with ast; and a backslash before a backtick outside a code span (an escaped "
+          "backtick the renderer shows as text) is a cannot-evaluate on a first or a wrapped line, after another "
+          "backslash too, and so is a backtick inside a raw HTML tag or an autolink (part of the tag or link to "
+          "the renderer), between a '<' and a '>' that open none too, while an escaped '<!' and a non-HTML '<?' "
+          "are refused with the 'even when escaped or not HTML' wording; while a code span with no such "
+          "backslash, one ending in a backslash ('`C:\\data\\`') or holding one before a shorter run, a '<' "
+          "inside a code span and a two-space hard break cut as the renderer shows them, an inline '<br>' joins "
+          "its sentences into one unit when no whitespace sits between the sentence end and the tag or the end "
+          "has a closing quote and opens the second unit after a bare end and whitespace, and a link title, a "
+          "link destination and an image's alt text are text their unit holds; and a GFM task marker "
           "('[x] ', '[ ] ') is refused as a paragraph's first line while a wrapped one stays prose; and a "
           "line directly after the '## Detail' split line is a paragraph's first line, so an ordered item, a "
           "task marker, a link reference definition and a one-tag line are refused there while the same text "
