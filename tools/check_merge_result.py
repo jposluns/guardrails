@@ -79,10 +79,14 @@ path of an informational message whose type starts with CONFLICT) and H the hand
 that commit. A path in D and in C passes (a resolved conflict, listed on a NOTE line; its resolution is not
 judged). Where a conflict (file/directory, or distinct types) makes git write a side's entry under a new name,
 PATH~LABEL (with _N added when that name is taken), the label is the one git gave that side: merge-tree, given
-commit ids, names it PATH~ID, the original merge by its own label (HEAD or a branch name). So a path in D, outside
-C and undeclared, that only the recorded tree holds and that is PATH~LABEL (a label with no slash) for the PATH of
-such a name in C passes (a NOTE line) when its entry is exactly the re-merge's entry under that name and the
-pairing is one to one; otherwise it is cannot-evaluate (conflict-name), never a finding. A path in D, outside C
+commit ids, names it PATH~ID, the original merge by its own label (HEAD or a branch name). git never picks such
+a name where a path already exists in either input tree or the merge base, so only a name git itself could have
+generated for this merge's conflict is excused: a path in D, outside C and undeclared, that only the recorded tree
+holds, that no input tree, merge-base tree or the re-merged tree holds (a path one of them holds is judged by the
+ordinary comparison below), and that is PATH~LABEL (a label with no slash) for the PATH of such a name in C passes
+(a NOTE line) when its entry is exactly the re-merge's entry under that name, the recorded tree does not also hold
+the re-merge's name, and the pairing is one to one; otherwise it is cannot-evaluate (conflict-name), never a
+pass. A path in D, outside C
 and declared, passes only when the declaration names exactly the recorded
 entry (its mode and object id, or absent = true for a path the result does not hold); any other declared
 content is a finding. A path in D, outside C and undeclared, is a finding (exit 1) naming the commit, the
@@ -190,8 +194,9 @@ deleted (or reverts a change main made) passes, since only merges are re-merged 
 ordinary change (the train squash then carries the loss onto main); in the default mode the declaration file
 is read from the work tree of --repo, so an uncommitted edit to it applies; the content of a conflict
 resolution (a path git reports conflicted passes whatever it holds); an entry git moved aside for a conflict
-and kept with git's own content passes under any name PATH~LABEL (the original merge's labels are not recorded,
-so LABEL is not judged); a squash that is neither named nor
+and kept with git's own content passes under a name PATH~LABEL that neither input tree, the merge base nor the
+re-merged tree holds, when the recorded tree does not also hold the re-merge's own name for it (the original
+merge's labels are not recorded, so LABEL is not judged); a squash that is neither named nor
 declared (a one-parent commit is not recognized as a squash from its message); a commit outside the range; a
 merge-tree output cut after a whole message that still leaves
 every stage path named by a CONFLICT message; a path that is not valid UTF-8 cannot be declared; a
@@ -289,7 +294,7 @@ RULES = ("compare", "conflict-exempt", "declaration-exact", "declaration-stale",
          "recorded-tree", "header-parents", "private-commit-graph", "blob-readable", "repository-top",
          "member-declarations", "name-unique", "tree-unique", "tree-ids", "object-hash", "bare-declarations",
          "merge-base-objects", "base-history-hash", "declaration-hash", "tree-canonical", "source-store",
-         "object-kind", "conflict-names")
+         "object-kind", "conflict-names", "conflict-name-taken", "conflict-name-destination")
 
 
 class CannotEvaluate(Exception):
@@ -870,14 +875,20 @@ def describe(entry):
 GENERATED_SUFFIX_RE = re.compile(rb"(?:_[0-9]+)?")
 
 
-def conflict_names(conflicted, differing, expected, recorded, declared, labels):
+def conflict_names(conflicted, differing, expected, recorded, declared, labels, taken=frozenset(),
+                   recorded_paths=frozenset()):
     """Where a conflict made git write a side's entry under a new name (PATH~LABEL, for a file/directory or
     distinct-types conflict, with _N added when that name is taken), the name holds the label git gave that side:
     merge-tree labels each side by the id it is given, the original merge by its own label (HEAD, a branch name).
     Returns (mapped {recorded path: re-merge path}, unmapped [recorded paths]): a recorded-only, undeclared path
     outside the conflicted set that is PATH~LABEL for the PATH of such a re-merge name is mapped when its entry is
     exactly the re-merge's entry under that name and the pairing is one to one; else it is unmapped (the gate
-    cannot tell which side's entry it is, so cannot-evaluate, never a finding)."""
+    cannot tell which side's entry it is, so cannot-evaluate, never a finding). Only a name git itself could have
+    generated for this merge is a candidate: git never picks a name that already exists in either input tree or
+    the merge base, so a path in taken (every path of both input trees, of each merge-base tree and of the
+    re-merged tree, subtrees included) is no candidate and gets the ordinary comparison. A pairing whose re-merge
+    name the recorded tree already holds (recorded_paths, every path of the recorded tree) is not one to one (the
+    recorded tree would hold git's entry twice), so the candidate is unmapped."""
     generated = {}
     for path in conflicted:
         for label in labels:
@@ -890,13 +901,14 @@ def conflict_names(conflicted, differing, expected, recorded, declared, labels):
     pairs = {}
     lookalikes = set()
     for path in sorted(differing):
-        if path in conflicted or path in declared or path in expected or path not in recorded:
+        if (path in conflicted or path in declared or path in expected or path not in recorded
+                or path in taken):
             continue
         for name, stem in generated.items():
             rest = path[len(stem) + 1:]
             if path.startswith(stem + b"~") and rest and b"/" not in rest:
                 lookalikes.add(path)
-                if recorded[path] == expected.get(name):
+                if recorded[path] == expected.get(name) and name not in recorded_paths:
                     pairs.setdefault(path, set()).add(name)
     claimed = {}
     for path, names in pairs.items():
@@ -1012,7 +1024,21 @@ def judge(run, priv, commit, p1, p2, recorded_tree, resolutions, disabled, objec
     declared = {path: entry for (merge, path), entry in resolutions.items() if merge == commit}
     renamed, unmapped = {}, []
     if "conflict-names" not in disabled:
-        renamed, unmapped = conflict_names(conflicted, differing, expected, recorded, declared, (p1, p2))
+        taken = set()
+        if "conflict-name-taken" not in disabled and any(b"~" in path for path in conflicted):
+            # Every path of both input trees, of each merge-base tree and of the re-merged tree: none of them can
+            # be a name git generated for this merge's conflict.
+            taken.update(expected_all)
+            trees = list(input_trees) + list(base_trees)
+            if not merge_base_objects:
+                for merge_base in bases:
+                    raw = priv.run(["cat-file", "commit", merge_base]).stdout
+                    trees.append(parse_commit(raw, disabled)[0])
+            for tree in trees:
+                taken.update(tree_entries(priv, tree, disabled))
+        recorded_paths = set(recorded_all) if "conflict-name-destination" not in disabled else set()
+        renamed, unmapped = conflict_names(conflicted, differing, expected, recorded, declared, (p1, p2), taken,
+                                           recorded_paths)
     clean = True
     for path in sorted(differing):
         have = recorded.get(path)
@@ -2016,6 +2042,38 @@ def fixtures(root):
     fx.git("add", "-A")
     fx.git("commit", "-q", "--no-edit")
     cases["conflict-name-lossy"] = (fx.path, {"base": fd_main, "head": fx.git("rev-parse", "HEAD")})
+    # Both git's name a~HEAD and the re-merge's own name a~<id> kept with git's content: the re-merge's name is
+    # already in the recorded tree, so a~HEAD cannot be paired one to one (a duplicate), cannot-evaluate.
+    fx.git("checkout", "-q", "-b", "fd-duplicate", fd_main)
+    fx.git("merge", "-q", "--no-edit", "side", ok=(1,))
+    fx.write("a~" + fd_main, b"base, edited on main\n")
+    fx.git("add", "-A")
+    fx.git("commit", "-q", "--no-edit")
+    cases["conflict-name-duplicate"] = (fx.path, {"base": fd_main, "head": fx.git("rev-parse", "HEAD")})
+
+    # A name that already exists is never one git generated for the conflict: the merge base holds a and a~old,
+    # the side turns a into a directory and deletes a~old, main edits a to a~old's content, and the merge drops
+    # git's a~HEAD and keeps the deleted a~old. a~old is in the merge base, so it is judged as any other path: the
+    # side's deletion was lost, a finding.
+    fx = Fixture(root, "file-directory-deleted")
+    fx.write("a", b"base\n")
+    fx.write("a~old", b"an older copy of a\n")
+    fx.write("keep.txt", b"kept\n")
+    fx.commit("base")
+    fx.git("checkout", "-q", "-b", "side")
+    os.remove(os.path.join(fx.path, "a"))
+    os.remove(os.path.join(fx.path, "a~old"))
+    fx.write("a/sub", b"a is a directory on the side\n")
+    fx.commit("side turns a into a directory and deletes a~old")
+    fx.git("checkout", "-q", "main")
+    fx.write("a", b"an older copy of a\n")
+    deleted_main = fx.commit("main edits a to a~old's content")
+    fx.git("merge", "-q", "--no-edit", "side", ok=(1,))
+    os.remove(os.path.join(fx.path, "a~HEAD"))
+    fx.write("a~old", b"an older copy of a\n")
+    fx.git("add", "-A")
+    fx.git("commit", "-q", "--no-edit")
+    cases["conflict-name-deleted"] = (fx.path, {"base": deleted_main, "head": fx.git("rev-parse", "HEAD")})
 
     # An older merge whose auto-merged blob is missing, below a newer merge whose re-merge writes that same blob
     # (and whose recorded tree holds a declared hand edit instead): the newer merge is judged first, so its
@@ -2150,6 +2208,9 @@ EXPECT = {
                            "conflict-names"),
     "conflict-name-edited": (2, (CONFLICT_NAME, "a~HEAD is named like an entry git moves aside"), "conflict-names"),
     "conflict-name-lossy": (1, ("keep.txt: re-merge", "a~HEAD: git's own name for the conflict entry"), None),
+    "conflict-name-duplicate": (2, (CONFLICT_NAME, "a~HEAD is named like an entry git moves aside"),
+                                "conflict-name-destination"),
+    "conflict-name-deleted": (1, ("a~old: re-merge",), "conflict-name-taken"),
     "regenerated-older": (2, (MISSING_OBJECT, "of the recorded tree", "missing or not a blob"), None),
     "regenerated-range": (2, (MISSING_OBJECT, "of the recorded tree", "missing or not a blob"), "source-store"),
 }
@@ -2335,7 +2396,8 @@ def self_test():
           "base-history commit, merge-base commit, merge-base tree, merge-base blob and member declaration blob, "
           "a recorded, input or member tree off git's canonical form, a missing blob a later re-merge writes, "
           "a blob entry of the recorded, either input or the merge-base tree naming an object read as a tree, "
-          "a file/directory conflict kept as git named it, edited, or beside a loss, and each rule red when "
+          "a file/directory conflict kept as git named it, edited, beside a loss, kept twice, or kept under a name "
+          "the merge base already holds, and each rule red when "
           "removed)".format(
               len(executed)))
     return 0

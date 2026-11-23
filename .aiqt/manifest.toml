@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "219b1a6bb9b45b6a971b1ec8960d01c284f6b2806034cb17049421584f862929"
+tree-sha256 = "8dc41d5511f662702774e2c5d0507f1b7f8877e0a9c8240b090b29162ef12257"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4392,8 +4392,8 @@ sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_merge_result.py"
-bytes = 143734
-sha256 = "1ccb2950bcebd98be85960b5382c7f282a4243b05ad597b8d1ff7e619db2751a"
+bytes = 148026
+sha256 = "c0ea47558936c3d9a6988a5a3bf6b9cc93234585ea7d8b1b82a8c75ac0933780"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
