@@ -48,13 +48,13 @@ the edits in tool order to the existing file content (old_string replaced once, 
 replace_all; an empty old_string creates an empty or absent file), and every line of the result that is not
 an unchanged carry-over from the original (the same line multiset diff) is checked WHOLE, so a fragment edit
 that repurposes a line (renaming `deadline` to `heartbeat`, or changing only the time on a heartbeat) is
-seen on the full resulting line, and a scheduling keyword immediately preceding the literal on that line
+seen on the full resulting line, and a scheduling keyword closely preceding the literal on that line
 still exempts it. The existing file is opened non-blocking, must be a regular file, and at most 4 MiB is
 read. When the WHOLE file was read (or it is absent) and an edit cannot apply (an old_string not found), the
 call is allowed: the tool itself fails and writes nothing. When the file was NOT read whole (over the 4 MiB
 cap, unreadable, or not a regular file), whole-line reconstruction is impossible, so each edit's new_string
 lines (less lines identical to its old_string lines) are checked, and the call is denied only when that
-fragment itself carries a future literal with no immediately preceding keyword (blockquote lines and code
+fragment itself carries a future literal with no closely preceding keyword (blockquote lines and code
 spans are exempt there too, but not fences, whose context the fragment cannot see); a time-only fragment (for
 example `17:45` to `22:25`) in such a file is not caught (disclosed below). An UNREADABLE target (it could not
 be opened or read, or is not a regular file, so nothing of it was read) fails OPEN except for what the new
@@ -286,7 +286,7 @@ can pass (a disclosed miss west of UTC, where the UTC reading of a composed loca
 overflowing or invalid literal is skipped without disabling the rest). A literal more than 60 seconds after
 now is future.
 
-Observed-time vs scheduled. A future literal is allowed when a scheduling keyword IMMEDIATELY precedes it on
+Observed-time vs scheduled. A future literal is allowed when a scheduling keyword CLOSELY precedes it on
 its line (a whole line of the resulting file, or a line of the Bash command text): the keyword ends at most
 SCHED_GAP_TOKENS (3) word tokens before the literal (a word token holds a letter or digit; `:` or `[` do not
 count), as in "next_run: T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T".
@@ -374,7 +374,7 @@ already existed elsewhere in the file, in the same table context, is exempt wher
 test sees only that prefix, and an Edit is checked on its fragment only, so a time-only fragment edit
 (`17:45` to `22:25`) there is a MISS. The table-header exemption applies only to whole files: the fragment
 path (an Edit on a file not read whole) and Bash get no table context, so a future literal in a table row
-under a scheduling header cell is denied there unless a keyword immediately precedes it on its own line (a
+under a scheduling header cell is denied there unless a keyword closely precedes it on its own line (a
 disclosed false positive). Table continuation follows GFM's pipe rules but recognizes only a subset of its
 block-interruption rules (a blank line, a list marker, an ATX heading, a blockquote, or a fence end the
 table), and that mismatch errs in BOTH directions. A MISS: a line GFM would end the table on for another
@@ -387,7 +387,7 @@ table) ends the table early, so a later row loses its header exemption.
 The header rule is lexical like the keyword rule: a keyword-bearing header cell
 exempts every literal in its column of a row holding an unescaped pipe. A pipe-free row gets no header
 exemption, so a bare scheduled value on its own pipe-free row under a scheduling header cell 0 (a GFM
-one-cell row) is denied (a disclosed false positive); the remedy is a scheduling keyword immediately before
+one-cell row) is denied (a disclosed false positive); the remedy is a scheduling keyword closely before
 the value on that line, or a pipe that makes it a piped row. MISS (disclosed): because GFM keeps a table
 open through pipe-free lines until a blank line, prose written directly under a table with no blank line
 stays in it, and a later prose line that happens to hold an unescaped pipe (a shell pipe, say) is read as a
@@ -724,7 +724,7 @@ def _in_spans(spans, pos):
 
 
 def future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None):
-    """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
+    """Future literals on one line not closely preceded by a scheduling keyword (SCHED_GAP_TOKENS). `in_subst(pos)` is true
     for a literal starting at absolute position base+pos that lies inside a date substitution; `cache` maps
     a literal to its converted value so a repeated literal is converted once; `extra_exempt(pos)`, when
     given, is an ADDITIONAL exemption for a literal starting at line position pos (the table-header rule);
@@ -3248,8 +3248,8 @@ def _deny(bad, now):
                 + f". The real clock now reads {now.strftime('%Y-%m-%dT%H:%M:%SZ')} "
                 f"({local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()}). A record timestamp is read from the "
                 "clock, never composed: use $(date -u +%Y-%m-%dT%H:%M:%SZ) in a shell write, or run `date -u` and "
-                "copy its output. A genuinely scheduled value is allowed when a schedule word immediately precedes "
-                "it (due, deadline, expires, until, through, valid, next run, scheduled for, not before, eta, "
+                "copy its output. A genuinely scheduled value is allowed when a schedule word closely precedes "
+                "it, ending at most three words before it (due, deadline, expires, until, through, valid, next run, scheduled for, not before, eta, "
                 "planned, target date, by). A Bash command is checked lexically: a command whose write TARGETS a "
                 "store path (a `>` redirection target, a tee operand, a sed/perl -i file, a cp/mv/install "
                 "destination, dd of=, or a truncate, ed, or ex file; a relative path is resolved against the cwd "
@@ -4138,7 +4138,7 @@ def _self_test():
             self.assertTrue(self.ev("Bash", command=f"echo $(/usrdate 2099-01-01T00:00Z) > {PROJ}/private/s.md"))
             self.assertTrue(self.ev("Bash", command=f"echo $(envdate 2099-01-01T00:00Z) > {PROJ}/private/s.md"))
 
-        def test_keyword_must_immediately_precede(self):
+        def test_keyword_must_closely_precede(self):
             for line in ("hb: 2099-01-01T00:00Z next", "target branch pushed, hb: 2099-01-01T00:00Z",
                          "next we did a b c and hb 2099-01-01T00:00Z"):
                 self.assertTrue(self.ev("Write", file_path=self.store, content=line), line)

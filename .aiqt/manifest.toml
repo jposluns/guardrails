@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "3dcc2851e8432da6883a10b6b8ed2c81a4154cf0e29ec037cbe2573d037fa984"
+tree-sha256 = "f6f2c493318d3274e7f985dde7afb74a8709db17c876b83aea6345a47871e667"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -147,8 +147,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9900
-sha256 = "6b5ede200e605cfb209bf975aaaadbf74b58df877a624260c2dced120a6ebf72"
+bytes = 9925
+sha256 = "27e80b4cf1412b65d888d5d0effc6195b7edb25645e0192b907f8eac12b68738"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2377,8 +2377,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 55390
-sha256 = "e7988dd5241da985066dd153cd0e3505436343a8a764c2dd2f35c7d1417a984a"
+bytes = 55420
+sha256 = "396814ac6f9c9ade22ebf8b7737326c85496b2fefc36fc542cc6f7d45c464a84"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2387,13 +2387,13 @@ sha256 = "8a974e4bdfb90410bc659aef1419a764cbf0232bdfd5687deabede8b0319ee0a"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 78944
-sha256 = "0a62433587bb928347bcaec464060ce782fa6f8212e95cd7c96b034ee9cc6bd6"
+bytes = 78992
+sha256 = "3cc707e0951b0cc5021e84411093f6f9c74ce49bf39049e537acc44ac7108efc"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "b0e171f14d300b01cd3b25083630823317e87a99c375a22fcad5de734e895cc7"
+sha256 = "d410188ff610714299155a4bb2e1310a9bc2c7360f7cebf124ef3bc63bb5b2e3"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2412,8 +2412,8 @@ sha256 = "5f8ffc633993ebb9b84b1c858b5d03fa94511c30cc1624f6c2813a0e3268a9fb"
 
 [[sources]]
 path = ".preview/future-stamp-write.py"
-bytes = 429199
-sha256 = "e83d2aa851fac017b23fa4d952bf5e2291919ab1a7821e5f0196e7370c9208f2"
+bytes = 429224
+sha256 = "7f36677587e0dfecd277e57f1f39c3bfae92e1206b464625734868d87b7b40f6"
 
 [[sources]]
 path = ".preview/pattern-self-match.py"
@@ -2432,8 +2432,8 @@ sha256 = "319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 562118
-sha256 = "067f92297dc9d03f709f9d59a6c9cfe0d86586a044285d6ad17136ea757d8d53"
+bytes = 566696
+sha256 = "989eb43701f2a1db39baf76d6c0f6c6ea33d77d2d39c26e113a7fb1d0cbcdb00"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -2492,8 +2492,8 @@ sha256 = "7a475927ce80162025499065202bd6482b18ea5908170df6e90fe6a343e5f3cc"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 26674
-sha256 = "a97044490fba7a669ce70b5eaa535ca36aa2f6312b33236ab700543d4e6731d9"
+bytes = 30214
+sha256 = "3165af303b4cbd5c0e3cc058774e205414282414f6d3f58ef290568c6a9e1d36"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4282,8 +4282,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 231479
-sha256 = "9f1f734e74dd8a2dda8b3be986d6f8a00ab017b5d05ff5696508c5fc71feaec6"
+bytes = 231550
+sha256 = "95736961a85b2a6e4232922cf848320551d09f545810c62f872e21d51e3f4d02"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4582,8 +4582,8 @@ sha256 = "d26f0ac312155884874d30f598e8d39f8ab706df56293806b5a2d3084ff7fa1b"
 
 [[sources]]
 path = "tools/ci-status.sh"
-bytes = 141879
-sha256 = "116e7acb4fe99f5c9ced0787d088ea9b8dba12e94f610be3be9287cc3290842f"
+bytes = 146001
+sha256 = "6f19d38fd958ffc8b85e30299ee8c859bbd8db71ec0bff4ba05ad4312e427d6f"
 
 [[sources]]
 path = "tools/ci_build_bash.py"
@@ -4747,8 +4747,13 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/measure_hook_latency.py"
-bytes = 110051
-sha256 = "d58c0e1d7a46411d6a2f7f28490fabdb7da8466ae1547662517d55d5606cbece"
+bytes = 149679
+sha256 = "829bc73b78ed431223d127b1bd6ab7e6e48bb50c5d88acd3eb076c0c50293f16"
+
+[[sources]]
+path = "tools/merge_pr.py"
+bytes = 109615
+sha256 = "22b69f2bbfb344a90438cd23ccb74964318e658eda56c0c6af039250d346b874"
 
 [[sources]]
 path = "tools/migrate.py"
@@ -4812,8 +4817,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 36730
-sha256 = "c37abd7d2a2451d5588012ddce9156fa988ee03a54cf19033fca15c726eee953"
+bytes = 36833
+sha256 = "97d7008c14e285a2b5d9dd6f16c23366b994e7da9cae35be85d1b2a2606fadc4"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4822,18 +4827,18 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 3106748
-sha256 = "f02c2112a3ed1f303d52133d69255e7aa20445e48089bbaecfa55f6613ee8b03"
+bytes = 3108223
+sha256 = "c971a5515f1ed65188f142a1042bc4edb9d8811469f0ab55ed63f6fcbcd62c23"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 336025
-sha256 = "17db1dc778d9c9e2a1523f2a64d6308bb5b73707d099db51be737d57826268ef"
+bytes = 346057
+sha256 = "d1afc540fb92b637f23aa095adb7cbdc039202d70e55c151e9ad0f3396c354b5"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
-bytes = 273706
-sha256 = "5218fd5dd347aa7f25cebbbce29bff5d48d94b8ffdd219e678ddd8ccc75ffc0d"
+bytes = 276699
+sha256 = "7d77fdbeb775e73ded2f6b146ea81df671acd0d4ae7b2d354685a005f7be7f28"
 
 [[sources]]
 path = "tools/selftest_gate_record.py"
@@ -4842,8 +4847,8 @@ sha256 = "e9fad8c7ce34bd2e963e979d83205b6d062be130b783aa309b2137c36aa92f5d"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 494914
-sha256 = "4d0e5602a3cdfbee1e6d05e59b80e2c3f6222b7e8e415d5d1fa3671c4bc44f4b"
+bytes = 499434
+sha256 = "45b9f6e1a5ce358b2cd47daa4b07394286a483276fdb2fc3e4dc3392cb516d76"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
@@ -4862,8 +4867,8 @@ sha256 = "69db6225093b83e3409d42fcbe184be4496a3407e48f411fdf5a899ad7660dca"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_core.py"
-bytes = 230099
-sha256 = "61e8b8ac7d7ac57709a9a8cdd61112c510c2971f6ef9fb281c59026bd544b7a0"
+bytes = 232034
+sha256 = "a3e6f630d1e98d976921bf790ae0cf8374de371b3648e296638407b361e6d9a7"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

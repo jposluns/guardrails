@@ -293,6 +293,36 @@ def _roster_checks():
         got = refusal()
     check("roster/shard-launch-other-count-refused",
           got.startswith("unparseable suite invocation:") and "--shard" in got, True)
+
+    # The one form rule (CONFIG_BARE_SUITE_RUNNERS in the engine): every bare suite runner the
+    # roster keeps is a selftest_ module, a registered bare launch, a declared bare runner, or
+    # excluded. Each vector takes one route away from the LIVE tables and must draw THIS guard's
+    # refusal naming that runner (red when the rule is dropped or bypassed): tools/ci_build_bash.py
+    # loses its CONFIG_BARE_SUITE_RUNNERS entry, and tools/merge_pr.py loses its bare exclusion,
+    # the shape that reached the config lanes as a bare usage-error launch (exit 2) in merge train
+    # 20261121c. The live roster itself builds (roster/live-roster-accounted), so every live suite
+    # runner is accounted.
+    bare_runners = _gfe.CONFIG_BARE_SUITE_RUNNERS
+    with patch.dict(bare_runners):
+        del bare_runners["tools/ci_build_bash.py"]
+        got_declared = refusal()
+    with patch.dict(CONFIG_EXCLUSIONS["all"]):
+        del CONFIG_EXCLUSIONS["all"][("tools/merge_pr.py",)]
+        got_excluded = refusal()
+    check("roster/unaccounted-bare-runner-refused",
+          (got_declared.startswith("unaccounted bare suite runner: 'tools/ci_build_bash.py'"),
+           got_excluded.startswith("unaccounted bare suite runner: 'tools/merge_pr.py'")),
+          (True, True))
+    # A stale entry (a runner no suite keeps bare: tools/check_secrets.py, a registered bare gate
+    # and no suite runner) and an unreasoned one (a blank reason) are each refused.
+    got = []
+    for runner, reason in (("tools/check_secrets.py", "Synthetic stale entry."),
+                           ("tools/ci_build_bash.py", "  ")):
+        with patch.dict(bare_runners, {runner: reason}):
+            got.append(refusal().startswith(
+                "stale or unreasoned bare suite runner entry: {!r}".format(runner)))
+    check("roster/stale-bare-runner-entry-refused", got, [True, True])
+    check("roster/live-roster-accounted", refusal(), "")
     shutil.rmtree(scratch, ignore_errors=True)
 
 
