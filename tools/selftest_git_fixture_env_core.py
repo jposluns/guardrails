@@ -1390,7 +1390,8 @@ def _member_close_controls(fixture):
         # stood-down observation, so a merely slow positive control whose evidence is at its
         # want is cannot-evaluate, never a definite mismatch. That the child's evidence IS
         # at its want under a slow positive control rests on "producer-map" and the
-        # "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers).
+        # "failed-stalled" value pin, short of THE RESIDUAL, what neither net catches
+        # (_allowlist_producers).
         _stood_down_wants([slow_down], [slow_want]) == [slow_down],
         # The deliberate empty send list (round 20): "failed-stalled" owes no signal by
         # construction, so its False timeliness field alone records nothing and the whole
@@ -1608,7 +1609,9 @@ def _member_close_controls(fixture):
     # test, whose body also runs only in the lock scenario).
     # Last, seven instances of routes the reader does NOT read (instances, not the
     # class, which the NOT READ text of _slow_control_record states by construction),
-    # held AT [] so a reader that starts catching one must update that text: an
+    # held AT [] so a reader change that starts catching one alters that probe's entry,
+    # fails the "slow-control" pin and must update that text (these probes only parse
+    # mutated sources; a route outside the seven is not detected here): an
     # exception name the handlers use rebound ahead of the try (exceptbind), contextlib
     # rebound by a class whose redirect_stdout turns a TimeoutExpired into RuntimeError
     # on exit (ctxclass), outcome stored through the child's own module attribute
@@ -1921,8 +1924,10 @@ def _member_close_controls(fixture):
                 # through dottedimport), names the fact it breaks; the last seven
                 # (exceptbind, ctxclass, mainattr, wildcard, exitafter, clsname,
                 # funcglobals) are instances of disclosed routes the reader does not read,
-                # held at [] so a reader that starts catching one must update the NOT READ
-                # text of _slow_control_record.
+                # held at [] so a reader change that starts catching one alters that
+                # probe's entry, fails this pin and must update the NOT READ text of
+                # _slow_control_record; a route outside the seven is not detected here
+                # (these probes only parse mutated sources).
                 ("slow-control", [[], ["gate"], ["gate", "record"], ["gate"], ["outcome"],
                                   ["outcome"], ["outcome"], ["outcome"], ["outcome"],
                                   ["outcome"], ["outcome"], ["outcome"], ["outcome"],

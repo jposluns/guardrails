@@ -3968,7 +3968,8 @@ def _handshake_expired(scenario, extra):
 #   60 s positive-control bound make the run cannot-evaluate, never a definite mismatch,
 #   while a false flag beside the same record stays definite. That the child's flags
 #   ARE at their want then rests on the producer pin ("producer-map" below) and the
-#   "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers). Member a's own
+#   "failed-stalled" value pin, short of THE RESIDUAL, what neither net catches
+#   (_allowlist_producers). Member a's own
 #   arrival and raise came OFF this entry (round 17): that 60 s bound sits between
 #   member a's worker entering run and those flags, so a merely slow git leaves them
 #   False with the code healthy; they are the "member_a" extra, never definite when
@@ -4652,7 +4653,9 @@ def _slow_control_record(source=None):
     earlier handler and no nested try, and yields the prefix the gate tests unless an edit
     in the NOT READ class below changes what the try or the gate evaluates. NOT READ, each
     named route an EXAMPLE of that class, a route that can keep the record out of the
-    report while this reader still gives []: whether a TimeoutExpired reaches this try at
+    report the suite parses (the text after the LAST "PROBE-REPORT " in the child's
+    stdout, decoded as JSON, as THE NOT READ CLASS below states; not merely a printed
+    report) while this reader still gives []: whether a TimeoutExpired reaches this try at
     all (the suite code main() runs, and the child's replacements of suite attributes on
     that path, such as the sweep wrapper, can swallow or replace it); a binding made by a
     wildcard import (from <module> import *), which can bind outcome or scenario unseen
@@ -4673,8 +4676,11 @@ def _slow_control_record(source=None):
     sys._getframe().f_globals['outcome'] = ...), which binds no name either; an exit or
     raise between the gate and the report (an assert, raise, sys.exit or os._exit after the
     record, in the child or a def it calls), so no PROBE-REPORT line is printed and the run
-    reads as a missing report, not a timeout; and any change to how the report is written
-    (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
+    reads as a missing report, not a timeout; any change to how the report is written
+    (a rebinding or replacement of print, sys.stdout or json.dumps); and any change to
+    WHICH report the suite parses (a second "PROBE-REPORT " line printed after the
+    committed one, without the record, is the one the parent decodes, though the record
+    was printed). THE NOT READ CLASS,
     exact by construction: this reader does not read ANY edit, by any route, that changes
     what the pinned try or the gate evaluates, or whether the record reaches the extras the
     parent decodes (_member_close_controls in tools/selftest_git_fixture_env_core.py takes
