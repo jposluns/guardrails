@@ -276,26 +276,36 @@ def parse_ownership(data):
     return exclusions, release, namespace, binary_set
 
 
+# The GIT_* variables a supplied launch environment may keep, each only at exactly this value: the
+# isolation pins of check_release_cut.git_environment(). Any other GIT_* entry of a supplied mapping is
+# dropped, so a caller cannot hand this read a GIT_DIR, GIT_INDEX_FILE, GIT_CONFIG_* or alternates value.
+GIT_ENV_PINS = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+
+
 def git_tracked(root, env=None):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
-    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels:
-    core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
-    must never run under a gate read; the genesis and delta branches of check_release_delta consume
-    this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
-    never a transport), atop the GIT_* environment scrub. `env` is the launch environment: None (every
-    caller but one) keeps that scrub of os.environ, so the caller's on-disk git configuration is still
-    read; check_byte_canon passes check_release_cut.git_environment(), so no home, XDG or system git
-    configuration reaches its read. GIT_NO_LAZY_FETCH=1 is applied over either."""
+    NEVER a filesystem walk and never a silent empty tree. Pinned like the release-gate funnels
+    (check_release_cut.git): --no-replace-objects, core.commitGraph=false and core.fsmonitor=false (a
+    repo-config fsmonitor hook is attacker-chosen code and must never run under a gate read; the genesis
+    and delta branches of check_release_delta consume this enumerator), protocol.allow=never and
+    GIT_NO_LAZY_FETCH=1 (a missing object is a refusal, never a transport), atop the GIT_* environment
+    scrub. `env` is the launch environment: None (every caller but one) keeps that scrub of os.environ,
+    so the caller's on-disk git configuration is still read; check_byte_canon passes
+    check_release_cut.git_environment(), so no home, XDG or system git configuration reaches its read.
+    A supplied mapping is scrubbed too: every GIT_* entry is dropped unless it is one of GIT_ENV_PINS
+    at exactly its pinned value. GIT_NO_LAZY_FETCH=1 is applied over either."""
     if env is None:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env = dict(env)
+    else:
+        env = {k: v for k, v in env.items() if not k.startswith("GIT_") or GIT_ENV_PINS.get(k) == v}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
-        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",
-                               "-c", "protocol.allow=never",
-                               "ls-files", "-z", "--cached", "--stage"],
+        proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+                               "-C", str(root), "ls-files", "-z", "--cached", "--stage"],
                               capture_output=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("cannot run git ls-files ({}); fail-closed".format(exc))

@@ -16,9 +16,12 @@ Both git reads of the live gate (gen_manifest.git_tracked's `git ls-files` scope
 `git check-attr` coverage read) run under check_release_cut.git_environment(), the isolated read
 environment the release gates share: every GIT_* variable dropped, the system and global configuration
 off, HOME and XDG_CONFIG_HOME at an empty location. So no home, XDG or system git configuration (a
-malformed one, or a global core.attributesFile) can fail or steer the gate. The repository's own
-config and attributes are still read. Residual: no safe.directory trust comes from the caller either,
-so a checkout owned by another uid is a git failure here (exit 2), never a pass.
+malformed one, or a global core.attributesFile) can fail or steer the gate. Both reads also carry the
+same pinned options (GIT_READ_PINS: --no-replace-objects, core.commitGraph=false, core.fsmonitor=false,
+protocol.allow=never) and a timeout, so no core.fsmonitor hook, commit graph or replace ref, from any
+configuration level including the repository's own, runs or changes their input. The repository's own
+attributes and its other config are still read. Residual: no safe.directory trust comes from the caller
+either, so a checkout owned by another uid is a git failure here (exit 2), never a pass.
 
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
@@ -74,6 +77,12 @@ import gen_manifest  # noqa: E402  reuse the validated scope loader; never a sec
 # The isolated git read environment the release gates share (check_selftest_removal reads through it
 # too): every git call of this gate runs under it, so the caller's git configuration never reaches one.
 from check_release_cut import git_environment  # noqa: E402
+# The pinned git options every git call of this gate carries, the same set check_release_cut.git() and
+# gen_manifest.git_tracked() pin: no replace refs, no commit graph, and no fsmonitor hook (a hook set in the
+# checkout's own config is attacker-chosen code and must never run under a gate read), no transport.
+GIT_READ_PINS = ("--no-replace-objects", "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
+                 "-c", "protocol.allow=never")
+GIT_TIMEOUT = 60
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
 from _byte_canon import (  # noqa: E402
@@ -333,8 +342,10 @@ def effective_attributes(root, scope_paths):
     ordered = sorted(scope_paths)
     payload = b"".join(p.encode("utf-8") + b"\0" for p in ordered)
     try:
-        proc = subprocess.run(["git", "-C", str(root), "check-attr", "-z", "--stdin", *attrs],
-                              input=payload, capture_output=True, env=git_environment())
+        proc = subprocess.run(["git", *GIT_READ_PINS, "-C", str(root), "check-attr", "-z", "--stdin",
+                               *attrs],
+                              input=payload, capture_output=True, timeout=GIT_TIMEOUT,
+                              env=git_environment())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("git check-attr could not be launched ({})".format(exc))
     if proc.returncode != 0:
@@ -830,9 +841,112 @@ def self_test_main():
             pass
         except Exception as exc:
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
+        # Every git launch of the gate (the scope read through gen_manifest.git_tracked and the check-attr
+        # read) carries GIT_READ_PINS ahead of -C, a timeout, and git_environment(); a supplied launch
+        # environment keeps no GIT_* entry outside gen_manifest.GIT_ENV_PINS at its pinned value.
+        launches = []
+
+        def _record(argv, **kwargs):
+            launches.append((list(argv), kwargs))
+            raise FileNotFoundError("recorded git launch")
+        subprocess.run = _record
+        for label, call in (("scope read", lambda: release_scope(repo_root())),
+                            ("check-attr read", lambda: effective_attributes(repo_root(), {"README.md"}))):
+            del launches[:]
+            try:
+                call()
+                failures.append("{}: a recorded launch failure did not fail closed".format(label))
+            except GateError:
+                pass
+            if len(launches) != 1:
+                failures.append("{}: expected one git launch, recorded {}".format(label, len(launches)))
+                continue
+            argv, kwargs = launches[0]
+            env = kwargs.get("env") or {}
+            if argv[:1 + len(GIT_READ_PINS)] != ["git", *GIT_READ_PINS]:
+                failures.append("{}: git launched without the pinned options: {}".format(label, argv))
+            if not kwargs.get("timeout"):
+                failures.append("{}: git launched without a timeout".format(label))
+            want = dict(git_environment(), GIT_NO_LAZY_FETCH="1")
+            if any(env.get(k) != want[k] for k in ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM",
+                                                   "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS")):
+                failures.append("{}: git launched outside git_environment()".format(label))
+        hostile = {"PATH": os.environ.get("PATH", ""), "GIT_DIR": "/nonexistent",
+                   "GIT_INDEX_FILE": "/nonexistent", "GIT_CONFIG_GLOBAL": "/nonexistent",
+                   "GIT_CONFIG_COUNT": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
+        del launches[:]
+        try:
+            gen_manifest.git_tracked(repo_root(), env=hostile)
+        except gen_manifest.GateError:
+            pass
+        kept = sorted(k for k in (launches[0][1].get("env") or {}) if k.startswith("GIT_")) \
+            if launches else None
+        if kept != ["GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS"]:
+            failures.append("git_tracked kept GIT_* entries {} from a supplied environment".format(kept))
     finally:
         subprocess.run = saved_run
     check("check-attr-fail-closed")
+    check("git-read-pins")
+    # The pins hold against real git: a fixture repository whose own config sets a core.fsmonitor hook
+    # that writes a marker, read with a hostile HOME, XDG_CONFIG_HOME and GIT_* caller environment, gives
+    # the same scope and attribute map as a clean read, and the hook never runs.
+    with _tf.TemporaryDirectory() as _d:
+        tmp = Path(_d)
+        fx = tmp / "fixture"
+        fx.mkdir()
+        (fx / ".gitattributes").write_bytes(b"* text eol=lf\n*.bin -text\n")
+        (fx / "a.txt").write_bytes(b"a\n")
+        (fx / "b.bin").write_bytes(b"\x00\x01")
+        for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "fixture")):
+            proc = gen_manifest._git(fx, *args)
+            if proc.returncode != 0:
+                failures.append("isolation fixture: git {} failed: {}".format(
+                    args[0], proc.stderr.decode("utf-8", "replace").strip()))
+
+        def _reads():
+            scope = gen_manifest.git_tracked(fx, env=git_environment())
+            return scope, effective_attributes(fx, scope)
+        try:
+            clean = _reads()
+        except (GateError, gen_manifest.GateError) as exc:
+            clean = None
+            failures.append("isolation fixture: clean read failed: {}".format(exc))
+        marker = tmp / "fsmonitor-ran.marker"
+        hook = tmp / "fsmonitor.sh"
+        hook.write_text("#!/bin/sh\necho ran >> '{}'\nexit 1\n".format(marker), encoding="utf-8")
+        hook.chmod(0o755)
+        if gen_manifest._git(fx, "config", "core.fsmonitor", str(hook)).returncode != 0:
+            failures.append("isolation fixture: could not set the repository core.fsmonitor hook")
+        home = tmp / "home"
+        (home / "xdg" / "git").mkdir(parents=True)
+        (home / ".gitconfig").write_text("[core]\n\tfsmonitor = {}\n\tattributesFile = {}\n".format(
+            hook, home / "attrs"), encoding="utf-8")
+        (home / "attrs").write_text("* -text\n", encoding="utf-8")
+        (home / "xdg" / "git" / "config").write_text("[core\n", encoding="utf-8")  # malformed
+        (home / "xdg" / "git" / "attributes").write_text("* -text\n", encoding="utf-8")
+        poison = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg"),
+                  "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_DIR": str(tmp / "missing"),
+                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                  "GIT_CONFIG_VALUE_0": str(hook)}
+        saved_env = {k: os.environ.get(k) for k in poison}
+        try:
+            os.environ.update(poison)
+            hostile_read = _reads()
+        except (GateError, gen_manifest.GateError) as exc:
+            hostile_read = None
+            failures.append("isolation fixture: hostile read failed: {}".format(exc))
+        finally:
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        if clean is None or hostile_read != clean:
+            failures.append("isolation fixture: the hostile read {} differs from the clean read {}".format(
+                hostile_read, clean))
+        if marker.exists():
+            failures.append("isolation fixture: the core.fsmonitor hook ran under a gate git read")
+    check("git-read-isolation-fixture")
     # _load_vectors strict rows: a malformed row and a missing required class each fail closed.
     def _vectors_reject(fake_rows):
         g = globals()
@@ -974,7 +1088,8 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: byte-format legs, the line and paragraph separator and soft-hyphen legs (direct "
           "and through run() over a temp tree), allowance scoping, "
-          "coverage logic, the containment "
+          "coverage logic, the pinned and isolated git reads (a repository fsmonitor hook and a hostile "
+          "home, XDG and GIT_* environment), the containment "
           "mode table and probe fail-safe, the policy and vector schema fail-closed legs, the "
           "published vectors and the soft-hyphen vector flip all hold")
     return 0

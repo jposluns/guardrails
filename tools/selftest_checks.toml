@@ -7957,6 +7957,8 @@ expected-check-ids = [
   "hardbreak-schema",
   "hardbreak-read-legs",
   "check-attr-fail-closed",
+  "git-read-pins",
+  "git-read-isolation-fixture",
   "vector-schema",
   "class-binding",
   "published-vectors",
