@@ -121,7 +121,8 @@ FIXTURE_REPO = "fixture/repository"
 FIXTURE_ORIGIN = "https://github.com/fixture/repository.git"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
-# The workflow file every read of ci-status.sh requires a completed successful run of.
+# The workflow file every read of ci-status.sh requires a completed successful run of by default
+# (--require-base BRANCH --require-workflow PATH requires PATH instead).
 QUALITY_PATH = ".github/workflows/quality.yml"
 # The fixture commit's committer date and the fixture clock. The script scans the unfiltered listing
 # back to min(committer date, now) minus its 24-hour margin; these mirror that arithmetic.
@@ -1466,6 +1467,34 @@ def _run_checks():
             retargeted.append((rc, calls, unmet_note in output,
                                "its recorded base is dev" in output))
         check("ci/require-base-retargeted-run-refused", retargeted, [(1, 1, True, True)] * 2)
+
+        # THE API HOST: --api-host github.com, in either position, puts --hostname github.com right after
+        # `api` on every gh call and changes no verdict; the same read without it carries no --hostname (the
+        # behaviour every other caller keeps). Another value, a value in another case, a repeat or a
+        # missing value is refused (exit 2) before any gh call. Every gh api call site in the script
+        # expands the host arguments.
+        pinned_prefix = ["api", "--hostname", "github.com"]
+        host_cases = []
+        for extra in (require + ("--api-host", "github.com"), ("--api-host", "github.com") + require, require):
+            rc, output, _calls = fixture.invoke([[page([pr_quality, pr_leaks])]], extra_args=extra)
+            host_cases.append((rc, "Quality" in output, bool(fixture.gh_argv),
+                               all(argv[:3] == pinned_prefix for argv in fixture.gh_argv),
+                               any("--hostname" in argv for argv in fixture.gh_argv)))
+        check("ci/api-host-pins-every-read", host_cases,
+              [(0, True, True, True, True)] * 2 + [(0, True, True, False, False)])
+        host_refusals = []
+        for extra in (("--api-host", "ghe.example.com"), ("--api-host", "GitHub.com"),
+                      ("--api-host", "github.com", "--api-host", "github.com"), ("--api-host",)):
+            rc, _output, _calls = fixture.invoke([[page([pr_quality])]], extra_args=require + extra)
+            host_refusals.append((rc, fixture.gh_argv))
+        check("ci/api-host-refusals", host_refusals, [(2, [])] * 4)
+        script_lines = SCRIPT.read_text(encoding="utf-8").splitlines()
+        call_sites = [line for line in script_lines if "gh api " in line and not line.lstrip().startswith("#")]
+        check("ci/api-host-every-call-site",
+              (len(call_sites) > 0,
+               [line.strip() for line in call_sites
+                if 'gh api ${GH_API_HOST_ARGS[@]+"${GH_API_HOST_ARGS[@]}"} ' not in line]),
+              (True, []))
 
         # A push run is not pull_request evidence, and a run with no (or a baseless) recorded pull
         # request has no establishable base: each is refused by name, never a pass.
@@ -3537,6 +3566,18 @@ def _main_health_checks(fixture):
 
     green = (0, 0, False, True, False, False, True, True)
     red = (1, 0, False, False, True, False, True, True)
+
+    # THE API HOST in the main-health read: with --api-host github.com every listing read carries
+    # --hostname github.com right after `api` and the verdict is unchanged; without it none does.
+    host_reads = []
+    for extra in (health + ("--api-host", "github.com"), health):
+        rc, output, calls = fixture.invoke([], rev=None, extra_args=extra,
+                                           main=[main_listing([main_run(601, "completed", "success", new_sha)])])
+        host_reads.append((rc, calls, green_line in output, bool(fixture.gh_argv),
+                           all(argv[:3] == ["api", "--hostname", "github.com"] for argv in fixture.gh_argv),
+                           any("--hostname" in argv for argv in fixture.gh_argv)))
+    check("ci/main-health-api-host-pins-every-read", host_reads,
+          [(0, 0, True, True, True, True), (0, 0, True, True, False, False)])
     undecided = (2, 0, False, False, False, True, False, True)
     new_green = main_run(601, "completed", "success", new_sha)
     new_red = main_run(602, "completed", "failure", new_sha)
