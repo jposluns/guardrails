@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "db608598702fb18ff553db4799c9116d41ce19701d4d22bcc18f0045f59d9a68"
+tree-sha256 = "9cb8e9238ace6269a900521288f661a24943ea4977ddc5995d1499afe0f1f903"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4277,8 +4277,8 @@ sha256 = "92153b428dcfcb12b60262e46bf382e87dcf7ccd60fdcff8b8e5333de0b229eb"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 65817
-sha256 = "69b317a375b06d1c54e03cad3d3c1d75d51725fad4a6c7e99be76fc920738f5b"
+bytes = 71504
+sha256 = "afd6468e116d6ff53d8d24bedef59bdb692c8e497b5f58796eb64855274c6fd2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
@@ -4487,8 +4487,8 @@ sha256 = "a279ed109e8777ab6f99dd03c247d8528d5595ab9aff09ecf4e9bae851bbd3a4"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 331188
-sha256 = "ce30cfd4e46c3db11d4c65cc5e802238c7fb9cbabc3752575da5e5ecc081215b"
+bytes = 331286
+sha256 = "9b235f066c36193d17264849d1210df6deef43a12ac3ec4ec1dccb4d952900fb"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -4677,8 +4677,8 @@ sha256 = "6ca6c684730d3a5231b2ccfe8244ae682a77d4bdbb8950ac9a74aad027927e07"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 114933
-sha256 = "9c46204897fa33a30559baee599771d65c5dab9242d70f6c7a43fac71941de71"
+bytes = 115105
+sha256 = "efef48a0ec429336501fb4fa2867b38d68595ba9bba62a445ad61d45f5dd2e19"
 
 [[sources]]
 path = "tools/gen_mappings.py"

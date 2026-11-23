@@ -276,11 +276,14 @@ def parse_ownership(data):
     return exclusions, release, namespace, binary_set
 
 
-# The GIT_* variables a supplied launch environment may keep, each only at exactly this value: the
-# isolation pins of check_release_cut.git_environment(). Any other GIT_* entry of a supplied mapping is
-# dropped, so a caller cannot hand this read a GIT_DIR, GIT_INDEX_FILE, GIT_CONFIG_* or alternates value.
-GIT_ENV_PINS = {"GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+def git_env_pins():
+    """The GIT_* variables a supplied launch environment may keep, each only at exactly this value:
+    derived from check_release_cut.git_environment() (its GIT_* entries), never a hand copy, so a pin
+    the shared helper gains is kept here too. Any other GIT_* entry of a supplied mapping is dropped, so
+    a caller cannot hand this read a GIT_DIR, GIT_INDEX_FILE, GIT_CONFIG_* or alternates value. Imported
+    only on the supplied-environment path, so the env=None callers never load check_release_cut."""
+    from check_release_cut import git_environment
+    return {k: v for k, v in git_environment().items() if k.startswith("GIT_")}
 
 
 def git_tracked(root, env=None):
@@ -295,12 +298,13 @@ def git_tracked(root, env=None):
     scrub. `env` is the launch environment: None (every caller but one) keeps that scrub of os.environ,
     so the caller's on-disk git configuration is still read; check_byte_canon passes
     check_release_cut.git_environment(), so no home, XDG or system git configuration reaches its read.
-    A supplied mapping is scrubbed too: every GIT_* entry is dropped unless it is one of GIT_ENV_PINS
+    A supplied mapping is scrubbed too: every GIT_* entry is dropped unless it is one of git_env_pins()
     at exactly its pinned value. GIT_NO_LAZY_FETCH=1 is applied over either."""
     if env is None:
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     else:
-        env = {k: v for k, v in env.items() if not k.startswith("GIT_") or GIT_ENV_PINS.get(k) == v}
+        pins = git_env_pins()
+        env = {k: v for k, v in env.items() if not k.startswith("GIT_") or pins.get(k) == v}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",

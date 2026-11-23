@@ -14,14 +14,19 @@ overriding the root one.
 
 Both git reads of the live gate (gen_manifest.git_tracked's `git ls-files` scope enumeration and the
 `git check-attr` coverage read) run under check_release_cut.git_environment(), the isolated read
-environment the release gates share: every GIT_* variable dropped, the system and global configuration
-off, HOME and XDG_CONFIG_HOME at an empty location. So no home, XDG or system git configuration (a
-malformed one, or a global core.attributesFile) can fail or steer the gate. Both reads also carry the
-same pinned options (GIT_READ_PINS: --no-replace-objects, core.commitGraph=false, core.fsmonitor=false,
-protocol.allow=never) and a timeout, so no core.fsmonitor hook, commit graph or replace ref, from any
-configuration level including the repository's own, runs or changes their input. The repository's own
-attributes and its other config are still read. Residual: no safe.directory trust comes from the caller
-either, so a checkout owned by another uid is a git failure here (exit 2), never a pass.
+environment the release gates share: every GIT_* variable dropped (GIT_DIR, GIT_ATTR_SOURCE,
+GIT_CONFIG_* included), the system and global configuration off (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL),
+the system-wide attributes file off (GIT_ATTR_NOSYSTEM), HOME and XDG_CONFIG_HOME at an empty location.
+So no home, XDG or system git configuration or attributes file (a malformed one, a global
+core.attributesFile, or $(prefix)/etc/gitattributes) can fail or steer the gate. The coverage read also
+runs against a private, empty git directory (--git-dir) over the checkout's work tree, so the
+repository's $GIT_DIR/info/attributes and its config (a core.attributesFile set there included) cannot
+steer it either: only the .gitattributes files in the work tree are evaluated. Both reads also
+carry the same pinned options (GIT_READ_PINS: --no-replace-objects, core.commitGraph=false,
+core.fsmonitor=false, protocol.allow=never) and a timeout, so no core.fsmonitor hook, commit graph or
+replace ref, from any configuration level including the repository's own, runs or changes their input.
+The scope read still reads the repository's own config. Residual: no safe.directory trust comes from the
+caller either, so a checkout owned by another uid is a git failure here (exit 2), never a pass.
 
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
@@ -65,6 +70,7 @@ import hashlib
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -331,6 +337,16 @@ def validate_hardbreak(root, rows, scope_paths):
         out.add(path)
     return out
 
+def _private_git_dir(parent):
+    """A minimal empty git directory under `parent` (the three entries git requires of one: HEAD,
+    objects/ and refs/), holding no config, no info/attributes and no index."""
+    git_dir = parent / "attr-read.git"
+    (git_dir / "objects").mkdir(parents=True)
+    (git_dir / "refs").mkdir()
+    (git_dir / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    return git_dir
+
+
 def effective_attributes(root, scope_paths):
     """{path: {"text": v, "eol": v}} via `git check-attr -z --stdin`, the engine evaluation. A
     process-launch failure (git absent) is fail-closed like the other git legs, and the NUL-delimited
@@ -341,11 +357,18 @@ def effective_attributes(root, scope_paths):
     attrs = ("text", "eol")
     ordered = sorted(scope_paths)
     payload = b"".join(p.encode("utf-8") + b"\0" for p in ordered)
+    # The read runs against a private, empty git directory over the checkout's work tree: git reads
+    # $GIT_DIR/info/attributes and the repository config (core.attributesFile) from the git directory it
+    # is given, and the empty one holds neither, while the work tree's .gitattributes files are read as
+    # before (the private index is empty, so they come from the work tree).
     try:
-        proc = subprocess.run(["git", *GIT_READ_PINS, "-C", str(root), "check-attr", "-z", "--stdin",
-                               *attrs],
-                              input=payload, capture_output=True, timeout=GIT_TIMEOUT,
-                              env=git_environment())
+        with tempfile.TemporaryDirectory() as private:
+            git_dir = _private_git_dir(Path(private))
+            proc = subprocess.run(["git", *GIT_READ_PINS, "--git-dir", str(git_dir),
+                                   "--work-tree", str(root), "-C", str(root), "check-attr", "-z",
+                                   "--stdin", *attrs],
+                                  input=payload, capture_output=True, timeout=GIT_TIMEOUT,
+                                  env=git_environment())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("git check-attr could not be launched ({})".format(exc))
     if proc.returncode != 0:
@@ -842,8 +865,16 @@ def self_test_main():
         except Exception as exc:
             failures.append("malformed check-attr response raised {!r} not GateError".format(exc))
         # Every git launch of the gate (the scope read through gen_manifest.git_tracked and the check-attr
-        # read) carries GIT_READ_PINS ahead of -C, a timeout, and git_environment(); a supplied launch
-        # environment keeps no GIT_* entry outside gen_manifest.GIT_ENV_PINS at its pinned value.
+        # read) carries GIT_READ_PINS ahead of -C, a timeout, and every HOME, XDG_CONFIG_HOME and GIT_*
+        # entry of git_environment() at its value (GIT_ATTR_NOSYSTEM among them); the check-attr read
+        # also names a private git directory outside the checkout; a supplied launch environment keeps
+        # no GIT_* entry outside gen_manifest.git_env_pins(), which is exactly git_environment()'s GIT_*.
+        shared = git_environment()
+        if shared.get("GIT_ATTR_NOSYSTEM") != "1" or shared.get("GIT_CONFIG_NOSYSTEM") != "1":
+            failures.append("git_environment() does not pin the system config and attributes files off")
+        if gen_manifest.git_env_pins() != {k: v for k, v in shared.items() if k.startswith("GIT_")}:
+            failures.append("gen_manifest.git_env_pins() is not git_environment()'s GIT_* pin set")
+        pinned_keys = sorted(k for k in shared if k.startswith("GIT_") or k in ("HOME", "XDG_CONFIG_HOME"))
         launches = []
 
         def _record(argv, **kwargs):
@@ -867,10 +898,16 @@ def self_test_main():
                 failures.append("{}: git launched without the pinned options: {}".format(label, argv))
             if not kwargs.get("timeout"):
                 failures.append("{}: git launched without a timeout".format(label))
-            want = dict(git_environment(), GIT_NO_LAZY_FETCH="1")
-            if any(env.get(k) != want[k] for k in ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM",
-                                                   "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS")):
-                failures.append("{}: git launched outside git_environment()".format(label))
+            want = dict(shared, GIT_NO_LAZY_FETCH="1")
+            missing = [k for k in pinned_keys if env.get(k) != want[k]]
+            if missing:
+                failures.append("{}: git launched outside git_environment() ({})".format(
+                    label, ", ".join(missing)))
+            if label == "check-attr read":
+                git_dirs = [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--git-dir"]
+                if len(git_dirs) != 1 or Path(git_dirs[0]).resolve().is_relative_to(repo_root()):
+                    failures.append("check-attr read: not launched against a private git directory: "
+                                    "{}".format(argv))
         hostile = {"PATH": os.environ.get("PATH", ""), "GIT_DIR": "/nonexistent",
                    "GIT_INDEX_FILE": "/nonexistent", "GIT_CONFIG_GLOBAL": "/nonexistent",
                    "GIT_CONFIG_COUNT": "1", "GIT_NO_REPLACE_OBJECTS": "1"}
@@ -889,14 +926,21 @@ def self_test_main():
     check("git-read-pins")
     # The pins hold against real git: a fixture repository whose own config sets a core.fsmonitor hook
     # that writes a marker, read with a hostile HOME, XDG_CONFIG_HOME and GIT_* caller environment, gives
-    # the same scope and attribute map as a clean read, and the hook never runs.
+    # the same scope and attribute map as a clean read, and the hook never runs. The fixture's
+    # .gitattributes leaves c.dat unset, and every attribute source outside the work tree's
+    # .gitattributes (the global core.attributesFile, the XDG attributes file, a GIT_CONFIG_COUNT
+    # core.attributesFile, the repository's info/attributes and a repository-config core.attributesFile)
+    # sets it, so any one of them reaching the coverage read changes the map.
+    steer = "c.dat text eol=lf\n"
+    unset = {"text": "unspecified", "eol": "unspecified"}
     with _tf.TemporaryDirectory() as _d:
         tmp = Path(_d)
         fx = tmp / "fixture"
         fx.mkdir()
-        (fx / ".gitattributes").write_bytes(b"* text eol=lf\n*.bin -text\n")
+        (fx / ".gitattributes").write_bytes(b"*.txt text eol=lf\n*.bin -text\n")
         (fx / "a.txt").write_bytes(b"a\n")
         (fx / "b.bin").write_bytes(b"\x00\x01")
+        (fx / "c.dat").write_bytes(b"c\n")
         for args in (("init", "-q"), ("add", "-A"), ("commit", "-q", "-m", "fixture")):
             proc = gen_manifest._git(fx, *args)
             if proc.returncode != 0:
@@ -911,23 +955,33 @@ def self_test_main():
         except (GateError, gen_manifest.GateError) as exc:
             clean = None
             failures.append("isolation fixture: clean read failed: {}".format(exc))
+        if clean is not None and clean[1].get("c.dat") != unset:
+            failures.append("isolation fixture: c.dat must be left unset by the fixture's .gitattributes, "
+                            "got {}".format(clean[1].get("c.dat")))
         marker = tmp / "fsmonitor-ran.marker"
         hook = tmp / "fsmonitor.sh"
         hook.write_text("#!/bin/sh\necho ran >> '{}'\nexit 1\n".format(marker), encoding="utf-8")
         hook.chmod(0o755)
         if gen_manifest._git(fx, "config", "core.fsmonitor", str(hook)).returncode != 0:
             failures.append("isolation fixture: could not set the repository core.fsmonitor hook")
+        (tmp / "repo-attrs").write_text(steer, encoding="utf-8")
+        if gen_manifest._git(fx, "config", "core.attributesFile", str(tmp / "repo-attrs")).returncode != 0:
+            failures.append("isolation fixture: could not set the repository core.attributesFile")
+        (fx / ".git" / "info").mkdir(exist_ok=True)
+        (fx / ".git" / "info" / "attributes").write_text(steer, encoding="utf-8")
         home = tmp / "home"
         (home / "xdg" / "git").mkdir(parents=True)
         (home / ".gitconfig").write_text("[core]\n\tfsmonitor = {}\n\tattributesFile = {}\n".format(
             hook, home / "attrs"), encoding="utf-8")
-        (home / "attrs").write_text("* -text\n", encoding="utf-8")
+        (home / "attrs").write_text(steer, encoding="utf-8")
         (home / "xdg" / "git" / "config").write_text("[core\n", encoding="utf-8")  # malformed
-        (home / "xdg" / "git" / "attributes").write_text("* -text\n", encoding="utf-8")
+        (home / "xdg" / "git" / "attributes").write_text(steer, encoding="utf-8")
         poison = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / "xdg"),
                   "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"), "GIT_DIR": str(tmp / "missing"),
-                  "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
-                  "GIT_CONFIG_VALUE_0": str(hook)}
+                  "GIT_CONFIG_SYSTEM": str(home / ".gitconfig"), "GIT_ATTR_SOURCE": "refs/heads/missing",
+                  "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                  "GIT_CONFIG_VALUE_0": str(hook), "GIT_CONFIG_KEY_1": "core.attributesFile",
+                  "GIT_CONFIG_VALUE_1": str(home / "attrs")}
         saved_env = {k: os.environ.get(k) for k in poison}
         try:
             os.environ.update(poison)
@@ -946,6 +1000,31 @@ def self_test_main():
                 hostile_read, clean))
         if marker.exists():
             failures.append("isolation fixture: the core.fsmonitor hook ran under a gate git read")
+        # The system-wide config and attributes files are root-owned, so no fixture can plant one; git's
+        # own report stands in: `git var GIT_ATTR_SYSTEM` and `git var GIT_CONFIG_SYSTEM` name the file
+        # git reads only while that file is enabled. Under git_environment() neither is named, even with
+        # GIT_CONFIG_SYSTEM pointed at a file on top; with the two NOSYSTEM pins taken out both are (the
+        # control that proves the probe can see the file).
+        pinned_env = dict(git_environment(), GIT_CONFIG_SYSTEM=str(home / ".gitconfig"))
+        open_env = {k: v for k, v in pinned_env.items()
+                    if k not in ("GIT_ATTR_NOSYSTEM", "GIT_CONFIG_NOSYSTEM")}
+        for name in ("GIT_ATTR_SYSTEM", "GIT_CONFIG_SYSTEM"):
+            seen = []
+            for env in (pinned_env, open_env):
+                try:
+                    proc = subprocess.run(["git", "var", name], capture_output=True, timeout=GIT_TIMEOUT,
+                                          env=env, cwd=str(tmp))
+                    seen.append(proc.stdout.strip())
+                except (OSError, subprocess.SubprocessError) as exc:
+                    seen.append(None)
+                    failures.append("isolation fixture: git var {} could not be launched ({})".format(
+                        name, exc))
+            if seen[0] != b"":
+                failures.append("isolation fixture: under git_environment() git still reads the system "
+                                "file {} ({!r})".format(name, seen[0]))
+            if not seen[1]:
+                failures.append("isolation fixture: control failed: git var {} named no file with the "
+                                "NOSYSTEM pins removed".format(name))
     check("git-read-isolation-fixture")
     # _load_vectors strict rows: a malformed row and a missing required class each fail closed.
     def _vectors_reject(fake_rows):
