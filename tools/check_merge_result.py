@@ -80,13 +80,13 @@ that commit. A path in D and in C passes (a resolved conflict, listed on a NOTE 
 judged). Where a conflict (file/directory, or distinct types) makes git write a side's entry under a new name,
 PATH~LABEL (with _N added when that name is taken), the label is the one git gave that side: merge-tree, given
 commit ids, names it PATH~ID, the original merge by its own label (HEAD or a branch name). git never picks such
-a name where a path already exists in either input tree or the merge base, so only a name git itself could have
-generated for this merge's conflict is excused: a path in D, outside C and undeclared, that only the recorded tree
-holds, that no input tree, merge-base tree or the re-merged tree holds (a path one of them holds is judged by the
-ordinary comparison below), and that is PATH~LABEL (a label with no slash) for the PATH of such a name in C passes
-(a NOTE line) when its entry is exactly the re-merge's entry under that name, the recorded tree does not also hold
-the re-merge's name, and the pairing is one to one; otherwise it is cannot-evaluate (conflict-name), never a
-pass. A path in D, outside C
+a name where a path already exists in either input tree or the merge base (tested with git's merge-ort backend
+only; see conflict_names), so only a name git itself could have generated for this merge's conflict is excused:
+a path in D, outside C and undeclared, that only the recorded tree holds, that no input tree, merge-base tree or
+the re-merged tree holds (a path one of them holds is judged by the ordinary comparison below), and that is
+PATH~LABEL (a label with no slash) for the PATH of such a name in C passes (a NOTE line) when its entry is
+exactly the re-merge's entry under that name, the recorded tree does not also hold the re-merge's name, and the
+pairing is one to one; otherwise it is cannot-evaluate (conflict-name), never a pass. A path in D, outside C
 and declared, passes only when the declaration names exactly the recorded
 entry (its mode and object id, or absent = true for a path the result does not hold); any other declared
 content is a finding. A path in D, outside C and undeclared, is a finding (exit 1) naming the commit, the
@@ -881,12 +881,16 @@ def conflict_names(conflicted, differing, expected, recorded, declared, labels, 
     distinct-types conflict, with _N added when that name is taken), the name holds the label git gave that side:
     merge-tree labels each side by the id it is given, the original merge by its own label (HEAD, a branch name).
     Returns (mapped {recorded path: re-merge path}, unmapped [recorded paths]): a recorded-only, undeclared path
-    outside the conflicted set that is PATH~LABEL for the PATH of such a re-merge name is mapped when its entry is
-    exactly the re-merge's entry under that name and the pairing is one to one; else it is unmapped (the gate
-    cannot tell which side's entry it is, so cannot-evaluate, never a finding). Only a name git itself could have
-    generated for this merge is a candidate: git never picks a name that already exists in either input tree or
-    the merge base, so a path in taken (every path of both input trees, of each merge-base tree and of the
-    re-merged tree, subtrees included) is no candidate and gets the ordinary comparison. A pairing whose re-merge
+    outside the conflicted set and outside taken that is PATH~LABEL for the PATH of such a re-merge name is mapped
+    when its entry is exactly the re-merge's entry under that name, the recorded tree does not also hold that name
+    and the pairing is one to one; else it is unmapped (the gate cannot tell which side's entry it is, so
+    cannot-evaluate, never a pass). Only a name git itself could have generated for this merge is a candidate:
+    git never picks a name that already exists in either input tree or the merge base, so a path in taken (every
+    path of both input trees, of each merge-base tree and of the re-merged tree, subtrees included) is no
+    candidate and gets the ordinary comparison (a finding when it differs and is undeclared). That claim about
+    git's names was tested with git's merge-ort backend only, not with merge-recursive or an older git; were it
+    wrong there, an honest merge's name in taken would still get the ordinary comparison, a finding to declare
+    and never a pass. A pairing whose re-merge
     name the recorded tree already holds (recorded_paths, every path of the recorded tree) is not one to one (the
     recorded tree would hold git's entry twice), so the candidate is unmapped."""
     generated = {}
