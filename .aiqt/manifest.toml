@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "4eefbced2d0755585d407c5de53356fe9c0d34d7cf7c69e8af631f9ce2558556"
+tree-sha256 = "eca42184f5287ed3077c040c39d72d4e41c1822fcaf9e85f5013bafb491cbb05"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -4277,8 +4277,8 @@ sha256 = "92153b428dcfcb12b60262e46bf382e87dcf7ccd60fdcff8b8e5333de0b229eb"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 57918
-sha256 = "a0d089fcb48f7132a476a70e541b600d61535ec113f7322bfb10e6dbc8ff214f"
+bytes = 58910
+sha256 = "5d7c7cbb7554f5c0849250a923646638164f714da76050f4e52a9973baf0d3a0"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
@@ -4677,8 +4677,8 @@ sha256 = "6ca6c684730d3a5231b2ccfe8244ae682a77d4bdbb8950ac9a74aad027927e07"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 113679
-sha256 = "575c253456b11666cd677108d186ca2b2d599d1caa6be9140b33891f3f5acf10"
+bytes = 114062
+sha256 = "45f150e66a2fc34a833e965f37733527cde54913a0fc4695b812a6edc1c64092"
 
 [[sources]]
 path = "tools/gen_mappings.py"

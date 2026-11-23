@@ -276,7 +276,7 @@ def parse_ownership(data):
     return exclusions, release, namespace, binary_set
 
 
-def git_tracked(root):
+def git_tracked(root, env=None):
     """The tracked path set from `git ls-files -z --cached --stage`, strictly decoded and validated.
     Fail-closed (GateError) on an unusable repository, a nonzero exit, empty output, a duplicate path,
     a case-fold or NFC/NFD collision, a symlink (120000), a gitlink (160000), or an unknown mode.
@@ -284,8 +284,13 @@ def git_tracked(root):
     core.fsmonitor=false (a repo-config fsmonitor hook is attacker-chosen code and
     must never run under a gate read; the genesis and delta branches of check_release_delta consume
     this enumerator), protocol.allow=never and GIT_NO_LAZY_FETCH=1 (a missing object is a refusal,
-    never a transport), atop the GIT_* environment scrub."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    never a transport), atop the GIT_* environment scrub. `env` is the launch environment: None (every
+    caller but one) keeps that scrub of os.environ, so the caller's on-disk git configuration is still
+    read; check_byte_canon passes check_release_cut.git_environment(), so no home, XDG or system git
+    configuration reaches its read. GIT_NO_LAZY_FETCH=1 is applied over either."""
+    if env is None:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = dict(env)
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:
         proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false",

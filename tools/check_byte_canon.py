@@ -12,6 +12,14 @@ ownership map's [checkout].binary roster. Coverage is evaluated through git's ow
 gen_manifest, and the engine evaluation additionally catches a nested tracked .gitattributes
 overriding the root one.
 
+Both git reads of the live gate (gen_manifest.git_tracked's `git ls-files` scope enumeration and the
+`git check-attr` coverage read) run under check_release_cut.git_environment(), the isolated read
+environment the release gates share: every GIT_* variable dropped, the system and global configuration
+off, HOME and XDG_CONFIG_HOME at an empty location. So no home, XDG or system git configuration (a
+malformed one, or a global core.attributesFile) can fail or steer the gate. The repository's own
+config and attributes are still read. Residual: no safe.directory trust comes from the caller either,
+so a checkout owned by another uid is a git failure here (exit 2), never a pass.
+
 The 3.1 scan forbids the zero-width and bidirectional control codepoints held in _byte_canon.FORBIDDEN
 and, in this gate only, a literal U+2028 LINE SEPARATOR or U+2029 PARAGRAPH SEPARATOR (str.splitlines()
 splits on both), held in _byte_canon.LINE_SEPARATORS, and a literal U+00AD SOFT HYPHEN, held in
@@ -63,6 +71,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools")
 from _gen_common import repo_root, load_toml  # noqa: E402
 import _containment  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated scope loader; never a second parser
+# The isolated git read environment the release gates share (check_selftest_removal reads through it
+# too): every git call of this gate runs under it, so the caller's git configuration never reaches one.
+from check_release_cut import git_environment  # noqa: E402
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
 from _byte_canon import (  # noqa: E402
@@ -177,7 +188,7 @@ def release_scope(root):
     the merged step 2: gen_manifest.classify returns a two-tuple)."""
     try:
         exclusions, release, namespace, binary_set = gen_manifest.load_ownership(root)
-        tracked = gen_manifest.git_tracked(root)
+        tracked = gen_manifest.git_tracked(root, env=git_environment())
         classes, _excluded = gen_manifest.classify(tracked, exclusions, release, namespace, root)
     except gen_manifest.GateError as exc:
         raise GateError("scope enumeration failed: {}".format(exc))
@@ -323,7 +334,7 @@ def effective_attributes(root, scope_paths):
     payload = b"".join(p.encode("utf-8") + b"\0" for p in ordered)
     try:
         proc = subprocess.run(["git", "-C", str(root), "check-attr", "-z", "--stdin", *attrs],
-                              input=payload, capture_output=True)
+                              input=payload, capture_output=True, env=git_environment())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GateError("git check-attr could not be launched ({})".format(exc))
     if proc.returncode != 0:
