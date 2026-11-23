@@ -880,6 +880,7 @@ tools/check_license_qualification.py text eol=lf
 tools/check_links.py text eol=lf
 tools/check_manifest.py text eol=lf
 tools/check_mappings.py text eol=lf
+tools/check_merge_result.py text eol=lf
 tools/check_mistakes_register.py text eol=lf
 tools/check_msg_leaks.py text eol=lf
 tools/check_must_deliver.py text eol=lf

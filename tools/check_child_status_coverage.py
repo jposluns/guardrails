@@ -14,7 +14,8 @@ with exit 2). This gate holds where it runs:
      tools/check_gitleaks_pin.py, tools/check_must_deliver.py, tools/_load_bound.py,
      tools/check_verifier_delivery.py, tools/render_og_cards.py, tools/check_links.py,
      tools/check_review_labels.py, opf/tools/check_opf_selftest_execution.py, tools/check_baseline_pin.py,
-     tools/orch_dispatch_marker.py, tools/selftest_orch_dispatch_marker.py and tools/merge_pr.py), in
+     tools/check_merge_result.py, tools/orch_dispatch_marker.py, tools/selftest_orch_dispatch_marker.py and
+     tools/merge_pr.py), in
      opf/tools/_opf_declaration.py and tools/check_opf_declaration.py (the constant and both functions) and in
      the hooks dispatcher and its generated plugin copy (the constant and the probe) are each bound exactly once
      at module scope, by one top-level definition (an undecorated one for a function), and AST-identical
@@ -245,6 +246,7 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("tools/check_review_labels.py", "check_review_labels.py"),
               ("opf/tools/check_opf_selftest_execution.py", "check_opf_selftest_execution.py"),
               ("tools/check_baseline_pin.py", "check_baseline_pin.py"),
+              ("tools/check_merge_result.py", "check_merge_result.py"),
               ("tools/orch_dispatch_marker.py", "orch_dispatch_marker.py"),
               ("tools/selftest_orch_dispatch_marker.py", "selftest_orch_dispatch_marker.py"),
               ("tools/merge_pr.py", "merge_pr.py"))

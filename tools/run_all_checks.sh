@@ -437,6 +437,12 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 # HEAD at or behind origin/main judges its uncommitted edits only and passes with a NOTE when clean.
 run_gate "review-labels-selftest"   python3 -I -B tools/check_selftest_execution.py --suite review-labels-selftest
 run_gate "review-labels"            python3 -I -B tools/check_review_labels.py
+# One-sided merges: every merge between refs/remotes/origin/main and HEAD must equal git merge-tree's re-merge of
+# its raw recorded parents, outside the conflicts git reports and the hand resolutions declared, by exact
+# content, in .aiqt/merge-resolutions.toml; a criss-cross, an octopus, a missing object, a git older than 2.38,
+# an unreadable declaration and an undeclared named squash are cannot-evaluate (exit 2).
+run_gate "merge-result-selftest"    python3 -I -B tools/check_merge_result.py --self-test
+run_gate "merge-result"             python3 -I -B tools/check_merge_result.py
 
 # ADVISORY QA digest, run under run_gate. It runs the reference audit and prints a compact digest that
 # distinguishes a required-unavailable surface from an optional-disabled one. audit_reference.py --digest

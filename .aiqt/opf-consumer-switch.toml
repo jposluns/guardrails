@@ -366,6 +366,12 @@ disposition = "not-a-reader"
 reason = "Its findings subscript reads its own measurement result, not the registry's findings key."
 
 [[reader]]
+path = "tools/check_merge_result.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are the mode field of a [[resolution]] table in its own merge-resolutions.toml, not the orchestration registry's mode key."
+
+[[reader]]
 path = "tools/check_python_floor.py"
 records = ["none"]
 disposition = "not-a-reader"
