@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "2854857853986a792497aed6e32a80c8d63e0924df8571360e153f32b8dd86d4"
+tree-sha256 = "481bec5e3ce7247f39c4c0c834154889199af8417f254fb5b57a4f26005d737a"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -168,7 +168,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 4056
-sha256 = "5a55a13b337d13dbb5ebc809974ac199c8c4fc3ace8d23924f378db70fa375bc"
+sha256 = "321d6fc2fee67685d1ae6923b0b1db60eba381993a3832b7f4e6f8a762c106a2"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -5382,8 +5382,8 @@ sha256 = "261656f81c19a24605113a0afb39d242f23e0b005ce08561a5ef1a8370c5929c"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 256054
-sha256 = "28f303a88e7d0ce2bdec5583366d50afbc0dd77a5ef94a97bc17e256b1a561b5"
+bytes = 266305
+sha256 = "0f2b57632f29b85ca738853fd79c6c8eac156d58bae21e6cb7974091e3724abd"
 
 [[sources]]
 path = "tools/gen_rules_core.py"
