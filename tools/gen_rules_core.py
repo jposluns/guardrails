@@ -131,8 +131,10 @@ Write mode opens the render without following a symbolic link in its last compon
                                   it switched off (the exit, or
                                   for a diagnostic guard only its named reason); a backstop row for each
                                   load check (no-title, empty-layer, group-outside), whose case another step
-                                  also refuses; and the config-lane rows, which read each lane runner's real
-                                  roster (--list-shard 1/1, in a child) for this file's launches
+                                  also refuses; the reference rows, where tools/gen_rules.py generates the
+                                  pointer's target and its removal fails both checks; and the config-lane
+                                  rows, which read each lane runner's real roster (--list-shard 1/1, in a
+                                  child) for this file's launches
 """
 import sys
 
@@ -1181,7 +1183,10 @@ def self_test_main():
     print("SELF-TEST PASS: gen_rules_core {} checks (a synthetic tree renders, re-checks clean and renders the "
           "same bytes twice, with a whole entry, a split entry with its pointer, a pending entry kept whole and "
           "the groups in index order; an over-cap entry not on pending, an '@' and a dangling pointer each exit "
-          "1 and exit 0 with their guard switched off; a missing, duplicate or unknown id, an entry differing "
+          "1 and exit 0 with their guard switched off; the reference file tools/gen_rules.py generates holds a "
+          "split rule's full render at the path its pointer names, and with it removed both checks exit 1 "
+          "(the CORE check exit 0 with the dangling-pointer guard switched off) until it is regenerated; "
+          "a missing, duplicate or unknown id, an entry differing "
           "from its source layer and frontmatter in the committed file are each named, and lose only that "
           "name with their guard switched off (drift still exits 1); a CRLF or lone CR is drift; a raise entry "
           "is off the schema (exit 2) even with the pin moved to it, and with the raise kind put back it is "
@@ -1327,6 +1332,37 @@ def _self_test_cases(tmp):
     with _without(RENDER_GUARDS, "dangling-pointer"):
         flipped = (_run(root, False)[0], _run(root, True)[0])
     check("flip/dangling-pointer", flipped == (0, 0), flipped)
+
+    # --- the reference tree tools/gen_rules.py generates: the split entry's pointer names a file it writes,
+    # holding the rule's full render; when that file disappears, both generators' checks fail, and its
+    # regeneration clears both ---
+    import gen_rules as rules_gen
+
+    def rules_run(root, check_mode):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            return rules_gen.run(root, check_mode)
+
+    root = _tree(tmp / "reference", reference=False)
+    target = root / REFERENCE_PREFIX / _SPLIT_REL
+    split_source = (root / ".aiqt" / "core" / "rules" / "split.md").read_text(encoding="utf-8")
+    generated = (rules_run(root, False), rules_run(root, True))
+    check("reference/generated-target-satisfies-pointer",
+          generated == (0, 0) and target.is_file()
+          and target.read_bytes() == rules_gen.full_body(split_source, "split.md").encode("utf-8")
+          and REFERENCE_PREFIX == rules_gen.REFERENCE_DIR + "/" and _write_then_check(root) == (0, 0),
+          (generated, _run(root, True)))
+    target.unlink()
+    code, out = _run(root, True)
+    check("reference/target-disappears-is-exit-1",
+          (rules_run(root, True), code) == (1, 1) and "dangling pointer: " + REFERENCE_PREFIX + _SPLIT_REL in out,
+          out)
+    with _without(RENDER_GUARDS, "dangling-pointer"):
+        flipped = _run(root, True)[0]
+    check("flip/reference-target-disappears", flipped == 0, flipped)
+    restored = (rules_run(root, False), rules_run(root, True), _run(root, True)[0])
+    check("reference/regenerated-target-clears-both", restored == (0, 0, 0), restored)
 
     # --- the ratchet: each accepted entry against the one before it, each guard with its flip ---
     shortened = _fixture_sources()

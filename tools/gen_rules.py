@@ -127,7 +127,16 @@ it, and no live source uses it yet):
   line (the core layer below the title and the split line are dropped). So the split is invisible in the
   read tree, in write mode and in the --check drift compare. core_layer returns a split source's core text
   below its title (blank lines at either end dropped), and None for a source with no split.
-  gen_rules.py           regenerate .claude/rules/{aiqt,security}/
+REFERENCE TREE (.aiqt/reference/rules/{aiqt,security}/, REFERENCE_DIR): the full-rule copies that the CORE
+  render's pointers name (tools/gen_rules_core.py REFERENCE_PREFIX). Each file is the same full render
+  (full_body) of its source at the same derived path as in .claude/rules/. The reference tree is compared
+  byte for byte (a CRLF or a lone CR in place of an LF is drift, and so is a target that is not UTF-8) and
+  written as bytes. A reference target that is there but is not a regular file (a symbolic link wherever it
+  points, a directory or another kind) is exit 2 in both modes, with nothing read or written through it.
+  Every file in a reference family directory that no source renders is an orphan (drift), whatever its
+  name. The .claude/rules/ compare is unchanged (it reads each target as text). Nothing loads the
+  reference tree: it is outside .claude/ and the paths the instruction-budget gate models as loaded.
+  gen_rules.py           regenerate .claude/rules/{aiqt,security}/ and .aiqt/reference/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or manifest, a rule mapping
                          to an id its manifest marks withdrawn, or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target, a source path that is not a
@@ -138,7 +147,13 @@ it, and no live source uses it yet):
                             exit, and that each guard in the revert table, put back in a scratch copy,
                             changes its case's exit; and that each listed split source renders byte-equal
                             to its unsplit original in write and check mode, with core_layer giving its
-                            core, and that each split-render guard, put back, makes a split case fail
+                            core, and that each split-render guard, put back, makes a split case fail;
+                            and that the reference tree is generated as each source's full render, a
+                            missing, edited, extra or CRLF-altered reference file is drift (exit 1) with
+                            --check writing nothing, a malformed source and a reference target that is a
+                            symbolic link or under a reference directory linked outside the root are
+                            exit 2 with nothing written, and each reference guard, put back, makes a
+                            reference case fail
 """
 import sys
 
@@ -157,6 +172,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import html
 import os
 import re
+import stat
 import unicodedata
 from pathlib import Path
 
@@ -262,7 +278,14 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
     {"target": ".claude/rules/security/", "kind": "tree",
      "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
+    {"target": ".aiqt/reference/rules/aiqt/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
+    {"target": ".aiqt/reference/rules/security/", "kind": "tree",
+     "sources": (".aiqt/core/rules/",), "regenerate": "python3 tools/gen_rules.py"},
 )
+# The reference tree the CORE render's pointers name (see REFERENCE TREE above; tools/gen_rules_core.py
+# REFERENCE_PREFIX is this directory with a trailing slash).
+REFERENCE_DIR = ".aiqt/reference/rules"
 
 
 def _unquote(tok):
@@ -691,12 +714,14 @@ def load_corpus(src_dir):
 
 
 def run(root, check):
-    """Reconcile the .claude/rules/ read tree under root against the .aiqt/core/rules/ corpus. Exit 0 in
-    sync, 1 on drift (check mode), 2 on a malformed source or a read/write failure. Parameterized on root
+    """Reconcile the .claude/rules/ read tree and the REFERENCE_DIR reference tree under root against the
+    .aiqt/core/rules/ corpus. Exit 0 in sync, 1 on drift (check mode), 2 on a malformed source, a
+    reference target that is not a regular file, or a read/write failure. Parameterized on root
     (rather than calling repo_root() inline) so the self-test can drive it against a synthetic tempdir
     tree, never the real repo."""
     src_dir = root / ".aiqt" / "core" / "rules"
     out_dir = root / ".claude" / "rules"
+    ref_dir = root / REFERENCE_DIR
     desired = {}
     try:
         # dir_or_absent (not is_dir) inside the try: an unreadable .aiqt/ parent, or a source path that is
@@ -743,13 +768,32 @@ def run(root, check):
         # a directory or resolves outside the root) is exit 2 with nothing written or deleted, never followed
         # out of the repository, and an unreadable parent raises (exit 2 below), never skipping the orphan
         # scan. A symlink to a directory inside the root is read. A family absent here can only be created
-        # below, holding desired files alone.
+        # below, holding desired files alone. The reference tree's directories (.aiqt/reference/ and
+        # .aiqt/reference/rules/ included) are judged the same way, before anything under either tree is
+        # written or deleted.
         probed = {}
-        for path in (out_dir, out_dir / "aiqt", out_dir / "security"):
+        for path in (out_dir, out_dir / "aiqt", out_dir / "security",
+                     ref_dir, ref_dir / "aiqt", ref_dir / "security"):
             probed[path], problem = dir_chain_or_absent(path, root)
             if problem is not None:
                 print("error: {} {} (cannot evaluate)".format(path, problem))
                 return 2
+        # Each reference target is read once, before anything is written: absent is None, a regular file is
+        # its bytes, and anything else there (a symbolic link wherever it points, a directory or another kind)
+        # is exit 2 in both modes, never read or written through.
+        held = {}
+        for rel in sorted(desired):
+            target = ref_dir / rel
+            try:
+                mode = os.lstat(target).st_mode
+            except FileNotFoundError:
+                held[rel] = None
+                continue
+            if not stat.S_ISREG(mode):
+                print("error: {} is there but is not a regular file (a symbolic link, a directory or another "
+                      "kind); neither mode reads or writes through it (cannot evaluate)".format(target))
+                return 2
+            held[rel] = target.read_bytes()
         for rel, content in sorted(desired.items()):
             target = out_dir / rel
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -769,6 +813,29 @@ def run(root, check):
                         rel = f.relative_to(out_dir).as_posix()
                         if rel not in desired:
                             drift.append("orphan " + rel)
+                            if not check:
+                                f.unlink()
+        # The reference tree: the same full render at the same derived path, compared byte for byte (the
+        # target's raw bytes against the render encoded as UTF-8, so a CRLF, a lone CR or a non-UTF-8 byte is
+        # drift) and written as bytes.
+        for rel, content in sorted(desired.items()):
+            want = content.encode("utf-8")
+            if held[rel] != want:
+                drift.append(REFERENCE_DIR + "/" + rel)
+                if not check:
+                    target = ref_dir / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(want)
+        # Every file in a reference family directory that no source renders is an orphan, whatever its name.
+        for family in ("aiqt", "security"):
+            fam_dir = ref_dir / family
+            if probed[fam_dir]:
+                for dirpath, _dirs, filenames in os.walk(fam_dir, onerror=_raise):
+                    for fn in sorted(filenames):
+                        f = Path(dirpath) / fn
+                        rel = f.relative_to(ref_dir).as_posix()
+                        if rel not in desired:
+                            drift.append("orphan " + REFERENCE_DIR + "/" + rel)
                             if not check:
                                 f.unlink()
     except (OSError, UnicodeError) as exc:
@@ -3040,8 +3107,11 @@ def _split_render_failures(module, base, run_quiet):
             (root / ".aiqt" / "core" / "rules" / _SPLIT_NAME).write_bytes(source.encode("utf-8"))
             target = root / ".claude" / "rules" / rel
             if prewrite is not None:
-                target.parent.mkdir(parents=True)
-                target.write_bytes(prewrite.encode("utf-8"))
+                # The same bytes in the read tree and in the reference tree, so each check case judges
+                # the one render in both.
+                for held_at in (target, root / REFERENCE_DIR / rel):
+                    held_at.parent.mkdir(parents=True)
+                    held_at.write_bytes(prewrite.encode("utf-8"))
             got = run_quiet(root, prewrite is not None, runner=module.run)
             if got != want:
                 failures.append("split case {} ({}): expected exit {}, got {!r}".format(name, mode, want, got))
@@ -3050,6 +3120,12 @@ def _split_render_failures(module, base, run_quiet):
                 if held != original.encode("utf-8"):
                     failures.append("split case {} ({}): the generated file is not the unsplit original byte for "
                                     "byte; got {!r}".format(name, mode, None if held is None else held[-300:]))
+                reference = root / REFERENCE_DIR / rel
+                ref_held = reference.read_bytes() if reference.is_file() else None
+                if ref_held != original.encode("utf-8"):
+                    failures.append("split case {} ({}): the reference file is not the unsplit original byte for "
+                                    "byte; got {!r}".format(name, mode,
+                                                            None if ref_held is None else ref_held[-300:]))
                 again = run_quiet(root, True, runner=module.run)
                 if again != 0:
                     failures.append("split case {} ({}): --check after generation expected exit 0, got {!r}"
@@ -3077,6 +3153,160 @@ _SPLIT_REVERTS = (
     ("split-drop-core", "lines[first - 2:title] + lines[split:]", "lines[first - 2:split - 1] + lines[split:]"),
     ("split-drop-heading", "lines[first - 2:title] + lines[split:]", "lines[first - 2:title] + lines[split - 1:]"),
     ("split-core-below-title", "core = lines[title:split - 1]", "core = lines[title - 1:split - 1]"),
+)
+
+
+# The reference tree (REFERENCE TREE above). A fixture corpus of an unsplit aiqt rule (_RULE_SRC) and a split
+# security rule (the second _SPLIT_CASES case) is generated, then each drift case alters the generated reference
+# tree and must be exit 1 in --check with every byte of the fixture tree unchanged, then exit 0 in write mode
+# and exit 0 in --check again (the write repairs it). (name, alteration of the case root)
+_REFERENCE_SPLIT = _split_case_texts(_SPLIT_CASES[1])
+_REFERENCE_SPLIT_REL = "security/SECI-gen-rules-selftest-split.md"
+
+
+def _ref_missing(root):
+    (root / REFERENCE_DIR / _RULE_REL).unlink()
+
+
+def _ref_edited(root):
+    path = root / REFERENCE_DIR / _REFERENCE_SPLIT_REL
+    path.write_bytes(path.read_bytes() + b"An edited line.\n")
+
+
+def _ref_extra_md(root):
+    (root / REFERENCE_DIR / "aiqt" / "zz-extra-rule.md").write_bytes(b"# Extra\n")
+
+
+def _ref_extra_other(root):
+    (root / REFERENCE_DIR / "security" / "notes.txt").write_bytes(b"not a rule\n")
+
+
+def _ref_crlf(root):
+    path = root / REFERENCE_DIR / _RULE_REL
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+
+
+def _ref_lone_cr(root):
+    path = root / REFERENCE_DIR / _REFERENCE_SPLIT_REL
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r", 1))
+
+
+def _ref_not_utf8(root):
+    (root / REFERENCE_DIR / _RULE_REL).write_bytes(b"\xff\xfe not utf-8\n")
+
+
+def _ref_tree_gone(root):
+    import shutil
+    shutil.rmtree(root / ".aiqt" / "reference")
+
+
+_REFERENCE_DRIFT_CASES = (("missing", _ref_missing), ("edited", _ref_edited), ("extra-md", _ref_extra_md),
+                          ("extra-other", _ref_extra_other), ("crlf", _ref_crlf), ("lone-cr", _ref_lone_cr),
+                          ("not-utf8", _ref_not_utf8), ("tree-gone", _ref_tree_gone))
+
+
+def _tree_bytes(root):
+    """Every entry under root, followed by no link: {relative path: bytes for a file, ('link', target) for a
+    symbolic link, 'dir' for a directory}."""
+    held = {}
+    for dirpath, dirs, filenames in os.walk(root):
+        for name in dirs + filenames:
+            path = Path(dirpath) / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                held[rel] = ("link", os.readlink(path))
+            elif path.is_dir():
+                held[rel] = "dir"
+            else:
+                held[rel] = path.read_bytes()
+    return held
+
+
+def _reference_root(base, name):
+    """A fixture corpus at base/name holding the unsplit aiqt rule and the split security rule; returns it."""
+    root = base / name
+    src = root / ".aiqt" / "core" / "rules"
+    src.mkdir(parents=True)
+    (src / "gen-rules-selftest-target.md").write_bytes(_RULE_SRC.encode("utf-8"))
+    (src / _SPLIT_NAME).write_bytes(_REFERENCE_SPLIT[1].encode("utf-8"))
+    return root
+
+
+def _reference_failures(module, base, run_quiet):
+    """One failure line per way module (this module, or one with a guard reverted) fails a reference-tree case.
+    base is a directory this call may populate."""
+    failures = []
+    expected = {_RULE_REL: _RULE_SRC.encode("utf-8"), _REFERENCE_SPLIT_REL: _REFERENCE_SPLIT[0].encode("utf-8")}
+
+    def ref_files(root):
+        ref = root / REFERENCE_DIR
+        return {path.relative_to(ref).as_posix(): path.read_bytes()
+                for path in sorted(ref.rglob("*")) if path.is_file()} if ref.is_dir() else None
+
+    # Generated: each reference file is its source's full render (the split source as its unsplit original),
+    # equal to the read tree's file, and nothing else is there; --check is then clean.
+    root = _reference_root(base, "generated")
+    got = (run_quiet(root, False, runner=module.run), run_quiet(root, True, runner=module.run))
+    claude = {rel: (root / ".claude" / "rules" / rel).read_bytes() if (root / ".claude" / "rules" / rel).is_file()
+              else None for rel in expected}
+    if got != (0, 0) or ref_files(root) != expected or claude != expected:
+        failures.append("reference generated: expected write and --check exit 0, the reference tree holding each "
+                        "source's full render and the read tree the same bytes; got exits {!r}, reference {!r}"
+                        .format(got, ref_files(root)))
+    for name, alter in _REFERENCE_DRIFT_CASES:
+        root = _reference_root(base, "drift-" + name)
+        if run_quiet(root, False, runner=module.run) != 0 or ref_files(root) != expected:
+            failures.append("reference {}: the fixture did not generate".format(name))
+            continue
+        alter(root)
+        before = _tree_bytes(root)
+        checked = run_quiet(root, True, runner=module.run)
+        unchanged = _tree_bytes(root) == before
+        written = run_quiet(root, False, runner=module.run)
+        again = run_quiet(root, True, runner=module.run)
+        if (checked, unchanged, written, again, ref_files(root)) != (1, True, 0, 0, expected):
+            failures.append("reference {}: expected --check exit 1 with nothing written, then write exit 0 and "
+                            "--check exit 0 with the reference tree restored; got --check {!r}, tree unchanged {}, "
+                            "write {!r}, --check {!r}".format(name, checked, unchanged, written, again))
+    # A malformed source, a reference target that is a symbolic link, and a reference directory linked outside
+    # the root: exit 2 in both modes with every byte of the fixture tree (and the outside directory) unchanged.
+    for name in ("malformed-source", "target-symlink", "reference-dir-outside"):
+        root = _reference_root(base, "refused-" + name)
+        outside = base / ("outside-" + name)
+        outside.mkdir()
+        if name != "reference-dir-outside" and (run_quiet(root, False, runner=module.run) != 0
+                                                or ref_files(root) != expected):
+            failures.append("reference {}: the fixture did not generate".format(name))
+            continue
+        if name == "malformed-source":
+            (root / ".aiqt" / "core" / "rules" / "gen-rules-selftest-target.md").write_bytes(
+                _RULE_SRC.replace("tier: 10", "tier: 11").encode("utf-8"))
+        elif name == "target-symlink":
+            target = root / REFERENCE_DIR / _RULE_REL
+            target.unlink()
+            (outside / "held.md").write_bytes(b"held outside\n")
+            target.symlink_to(outside / "held.md")
+        else:
+            (root / ".aiqt" / "reference").symlink_to(outside)
+        before, outside_before = _tree_bytes(root), _tree_bytes(outside)
+        got = (run_quiet(root, True, runner=module.run), run_quiet(root, False, runner=module.run))
+        if got != (2, 2) or _tree_bytes(root) != before or _tree_bytes(outside) != outside_before:
+            failures.append("reference {}: expected exit 2 in --check and in write mode with nothing written; got "
+                            "{!r}, tree unchanged {}, outside unchanged {}".format(
+                                name, got, _tree_bytes(root) == before, _tree_bytes(outside) == outside_before))
+    return failures
+
+
+# Red on revert for the reference tree: each guard put back makes at least one reference case fail.
+# (name, fixed text, reverted text)
+_REFERENCE_REVERTS = (
+    ("reference-byte-compare", "            if held[rel] != want:\n",
+     "            if (held[rel] or b\"\").replace(b\"\\r\", b\"\") != want:\n"),
+    ("reference-write", "                    target.write_bytes(want)\n", "                    pass\n"),
+    ("reference-orphan", "drift.append(\"orphan \" + REFERENCE_DIR + \"/\" + rel)", "pass"),
+    ("reference-regular-file", "            if not stat.S_ISREG(mode):\n", "            if False:\n"),
+    ("reference-probe", "                     ref_dir, ref_dir / \"aiqt\", ref_dir / \"security\"):",
+     "                     ):"),
 )
 
 
@@ -3173,6 +3403,9 @@ def self_test_main():
             kept = linked / ".claude" / "rules" / _RULE_REL
             kept.parent.mkdir(parents=True)
             kept.write_text(_RULE_SRC, encoding="utf-8")
+            # The reference copy too, so the in-root --check case is in sync in both trees.
+            (linked / REFERENCE_DIR / _RULE_REL).parent.mkdir(parents=True)
+            (linked / REFERENCE_DIR / _RULE_REL).write_bytes(_RULE_SRC.encode("utf-8"))
             (linked / "shared" / "rules").mkdir(parents=True)
             (linked / "shared" / "rules" / "gen-rules-selftest-target.md").write_text(_RULE_SRC, encoding="utf-8")
             (linked / "shared" / "file.txt").write_text("not a directory\n", encoding="utf-8")
@@ -3258,6 +3491,23 @@ def self_test_main():
             if not _split_render_failures(mutant, revert_base / label, run_quiet):
                 failures.append("revert {}: with the guard removed, the split cases expected at least one failure, "
                                 "got none".format(label))
+
+        # The reference tree: generated as each source's full render; a missing, edited, extra, CRLF-altered,
+        # lone-CR, non-UTF-8 or removed reference tree is drift with --check writing nothing; a malformed source,
+        # a linked reference target and a reference directory linked outside the root are exit 2 with nothing
+        # written; and each reference guard put back goes red.
+        (tmp / "reference").mkdir()
+        failures.extend(_reference_failures(sys.modules[__name__], tmp / "reference", run_quiet))
+        for label, old, new in _REFERENCE_REVERTS:
+            try:
+                mutant = _load_reverted(revert_base, label, old, new)
+            except AssertionError as exc:
+                failures.append(str(exc))
+                continue
+            (revert_base / label).mkdir()
+            if not _reference_failures(mutant, revert_base / label, run_quiet):
+                failures.append("revert {}: with the guard removed, the reference cases expected at least one "
+                                "failure, got none".format(label))
 
         # The adopter-shaped rule is accepted, and is refused once the ASCII-only value check is put back.
         adopter = tmp / "adopter" / _ADOPTER_NAME
@@ -3446,7 +3696,11 @@ def self_test_main():
           "written or deleted there, and one symlinked inside the root is read; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}); {} detail layout case(s) "
           "hold and {} guard revert(s) each go red; {} split source(s) render byte-equal to their unsplit "
-          "original in write and check mode, and {} split-render revert(s) each go red; an adopter-shaped "
+          "original in write and check mode, and {} split-render revert(s) each go red; the reference tree "
+          "holds each source's full render, {} reference drift case(s) each exit 1 in --check with nothing "
+          "written and are repaired in write mode, a malformed source, a linked reference target and a "
+          "reference directory linked outside the root each exit 2 with nothing written, and {} reference "
+          "revert(s) each go red; an adopter-shaped "
           "rule with a non-ASCII value is accepted and goes red under the ASCII-only revert; {} parse-level "
           "revert(s) each go red; {} adopter-mode case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "
@@ -3458,7 +3712,7 @@ def self_test_main():
           "{}.".format(
               len(_MAP_KEYS_CONDITIONS), ", ".join(_MAP_KEYS_CONDITIONS),
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_SPLIT_CASES), len(_SPLIT_REVERTS),
-              len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
+              len(_REFERENCE_DRIFT_CASES), len(_REFERENCE_REVERTS), len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
               len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),
               "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
               "PyYAML safe_load reads the same keys and values for {} live source(s), {} fuzzed "

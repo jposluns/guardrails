@@ -7972,6 +7972,13 @@ expected-check-ids = [
   "flip/frontmatter",
   "case/dangling-pointer",
   "flip/dangling-pointer",
+  # reference: the reference tree tools/gen_rules.py generates holds the split rule's full render at the
+  # path its pointer names; with that file gone both checks exit 1 (the CORE check exit 0 with the
+  # dangling-pointer guard switched off), and regenerating it clears both
+  "reference/generated-target-satisfies-pointer",
+  "reference/target-disappears-is-exit-1",
+  "flip/reference-target-disappears",
+  "reference/regenerated-target-clears-both",
   # ratchet: each accepted budget entry against the one before it, each guard with its flip; the pending
   # list only shrinks: a raise entry is off the schema (exit 2), and with the raise kind put back into the
   # schema the same entry with the pin moved to it is exit 1, exit 0 with its guard switched off

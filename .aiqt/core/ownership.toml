@@ -265,6 +265,16 @@ class = "pack-immutable"
 note = "The generated worker-pack read surface (tools/gen_worker_pack.py); the dispatcher injects these bytes into every worker brief."
 
 [[release-class]]
+pattern = ".aiqt/reference/rules/aiqt/**"
+class = "pack-immutable"
+note = "The aiqt full-rule reference tree (tools/gen_rules.py), generated from .aiqt/core/rules/ and drift-gated byte for byte; the paths the CORE render's pointers name. Outside .claude/, not named like CLAUDE.md and outside the paths the instruction-budget gate models as loaded; that no client loads it is inferred, not observed on a client."
+
+[[release-class]]
+pattern = ".aiqt/reference/rules/security/**"
+class = "pack-immutable"
+note = "The security full-rule reference tree (tools/gen_rules.py), generated from .aiqt/core/rules/ and drift-gated byte for byte; the paths the CORE render's pointers name. Outside .claude/, not named like CLAUDE.md and outside the paths the instruction-budget gate models as loaded; that no client loads it is inferred, not observed on a client."
+
+[[release-class]]
 path = ".aiqt/renders/aiqt-core.md"
 class = "pack-immutable"
 note = "The CORE render preview (tools/gen_rules_core.py), generated from .aiqt/core/rules/ and drift-gated; a path no file imports (outside .claude/, not named like CLAUDE.md, outside the paths the instruction-budget gate models as loaded); that no client loads it is inferred, not observed on a client."

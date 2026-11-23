@@ -85,7 +85,7 @@ rules = ["gensrc"]
 platform = "ci"
 default = "block"
 class = "a"
-residue = "A byte-identity drift gate over the artefact tools/gen_rules.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares."
+residue = "A byte-identity drift gate over the artefact tools/gen_rules.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. Its targets are the .claude/rules/ read trees and the .aiqt/reference/rules/ reference trees that the CORE render's pointers name; the reference trees are compared as raw bytes, so a CRLF or a lone CR there is drift, while the read trees are read as text. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, it does not show that a core layer keeps the meaning of the full rule its pointer names, and it covers only the targets that generator declares."
 
 [[gate]]
 id = "agents-drift"

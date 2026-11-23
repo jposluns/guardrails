@@ -83,6 +83,22 @@
       "target": ".aiqt/manifest.toml"
     },
     {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_rules.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".aiqt/reference/rules/aiqt/"
+    },
+    {
+      "kind": "tree",
+      "regenerate": "python3 tools/gen_rules.py",
+      "sources": [
+        ".aiqt/core/rules/"
+      ],
+      "target": ".aiqt/reference/rules/security/"
+    },
+    {
       "kind": "file",
       "regenerate": "python3 tools/gen_manifest.py",
       "sources": [
