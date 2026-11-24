@@ -1865,7 +1865,10 @@ def _rdp_label_screen_sweep(ls):
 # Both legs are measured robustly: each timing runs its leg (the screen, or _rdp_reference_scan) over the
 # brief a fixed count of times per shape and kind, the count doubling from one until that leg's least time
 # over three tries at the smallest size reaches _RDP_TIMING_FLOOR (or _RDP_TIMING_MAX_REPEATS), and the
-# shape's ratio bound is scaled by the screen's count over the reference's (_rdp_label_screen_timing). A
+# shape's ratio bound is scaled by the screen's count over the reference's (_rdp_ratio_bound). The floor
+# is checked only while the counts are calibrated: a count read under load can come out smaller, so a
+# later block at the smallest size can read under the floor (about 21 to 24 milliseconds in runs under
+# load on one host, none kept in the repository), and the counts can differ from run to run. A
 # single scan took about 4 to 7 milliseconds at 256 KiB and the backtick-fence-line screen about 10; on one
 # CI runner a reference's least time read about 2 to 7 milliseconds over its linear share at the smaller
 # size in two groups and the confirm rounds while the screen's own time about doubled per doubling, so the
@@ -1886,14 +1889,18 @@ _RDP_TIMING_SHAPES = (
     ("lookalike-between-marks", "r\u0301\u0435\u0300", ":", "12.3"), ("marks", "\u0903", "", "8.9"))
 _RDP_TIMING_SIZES = (262144, 524288, 1048576)
 _RDP_TIMING_MARGIN = Fraction(5, 2)
-# One timing over this many CPU seconds is a runaway: the shape fails and is not timed again.
+# One timing (one timed block: a single call in rdp/label-screen-linear-time-mutant's screen timings, the
+# calibrated count of calls elsewhere) over this many CPU seconds is a runaway: the shape fails and is not
+# timed again.
 _RDP_TIMING_RUNAWAY = 10.0
 # The CPU seconds every timing in the row may spend together. A timing starts only while the total is under
 # it, so when no timing is a runaway the row's timings spend less than this plus one timing of at most
-# _RDP_TIMING_RUNAWAY: under 190 CPU seconds, against about 30 for the real screen on the measuring host
-# with one reference scan per timing (the repeated legs, _RDP_TIMING_FLOOR, add about half the screen's
-# time to that, an estimate from the repeat counts, not a measured total). A
-# runaway is one call the row cannot cut short; it ends its shape, and the budget still holds for the rest.
+# _RDP_TIMING_RUNAWAY: under 190 CPU seconds, against about 35 to 42 the real screen's timings spent with
+# the legs repeated to _RDP_TIMING_FLOOR over ten runs on one host (about 29 to 32 there with the
+# reference repeated by the shape's ratio alone; runs measured for this comment, none kept in the
+# repository). A runaway is
+# one timed block (one call, or the count of calls the timer repeats) the row cannot cut short; it ends
+# its shape, and the budget still holds for the rest.
 _RDP_TIMING_BUDGET = 180.0
 # The rounds a growth fault must reproduce in before it fails its shape (_rdp_timing_rows): two groups'
 # worth, judged together on each (kind, size)'s least time over them.
@@ -2239,7 +2246,8 @@ def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMI
     fault there confirms it ("not linear", naming the failing groups and the confirm faults); none passes
     the shape ("linear"). A super-linear screen's growth holds in its quiet times, the least over many
     rounds, so a fault well over the growth bound reproduces; load that lifted one size's reference timing
-    (each leg repeated to at least _RDP_TIMING_FLOOR at the smallest size, as _RDP_TIMING_FLOOR states)
+    (each leg repeated a count calibrated to reach _RDP_TIMING_FLOOR at the smallest size, as the comment
+    above _RDP_TIMING_FLOOR states, so most such timings reach it)
     through two groups, moving that size's multiple, has to lift that one (kind, size) through every
     confirm round as well to fail the shape. The confirm
     rounds narrow what the growth bound catches, a reduction accepted so that load on a linear screen's
@@ -2325,9 +2333,11 @@ def _rdp_label_screen_timing(ls):
     Each shape is judged twice. Its operation counts (_rdp_screen_ops), deterministic for a given brief,
     must grow less than the size to the power 1.5 over each doubling (_rdp_ops_growth); a shape whose
     counts grow too fast fails by name and is not timed. And each brief is timed in this process's CPU
-    time against a linear reference over the same brief (_rdp_reference_scan; each leg repeated to at
-    least _RDP_TIMING_FLOOR at the smallest size, so that no screen or reference timing is a few
-    milliseconds that a burst of load could lift by half; each timed block runs under the hang backstop,
+    time against a linear reference over the same brief (_rdp_reference_scan; each leg repeated a count
+    calibrated so that its least time at the smallest size reaches _RDP_TIMING_FLOOR, so that a screen or
+    reference timing is not a few milliseconds that a burst of load could lift by half; the floor is
+    checked only while calibrating, so a later block can read under it; each timed block runs under the
+    hang backstop,
     _hang_backstopped, and one it ends counts as a runaway): the shape's time must stay under its ratio
     bound (scaled by the two repeat counts) to the reference at every size, and its multiple of the reference
     must grow
@@ -2392,12 +2402,21 @@ def _rdp_label_screen_timing(ls):
             count *= 2
         return count
 
-    def _timer(shape, kind, size, _round_number):
-        took, done = _block(shape, kind, size, repeats[(shape, kind)])
+    def _timed(shape, kind, size, count):
+        took, done = _block(shape, kind, size, count)
         return took if done else _RDP_TIMING_RUNAWAY + 1.0 + took
+
+    def _timer(shape, kind, size, _round_number):
+        return _timed(shape, kind, size, repeats[(shape, kind)])
+
+    def _one_screen_call(shape, kind, size, _round_number):
+        """The mutant row's timer: one screen call per timing, the reference repeated as calibrated."""
+        return _timed(shape, kind, size, 1 if kind == "screen" else repeats[(shape, kind)])
     shapes = []
     counted = {}
+    ratios = {}
     for shape, unit, tail, ratio in _RDP_TIMING_SHAPES:
+        ratios[shape] = ratio
         for size in _RDP_TIMING_SIZES:
             texts[(shape, size)] = _brief(unit, tail, size)
         lengths = {size: len(texts[(shape, size)].encode()) for size in _RDP_TIMING_SIZES}
@@ -2413,15 +2432,29 @@ def _rdp_label_screen_timing(ls):
                 counted[shape] = "not linear: " + ", ".join(faults)
         for kind in ("screen", "reference"):
             repeats[(shape, kind)] = 1 if shape in counted else _calibrate(shape, kind)
-        shapes.append((shape, lengths, Fraction(ratio) * _RDP_TIMING_MARGIN * repeats[(shape, "screen")]
-                       / repeats[(shape, "reference")]))
+        shapes.append((shape, lengths, _rdp_ratio_bound(ratio, repeats[(shape, "screen")],
+                                                        repeats[(shape, "reference")])))
     rows, _spent = _rdp_timing_rows([row for row in shapes if row[0] not in counted], _timer)
     timed = dict(rows)
     check("rdp/label-screen-linear-time",
           [(shape, counted.get(shape, timed.get(shape))) for shape, _l, _b in shapes],
           [(shape, "linear") for shape, _l, _b in shapes])
-    _rdp_label_screen_mutant_timing(next(row for row in shapes if row[0] == "backtick-fence-line"), _timer)
+    fence = "backtick-fence-line"
+    _rdp_label_screen_mutant_timing(
+        (fence, next(lengths for shape, lengths, _b in shapes if shape == fence),
+         _rdp_ratio_bound(ratios[fence], 1, repeats[(fence, "reference")])), _one_screen_call)
     _rdp_timing_decision_cases()
+    _rdp_timing_count_scaling_cases()
+
+
+def _rdp_ratio_bound(ratio, screen_count, reference_count):
+    """The ratio bound of a shape whose timings run the screen screen_count times and the reference
+    reference_count times: _RDP_TIMING_MARGIN times the shape's typical per-call ratio (ratio, as
+    _RDP_TIMING_SHAPES states it) times screen_count over reference_count, exact in rationals. A screen
+    call within its per-call bound of one reference scan is then within this bound over the two blocks,
+    since each block's time is its count times its per-call time (rdp/label-screen-linear-time-count-scaling
+    pins the direction of the scaling)."""
+    return Fraction(ratio) * _RDP_TIMING_MARGIN * screen_count / reference_count
 
 
 def _rdp_label_screen_mutant_timing(row, timer):
@@ -2432,7 +2465,11 @@ def _rdp_label_screen_mutant_timing(row, timer):
     512 KiB and 1 MiB). That is cubic work the operation counts cannot see, and since it is the
     reference's own Python loop, it adds that many times the reference to the screen's multiple of the
     reference whatever the host's speed. row is the backtick-fence-line shape, whose own screen is the
-    fastest against the reference (about 2.1), and timer the row's (_rdp_label_screen_timing). The mutant
+    fastest against the reference (about 2.1), with its bound for one screen call against the reference's
+    calibrated count (_rdp_ratio_bound with a screen count of 1), and timer runs one screen call per
+    timing and the reference that count of times (_rdp_label_screen_timing), so that the runaway bound and
+    the budget apply to one mutant screen call, as _RDP_TIMING_RUNAWAY and _RDP_TIMING_BUDGET state them,
+    not to a block of them; the row checks that every screen timing made exactly one call. The mutant
     is timed twice: under the shape's ratio bound, where it must fail ("not linear"), and with that bound
     lifted a thousand times, far over its measured multiples, where in the measured runs only the growth
     bound sees it, so its two failing groups hold growth faults alone and the confirm rounds must reproduce
@@ -2458,43 +2495,59 @@ def _rdp_label_screen_mutant_timing(row, timer):
     is the product of the two doublings' cuts (1.76 times 2.40), since the 512 KiB reference's lift also
     raises the second doubling's growth 1.76 times; a lift of the 1 MiB reference alone leaves the first
     doubling's growth near 2.5, which fails however large that lift is. The timing under the ratio bound
-    must also bring every size's multiple under that bound (about 5.25). In the runner's failure that the
+    must also bring every size's multiple under that bound (about 5.25 for one call against one scan; the
+    bound row carries is that divided by the reference's count). In the runner's failure that the
     confirm rounds answer, a 512 KiB reference read about 1.9 times its linear share (from the runner's job
-    log, which the repository does not keep). Those figures were taken with one call per timing; each timing
-    is now a block of calls repeated to _RDP_TIMING_FLOOR at 256 KiB (_rdp_label_screen_timing), four
-    screen calls of this shape on the host where that was measured, and the headroom figures below are
-    scaled from them by that count, an estimate, not a measurement. Second, a runaway: a timing reads
-    "runaway" when one timed block takes over _RDP_TIMING_RUNAWAY (10) CPU seconds. The cheapest route is
-    to make the 1 MiB mutant block, the row's longest (about 3 to 3.5 CPU seconds at four calls), about 3
-    times longer; any other block over 10 CPU seconds, a smaller size's screen or any reference, is a
-    runaway as well, and needs a larger lift of its own time. Third, over budget: a timing reads "over
-    budget" when its blocks have spent _RDP_TIMING_BUDGET (180) CPU seconds before a later block starts, a
-    budget each of the two timings has to itself, so load would have to make the longer one's CPU time
-    about 4 times longer (the two together spent about 17 with one call per timing). Fourth, a ratio
-    fault on the timing with the lifted bound: that bound is the shape's multiplied by 1000 (5250), finite,
+    log, which the repository does not keep). Those figures were taken with one screen call per timing,
+    as the row times it again (the screen is not repeated here; the reference is, which only lengthens the
+    reference timings these lifts act on). Second, a runaway: a timing reads "runaway" when one timing,
+    here one mutant screen call or one reference block, takes over _RDP_TIMING_RUNAWAY (10) CPU seconds.
+    The cheapest route is to make the 1 MiB mutant call, the row's longest, about 10 times longer (it took
+    about 0.8 to 1.2 CPU seconds, the longest timing of each of ten runs measured for this timer on one
+    host, none kept in the repository); any other timing over 10 CPU seconds, a smaller size's screen or
+    any reference block, is a runaway as well, and needs a larger lift of its own time. Third, over
+    budget: a timing reads "over budget" when its timings have spent _RDP_TIMING_BUDGET (180) CPU seconds
+    before a later one starts, a budget each of the two timings has to itself, so load would have to make
+    the longer one's CPU time about 11 times longer (it spent about 12.8 to 16.2 CPU seconds over those ten
+    runs, against about 11.2 to 12.6 over ten runs with one reference scan per timing: the reference
+    repeated to _RDP_TIMING_FLOOR costs that headroom). Fourth, a ratio
+    fault on the timing with the lifted bound: that bound is the shape's multiplied by 1000 (5250 for one
+    call against one scan), finite,
     not disabled, and a ratio fault in either failing group fails the shape at once ("not linear" with no
     confirm round), so the row's requirement that the verdict read "confirmed over" fails. Load would have
-    to lift a screen timing against its reference about 150 times at 1 MiB (5250 over about 35) through
+    to lift a screen timing against its reference about 150 times at 1 MiB (5250 over about 35, both for
+    one call against one scan, so the reference's count cancels) through
     every round of one of the groups that decide the shape, and more at the smaller sizes; at the 1 MiB
     call times above, that lift takes the call past the runaway bound first. A term only a few percent over
     the bound can pass the confirm rounds (_rdp_timing_rows), so this row pins that a clear super-linear
     term still fails, not that every one does."""
     shape, lengths, bound = row
     real = aiqt_hooks._rdp_hidden
+    calls = [0]
+    per_timing = set()
 
     def _mutant(text):
+        calls[0] += 1
         for _scan in range(_RDP_MUTANT_SCANS * (len(text) // 262144) ** 2):
             _rdp_reference_scan(text)
         return real(text)
+
+    def _counted(shape, kind, size, round_number):
+        calls[0] = 0
+        took = timer(shape, kind, size, round_number)
+        if kind == "screen":
+            per_timing.add(calls[0])
+        return took
     aiqt_hooks._rdp_hidden = _mutant
     try:
-        bounded, _spent = _rdp_timing_rows([row], timer)
-        unbounded, _spent = _rdp_timing_rows([(shape, lengths, 1000 * bound)], timer)
+        bounded, _spent = _rdp_timing_rows([row], _counted)
+        unbounded, _spent = _rdp_timing_rows([(shape, lengths, 1000 * bound)], _counted)
     finally:
         aiqt_hooks._rdp_hidden = real
     check("rdp/label-screen-linear-time-mutant",
-          [bounded[0][1].split(":")[0], unbounded[0][1].split(":")[0], "; confirmed over " in unbounded[0][1]],
-          ["not linear", "not linear", True])
+          [bounded[0][1].split(":")[0], unbounded[0][1].split(":")[0], "; confirmed over " in unbounded[0][1],
+           sorted(per_timing)],
+          ["not linear", "not linear", True, [1]])
 
 
 def _rdp_timing_decision_cases():
@@ -2765,6 +2818,36 @@ def _rdp_timing_decision_cases():
           [(case, len(faults), faults == expected[case]) for case, faults in flipped],
           [("zero-screen-at-larger", 0, False), ("zero-reference-at-smaller", 1, False),
            ("zero-screen-at-smaller", 1, False), ("zero-reference-at-larger", 2, False)])
+
+
+def _rdp_timing_count_scaling_cases():
+    """The ratio bound follows the repeat counts in the right direction (rdp/label-screen-linear-time-count-
+    scaling), over simulated times, no screen run: a timing runs the screen screen_count times and the
+    reference reference_count times, so each block's time is its count times its per-call time, and the
+    bound _rdp_ratio_bound gives must hold a screen exactly as the per-call bound (_RDP_TIMING_MARGIN times
+    the shape's ratio, here 13.5) holds one call against one scan. For each pair of counts, (1, 1), (2, 16),
+    (16, 2) and (1, 8) (the mutant row's one screen call against a calibrated reference), a linear screen at
+    the typical ratio and one just inside the per-call bound pass, and one just over it and one 5 times the
+    typical ratio fail at all three sizes. Swapping the counts in the scaling loosens the bound 64 times at
+    (2, 16), where the screens over it then pass, and tightens it 64 times at (16, 2), where the typical
+    screen then fails, so either direction of that slip turns the row red; leaving the counts out does the
+    same at both."""
+    sizes = {262144: 262144, 524288: 524288, 1048576: 1048576}
+    per_call = float(Fraction("13.5") * _RDP_TIMING_MARGIN)
+    got = []
+    for screen_count, reference_count in ((1, 1), (2, 16), (16, 2), (1, 8)):
+        bound = _rdp_ratio_bound("13.5", screen_count, reference_count)
+        for case, multiple in (("typical", 13.5), ("just-under", per_call * (1 - 1e-6)),
+                               ("just-over", per_call * (1 + 1e-6)), ("five-times-typical", 5 * 13.5)):
+            least = {}
+            for size in sizes:
+                scan = 0.004 * size / 262144
+                least[("reference", size)] = reference_count * scan
+                least[("screen", size)] = screen_count * multiple * scan
+            got.append(((screen_count, reference_count), case, len(_rdp_timing_group(least, sizes, bound))))
+    check("rdp/label-screen-linear-time-count-scaling", got,
+          [(counts, case, faults) for counts in ((1, 1), (2, 16), (16, 2), (1, 8))
+           for case, faults in (("typical", 0), ("just-under", 0), ("just-over", 3), ("five-times-typical", 3))])
 
 
 def _rwh_iso(hours=0):
@@ -10186,7 +10269,8 @@ def _citechk_raw_plain_linear():
     """The shape test of a command scanned as written (_CITECHK_RAW_PLAIN, re.match) reads in linear time
     where it fails late (citeledger/cd-allowlist-raw-linear): one long word, many words with no
     here-document after them, and a long body that ends in a '$', each about 256 Ki, 512 Ki and 1 Mi
-    characters long and never over _CITE_MAX_COMMAND, the longest command the hook scans, none matching,
+    characters long and never over _CITECHK_COMMAND_MAX, the longest command the check scans (a missing
+    name fails the row by name, with no default standing in for it), none matching,
     with its own time growing linearly over each (_linear_growth), never judged on a fixed time; a plain
     one matches. The words are seven letters and a space (32 Ki to 128 Ki of them): with one-letter words
     the match's time per word about doubled between 128 Ki and 256 Ki words on the measuring host (Python
@@ -10194,7 +10278,9 @@ def _citechk_raw_plain_linear():
     outgrowing a cache, an inference, not measured), not in the count of steps, so a span across it read
     linear code as not linear (0.0137 to 0.1284 CPU seconds over 256 Ki to 1 Mi characters), and a span
     above it is over the cap the hook scans. Seven-letter words keep the span under 128 Ki words, where the
-    same host measured 0.0111, 0.0226 and 0.0458 CPU seconds. Each shape's results are read under the
+    same host measured 0.0111, 0.0226 and 0.0458 CPU seconds (no artefact in the repository keeps any of
+    the measurements in this docstring; they are quoted from the run that set the shapes). Each shape's
+    results are read under the
     hang backstop (_backstopped_results), so a regression fails the row as "hang" instead of hanging it."""
     check("citeledger/cd-allowlist-raw-linear", _citechk_raw_plain_got(),
           ([[False] * 3] * 3, True, True, ["linear"] * 3))
@@ -10202,16 +10288,19 @@ def _citechk_raw_plain_linear():
 
 def _citechk_raw_plain_got():
     """What citeledger/cd-allowlist-raw-linear judges: (each shape's results, whether every input is within
-    _CITE_MAX_COMMAND, whether a plain one matches, each shape's growth verdict)."""
+    _CITECHK_COMMAND_MAX, the check's own bound on the command it scans, read with no default, so a missing
+    name reads False there and every input falls back to the 1 Mi size the row was measured at, whether a
+    plain one matches, each shape's growth verdict)."""
     plain = getattr(aiqt_hooks, "_CITECHK_RAW_PLAIN", None)
-    cap = getattr(aiqt_hooks, "_CITE_MAX_COMMAND", 1 << 20)
-    shapes = ({count: "git commit " + "a" * count for count in (1 << 18, 1 << 19, cap - 11)},
-              {count: "git commit " + "aaaaaaa " * count for count in (1 << 15, 1 << 16, (cap - 11) // 8)},
-              {count: "git commit -F - <<EOF\n" + "x" * count + "$" for count in (1 << 18, 1 << 19, cap - 23)})
+    cap = getattr(aiqt_hooks, "_CITECHK_COMMAND_MAX", None)
+    top = 1 << 20 if cap is None else cap
+    shapes = ({count: "git commit " + "a" * count for count in (1 << 18, 1 << 19, top - 11)},
+              {count: "git commit " + "aaaaaaa " * count for count in (1 << 15, 1 << 16, (top - 11) // 8)},
+              {count: "git commit -F - <<EOF\n" + "x" * count + "$" for count in (1 << 18, 1 << 19, top - 23)})
     results = [plain is not None and _backstopped_results(
         lambda texts=texts: [plain.match(texts[count]) is not None for count in sorted(texts)])
         for texts in shapes]
-    return (results, all(len(text) <= cap for texts in shapes for text in texts.values()),
+    return (results, cap is not None and all(len(text) <= cap for texts in shapes for text in texts.values()),
             plain is not None and plain.match("git commit -F - <<EOF\nsee tools/a.py:1\nEOF\n") is not None,
             [plain is not None and _growth_unless_hung(got, plain.match, texts) for got, texts in zip(results, shapes)])
 
