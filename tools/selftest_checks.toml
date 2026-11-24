@@ -2101,6 +2101,8 @@ expected-check-ids = [
   "citeledger/check-command-bound-no-cwd",
   "citeledger/check-cost-shapes",
   "citeledger/check-linear-patterns",
+  "citeledger/linear-rows-fail-on-quadratic",
+  "citeledger/linear-rows-end-on-regression",
   # ---------- the citation hooks together ----------
   "citeledger/roadmap-pairs-recorder-with-check",
   "citeledger/state-dir-inside-tmp",
