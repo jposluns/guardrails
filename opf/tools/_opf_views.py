@@ -3926,6 +3926,12 @@ def _self_test():
             check("md-text-passes-forbidden-" + _lbl, chr(_cp) in _mt)
             check("byte-canon-flags-forbidden-" + _lbl,
                   check_byte_canon.scan_bytes(_mt.encode("utf-8")) != [])
+        # U+00AD SOFT HYPHEN is NOT in the shared forbidden set (like U+2028/U+2029 it is refused only by
+        # AIQT's release gate, since an adopter's store may already hold one): _md_text passes it and the
+        # shared scan does not flag it, so a view over such a record renders.
+        _mt = _md_text("co" + chr(0x00AD) + "op")
+        check("md-text-passes-soft-hyphen", chr(0x00AD) in _mt)
+        check("byte-canon-passes-soft-hyphen", check_byte_canon.scan_bytes((_mt + "\n").encode("utf-8")) == [])
         # A lone CR is a DIFFERENT case: _md_text COLLAPSES it to a space, so it never reaches a body; the
         # scan's CR leg is defence in depth for any non-_md_text path (schema also rejects a CR in title).
         check("md-text-collapses-cr", _md_text("a\rb") == "a b")
@@ -4800,6 +4806,21 @@ def _self_test():
                   render_write(_bcroot) == EXIT_CANNOT_EVALUATE)
             check("byte-canon-wrote-nothing-" + _bcls,
                   not (_bcroot / WORKING_DIRNAME / "TODO.md").exists())
+        # U+00AD SOFT HYPHEN stays OUT of that fail-closed set: a store whose record title holds a literal
+        # one (an earlier emitter wrote it so, and an imported or done record cannot be changed) still
+        # renders (EXIT_OK), and the view carries the character as the record does.
+        _shyroot = new_root()
+        write_toml(_shyroot, "manifest.toml", manifest)
+        empty_indexes(_shyroot)
+        write_toml(_shyroot, "version.toml", _bc_version)
+        write_toml(_shyroot, "backlog_item.index.toml", "\n".join([
+            "schema = 1",
+            _rec("BI-1", "backlog_item", "open", "co" + chr(0x00AD) + "op"),
+        ]) + "\n")
+        check("soft-hyphen-store-renders", render_write(_shyroot) == EXIT_OK)
+        _shytodo = _shyroot / WORKING_DIRNAME / "TODO.md"
+        check("soft-hyphen-store-view-written",
+              _shytodo.exists() and chr(0x00AD) in _shytodo.read_text(encoding="utf-8"))
 
         # Byte-canon positive case: a SCHEMA-VALID backlog_item whose title merely ends in a SPACE
         # renders a body line ending in whitespace; _render_resolved normalizes trailing line
@@ -5304,53 +5325,75 @@ def _self_test():
         finally:
             globals()["_WRITE_GATE_COMPOSED"] = _saved_flag
 
-        # --- one-time re-spelling of the DECISIONS.toml projection (spec 5.7/10.5): the emitter now writes
-        # U+2028/U+2029 as escapes, with NO generator-version bump, so a projection an EARLIER tool rendered
-        # from a record holding either character differs from the current render in exactly that spelling.
-        # The byte-level drift gate is NOT loosened: the old-spelled view reads as C-VIEW-DRIFT until one
-        # re-render re-spells it, and a projection over records holding neither character is byte-identical
-        # across a re-render, so a store without these characters sees no drift.
+        # --- one-time re-spelling of the DECISIONS.toml projection (spec 5.7/10.5), one row per class of
+        # character the record emitter escapes and an earlier emitter wrote literally: the line and paragraph
+        # separators U+2028/U+2029 (prefix sep-, earlier spelling prior_separator_spelling) and U+00AD SOFT
+        # HYPHEN (prefix shy-, earlier spelling prior_soft_hyphen_spelling, the one the tooling just before
+        # the soft-hyphen escape wrote). There is NO generator-version bump, so a projection an EARLIER tool
+        # rendered from a record holding one differs from the current render in exactly that spelling. The
+        # byte-level drift gate is NOT loosened: the old-spelled view reads as C-VIEW-DRIFT (doctor) and as
+        # drift (render --check) until one re-render re-spells it, and a projection over records holding none
+        # of these characters is byte-identical across a re-render, so a store without them sees no drift.
+        # Each row carries its own flip: with that class's escape removed from the emitter, the row must go
+        # red (one of its assertions false, or the run refused), and `<prefix>-respell-flip-no-escape-red`
+        # asserts that it does.
         import _opf_check as _sep_check
-        _sep_decision = {"id": "MD-1", "type": "maintainer_decision", "status": "recorded",
-                         "title": "a ruling",
-                         "decision": "do" + chr(0x2028) + "this" + chr(0x2029) + "that",
-                         "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
-                         "actor": {"kind": "maintainer"}}
+        import unittest.mock as _sep_mock
 
-        def _add_sep_decision(root, bi):
-            import _opf_emit
-            mdir = root / WORKING_DIRNAME / "toml"
-            (mdir / "maintainer_decision.index.toml").write_text(
-                _opf_emit.emit({"schema": 1, "record": [_sep_decision]}), encoding="utf-8")
-            (mdir / "counters.toml").write_text(
-                _opf_emit.emit({"schema": 1, "counters": {
-                    "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
-                    "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 1, "PP": 0}}), encoding="utf-8")
+        def _respell_row(chars, prior_spelling):
+            """Run one class's re-spelling row over a fresh gate store; returns (name suffix, bool) pairs."""
+            decision = {"id": "MD-1", "type": "maintainer_decision", "status": "recorded",
+                        "title": "a ruling",
+                        "decision": "do" + chars[0] + "this" + chars[-1] + "that",
+                        "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
+                        "actor": {"kind": "maintainer"}}
 
-        _sep_root, _sep_obs = _gate_store(mutate=_add_sep_decision)
-        _sep_view = _sep_root / WORKING_DIRNAME / "DECISIONS.toml"
-        check("sep-respell-write-ok",
-              render(["--root", str(_sep_root), "--write"], observations=_sep_obs) == EXIT_OK)
-        _sep_now = _sep_view.read_bytes()
-        check("sep-respell-current-render-escapes",
-              b"\\u2028" in _sep_now and b"\\u2029" in _sep_now
-              and not any(ch.encode("utf-8") in _sep_now for ch in (chr(0x2028), chr(0x2029))))
-        _sep_old = _opf_emit.prior_separator_spelling(_sep_now.decode("utf-8")).encode("utf-8")
-        check("sep-respell-prior-spelling-differs", _sep_old != _sep_now)
-        _sep_view.write_bytes(_sep_old)
-        _sep_post = _sep_check.validate_store(
-            _opf_store.resolve_store(Path(str(_sep_root))), observations=_sep_obs)
-        check("sep-respell-old-view-is-view-drift",
-              _sep_post.checks.get("C-VIEW-DRIFT") == "FINDING"
-              and any("DECISIONS.toml" in m for m in _sep_post.by_check.get("C-VIEW-DRIFT", [])))
-        check("sep-respell-old-view-check-reports-drift",
-              render(["--root", str(_sep_root), "--check"]) == EXIT_DRIFT)
-        check("sep-respell-one-rerender-clears",
-              render(["--root", str(_sep_root), "--write"], observations=_sep_obs) == EXIT_OK
-              and _sep_view.read_bytes() == _sep_now)
-        check("sep-respell-check-clean-after-rerender",
-              render(["--root", str(_sep_root), "--check"]) == EXIT_OK)
-        # Control: a projection over records holding neither character is byte-identical across a re-render.
+            def _add_decision(root, bi):
+                import _opf_emit
+                mdir = root / WORKING_DIRNAME / "toml"
+                (mdir / "maintainer_decision.index.toml").write_text(
+                    _opf_emit.emit({"schema": 1, "record": [decision]}), encoding="utf-8")
+                (mdir / "counters.toml").write_text(
+                    _opf_emit.emit({"schema": 1, "counters": {
+                        "BI": 2, "DN": 1, "WL": 4, "FN": 0, "PD": 0, "AD": 0,
+                        "BL": 0, "HO": 1, "RF": 0, "CN": 0, "MD": 1, "PP": 0}}), encoding="utf-8")
+
+            got = []
+            root, obs = _gate_store(mutate=_add_decision)
+            view = root / WORKING_DIRNAME / "DECISIONS.toml"
+            got.append(("write-ok", render(["--root", str(root), "--write"], observations=obs) == EXIT_OK))
+            now = view.read_bytes() if view.is_file() else b""
+            got.append(("current-render-escapes",
+                        all("\\u{:04X}".format(ord(ch)).encode("ascii") in now for ch in chars)
+                        and not any(ch.encode("utf-8") in now for ch in chars)))
+            old = prior_spelling(now.decode("utf-8")).encode("utf-8")
+            got.append(("prior-spelling-differs", old != now))
+            view.write_bytes(old)
+            post = _sep_check.validate_store(_opf_store.resolve_store(Path(str(root))), observations=obs)
+            got.append(("old-view-is-view-drift",
+                        post.checks.get("C-VIEW-DRIFT") == "FINDING"
+                        and any("DECISIONS.toml" in m for m in post.by_check.get("C-VIEW-DRIFT", []))))
+            got.append(("old-view-check-reports-drift", render(["--root", str(root), "--check"]) == EXIT_DRIFT))
+            got.append(("one-rerender-clears",
+                        render(["--root", str(root), "--write"], observations=obs) == EXIT_OK
+                        and view.read_bytes() == now))
+            got.append(("check-clean-after-rerender", render(["--root", str(root), "--check"]) == EXIT_OK))
+            return got
+
+        for _rs_prefix, _rs_chars, _rs_prior, _rs_escape_attr in (
+                ("sep", (chr(0x2028), chr(0x2029)), _opf_emit.prior_separator_spelling, "_LINE_SEPARATORS"),
+                ("shy", (chr(0x00AD),), _opf_emit.prior_soft_hyphen_spelling, "_SOFT_HYPHEN_SET")):
+            for _rs_name, _rs_ok in _respell_row(_rs_chars, _rs_prior):
+                check("{}-respell-{}".format(_rs_prefix, _rs_name), _rs_ok)
+            # The flip: the same row with this class's escape removed from the emitter must not pass whole.
+            try:
+                with _sep_mock.patch.object(_opf_emit, _rs_escape_attr, frozenset()):
+                    _rs_flipped = all(ok for _n, ok in _respell_row(_rs_chars, _rs_prior))
+            except Exception:  # noqa: BLE001 - a flipped run that raises is a red row, never a pass
+                _rs_flipped = False
+            check("{}-respell-flip-no-escape-red".format(_rs_prefix), not _rs_flipped)
+        # Control: a projection over records holding none of these characters is byte-identical across a
+        # re-render.
         _plain_view = gvroot / WORKING_DIRNAME / "DECISIONS.toml"
         _plain_before = _plain_view.read_bytes()
         check("sep-plain-rerender-byte-identical",

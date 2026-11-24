@@ -42,6 +42,11 @@ class = "word-joiner"
 payload-base64 = "YeKBoGIK"                      # b"a" + U+2060 (WORD JOINER) + b"b\n"
 
 [[vector]]
+name = "fail-soft-hyphen"
+class = "soft-hyphen"
+payload-base64 = "Y2/CrW9wCg=="                  # b"co" + U+00AD (SOFT HYPHEN) + b"op\n"
+
+[[vector]]
 name = "fail-invalid-utf8"
 class = "invalid-utf8"
 payload-base64 = "//4K"                          # b"\xff\xfe\n" (not valid UTF-8)

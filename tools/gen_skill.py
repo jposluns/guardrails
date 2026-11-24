@@ -230,9 +230,11 @@ def authoring_marker_tracked(root, marker_rel):
     release, pin or install carries it (.aiqt/core/ownership.toml excludes it by an exact literal), so an
     adopter's index never tracks it. Only a positive answer counts: a root that is not in a git work tree, a
     missing git binary, a nonzero exit or a timeout is False (an adopter tree need not be a git repository, and
-    the parent behaviour judged such a tree without git). The call is pinned like gen_manifest.git_tracked: the
-    GIT_* environment is scrubbed, core.fsmonitor=false (a repository-config fsmonitor hook is attacker-chosen
-    code), protocol.allow=never and GIT_NO_LAZY_FETCH=1; ls-files --cached runs no filter, hook or transport."""
+    the parent behaviour judged such a tree without git). The call is pinned like gen_manifest.git_tracked on the
+    hook and transport options only: the GIT_* environment is scrubbed, core.fsmonitor=false (a repository-config
+    fsmonitor hook is attacker-chosen code), protocol.allow=never and GIT_NO_LAZY_FETCH=1; unlike git_tracked it
+    passes neither --no-replace-objects nor core.commitGraph=false (ls-files --cached reads the index, not objects
+    or the commit graph). ls-files --cached runs no filter, hook or transport."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_NO_LAZY_FETCH"] = "1"
     try:

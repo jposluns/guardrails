@@ -870,9 +870,11 @@ malformed.
 - `commands` lists the basenames of the commands that dispatch a review.
 - `brief_option` is the option that names the brief file, as `--brief PATH` or `--brief=PATH`.
 - `labels` names the five brief labels, and optionally two more, `draft` and `skip`, declared
-  together or not at all, which turn on the worker draft census below, and optionally two more,
+  together or not at all, which turn on the worker draft census below, optionally two more,
   `carried` and `reopen`, declared together or not at all, which turn on the carried review check
-  below (rule evgcmp). They must be distinct.
+  below (rule evgcmp), and three more, `export`, `export_diff` and `export_base`, declared together
+  or not at all, which turn on the review export check below. One or two of the export labels is a
+  malformed binding. They must be distinct.
 - `authority.argv` is a fixed argv, never a shell string. The hook runs it from the repository root
   with the brief's absolute path appended and every `GIT_*` variable removed from its environment, as
   for the hook's own git reads, and it must print exactly one full commit id: the
@@ -988,6 +990,10 @@ MODIFIER LETTER TRIANGULAR COLON); and when it is split across lines.
   review is carried from.
 - `Review-reopen:` lines (only with the `reopen` label) each name one path where review reopens because
   it differs between the reviewed and the new bases, kept exactly as written.
+- `Review-export:`, `Review-export-diff:` and `Review-export-base:` (optional, only where the binding
+  declares the export labels; the label text is the binding's) name a review export together, once
+  each: its root by an absolute path, and its diff file and base-copy directory by paths relative to
+  that root.
 
 For a `revision` target, the hook checks the following in order. The first failure decides.
 
@@ -999,7 +1005,8 @@ For a `revision` target, the hook checks the following in order. The first failu
    paths the draft's headers name, less the skipped ones, join the declared paths.
 5. The commit's changed set equals the declared paths. The base is the sole parent, the first parent
    of a merge, or the empty tree for a root commit.
-6. No declared path is staged against the pin, and the working tree matches the pin at every
+6. Where the brief names a review export, the review export check below passes.
+7. No declared path is staged against the pin, and the working tree matches the pin at every
    declared path. The working tree is compared by content: the hook hashes each declared file, or
    reads each symlink target, and compares the result and the file mode with the pin's tree entry.
    An assume-unchanged or skip-worktree flag, `core.ignoreStat`, the stat cache, an fsmonitor answer
@@ -1134,6 +1141,95 @@ does (such as one starting `index ` or `\ `), that reads as an inline submodule 
 a value other than `7bit` or `8bit` is refused with the rest, which can withhold a correct draft:
 telling a message line from a part header or a section's line needs the mailbox structure, which a
 draft can mangle, so the census refuses such a line wherever it stands.
+
+### The review export check
+
+A review copy that carries a diff, base copies of files, or a statement that files outside the diff
+are unchanged takes all of them from the one derived base (rule vfxcmt). When the diff comes from one
+base and the base copies from another, the copy contradicts itself: a series reviewed through its last
+commit's diff names only what that commit changed, and base copies taken from the series base then
+present a file an earlier commit changed as unchanged. Where the binding declares the `export`,
+`export_diff` and `export_base` labels and a revision brief names an export, the hook checks it,
+after the changed-set equality, against the pin and the base it derives itself (never a base the
+export or the brief names):
+
+- P1: the export's diff file is byte-identical to the hook's own diff of the derived base against the
+  pin, so it names exactly the changed set with each path's real change. The hook takes that diff with
+  replacement objects and grafts disabled and every ambient `GIT_` variable removed, with these fixed
+  options, which a worker uses to build the export:
+
+  ```
+  GIT_NO_REPLACE_OBJECTS=1 GIT_ATTR_NOSYSTEM=1 git -c core.attributesFile=/dev/null \
+    -c core.loosecompression=1 --attr-source=$(git hash-object -t tree /dev/null) \
+    -c core.quotePath=true -c diff.suppressBlankEmpty=false diff-tree -r -p \
+    --binary --full-index --no-renames -U3 --inter-hunk-context=0 --diff-algorithm=myers \
+    --indent-heuristic --no-relative -O/dev/null --src-prefix=a/ --dst-prefix=b/ --no-color \
+    --no-ext-diff --no-textconv --ignore-submodules=none --submodule=short <base> <pin>
+  ```
+
+  That is no attribute in force (attributes read from the empty tree, no `core.attributesFile`, no
+  system attributes file), binary content deflated at level 1 whatever `core.compression` or
+  `core.loosecompression` says, no external diff, no textconv, no colour, three context lines, no
+  rename or copy detection (a rename is a deletion and an addition), binary content in full, and
+  quoted path names. So a `binary`, `-diff` or diff driver attribute the repository commits does not
+  shape it, and the check is usable on files the repository marks binary. The bytes are compared as
+  they are, with no line-ending, byte-order-mark or whitespace change, so the genuine diff of a commit
+  that changes a CRLF file passes. A diff from another base, a merge's second parent or a series base,
+  a diff with a section that is only a `Binary files` line, mode lines or an empty hunk, and a diff
+  taken with other options are refused, even where they name the same paths; a refusal names the
+  paths that differ where the headers name another path set. P1 only refuses: git configuration can
+  still change the form of this diff, so whether the export matches the commit is decided by bytes
+  (P2 and P3), never by the diff's text.
+- P2: every changed path is exported (a head copy where the pin has the path, a base copy where the
+  base has it); every head copy, a regular file under the root outside the diff file and the
+  base-copy directory, is byte for byte the content of the pin's blob at its path; every base copy, a
+  regular file under the base-copy directory, is byte for byte the content of the derived base's blob
+  at its path, so a path the base lacks has none; every copy's owner execute bit matches its blob's
+  mode (set for 100755, clear for 100644); and a root commit's export holds no base copy. Each mismatch
+  is refused. The hook reads the blobs with one `git cat-file --batch` under the same pinned options,
+  which reads an object's own bytes with no filter, textconv, diff driver or external program, hashes
+  each record as a blob in the repository's object format and holds it to the object id it was read
+  for, and compares each copy with those verified bytes, never by object id. An object store that
+  returns other bytes under a blob's id is a cannot-evaluate, never a pass. Only the blob bytes are
+  verified this way: the trees, the commits and the hook's own diff are taken as git reads them, so
+  object-store integrity is otherwise assumed.
+- P3: no changed path whose blob bytes are text on every side that has it (no NUL in the first 8000
+  bytes, git's own test) has a binary section (`Binary files` or `GIT binary patch`) in the diff. So
+  no diff driver setting (such as `diff.default.binary`) or `$GIT_DIR/info/attributes` entry can
+  show a text change as a binary section that passes; such an export is refused.
+
+The hook walks the root itself, opening each directory and file by name from its parent's descriptor
+without following a symlink, so no path it reads escapes the root. Withheld as `UNVERIFIABLE:`: a
+brief naming the export only in part or twice, a relative root, a diff or base path that is absolute
+or holds an empty, `.` or `..` component, a diff file inside the base-copy directory, a root, diff
+file or base-copy directory that is missing or cannot be read, a diff file or a derived-base diff over
+`max_brief_bytes`, a diff file that differs from the hook's diff and that the census cannot read (not
+UTF-8, a NUL, a malformed section), a symlink, FIFO, device or socket anywhere under the root, a
+changed path that is a symlink or submodule entry or that the diff file or base-copy directory stands
+in place of, a failed git read (the hook's own diff and its blob read included), a blob read whose
+bytes do not hash to its object id, copies or blobs over 128 MiB together on either side (the copies
+counted by size before they are read, the blobs by the sizes `git cat-file --batch-check` reports
+first), more than 50000 entries under the root, and the 8 second budget.
+
+The check applies to a `revision` target only, and a brief that names no export is reconciled as
+before. Its residual: edits between the check and the reviewers' reads are not caught. Git
+configuration the options do not pin (a diff driver's hunk-header pattern, `diff.default.binary`,
+`$GIT_DIR/info/attributes`) changes the hook's diff as well as the worker's, so a diff
+taken without it is refused (a false refusal), and one taken with it passes only where P2 and P3 hold;
+a text change it shows as a binary section is refused by P3. A file that is binary by git's test may
+be shown as a binary section, and its change is then checked only through its copies. A binary
+section's bytes are zlib output, so they also depend on the zlib and git builds: a diff another build
+took can differ, and P1 then refuses it (a false refusal, never a pass). Copies are compared by
+content and owner execute bit only, with the content read from blobs whose bytes hash to their
+object ids; the trees, commits and diff git reads are trusted as the object store gives them. An
+export whose copies or blobs exceed 128 MiB is withheld (a false cannot-evaluate for a large
+genuine export), and an object store rewritten between the size read and the content read is
+outside that bound. The brief's
+"unchanged" prose is not parsed. A series whose pin's first-parent diff is not the whole task still
+passes (the self-test row `rdp/export-first-parent-base-copies-allows`). Only the adopter's authority
+command and the rule text decide the pin. Context files and sealers that never call the preflight or
+a declared dispatch command are not seen (a context file inside the export root is a head copy and is
+compared with the pin; one a reviewer reads from elsewhere is not).
 
 ### The carried review check
 
@@ -1288,6 +1384,14 @@ Limits:
   census reads the draft the brief names, which is not proven to be the draft the commit applied.
   A draft with CRLF line ends, or one holding a hunk of a CRLF file, is withheld as `UNVERIFIABLE:`
   rather than censused.
+- A review export is checked only where the brief names it. Edits between the check and the
+  reviewers' reads, the brief's "unchanged" prose, earlier commits of a series outside the pin's
+  first-parent diff, and context files and sealers that never call the preflight or a declared
+  dispatch command are not caught (the review export check above). Copies are compared with the
+  blob bytes and a text change shown as a binary section is refused, but git configuration the
+  hook's options do not pin still shapes its diff, so an export taken without that configuration,
+  or whose binary sections another zlib or git build deflated differently, is refused, and a file
+  binary by git's test is checked only through its copies.
 - The carried review check sees only a declared carry. A brief that writes `none` while its prose
   still carries a verdict, and a dispatch through an undeclared command, alias, script or non-Bash
   tool, are not seen, the same limit as a misdeclared target.

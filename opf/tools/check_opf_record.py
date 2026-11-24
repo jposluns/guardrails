@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T116)
+  check_opf_record.py --self-test                    the fixture suite (T1-T117)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
                                                      through an assertion (_discriminate)
 
@@ -679,6 +679,12 @@ Each case runs on its own copy of that template; the root is removed in a finall
       close then fails, refuses exit 2 naming that error, the lease the claim left in place as one that
       STAYS and the leftover's release, the journal left as found (flip: the claim's close error reaches
       the unexpected-error backstop, whose repr drops those notes)
+  T117 a store whose backlog index an earlier emitter wrote with a literal U+00AD SOFT HYPHEN inside a
+      basic string, in a record's title and summary: render writes views carrying the character, doctor is
+      VALID and render --check is clean; a create records, re-spelling the file with the \\u00AD escape, the
+      existing record reading back unchanged and doctor staying VALID; and a create whose own title holds a
+      soft hyphen records and leaves doctor VALID and render --check clean (flips: U+00AD put back in the
+      shared forbidden set the view generator refuses; no soft-hyphen escape; the strict byte comparison)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), or, when no assertion fails, a
@@ -9890,6 +9896,86 @@ def flip_t89_any_bytes():
     return patch.object(emit, "matches_store_bytes", lambda raw, fresh: True)
 
 
+# --- T117: a store an earlier emitter wrote with a literal U+00AD SOFT HYPHEN ---------------------------------
+# U+00AD stays out of the shared forbidden set the view generator refuses (the separators' reason): a store
+# may already hold one, and an imported or done record cannot be changed, so render, doctor and record must
+# keep working over it while the emitter escapes it in every file it writes.
+
+T117_TEXT = "co" + chr(0x00AD) + "op"
+T117_LITERAL = chr(0x00AD).encode("utf-8")
+T117_CREATE = ["create", "--type", "backlog_item", "--title", T117_TEXT, "--summary", T117_TEXT,
+               "--actor", "assistant:gate"]
+T117_VIEW = ".working/BACKLOG.md"
+
+
+def _t117_store(fx, name):
+    """A doctor-VALID store whose backlog index holds BI-1 with a soft hyphen in its title and summary in the
+    earlier (literal) spelling, its views rendered over those bytes, everything committed."""
+    env = fx.env
+    root = fx.case(name)
+    step(fx, root, T117_CREATE, "a soft-hyphen record")
+    written = read(root, BI_INDEX)
+    if b"\\u00AD" in written:     # the earlier emitter wrote the character itself (no other escape text here)
+        write_commit(env, root, BI_INDEX, written.replace(b"\\u00AD", T117_LITERAL), "the earlier spelling")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("T117 render over a store holding a literal soft hyphen", rc, err[-800:])
+    if env.git(root, "status", "--porcelain", "--", ".working").strip():
+        fx.commit_all(root, "views over the earlier spelling")
+    held = read(root, BI_INDEX)
+    assert T117_LITERAL in held and b"\\u00AD" not in held, (
+        "T117 the fixture index holds the literal character", held[-400:])
+    assert T117_LITERAL in read(root, T117_VIEW), ("T117 the rendered view carries the character",
+                                                  read(root, T117_VIEW)[-400:])
+    doctor_valid(env, root)
+    return root
+
+
+def _t117_render_clean(env, root, when):
+    rc, out, err = cli(env, ["render", "--root", str(root), "--check"])
+    assert rc == 0, ("T117 render --check is clean " + when, rc, out[-800:], err[-800:])
+
+
+def t117_soft_hyphen_store(fx):
+    env = fx.env
+    root = _t117_store(fx, "t117-soft-hyphen")
+    _t117_render_clean(env, root, "over the earlier spelling")
+    kept = row(root, "BI-1")
+    assert kept["title"] == T117_TEXT and kept["summary"] == T117_TEXT, kept
+    recorded(record_cli(env, root, CREATE))
+    after = read(root, BI_INDEX)
+    assert T117_LITERAL not in after, ("T117 the write re-spells the file", after[-400:])
+    assert b'summary = "co\\u00ADop"' in after, ("T117 the escape is written", after[-400:])
+    assert row(root, "BI-1") == kept, "T117 the existing record reads back unchanged"
+    assert [r["id"] for r in model(root, BI_INDEX)["record"]] == ["BI-1", "BI-2"], (
+        "T117 the new record is appended")
+    doctor_valid(env, root)
+    fx.commit_all(root, "an unrelated record over the soft-hyphen store")
+    _t117_render_clean(env, root, "after an unrelated create")
+    recorded(record_cli(env, root, T117_CREATE))
+    assert row(root, "BI-3")["title"] == T117_TEXT, "T117 a soft-hyphen title records"
+    assert T117_LITERAL not in read(root, BI_INDEX), "T117 the new record is written with the escape"
+    doctor_valid(env, root)
+    fx.commit_all(root, "a soft-hyphen record")
+    _t117_render_clean(env, root, "after a soft-hyphen create")
+
+
+@contextlib.contextmanager
+def flip_t117_forbidden():
+    """U+00AD put back in the shared forbidden set (_byte_canon.FORBIDDEN), which the view generator reads."""
+    import _byte_canon
+    shy = chr(0x00AD)
+    widened = dict(_byte_canon.FORBIDDEN) | {shy.encode("utf-8"): shy}
+    with patch.object(_byte_canon, "FORBIDDEN", widened), \
+            patch.object(_byte_canon, "FORBIDDEN_RE",
+                         re.compile(b"|".join(re.escape(b) for b in sorted(widened)))), \
+            patch.object(_byte_canon, "ZERO_WIDTH", _byte_canon.ZERO_WIDTH + (shy,)):
+        yield
+
+
+def flip_t117_no_escape():
+    return patch.object(emit, "_SOFT_HYPHEN_SET", frozenset())
+
+
 # --- T90: the store-read cap over every file a record operation would publish -------------------------------
 # Re-spelling grows each literal separator from three bytes to six and the appended row adds its whole
 # body, so a legacy index near the cap could otherwise be rewritten into one the resolver and doctor then
@@ -11235,6 +11321,8 @@ TESTS = (
     ("T114-receipt-repair-uncommitted-edit", t114_repair_uncommitted_edit, flip_t114),
     ("T115-receipt-repair-head-moved", t115_repair_head_moved, flip_t115),
     ("T116-recovery-claim-close-fault-named", t116_claim_close_fault_named, flip_t116),
+    ("T117-soft-hyphen-store-keeps-working", t117_soft_hyphen_store, (flip_t117_forbidden, flip_t117_no_escape,
+                                                                      flip_t89_strict)),
 )
 
 

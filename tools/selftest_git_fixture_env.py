@@ -803,15 +803,41 @@ CONFIG_DIRECT_SELFTESTS = {
     "merge-pr-selftest": ("tools/merge_pr.py", "--self-test"),
 }
 
+# The one coverage rule for a bare suite runner CONFIG_EXCLUSIONS["all"] excludes: the roster must
+# still enter that runner's own self-test directly in every config lane, through its
+# CONFIG_DIRECT_SELFTESTS entry or a registered --self-test/--selftest launch of the runner that no
+# lane excludes (a launch CONFIG_EXCLUSIONS["malformed"] excludes does not count), unless the
+# runner is named here with the reason its suite step alone carries its self-test. Any other
+# excluded bare runner of a rostered suite refuses the roster ("uncovered excluded bare runner"),
+# so deleting a CONFIG_DIRECT_SELFTESTS entry or a registered direct launch, or excluding it from
+# one lane, cannot silently drop that runner from a lane; an entry here whose runner is not such
+# an excluded runner, has a direct launch in any lane, or carries no reason (or one that is not a
+# string) refuses the roster too.
+CONFIG_SUITE_STEP_ONLY = {
+    "tools/measure_hook_latency.py":
+        "Its only self-test entry is the hook-latency-selftest suite step: no registry launches"
+        " it directly, and a bare launch is a real timing measurement, not a self-test (see its"
+        " CONFIG_EXCLUSIONS['all'] reason).",
+}
+
 # Every registered suite reaches these lanes in one accounted form: its execution-gate step, plus
 # a direct launch of its runner. That direct launch is the BARE runner unless CONFIG_EXCLUSIONS["all"]
 # excludes the bare runner with a reason; such a runner's self-test is then still entered directly
 # through its CONFIG_DIRECT_SELFTESTS entry or a registered --self-test launch, except where the
-# reason says why the suite step alone carries it (tools/measure_hook_latency.py). A bare runner
-# launch the roster keeps must be known to be a
-# self-test or a passing gate: a selftest_ module (its bare launch IS the self-test), a bare launch
-# one of the registries runs itself (a registered gate), or a runner named here, each with the
-# reason its bare launch exits 0 under a clean configuration and the self-test check that pins it.
+# reason says why the suite step alone carries it (CONFIG_SUITE_STEP_ONLY). A bare runner
+# launch the roster keeps must be known to be a self-test or a passing gate, from a registry:
+# a selftest_ module every suite row of which carries no args (the execution gate's required step
+# then launches it with no arguments but the gate's own report pair, so its bare entry point IS the
+# registered self-test), a bare launch one of the registries runs itself (a registered gate), or a
+# runner named here as (reason, check id), which may be a selftest_ module whose suite rows carry
+# args: the reason its bare launch exits 0 under a clean configuration, and a check id. The roster
+# enforces membership only: the id must be in the expected-check-ids of a suite row that runs that
+# runner (tools/selftest_checks.toml), so a cited id that is misspelt, renamed, removed or another
+# runner's refuses the roster ("unresolved bare suite runner check id"). Whether the cited check
+# pins the bare exit the reason states is a review claim the roster does not verify.
+# Residual: none of these routes runs the bare launch while the roster is built, so whether it
+# exits 0 under a config lane's poisoned configuration is decided only when the lane runs it
+# (a nonzero member fails the lane); a launch that fails a lane by design needs a lane exclusion.
 # Any other bare suite runner refuses the roster ("unaccounted bare suite runner"), so a new suite
 # whose runner fails a bare launch by design (a usage error) is refused when the roster is built,
 # in tools/check_selftest_execution.py --suite git-fixture-env-core and at the start of every
@@ -819,15 +845,18 @@ CONFIG_DIRECT_SELFTESTS = {
 # (its runner no longer a kept bare suite runner, or already accounted by another route) refuses
 # the roster too.
 CONFIG_BARE_SUITE_RUNNERS = {
-    "tools/check_brief_capability.py":
+    "tools/check_brief_capability.py": (
         "A bare launch lints no brief: it validates the shipped capability table and exits 0 on"
-        " it (its self-test pins that exit as main/bare-shipped-table-0).",
-    "tools/check_verifier_delivery.py":
+        " it.",
+        "main/bare-shipped-table-0"),
+    "tools/check_verifier_delivery.py": (
         "A bare launch validates the tool's own static tables, reads no input and runs no git,"
-        " and exits 0 (its self-test pins that exit as cli/bare-ok-exit-0).",
-    "tools/ci_build_bash.py":
+        " and exits 0.",
+        "cli/bare-ok-exit-0"),
+    "tools/ci_build_bash.py": (
         "A bare launch is the self-test, even with RUNNER_TEMP and GITHUB_PATH set; only --build"
-        " builds (its self-test pins that as main/bare-runs-self-test).",
+        " builds.",
+        "main/bare-runs-self-test"),
 }
 
 
@@ -875,8 +904,12 @@ def _registered_selftests(root=ROOT):
     CONFIG_DIRECT_SELFTESTS entry names instead, so the lanes still enter
     that runner's own self-test entry point under the poison. A bare runner
     the roster keeps must be accounted (CONFIG_BARE_SUITE_RUNNERS states the
-    rule): an unaccounted one, or a stale or unreasoned entry in that table,
-    refuses the roster here, before any lane deals it to a shard.
+    rule): an unaccounted one, a stale or unreasoned entry in that table, or
+    an entry whose cited check id no suite row of its runner registers,
+    refuses the roster here, before any lane deals it to a shard. An excluded
+    bare runner with no direct self-test launch that every config lane runs
+    refuses the roster too, unless CONFIG_SUITE_STEP_ONLY names it (that table
+    states the rule).
     """
     from check_ci_parity import (
         adapt_standalone_runner, extract_local, extract_ci,
@@ -940,7 +973,19 @@ def _registered_selftests(root=ROOT):
     if suites is None:
         raise ValueError("cannot read suite runner registry")
     runners = {row["id"]: row["runner"] for row in suites}
+    runner_rows = {}  # runner -> every suite row that runs it
+    for row in suites:
+        runner_rows.setdefault(row["runner"], []).append(row)
+
+    def selftest_route(runner):
+        # The selftest_ route of the form rule: a selftest_ module every suite row of which carries
+        # no args. The same predicate decides which runners it accounts and which declarations it
+        # makes stale, so a selftest_ runner it does not account may be declared instead.
+        return (Path(runner).name.startswith("selftest_")
+                and not any("args" in row for row in runner_rows.get(runner, ())))
+
     bare_declared = set()
+    excluded_bare = {}  # excluded bare runner of a rostered suite -> its suite id
     for argv in sorted(commands):
         identity = _suite_identity(argv)
         if identity[0] == "tools/check_selftest_execution.py" and "--suite" in identity:
@@ -949,29 +994,61 @@ def _registered_selftests(root=ROOT):
             if identity not in CONFIG_EXCLUSIONS["all"]:
                 runner = runners[argv[2]]
                 # The one form rule (CONFIG_BARE_SUITE_RUNNERS): a bare runner launch the roster
-                # keeps is a selftest_ module, a registered bare gate, or a declared bare runner.
-                if (runner,) not in CONFIG_EXCLUSIONS["all"]:
-                    if runner in CONFIG_BARE_SUITE_RUNNERS:
-                        bare_declared.add(runner)
-                    elif not (Path(runner).name.startswith("selftest_")
-                              or (runner,) in registered):
-                        raise ValueError(
-                            "unaccounted bare suite runner: {!r} of suite {!r} is neither a"
-                            " selftest_ module, a registered bare launch, a"
-                            " CONFIG_BARE_SUITE_RUNNERS entry nor a CONFIG_EXCLUSIONS['all']"
-                            " exclusion".format(runner, argv[2]))
+                # keeps is a selftest_ module the registry launches with no row args, a registered
+                # bare gate, or a declared bare runner.
+                if (runner,) in CONFIG_EXCLUSIONS["all"]:
+                    excluded_bare.setdefault(runner, argv[2])
+                elif runner in CONFIG_BARE_SUITE_RUNNERS:
+                    bare_declared.add(runner)
+                elif not (selftest_route(runner) or (runner,) in registered):
+                    raise ValueError(
+                        "unaccounted bare suite runner: {!r} of suite {!r} is neither a"
+                        " selftest_ module whose suite rows carry no args, a registered bare"
+                        " launch, a CONFIG_BARE_SUITE_RUNNERS entry nor a"
+                        " CONFIG_EXCLUSIONS['all'] exclusion".format(runner, argv[2]))
                 commands.add((runner,))
                 direct = CONFIG_DIRECT_SELFTESTS.get(argv[2])
                 if direct is not None:
                     commands.add(direct)
-    for runner, reason in CONFIG_BARE_SUITE_RUNNERS.items():
-        if (runner not in bare_declared or not reason.strip()
-                or Path(runner).name.startswith("selftest_") or (runner,) in registered):
+    for runner, entry in CONFIG_BARE_SUITE_RUNNERS.items():
+        reason, check_id = entry if isinstance(entry, tuple) and len(entry) == 2 else ("", "")
+        if (runner not in bare_declared or not isinstance(reason, str) or not reason.strip()
+                or selftest_route(runner) or (runner,) in registered):
             raise ValueError("stale or unreasoned bare suite runner entry: {!r}".format(runner))
+        # The cited check id resolves against the registry it names: the expected-check-ids of a
+        # suite row that runs this runner in tools/selftest_checks.toml.
+        cited_in = sorted(row["id"] for row in runner_rows.get(runner, ())
+                          if check_id in row["expected-check-ids"])
+        if not isinstance(check_id, str) or not cited_in:
+            raise ValueError(
+                "unresolved bare suite runner check id: {!r} cites {!r}, which no suite row"
+                " running it lists in its expected-check-ids".format(runner, check_id))
     for suite_id, direct in CONFIG_DIRECT_SELFTESTS.items():
         if suite_id not in runners or direct not in commands:
             raise ValueError("stale direct self-test entry: {!r}".format(suite_id))
     identities = {_suite_identity(argv) for argv in commands}
+    # The coverage rule CONFIG_SUITE_STEP_ONLY states: an excluded bare runner keeps a direct
+    # self-test launch that every config lane runs, or is named there with a reason. A launch
+    # covers only the lanes that run it: CONFIG_EXCLUSIONS["all"] removes it from every lane, and
+    # CONFIG_EXCLUSIONS["malformed"] from the malformed lane (_config_lane_roster), so a direct
+    # launch a lane excludes does not count as that runner's coverage.
+    def direct_launches(excluded):
+        return {identity[0] for identity in identities
+                if identity not in excluded
+                and ("--self-test" in identity or "--selftest" in identity)}
+    directly_entered = direct_launches(CONFIG_EXCLUSIONS["all"])  # in at least one lane
+    entered_in_every_lane = direct_launches(
+        set(CONFIG_EXCLUSIONS["all"]) | set(CONFIG_EXCLUSIONS["malformed"]))
+    for runner, suite_id in sorted(excluded_bare.items()):
+        if runner not in entered_in_every_lane and runner not in CONFIG_SUITE_STEP_ONLY:
+            raise ValueError(
+                "uncovered excluded bare runner: {!r} of suite {!r} has no direct self-test launch"
+                " (a CONFIG_DIRECT_SELFTESTS entry or a registered --self-test launch) that every"
+                " config lane runs, and no CONFIG_SUITE_STEP_ONLY entry".format(runner, suite_id))
+    for runner, reason in CONFIG_SUITE_STEP_ONLY.items():
+        if (runner not in excluded_bare or runner in directly_entered
+                or not isinstance(reason, str) or not reason.strip()):
+            raise ValueError("stale or unreasoned suite-step-only entry: {!r}".format(runner))
     for lane, exclusions in CONFIG_EXCLUSIONS.items():
         for argv, reason in exclusions.items():
             if argv not in identities or not reason.strip():
@@ -3968,7 +4045,8 @@ def _handshake_expired(scenario, extra):
 #   60 s positive-control bound make the run cannot-evaluate, never a definite mismatch,
 #   while a false flag beside the same record stays definite. That the child's flags
 #   ARE at their want then rests on the producer pin ("producer-map" below) and the
-#   "failed-stalled" value pin, short of THE RESIDUAL (_allowlist_producers). Member a's own
+#   "failed-stalled" value pin, short of THE RESIDUAL, what neither net catches
+#   (_allowlist_producers). Member a's own
 #   arrival and raise came OFF this entry (round 17): that 60 s bound sits between
 #   member a's worker entering run and those flags, so a merely slow git leaves them
 #   False with the code healthy; they are the "member_a" extra, never definite when
@@ -4652,7 +4730,9 @@ def _slow_control_record(source=None):
     earlier handler and no nested try, and yields the prefix the gate tests unless an edit
     in the NOT READ class below changes what the try or the gate evaluates. NOT READ, each
     named route an EXAMPLE of that class, a route that can keep the record out of the
-    report while this reader still gives []: whether a TimeoutExpired reaches this try at
+    report the suite parses (the text after the LAST "PROBE-REPORT " in the child's
+    stdout, decoded as JSON, as THE NOT READ CLASS below states; not merely a printed
+    report) while this reader still gives []: whether a TimeoutExpired reaches this try at
     all (the suite code main() runs, and the child's replacements of suite attributes on
     that path, such as the sweep wrapper, can swallow or replace it); a binding made by a
     wildcard import (from <module> import *), which can bind outcome or scenario unseen
@@ -4673,8 +4753,11 @@ def _slow_control_record(source=None):
     sys._getframe().f_globals['outcome'] = ...), which binds no name either; an exit or
     raise between the gate and the report (an assert, raise, sys.exit or os._exit after the
     record, in the child or a def it calls), so no PROBE-REPORT line is printed and the run
-    reads as a missing report, not a timeout; and any change to how the report is written
-    (a rebinding or replacement of print, sys.stdout or json.dumps). THE NOT READ CLASS,
+    reads as a missing report, not a timeout; any change to how the report is written
+    (a rebinding or replacement of print, sys.stdout or json.dumps); and any change to
+    WHICH report the suite parses (a second "PROBE-REPORT " line printed after the
+    committed one, without the record, is the one the parent decodes, though the record
+    was printed). THE NOT READ CLASS,
     exact by construction: this reader does not read ANY edit, by any route, that changes
     what the pinned try or the gate evaluates, or whether the record reaches the extras the
     parent decodes (_member_close_controls in tools/selftest_git_fixture_env_core.py takes

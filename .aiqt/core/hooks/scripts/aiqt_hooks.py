@@ -324,6 +324,7 @@ import collections
 import datetime
 import errno
 import fnmatch
+import hashlib
 import itertools
 import json
 import math
@@ -415,7 +416,7 @@ DENY_CONSTRUCTORS = (
     "_deny_unreadable_command", "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_check_then_git_deny", "_gate_plumbing_deny", "_gate_push_redirect_deny", "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
     "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
-    "_reset_ancestry_deny", "_wrtscp_deny")
+    "_reset_ancestry_deny", "_static_reading_uncertain_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -687,10 +688,12 @@ class _AnsiCQuotes:
         return False
 
 
-# _ansi_c_decode reads the one-character escapes of an ANSI-C quote from _ANSI_C_NAMED (beside _ansi_c_decoded), as
+# _ansi_c_decode reads the one-character escapes of an ANSI-C quote from _ANSI_C_NAMED (below), as
 # bash 5.3 decodes them (lib/sh/strtrans.c, ansicstr, with the flags $'...' passes): \a \b \e \E \f \n \r \t \v, and
 # \\ \' \" \? as the character itself. Any other character after a backslash keeps the backslash (\z is \z), and so
 # does \x, \u or \U followed by no hex digit.
+_ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
+                 "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
 _ANSI_C_HEX = frozenset("0123456789abcdefABCDEF")
 _ANSI_C_OCTAL = frozenset("01234567")
 
@@ -2520,55 +2523,789 @@ def _dequoted_text(command):
     return joined.replace("'", "").replace('"', "").replace(chr(92), "")
 
 
-# An ANSI-C $'...' quote, its body running to the first single quote no backslash escapes, and one backslash
-# escape inside such a body, in the forms bash decodes there (_ansi_c_decoded).
+# An ANSI-C $'...' quote, its body running to the first single quote no backslash escapes (_ansi_c_decoded). The
+# escapes inside such a body are read through the hooks' one escape table, the no-verify gate's: _GATE_BASH_ESCAPE_RE
+# finds each escape in every form bash 5.3.9 decodes (octal, \x with one or two hex digits, braced \x{...}, \u, \U,
+# \c with \c\\ as one pair, the letter escapes) and _gate_bash_escape decodes it, so the static decoded reading and
+# the gate's decoder (_gate_ansi_c_text) cannot read an escape differently.
 _ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
-_ANSI_C_ESCAPE_RE = re.compile(
-    r"\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|c(.)|(.))", re.DOTALL)
-_ANSI_C_NAMED = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t",
-                 "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
-
-
-def _ansi_c_escape(match):
-    """The text one ANSI-C escape (_ANSI_C_ESCAPE_RE) stands for, as bash decodes it: the character of a hex,
-    Unicode or octal value (an octal value keeps its low eight bits, as bash does; a code point past
-    U+10FFFF reads as nothing), the control character of \\cX, a named escape's character, and the escape
-    itself where bash keeps it unchanged (an unknown letter)."""
-    hex_value, short_point, long_point, octal, control, other = match.groups()
-    if hex_value is not None:
-        return chr(int(hex_value, 16))
-    if short_point is not None or long_point is not None:
-        point = int(short_point or long_point, 16)
-        return chr(point) if point <= 0x10FFFF else ""
-    if octal is not None:
-        return chr(int(octal, 8) & 0xFF)
-    if control is not None:
-        return "\x7f" if control == "?" else chr(ord(control) & 0x1F)
-    return _ANSI_C_NAMED.get(other, match.group(0))
 
 
 def _ansi_c_body(match):
-    """The decoded body of one ANSI-C quote (_ANSI_C_QUOTE_RE), with no quote characters around it."""
-    return _ANSI_C_ESCAPE_RE.sub(_ansi_c_escape, match.group(1))
+    """The decoded body of one ANSI-C quote (_ANSI_C_QUOTE_RE), with no quote characters around it: each escape
+    (_GATE_BASH_ESCAPE_RE) decoded by _gate_bash_escape, with no cut at a NUL (_decoded_readings reads the letters
+    after one too, which can only add a match; _ansi_c_static_quote cuts there as bash does)."""
+    return _GATE_BASH_ESCAPE_RE.sub(_gate_bash_escape, match.group(1))
 
 
 def _ansi_c_decoded(command):
     """command with each ANSI-C $'...' quote replaced by its body decoded the way bash decodes it
-    (_ansi_c_escape), so a spelling bash assembles from escapes (--no-$'\\x76'erify) reads as that spelling.
+    (_ansi_c_body, _gate_bash_escape), so a spelling bash assembles from escapes (--no-$'\\x76'erify,
+    --no-$'\\x{76}'erify) reads as that spelling.
     The quote is found in the raw text without tracking the quoting around it, so a $' inside other quotes
     is decoded too: it is read only beside the raw text and its plain de-quoted copy (_decoded_readings),
     where an extra reading can only add a match. Linear, never raises."""
     return _ANSI_C_QUOTE_RE.sub(_ansi_c_body, command)
 
 
+def _ansi_c_pair_split_body(match):
+    """The body of one ANSI-C quote (_ANSI_C_QUOTE_RE) with each escape decoded by the shared table
+    (_gate_bash_escape) but found by _ANSI_C_PAIR_SPLIT_ESCAPE_RE, which reads \\c and the one character after it,
+    so a \\c\\\\ pair is split (\\c\\\\x67 as \\c\\ and \\x67): the letters the escape table before the one shared
+    table read from it. bash reads the pair as one escape (_ansi_c_body); this reading is read only beside that
+    one."""
+    return _ANSI_C_PAIR_SPLIT_ESCAPE_RE.sub(_gate_bash_escape, match.group(1))
+
+
 def _decoded_readings(command):
     """The de-quoted readings a parse-failure fallback reads BESIDE the raw text: _dequoted_text(command)
     and, when command holds an ANSI-C $'...' quote, _dequoted_text of command with each such quote's escapes
-    decoded first (_ansi_c_decoded). A probe that matches any reading matches, so each reading can only add
-    a match to the raw text's probes, never clear one."""
+    decoded first (_ansi_c_decoded). When command also holds the text \\c\\\\, a third reading decodes each quote
+    with every \\c\\\\ pair split (_ansi_c_pair_split_body, _ANSI_C_PAIR_SPLIT_ESCAPE_RE): the escape table before the one shared table read the
+    pair as \\c\\ and an escape after it ($'\\c\\\\x67'it as a control character and git), so a command that reading
+    matched still matches. A probe that matches any reading matches, so each reading can only add a match to the raw
+    text's probes, never clear one. Gate G (_ansi_c_static_relevant) does not apply here: every command that holds $'
+    gets the decoded reading through the one escape table, so the main-path fallbacks that read these readings read a
+    braced escape as bash does (gi$'\\x{74}' as git, where the table before the one shared table read gix{74}) and
+    \\c before a multibyte character as its first byte's control character and U+FFFD (where that table read \\c
+    before an e with an acute accent as a tab); only the \\c\\\\ pair keeps that table's reading, as the third reading
+    above."""
     if "$'" not in command:
         return (_dequoted_text(command),)
-    return (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
+    readings = (_dequoted_text(command), _dequoted_text(_ansi_c_decoded(command)))
+    if "\\c\\\\" not in command:
+        return readings
+    return readings + (_dequoted_text(_ANSI_C_QUOTE_RE.sub(_ansi_c_pair_split_body, command)),)
+
+
+# The characters an ANSI-C quote's decoded body may hold and still be written back unquoted with the same meaning
+# to bash: letters, digits and _ - . / , : @ % + (no blank, quote, backslash, '$', backquote, glob, brace,
+# tilde, '=', '#', '!', or operator character).
+_ANSI_C_PLAIN_RE = re.compile(r"[A-Za-z0-9_./,:@%+-]+")
+
+
+def _ansi_c_static_quote(match):
+    """One ANSI-C quote (_ANSI_C_QUOTE_RE) written back as the literal word text bash makes of it: unchanged when its
+    body holds no backslash (the lexer already reads such a body literally), else its body as the no-verify gate's
+    decoder reads it (_gate_ansi_c_text: every escape form bash decodes, cut at the first escape that yields a NUL)
+    and cut at any NUL left (bash ends the string there), written unquoted when every character is in
+    _ANSI_C_PLAIN_RE and single-quoted otherwise (a single quote in it as '\\'')."""
+    if "\\" not in match.group(1):
+        return match.group(0)
+    body = _gate_ansi_c_text(match.group(1)).split("\x00", 1)[0]
+    if _ANSI_C_PLAIN_RE.fullmatch(body):
+        return body
+    return "'" + body.replace("'", "'\\''") + "'"
+
+
+def _ansi_c_static_reading(command):
+    """The STATIC DECODED READING: command with every quote bash decodes from the command text alone, and that this
+    reading decodes exactly as bash does (every other one is refused, below), written as the
+    literal word text bash assembles from it, so a git word, subcommand or option spelled that way lexes as its
+    plain spelling: an ANSI-C $'...' quote whose body holds an escape ($'\\x67'it, git $'\\x63'ommit, git log
+    $'\\x2d'p, $'\\x{67}'it) is decoded (_ansi_c_static_quote, the escapes read by the no-verify gate's decoder,
+    _gate_ansi_c_text, through the one escape table _decoded_readings reads too), and the '$' of a locale $"..." quote is dropped (gi$"t"), the string bash reads when no
+    message catalogue translates it, as _dequoted_text drops it. It is the lexable counterpart of
+    _decoded_readings' readings, which remove every quote and so cannot be lexed. Unlike them it tracks quoting
+    as bash does, so a $' or $" inside single quotes, or inside double quotes outside a '$(...)' or backquote
+    substitution, stays as written (bash keeps it literal there: git commit -m "a $'\\x60'id$'\\x60' b" holds no
+    substitution). A '#' opens a comment only where bash opens one: at a word start (the command's start, or
+    right after an unescaped blank, newline or operator character, or after the opening of a '$(...)', '<(...)',
+    '>(...)' or backquote substitution), outside quotes, here-document bodies and '${...}' expansions, with no
+    parenthesis open in its command (_ansi_c_static_scan). The comment is kept as written to its line's end (or
+    a backquote body's first unescaped backquote), and a here-document's body is kept as written (a quoted
+    delimiter) or read as double-quoted text (an unquoted one), so a single quote in either (true # it's,
+    cat <<'EOF' / it's / EOF) neither hides a later $'...' quote nor is decoded; a body whose delimiter line
+    never comes is read as command text. A '#' after an escaped blank or operator, a line continuation inside a
+    word, or the ')' that closes a substitution is word text (echo a\\ #; and echo $(true)#; run what follows).
+    Where the scan cannot read a construct with certainty, or where its reading there could differ from the
+    comment and here-document reading before this one, ahead of a later $'...' or $"..." quote, it raises
+    _StaticReadingUncertain and each guard that reads it denies (_static_reading_uncertain_deny). It decodes only
+    the quotes it reads exactly as bash does: inside a backquote substitution's body bash turns \\\\ into \\, \\$
+    into $ and \\` into ` (and \\" into ", in a backquote inside double quotes) before it parses the body, and ends
+    the body at its first unescaped backquote, which the scan does not model, so a backslash before a backslash,
+    '$', backquote or quote there, and a backquote inside a quoted string, an ANSI-C quote, a here-document, a
+    '$(...)' or a '${...}' there (_ANSI_C_BACKQUOTE_UNSURE_RE), is refused (`$'\\\\x67'it log -p` and
+    `\\$'\\x67'it log -p` both run git log -p). That refusal applies ahead of the last ANSI-C or locale quote as
+    written and ahead of the last quote the un-escaping can open where none is written (_ANSI_C_BACKQUOTE_BUILT_RE:
+    `gi$\\\\<newline>'t' log -p` and "`gi$\\"t\\" log -p`" both run git log -p); a backslash in a backquote body
+    after both is past it, and a backslash there before any other character, which bash keeps, is read as
+    written.
+    commit_msg_subst, commit_identity, diff_source_pretool and git_explicit_binding read it BESIDE the command
+    itself (_ansi_c_static_lexed), so it can only add a deny or a note, never clear one. A word bash builds at
+    run time (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes, an
+    unquoted glob character or brace, or that uses a value assigned earlier in the same command) is not
+    decoded: the disclosed run-time-word residual. GATE G comes first (_ansi_c_static_relevant): when the command
+    holds no backslash after a backquote (_ansi_c_backquote_backslash; G reads text as written and does not model a
+    backquote body's un-escaping, so it never calls such a command irrelevant), no locale quote, no '$' and line
+    continuation before a quote, and no ANSI-C quote with an escape that can change a value a guard tests, the
+    reading is command itself, so there is no extra reading and no refusal and
+    each guard takes the decision of its path without the static reading (an escape that decodes to one blank or
+    control character, as in printf $'done\\n', in a command whose text names neither git nor an AI identity). A '$'
+    followed by one or more line continuations before a quote (_ANSI_C_CONTINUED_QUOTE_RE, matched on the command as
+    written), which bash joins into an ANSI-C or locale quote, makes the command relevant whatever the quote holds
+    ($<backslash-newline>'\\x67'it, and gi$<backslash-newline>'t' with no escape) and is refused
+    (_StaticReadingUncertain), since the scan reads the quote after the continuation as a plain one. That match is
+    on the text as written: inside a backquote body bash also joins $\\\\<backslash-newline>' (the doubled backslash
+    un-escaped first), which it does not match; such a command holds a backslash after a backquote, so G reads it as
+    relevant and the scan refuses it (_ANSI_C_BACKQUOTE_BUILT_RE). An ANSI-C quote holding a \\c\\\\ pair (_ansi_c_pair_index) is refused too: bash reads the pair as one
+    escape, as this reading does, but the escape table before the one shared table read it as \\c\\ and an escape
+    after it ($'\\c\\\\x20Claude' as a control character, a blank and Claude), so a command that reading denied is
+    still denied (the no-reduction rule). An ANSI-C quote holding a \\U code past U+10FFFF (_ansi_c_beyond_index) is
+    refused too: bash builds it as bytes no character names, which the escape table reads as nothing, so
+    --author=x$'\\U110000'Claude would read as xClaude where bash puts those bytes between x and Claude.
+    Otherwise the scan reads the whole command as above, and returns the rest of the text unchanged from an ANSI-C
+    quote that never closes. Linear; raises only _StaticReadingUncertain."""
+    if not _ansi_c_static_relevant(command):
+        return command
+    continued = _ANSI_C_CONTINUED_QUOTE_RE.search(command)
+    if continued is not None:
+        raise _StaticReadingUncertain("a '$' and a line continuation before a quote, which bash joins into an ANSI-C "
+                                      "or locale quote this reading does not decode", continued.start())
+    paired = _ansi_c_pair_index(command)
+    if paired >= 0:
+        raise _StaticReadingUncertain("an ANSI-C quote holding a \\c\\\\ pair, which the escape table before the one "
+                                      "shared table read as two escapes", paired)
+    beyond = _ansi_c_beyond_index(command)
+    if beyond >= 0:
+        raise _StaticReadingUncertain("an ANSI-C quote holding a \\U code past U+10FFFF, which bash builds as bytes "
+                                      "no character names and the escape table reads as nothing", beyond)
+    return _ansi_c_static_scan(command)
+
+
+def _ansi_c_beyond_index(command):
+    """The index of the first $' from which an ANSI-C quote (_ANSI_C_QUOTE_RE) holding a \\U escape
+    (_GATE_BASH_ESCAPE_RE) whose code is past U+10FFFF is matched, in command as written or with every
+    backslash-newline removed, matched from every index that holds $' as _ansi_c_pair_index matches; -1 when there
+    is none (and at once when the text \\U is in neither). bash 5.3.9 builds such a code as a byte sequence no
+    Unicode character names (\\U110000 as f4 90 80 80 under C.UTF-8), while the one escape table reads it as
+    nothing (_gate_bash_escape), so the static decoded reading refuses the command rather than read the letters
+    around it as joined. Linear for the reason _ansi_c_static_relevant is; never raises."""
+    joined = command.replace("\\\n", "")
+    for text in ((command, joined) if joined != command else (command,)):
+        if "\\U" not in text:
+            continue
+        at = text.find("$'")
+        while at >= 0:
+            match = _ANSI_C_QUOTE_RE.match(text, at)
+            if match is not None and any(escape.group(5) is not None and int(escape.group(5), 16) > 0x10FFFF
+                                         for escape in _GATE_BASH_ESCAPE_RE.finditer(match.group(1))):
+                return at
+            at = text.find("$'", at + 1)
+    return -1
+
+
+def _ansi_c_pair_index(command):
+    """The index of the first $' from which an ANSI-C quote (_ANSI_C_QUOTE_RE) holding a \\c\\\\ pair escape
+    (_GATE_BASH_ESCAPE_RE) is matched, in command as written or with every backslash-newline removed, matched from
+    every index that holds $' as _ansi_c_static_relevant matches; -1 when there is none (and at once when the text
+    \\c\\\\ is in neither). Linear for the reason _ansi_c_static_relevant is; never raises."""
+    joined = command.replace("\\\n", "")
+    for text in ((command, joined) if joined != command else (command,)):
+        if "\\c\\\\" not in text:
+            continue
+        at = text.find("$'")
+        while at >= 0:
+            match = _ANSI_C_QUOTE_RE.match(text, at)
+            if match is not None and any(escape.group(6) == "\\\\"
+                                         for escape in _GATE_BASH_ESCAPE_RE.finditer(match.group(1))):
+                return at
+            at = text.find("$'", at + 1)
+    return -1
+
+
+# The characters an ANSI-C escape may decode to and spell part of a word a guard tests (_ansi_c_static_relevant):
+# printable, non-blank ASCII ('!' to '~') other than the single quote, the double quote and the backslash.
+_ANSI_C_RELEVANT_CHARS = frozenset(chr(point) for point in range(0x21, 0x7F)) - frozenset("'\"\\")
+# The characters an INERT escape decodes to (_ansi_c_static_relevant): one blank or ASCII control character from
+# U+0002 to U+0020. None of them is a letter or bash quoting, so one can split or end the letters around it, or
+# vanish where eval or sh -c reads the text again (a newline after a backslash there is a line continuation), but
+# never stands in a name. Not inert: a single quote, double quote or backslash (bash quoting in a body read again:
+# eval $'g\x27\x27it log -p' runs git log -p), U+0001 and U+007F (the CTLESC and CTLNUL characters bash uses
+# internally to mark quoting), a NUL (bash ends the string there, so the letters after it in the quote drop out:
+# --author=$'Cl\0zz'aude is --author=Claude), non-ASCII text (a letter Python's case-insensitive match folds to an
+# ASCII one), nothing in _gate_bash_escape's decoding (a code point past U+10FFFF, which bash builds as bytes and
+# the static decoded reading refuses, _ansi_c_beyond_index) and any other text. These read an escape as written; in
+# a command with a backslash after a backquote, where bash may un-escape a backquote body first ($'\c\`zz' there is
+# \c` and a NUL, not \c\ and a backquote), gate G reads no escape as inert (_ansi_c_backquote_backslash).
+_ANSI_C_INERT_CHARS = frozenset(chr(point) for point in range(0x02, 0x21))
+# A '$' and one or more line continuations before a quote: bash joins them into $'...' or $"..." before it reads
+# the quote. Gate G reads a match as relevant whatever the quote holds (_ansi_c_static_relevant), and
+# _ansi_c_static_reading refuses it.
+_ANSI_C_CONTINUED_QUOTE_RE = re.compile(r"\$(?:\\\n)+['\"]")
+# The SUBJECT of an inert escape (_ansi_c_static_relevant): every value the four guards that read the static decoded
+# reading test needs one of these names in the text bash assembles. commit_msg_subst, git_explicit_binding and
+# diff_source_pretool test git words, subcommands, options and paths of a git command, so the text names git;
+# commit_identity tests identity values and trailers, every one of which it flags only when AI_IDENTITY_RE names an
+# AI in it (a git identity variable names git as well), so the text names one of AI_IDENTITY_RE's names. Matched
+# with no word boundary and in any case, so it can only find more than those tests do. Keep it in step with
+# AI_IDENTITY_RE.
+_ANSI_C_SUBJECT_RE = re.compile(r"(?i)git|claude|anthropic|openai|chatgpt|codex|copilot|gemini|gpt")
+# What bash removes between the letters of a word it assembles that the subject check reads past: a quote, a
+# backslash, a '$' (one before a quote), a backquote (an empty substitution) and a line continuation.
+_ANSI_C_SUBJECT_STRIP_RE = re.compile(r"\\\n|[\\'\"$`]")
+
+
+def _ansi_c_inert_dropped(match):
+    """match (_GATE_BASH_ESCAPE_RE) removed when it is an inert escape (_ANSI_C_INERT_CHARS), else kept as written."""
+    return "" if _gate_bash_escape(match) in _ANSI_C_INERT_CHARS else match.group(0)
+
+
+def _ansi_c_inert_quote(match):
+    """One ANSI-C quote (_ANSI_C_QUOTE_RE) with its inert escapes removed (_ansi_c_inert_dropped)."""
+    return "$'" + _GATE_BASH_ESCAPE_RE.sub(_ansi_c_inert_dropped, match.group(1)) + "'"
+
+
+def _ansi_c_static_subject(command):
+    """True when command names git or an AI identity (_ANSI_C_SUBJECT_RE) in any of three texts, each with every
+    quote, backslash, '$', backquote and line continuation then removed (_ANSI_C_SUBJECT_STRIP_RE): command itself
+    (a backslash outside quotes quotes the letter after it: gi\\t is git), command with the inert escapes of each
+    ANSI-C quote removed (the quotes matched once, left to right), and command with every inert escape removed
+    wherever it stands (so a quote that match swallows is read too). These are the only commands in which an inert
+    escape (_ANSI_C_INERT_CHARS) can change a value one of the four guards tests: an inert escape decodes to no
+    letter, so every letter of a name in the text bash assembles around it, or in a body eval or sh -c reads again,
+    is a letter of the raw text, with only what these texts remove between them (the escape vanishes there when a
+    backslash before its newline makes a line continuation). The letters and digits of an escape that is not
+    removed (x20) can only add a match. Linear, never raises."""
+    texts = (command, _ANSI_C_QUOTE_RE.sub(_ansi_c_inert_quote, command),
+             _GATE_BASH_ESCAPE_RE.sub(_ansi_c_inert_dropped, command))
+    return any(_ANSI_C_SUBJECT_RE.search(_ANSI_C_SUBJECT_STRIP_RE.sub("", text)) for text in texts)
+
+
+def _ansi_c_backquote_backslash(command):
+    """True when command holds a backslash after its first backquote: every backslash that can stand in a
+    backquote substitution's body does (a body opens only at a backquote), so this finds every such body that
+    holds one, and more (a backquote inside single quotes, or one a backslash escapes, counts too). bash un-escapes
+    a backquote body before it parses it (\\\\ to \\, \\$ to $, \\` to `, and \\" to " in a backquote inside double
+    quotes; a backslash before any other character is kept), which gate G does not model: it reads the text as
+    written, so in such a body it could pair an escape bash never sees ($'\\c\\`zz' as \\c\\ and a plain backquote,
+    where bash reads \\c` as a NUL) or miss a quote bash joins ($\\\\<newline>'t' as no quote, where bash reads
+    $'t'). Gate G reads such a command as relevant to every guard (_ansi_c_static_relevant), so the scan, which
+    refuses what it cannot un-escape there (_ANSI_C_BACKQUOTE_UNSURE_RE, read up to each quote
+    _ANSI_C_BACKQUOTE_BUILT_RE finds), decides. Linear, never raises."""
+    tick = command.find("`")
+    return tick >= 0 and command.find("\\", tick + 1) >= 0
+
+
+def _ansi_c_static_relevant(command):
+    """GATE G of the static decoded reading (_ansi_c_static_reading), which needs no grammar: True when command
+    holds a backslash after a backquote (_ansi_c_backquote_backslash: a backquote body G does not decode as bash
+    does, whatever it holds), a locale $"..." quote (every one is relevant), or an ANSI-C $'...' quote with an
+    escape (_GATE_BASH_ESCAPE_RE)
+    that can change a value one of the four guards that read the reading tests (words, identity values, trailers
+    and paths), read as the guards' own lexer reads it (the escape's letter kept: $'\\x20' as x20) rather than as
+    bash does: one whose decoding (_gate_bash_escape) holds a character in _ANSI_C_RELEVANT_CHARS (it spells part of a
+    git word, subcommand, option or path) or is not a single inert character (_ANSI_C_INERT_CHARS: a NUL, non-ASCII
+    text, nothing, or more than one character), or an inert escape in a command whose text names git or an AI
+    identity (_ansi_c_static_subject). A braced \\x{...} escape and a \\c\\\\ pair are relevant whatever they decode
+    to: the escape table before the one shared table read each as other escapes ($'\\x{20}' as \\x and {20},
+    $'\\c\\\\x67' as \\c\\ and \\x67), each relevant, so no command that reading refused is now read as irrelevant
+    (the no-reduction rule). An inert escape there can split, end or join the value around it: a blank
+    or control character makes a word boundary AI_IDENTITY_RE needs ($'\\x20Claude'), a newline starts a trailer's
+    line, and a blank or newline splits words in a body eval or sh -c reads again (eval $'git\\x20log -p'), where
+    a newline after a backslash is a line continuation. True too, before any quote is read, whenever
+    _ANSI_C_CONTINUED_QUOTE_RE matches the command as written: a '$' and one or more line continuations before a
+    quote, which bash joins into an ANSI-C or locale quote and _ansi_c_static_reading refuses whatever the quote
+    holds, an escape or none (gi$<backslash-newline>'t' is git to bash). False otherwise, and then the guards read
+    no static decoded reading and refuse nothing on its account. The command is read as written and with every
+    backslash-newline removed, so a '$', a line continuation and a quote read as the quote bash joins them into;
+    each reading can only add a quote. The quote is matched on its own (_ANSI_C_QUOTE_RE, which
+    ends it at the same unescaped single quote bash does) from EVERY index that holds $', with no tracking of the
+    quoting around it, so a spurious match that starts earlier (inside single quotes, a comment or a here-document
+    body) and swallows a real quote's opening cannot hide that quote: its own index is matched again. A $' or $"
+    inside other quotes is read the same way, so it can only make the command relevant, which keeps the scan's
+    path. An escape bash keeps unchanged (an unknown letter such as \\q) holds its letter and is relevant. Linear: a
+    match from one index ends no later than the single quote of the next $' (the character before that quote is the
+    '$', not a backslash, so no escape holds it), so the matches together read each character a bounded number of
+    times, and the subject is read at most once for the command as written and once for its joined text. Never
+    raises."""
+    if _ANSI_C_CONTINUED_QUOTE_RE.search(command) is not None:
+        return True  # a '$' and a line continuation before a quote, refused whatever the quote holds
+    if _ansi_c_backquote_backslash(command):
+        return True  # a backslash a backquote body may un-escape, which G does not model
+    joined = command.replace("\\\n", "")
+    return _ansi_c_static_relevant_text(command, joined) or (
+        joined != command and _ansi_c_static_relevant_text(joined, joined))
+
+
+def _ansi_c_static_relevant_text(text, joined):
+    """_ansi_c_static_relevant over one reading text of the command; joined is the command with every
+    backslash-newline removed, the text the subject check reads (_ansi_c_static_subject)."""
+    if '$"' in text:
+        return True
+    subject = None
+    at = text.find("$'")
+    while at >= 0:
+        match = _ANSI_C_QUOTE_RE.match(text, at)
+        if match is not None:
+            for escape in _GATE_BASH_ESCAPE_RE.finditer(match.group(1)):
+                if escape.group(2) is not None or escape.group(6) == "\\\\":
+                    return True  # a braced \x{...} escape or a \c\\ pair (_ansi_c_static_relevant)
+                decoded = _gate_bash_escape(escape)
+                if not _ANSI_C_RELEVANT_CHARS.isdisjoint(decoded) or len(decoded) != 1 or (
+                        decoded not in _ANSI_C_INERT_CHARS):
+                    return True
+                if subject is None:
+                    subject = _ansi_c_static_subject(joined)
+                if subject:
+                    return True
+        at = text.find("$'", at + 1)
+    return False
+
+
+# A here-document operator (<< or <<-, not the <<< here-string) and its delimiter word, as bash reads them.
+_ANSI_C_HEREDOC_RE = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>\\'\"]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)")
+
+
+class _StaticReadingUncertain(Exception):
+    """The refusal of the static decoded reading (_ansi_c_static_reading): ahead of a later ANSI-C $'...' or locale
+    $"..." quote the scan met a construct it cannot read with certainty the way bash reads it, or one where its
+    reading could differ from the comment and here-document reading before this one, so which of those quotes
+    bash decodes as command text is not known. at is the construct's index. It is not a ValueError, so no lexer
+    fallback takes it for a parse failure that adds nothing: each guard that reads the static decoded reading
+    catches it and denies (_static_reading_uncertain_deny)."""
+
+    def __init__(self, message, at):
+        super().__init__(message)
+        self.at = at
+
+
+def _static_reading_uncertain_deny(rule, subject, exc):
+    """The deny a guard returns when the static decoded reading refuses a command (_StaticReadingUncertain): rule
+    names the rule, subject the shape the guard cannot rule out in the command's ANSI-C or locale quoting."""
+    return _deny(
+        "AIQT rule {}: this command holds an ANSI-C $'...' or locale $\"...\" quote after a construct the static "
+        "decoded reading cannot read with certainty the way bash reads it ({}), so this guard cannot tell which of "
+        "those quotes bash decodes as command text and cannot rule out {} spelled in them; it is denied rather than "
+        "allowed unread (check-fails-closed-on-unreadable). Write the quoted words plainly, put a comment's '#' "
+        "after a blank outside any grouping, substitution or expansion, or split the command.".format(
+            rule, exc, subject),
+        "AIQT guardrail: denied a command whose ANSI-C or locale quoting the static decoded reading could not read "
+        "(rule {}, fail-closed).".format(rule.split(" ", 1)[0]))
+
+
+def _ansi_c_line_index(command):
+    """({line: [start, ...]}, {line with leading tabs removed: [start, ...]}, [index of each backslash-newline])
+    over every line of command, each list ascending: built once per scan, so finding every here-document's end
+    stays linear."""
+    plain, stripped = {}, {}
+    pos = 0
+    for line in command.split("\n"):
+        plain.setdefault(line, []).append(pos)
+        stripped.setdefault(line.lstrip("\t"), []).append(pos)
+        pos += len(line) + 1
+    return plain, stripped, [match.start() for match in re.finditer(r"\\\n", command)]
+
+
+def _ansi_c_heredoc_end(command, start, delim, strip, index, bound):
+    """The index just past the delimiter line of a here-document body that starts at start (a line start; leading
+    tabs removed first under <<-), or -1 when no line from start on, before bound, is the delimiter. index is
+    _ansi_c_line_index(command); bound is the end of the text the body is read in (the command's length, or the
+    end of the unquoted here-document body that holds this one)."""
+    starts = index[1 if strip else 0].get(delim, ())
+    at = bisect.bisect_left(starts, start)
+    if at == len(starts) or starts[at] >= bound:
+        return -1
+    nl = command.find("\n", starts[at], bound)
+    return bound if nl < 0 else nl + 1
+
+
+def _ansi_c_heredoc_continued(index, start, end):
+    """True when a backslash-newline lies in a here-document body command[start:end] before its delimiter line's
+    own newline: bash joins the lines of an unquoted body there before it looks for the delimiter line (cat <<E /
+    x<backslash> / E / ... reads x E as one body line), which _ansi_c_heredoc_end does not model."""
+    at = bisect.bisect_left(index[2], start)
+    return at < len(index[2]) and index[2][at] < end - 1
+
+
+def _ansi_c_heredoc_word(command, i, limit):
+    """bash's reading of the here-document delimiter word that starts at i, before limit: (the index past it, the
+    delimiter, True when any of it is quoted), the delimiter with its quoting removed as bash removes it (a
+    backslash-escaped character, a single-quoted string, an ANSI-C $'...' string decoded, a double-quoted or
+    locale string with a backslash removed only before $, backquote, double quote or backslash), or None where the
+    word holds a construct this reading does not model: a backslash-newline, a quote that never closes, a '#'
+    that starts it (bash reads a comment there), or a '$(', '${', '$[' or backquote, quoted or not."""
+    out = []
+    quoted = False
+    start = i
+    while i < limit:
+        c = command[i]
+        if c in " \t\n;&|()<>":
+            break
+        if c == "#" and i == start:
+            return None
+        if c == "\\":
+            if i + 1 >= limit or command[i + 1] == "\n":
+                return None
+            out.append(command[i + 1])
+            quoted = True
+            i += 2
+            continue
+        if c == "'":
+            close = command.find("'", i + 1, limit)
+            if close < 0:
+                return None
+            out.append(command[i + 1:close])
+            quoted = True
+            i = close + 1
+            continue
+        if command.startswith("$'", i):
+            match = _ANSI_C_QUOTE_RE.match(command, i, limit)
+            if match is None:
+                return None
+            out.append(_ansi_c_body(match))
+            quoted = True
+            i = match.end()
+            continue
+        if c == '"' or command.startswith('$"', i):
+            j = i + (2 if c == "$" else 1)
+            while j < limit and command[j] != '"':
+                if command[j] == "\\" and j + 1 < limit:
+                    if command[j + 1] == "\n":
+                        return None
+                    out.append(command[j + 1] if command[j + 1] in '$`"\\' else command[j:j + 2])
+                    j += 2
+                    continue
+                if command[j] == "`" or command.startswith(("$(", "${", "$["), j):
+                    return None
+                out.append(command[j])
+                j += 1
+            if j >= limit:
+                return None
+            quoted = True
+            i = j + 1
+            continue
+        if c == "`" or command.startswith(("$(", "${", "$["), i):
+            return None
+        out.append(c)
+        i += 1
+    return i, "".join(out), quoted
+
+
+# A comment's text that reads the same whether a '#' opens a comment or is word text: no quote, backslash, '$',
+# backquote, parenthesis, brace or redirection character (_ansi_c_static_scan).
+_ANSI_C_NEUTRAL_RE = re.compile(r"[^'\"`$\\(){}<>]*")
+# What the scan cannot read exactly as bash does inside a backquote substitution's body (_ansi_c_static_scan): a
+# backslash before another backslash, a '$', a backquote or a quote, and a backquote it does not read as the body's
+# own closing one. bash finds the body's end at its first unescaped backquote and turns \\ into \, \$ into $ and \`
+# into ` (and \" into " in a backquote inside double quotes) before it parses the body, so a doubled or escaped
+# quote opener there is another quote to bash ($'\\x67'it and \$'\x67'it both run git), and a backquote inside a
+# quoted string, an ANSI-C body, a here-document body, a '$(...)' or a '${...}' in the body is undefined in POSIX.
+# The scan reads the body as written and models none of that, so it refuses at each match.
+_ANSI_C_BACKQUOTE_UNSURE_RE = re.compile(r"\\[\\$`'\"]|`")
+# A '$', one or more backslashes or newlines, then a quote: no ANSI-C or locale quote in the text as written, but
+# one that a backquote body's un-escaping can open, since bash removes a backslash there before a backslash ($\\
+# and a newline become $ and a line continuation, joined into $'...') and, in a backquote inside double quotes,
+# before a double quote ($\" becomes $"...", a locale quote). A '$' or quote bash builds in such a body is a '$' or
+# quote of the text as written (the un-escaping only removes backslashes, and a line continuation removes a
+# backslash and a newline), so every quote it can open is either matched by $' or $" as written or by this. When
+# the command holds a backquote, _ansi_c_static_scan reads up to the quote of each match, so a backslash bash
+# removes there inside a backquote body is refused (_ANSI_C_BACKQUOTE_UNSURE_RE) rather than passed unread.
+_ANSI_C_BACKQUOTE_BUILT_RE = re.compile(r"\$[\\\n]+['\"]")
+
+
+def _ansi_c_static_scan(command):
+    """_ansi_c_static_reading's scan of command. stack holds the open contexts, innermost last: '"' double quotes,
+    'H' an unquoted here-document's body (read as double quotes that no '"' closes), '(' a '$(...)', '<(...)' or
+    '>(...)' substitution, '`' a backquote substitution and '{' a '${...}' expansion; depth holds, for the
+    command text at the top level and in each '(' or '`' context, how many plain parentheses are open there.
+
+    A '#' opens a comment only at a word start (word_at: the command's start, the index after an unescaped blank,
+    newline or operator character, after a line continuation that itself stands at a word start, or right inside
+    a substitution's opening), outside quotes, here-document bodies and '${...}' expansions, and only with no
+    parenthesis open in its command (in a subshell bash reads a comment there, but in a (( )) or $(( ))
+    arithmetic or a [[ =~ ]] group it reads text). A '#' anywhere else is word text: after an escaped blank or
+    operator (echo a\\ #;), a line continuation inside a word, or the ')' that closes a substitution
+    ($(true)#, $((1))#, <(true)#). The scan before this one took any '#' right after a blank, newline or one of
+    ;&|()<> for a comment and cut a backquote comment at the first backquote, escaped or not; where that test
+    and this one disagree the text from the '#' to its line's end reads the same both ways when it holds none
+    of _ANSI_C_NEUTRAL_RE's characters (it is kept as written), and otherwise the scan refuses.
+
+    It refuses (_StaticReadingUncertain) only at or ahead of the last ANSI-C or locale quote, or, when command holds
+    a backquote, the last quote a backquote body's un-escaping can open where none is written
+    (_ANSI_C_BACKQUOTE_BUILT_RE: a '$', backslashes or newlines, then a quote); past both nothing is decoded, so the
+    rest is kept as written: inside a backquote substitution's body (ticks, the count of '`'
+    contexts open), at each match of _ANSI_C_BACKQUOTE_UNSURE_RE (a backslash before a backslash, '$', backquote
+    or quote, which bash removes or may remove before it parses the body, read in the text the scan walks and in
+    every single-quoted string, ANSI-C quote, here-document delimiter word and quoted here-document body it takes
+    whole; and a backquote met where the innermost context is not that body's own, inside double quotes, an
+    unquoted here-document body, a '$(...)' or a '${...}', where bash ends the body or POSIX leaves it undefined);
+    at a '#' at a word start with a parenthesis open, at such a
+    disagreement, at a '${' that opens a bash 5.3 command substitution (${ cmd; } or ${| cmd; }) or a '$['
+    arithmetic, at a here-document delimiter word whose bash reading (_ansi_c_heredoc_word) differs from the
+    one before this (<<$'E\\x41' ends at the line EA, <<"E\\"F" at E"F) or that it does not model, at a
+    here-document operator inside a '${...}' or with a parenthesis open ($(( 1 << 2 )) shifts) once its line
+    ends, and at an unquoted body that holds a line continuation (bash joins such lines before it looks for the
+    delimiter line). Bodies are read in place, not by a nested scan (frames holds each unquoted body being read:
+    its end, the heights of stack and depth to restore there, and the bodies after it on the same line), with
+    one line index per command, so nested here-documents cost no recursion and the scan is linear in the
+    length of command."""
+    out = []
+    stack = []
+    depth = [0]
+    frames = []
+    queue = []  # here-document bodies still to read on the current line, the next one last: (start, end, quoted)
+    pending = []  # here-documents opened on the current line: (delimiter, strip tabs, quoted, certain)
+    index = None  # _ansi_c_line_index(command), built at the first here-document body
+    word_at = 0
+    nl_at = -1  # the index of the first newline at or after i once looked up (len(command) when none)
+    ticks = 0  # how many '`' contexts stack holds: inside a backquote body when nonzero
+    last = max(command.rfind("$'"), command.rfind('$"'))
+    if "`" in command:
+        for built in _ANSI_C_BACKQUOTE_BUILT_RE.finditer(command):
+            last = max(last, built.end() - 1)  # a quote a backquote body's un-escaping can open
+    i, n = 0, len(command)
+    while True:
+        if queue:
+            start, end, quoted = queue.pop()
+            if quoted:
+                if ticks and start <= last and _ANSI_C_BACKQUOTE_UNSURE_RE.search(command, start, end) is not None:
+                    raise _StaticReadingUncertain("a quoted here-document body inside a backquote substitution "
+                                                  "that holds a backquote or a backslash bash removes there", start)
+                out.append(command[start:end])
+                i = word_at = end
+                continue
+            frames.append((end, len(stack), len(depth), queue, ticks))
+            queue = []
+            stack.append("H")
+            i = start
+            continue
+        limit = frames[-1][0] if frames else n
+        if i >= limit:
+            if not frames:
+                break
+            _end, height, levels, queue, ticks = frames.pop()
+            del stack[height:]
+            del depth[levels:]
+            pending = []
+            word_at = i
+            continue
+        if i > last:
+            out.append(command[i:])  # no ANSI-C or locale quote, written or built, from here on: nothing to decode
+            break
+        c = command[i]
+        top = stack[-1] if stack else None
+        if c == "\\" and i + 1 < limit:
+            if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.match(command, i) is not None:
+                raise _StaticReadingUncertain("a backslash before a backslash, '$', backquote or quote inside a "
+                                              "backquote substitution, which bash may remove before it parses the "
+                                              "body", i)
+            if command[i + 1] == "\n" and word_at == i and top not in ('"', "H"):
+                word_at = i + 2  # bash removes a line continuation first, so a word start stays one
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if top in ('"', "H"):
+            if c == '"' and top == '"':
+                stack.pop()
+            elif c == "`":
+                if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.match(command, i) is not None:
+                    raise _StaticReadingUncertain("a backquote inside double quotes or a here-document body inside "
+                                                  "a backquote substitution", i)
+                stack.append("`")
+                depth.append(0)
+                ticks += 1
+                word_at = i + 1
+            elif command.startswith("$(", i):
+                stack.append("(")
+                depth.append(0)
+                out.append("$(")
+                i += 2
+                word_at = i
+                continue
+            out.append(c)
+            i += 1
+            continue
+        if c == "#":
+            if nl_at < i:
+                nl_at = command.find("\n", i)
+                if nl_at < 0:
+                    nl_at = n
+            eol = min(nl_at, limit)
+            before = i == 0 or command[i - 1] in " \t\n;&|()<>"  # the comment test before this scan
+            if top == "{":
+                if before:
+                    raise _StaticReadingUncertain("a '#' after a blank or operator inside a '${...}' expansion", i)
+                out.append(c)
+                i += 1
+                continue
+            if i == word_at:
+                if depth[-1]:
+                    raise _StaticReadingUncertain("a '#' at a word start inside an open parenthesis, a comment in "
+                                                  "a subshell but text in an arithmetic or [[ ]] group", i)
+                end = eol
+                if top == "`":  # bash cuts a backquote body at its first unescaped backquote before it reads it
+                    j = i
+                    while j < eol:
+                        if command[j] == "\\":
+                            j += 2
+                        elif command[j] == "`":
+                            end = j
+                            break
+                        else:
+                            j += 1
+                if before:
+                    was = eol
+                    if top == "`":
+                        close = command.find("`", i, eol)
+                        if close >= 0:
+                            was = close
+                    if was == end:
+                        out.append(command[i:end])
+                        i = end
+                        continue
+            elif not before:
+                out.append(c)
+                i += 1
+                continue
+            if _ANSI_C_NEUTRAL_RE.fullmatch(command, i + 1, eol) is None:
+                raise _StaticReadingUncertain("a '#' that bash reads {} where the reading before this one read {}"
+                                              .format(*(("as word text", "a comment") if i != word_at else
+                                                        ("as a comment", "it otherwise"))), i)
+            out.append(command[i:eol])  # the same text either way
+            i = eol
+            continue
+        if command.startswith("<<<", i):
+            out.append("<<<")  # a here-string: its word is ordinary command text
+            i += 3
+            word_at = i
+            continue
+        if command.startswith("<<", i):
+            match = _ANSI_C_HEREDOC_RE.match(command, i, limit)
+            if match is not None:
+                if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.search(command, i, match.end()) is not None:
+                    raise _StaticReadingUncertain("a here-document delimiter word inside a backquote substitution "
+                                                  "that holds a backquote or a backslash bash removes there", i)
+                word = match.group(2)
+                delim = re.sub(r"\\(.)", r"\1", word.replace("'", "").replace('"', ""))
+                quoted = any(q in word for q in "'\"\\")
+                if not delim or _ansi_c_heredoc_word(command, match.start(2), limit) != (match.end(), delim, quoted):
+                    raise _StaticReadingUncertain("a here-document delimiter word {!r} this reading does not read "
+                                                  "as bash does".format(word[:40]), i)
+                pending.append((delim, bool(match.group(1)), quoted, top != "{" and not depth[-1]))
+                out.append(match.group(0))
+                i = match.end()
+                continue
+        if c == "\n" and pending:
+            if top == "{" or not all(certain for _delim, _strip, _quoted, certain in pending):
+                raise _StaticReadingUncertain("a '<<' inside a '${...}' expansion or an open parenthesis, a "
+                                              "here-document in a subshell but a shift in an arithmetic", i)
+            out.append(c)
+            i += 1
+            word_at = i
+            if index is None:
+                index = _ansi_c_line_index(command)
+            at = i
+            for delim, strip, quoted, _certain in pending:
+                end = _ansi_c_heredoc_end(command, at, delim, strip, index, limit)
+                if end < 0:
+                    break  # bash would read the rest as the body; it is read as command text instead
+                if not quoted and _ansi_c_heredoc_continued(index, at, end):
+                    raise _StaticReadingUncertain("an unquoted here-document body with a line continuation", at)
+                queue.append((at, end, quoted))
+                at = end
+            queue.reverse()
+            pending = []
+            continue
+        if c == "'":
+            close = command.find("'", i + 1, limit)
+            end = limit if close < 0 else close + 1
+            if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.search(command, i, end) is not None:
+                raise _StaticReadingUncertain("a single-quoted string inside a backquote substitution that holds a "
+                                              "backquote or a backslash bash removes there", i)
+            out.append(command[i:end])
+            i = end
+            continue
+        if c == "$" and i + 1 < limit and command[i + 1] == "'":
+            match = _ANSI_C_QUOTE_RE.match(command, i, limit)
+            if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.search(
+                    command, i, limit if match is None else match.end()) is not None:
+                raise _StaticReadingUncertain("an ANSI-C quote inside a backquote substitution that holds a "
+                                              "backquote or a backslash bash removes there", i)
+            if match is None:
+                out.append(command[i:limit])
+                i = limit
+                continue
+            out.append(_ansi_c_static_quote(match))
+            i = match.end()
+            continue
+        if c == "$" and i + 1 < limit and command[i + 1] == '"':
+            stack.append('"')
+            out.append('"')
+            i += 2
+            continue
+        if c == '"':
+            stack.append('"')
+        elif c == "`":
+            if top == "`":
+                stack.pop()
+                depth.pop()
+                ticks -= 1
+            else:
+                if ticks and _ANSI_C_BACKQUOTE_UNSURE_RE.match(command, i) is not None:
+                    raise _StaticReadingUncertain("a backquote inside a '$(...)', '<(...)', '>(...)' or '${...}' "
+                                                  "inside a backquote substitution", i)
+                stack.append("`")
+                depth.append(0)
+                ticks += 1
+                word_at = i + 1
+        elif command.startswith("$(", i) or (top != "{" and command.startswith(("<(", ">("), i)):
+            stack.append("(")  # a process substitution closes as $(...) does: <(true)# is one word
+            depth.append(0)
+            out.append(command[i:i + 2])
+            i += 2
+            word_at = i
+            continue
+        elif command.startswith("${", i):
+            if command[i + 2:i + 3] in (" ", "\t", "\n", "|"):
+                raise _StaticReadingUncertain("a bash 5.3 '${ ...; }' command substitution", i)
+            stack.append("{")
+            out.append("${")
+            i += 2
+            continue
+        elif command.startswith("$[", i):
+            raise _StaticReadingUncertain("a '$[...]' arithmetic expansion", i)
+        elif top == "{":
+            if c == "{":
+                stack.append("{")  # bash pairs the braces in an expansion's word: ${x:-{a}} is {a}
+            elif c == "}":
+                stack.pop()
+        elif c == "(":
+            depth[-1] += 1
+            word_at = i + 1
+        elif c == ")":
+            if top == "(" and not depth[-1]:
+                stack.pop()  # $(...)#x, $((...))#x and <(...)#x are one word: this ')' starts none
+                depth.pop()
+            else:
+                if depth[-1]:
+                    depth[-1] -= 1
+                word_at = i + 1
+        elif c in " \t\n;&|<>":
+            word_at = i + 1
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _ansi_c_static_lexed(command, lex, **kwargs):
+    """lex(_ansi_c_static_reading(command), **kwargs) when that reading differs from command, else []: the extra
+    reading a guard reads beside its own lex of command. A reading lex refuses (any ValueError: a parse failure, an
+    uncertain '#', the reading budget) adds nothing, since the guard's own reading of command, with its fallbacks,
+    still decides. A reading the scan itself refuses (_StaticReadingUncertain) is not caught here: the guard
+    denies (_static_reading_uncertain_deny). The count of lexes that read a body main's reading fails
+    (_SubstHeredocs.reads) is restored, so the extra lex never moves the guard's MAIN'S DECISION AS A FLOOR
+    comparison."""
+    decoded = _ansi_c_static_reading(command)
+    if decoded == command:
+        return []
+    reads = _SubstHeredocs.reads
+    try:
+        return lex(decoded, **kwargs)
+    except ValueError:
+        return []
+    finally:
+        _SubstHeredocs.reads = reads
 
 
 # The uncertainty causes _lex_uncertain_causes reports, worded for the deny messages.
@@ -5151,8 +5888,14 @@ def _diff_source_fallback(command):
     unsupported construct such as a heredoc or process substitution): an apparent git diff-producer (the
     broad raw probe) ASKS, everything else ALLOWS. An unparseable command can never earn an ALLOW from a
     summary or redirect regex - the old raw-summary/redirect escapes are removed - so a plausibly-dumping
-    unparseable command is surfaced for confirmation rather than proven either way."""
-    if _RAW_DIFF_PRODUCER_RE.search(command):
+    unparseable command is surfaced for confirmation rather than proven either way. The probe reads the
+    de-quoted readings (_decoded_readings) BESIDE the raw text, so a producer split by quoting (git d''iff <<<x)
+    takes the note as its plain spelling (git diff <<<x) does; a reading can only add the note, never clear it.
+    The note is this fallback's only outcome for an apparent producer, which it never denies, since it cannot
+    tell a console dump from a summary or a redirect: a confirmed dump that the parsed path denies (git d''iff,
+    git diff) is noted, not denied, once a construct the lexer refuses is added, split or plain alike (the
+    disclosed residual of this convention-tier fallback)."""
+    if any(_RAW_DIFF_PRODUCER_RE.search(text) for text in (command,) + _decoded_readings(command)):
         return _allow_note(
             "AIQT guardrail (rule cnsdif, no-console-diff-dumps): the shared tokenizer could not parse this "
             "command and it appears to invoke a git diff-producer. This is a console-readability convention, "
@@ -5160,6 +5903,45 @@ def _diff_source_fallback(command):
             "form (--stat, --name-only), a redirect to a real file (> file), or a pager (| less) to keep the "
             "review surface readable.")
     return _allow()
+
+
+def _diff_parsed_kind(command, readings, reading):
+    """The decision diff_source_pretool takes on a command its lex read: 'allow' when no producer-capable form is
+    found anywhere (the bounded true boundary) or the WHOLE command is one of the closed proofs (AIRTIGHT-NARROW),
+    'deny' when a possible producer is a confirmed console dump (outranking the note across a compound), and
+    'note' for any remaining producer-capable but unproven form. readings are the lex's readings and reading the
+    _CommandReading the lex ran under (its added, shared and origins)."""
+    possibles = _diff_possibles(readings, reading.added, reading.shared)
+    if not possibles:
+        return "allow"
+    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
+    segments = [seg for segs in readings for seg in segs]
+    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
+    if (_diff_proof_help(command) or _diff_proof_summary(command) or _diff_proof_log_listing(command)
+            or _diff_proof_show_blob(command) or _diff_proof_realfile(own) or _diff_proof_pager(own)):
+        return "allow"
+    # A segment the command reading read past a compound command's reserved words writes where that compound's
+    # closing word sends its output, so it is a confirmed dump only where that reaches the console too
+    # (_diff_compound_console); a segment of a backquote substitution is judged as main judges one of a '$(...)'
+    # substitution, by its own redirects.
+    compound = _diff_compound_console(own) if reading.added else ()
+    for index, seg in possibles:
+        if index >= len(own):
+            origin, body = reading.origins[index - len(own)]
+            if not body and not compound[origin]:
+                continue
+        if _is_console_dump(seg, segments, index):
+            return "deny"
+    return "note"
+
+
+def _diff_static_kind(decoded):
+    """_diff_parsed_kind of the static decoded reading of a command (_ansi_c_static_reading, passed in as decoded),
+    lexed as diff_source_pretool lexes the command itself; a ValueError from that lex propagates, and
+    _ansi_c_static_lexed turns it into no added decision."""
+    with _CommandReading(origins=True) as reading:
+        readings = _lex_readings(decoded)
+    return _diff_parsed_kind(decoded, readings, reading)
 
 
 def diff_source_pretool(data):
@@ -5189,7 +5971,9 @@ def diff_source_pretool(data):
     quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are judged beside the lex's own where main's reading lexes, and where
     it fails the fallback a lex that fails takes, which never denies, decides in place of this guard's
-    allow."""
+    allow. The static decoded reading (_ansi_c_static_reading: ANSI-C escapes decoded, a locale quote's '$'
+    dropped) is judged the same way beside a command the lex read, and its decision stands where it is stricter
+    (git $'\\x6c'og -p DENIES as git log -p does)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: diff_source_pretool wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -5234,38 +6018,34 @@ def diff_source_pretool(data):
         return _diff_source_fallback(command)
     except ValueError:
         return _diff_source_fallback(command)
-    possibles = _diff_possibles(readings, reading.added, reading.shared)
-    # The segments are joined only where a possible producer is judged against its neighbours and the proofs.
-    segments = [seg for segs in readings for seg in segs] if possibles else []
-    own = segments[:len(segments) - reading.added] if reading.added else segments  # no copy when none added
+    kind = _diff_parsed_kind(command, readings, reading)
+    if kind != "deny":
+        # The static decoded reading (_ansi_c_static_reading), judged the same way beside the command: a git word,
+        # producer or option spelled with an ANSI-C escape (git $'\x6c'og -p) is judged as its plain spelling is,
+        # and only a stricter kind than the command's own is taken (deny over note over allow). A reading the
+        # scan cannot make with certainty denies (_StaticReadingUncertain).
+        try:
+            decoded = _ansi_c_static_lexed(command, _diff_static_kind)
+        except _StaticReadingUncertain as exc:
+            return _static_reading_uncertain_deny("cnsdif (no-console-diff-dumps)", "a git diff-producer that "
+                                                  "dumps a patch to the console", exc)
+        if decoded == "deny" or (decoded == "note" and kind == "allow"):
+            kind = decoded
     # No producer-capable form anywhere (the bounded true boundary), or AIRTIGHT-NARROW: the WHOLE command is
-    # one of the five closed proofs. Either allows, unless main's reading of a here-document body the lex read
+    # one of the closed proofs. Either allows, unless main's reading of a here-document body the lex read
     # fails, where the fallback main's failed lex takes decides instead (its note, or the allow).
-    if not possibles or (_diff_proof_help(command) or _diff_proof_summary(command)
-                         or _diff_proof_log_listing(command) or _diff_proof_show_blob(command)
-                         or _diff_proof_realfile(own) or _diff_proof_pager(own)):
+    if kind == "allow":
         if _SubstHeredocs.reads != reads:
             return _diff_source_fallback(command)
         return _allow()
-    # Otherwise judge each possible producer: a confirmed console dump DENIES (outranking ASK across a
-    # compound), and any remaining producer-capable-but-unproven form ASKS. A segment the command reading read
-    # past a compound command's reserved words writes where that compound's closing word sends its output, so
-    # it is a confirmed dump only where that reaches the console too (_diff_compound_console); a segment of a
-    # backquote substitution is judged as main judges one of a '$(...)' substitution, by its own redirects.
-    compound = _diff_compound_console(own) if reading.added else ()
-    for index, seg in possibles:
-        if index >= len(own):
-            origin, body = reading.origins[index - len(own)]
-            if not body and not compound[origin]:
-                continue
-        if _is_console_dump(seg, segments, index):
-            return _deny(
-                "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
-                "patch is not redirected to a real file or piped into a pager where the diff command stands, "
-                "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
-                "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
-                "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
-                "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
+    if kind == "deny":
+        return _deny(
+            "AIQT rule cnsdif (no-console-diff-dumps): this command runs a version-control diff whose "
+            "patch is not redirected to a real file or piped into a pager where the diff command stands, "
+            "so it reaches the console or a substitution or coprocess that captures it, a raw dump that "
+            "buries the review surface. Use a summary form (--stat, --name-only, --name-status, "
+            "--numstat), redirect the diff to a real file (> file), or pipe it into a pager (| less).",
+            "AIQT guardrail: denied a diff dump not sent to a file or a pager (rule cnsdif).")
     return _allow_note(
         "AIQT guardrail (rule cnsdif, no-console-diff-dumps): this command is producer-capable (it can "
         "render a version-control diff) but is outside the guard's proven-safe forms - a wrapper, a pathed "
@@ -7154,10 +7934,12 @@ def _commit_identity_fallback(command, error):
     unsupported construct), a command line that git runs from its operands was left unread, because the
     tokenizer cannot parse it or it is past the run-line bounds, and nothing read set an AI identity
     (_CMTIDN_RUN_BOUNDS), or the command is longer than the check reads within the hook timeout
-    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command for an
-    AI identity in a Co-Authored-By trailer, an --author value (any prefix git reads as --author), a
-    git-identity env var or EMAIL, or a user, author or committer name or email config value
-    (_RAW_IDENTITY_CONTEXTS), and denies on a hit.
+    (_CMTIDN_TOO_LONG). Unless a check below decides first, it scans the RAW string of the whole command, and
+    then each of its de-quoted readings (_cmtidn_fallback_texts, _decoded_readings), for an AI identity in a
+    Co-Authored-By trailer, an --author value (any prefix git reads as --author), a git-identity env var or
+    EMAIL, or a user, author or committer name or email config value (_RAW_IDENTITY_CONTEXTS), and denies on a
+    hit, so an option or trailer name split by quoting behind a here-string (git commit --au""thor="Claude
+    <...>" -m x <<<y) denies as it does where the command parses.
     A command too long to read is first denied when an AI name appears ANYWHERE in it once every quote,
     backslash, '$' and newline is removed, with no word boundary needed around the name (_AI_NAME_ANYWHERE_RE),
     and it also holds a word that can record an identity (_cmtidn_identity_word), so a command that the reader
@@ -7175,7 +7957,14 @@ def _commit_identity_fallback(command, error):
     single runs on one host took about 0.26 s of CPU time at 1,048,576 characters, 4.0 s at 16,777,216 and 6.3 s
     at 25,165,824 (with each value searched whole, 0.59 s, 8.7 s and 14.0 s on the same host), and 7.3 s at
     33,554,432, 8.9 s at 41,943,040 and 10.3 s at 50,331,648, so on the measuring host a command of about 40 to
-    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. The platform
+    48 MiB or longer can outlast the 10-second hook timeout, and on a slower host a shorter one can. Those figures
+    measure the raw text's scan alone: a command that holds a quote, a backslash or an ANSI-C $'...' quote is
+    scanned again over each de-quoted reading that differs from it (one, or two with an ANSI-C quote), so it costs
+    more. On another, heavily loaded host, a command of 8,388,608 characters of repeated trailer names with a quote
+    and a newline before an AI name (so no reading finds one, and every pass runs whole) took 7.75 s of CPU time
+    with the de-quoted reading against 4.69 s for the raw scan alone (the highest of three runs each), about 1.7
+    times, so such a command can outlast the timeout at a shorter length than above; the two-reading case was not
+    measured. The platform
     contract this file records (the module docstring) does not say that a hook stopped at its timeout refuses the
     call, so such a command may run with no deny from this check.
     With a run line left unread it first denies when an AI identity appears ANYWHERE in the
@@ -7218,19 +8007,35 @@ def _commit_identity_fallback(command, error):
             return _deny(reason,
                          "AIQT guardrail: denied a git command with a run line left unread (unparseable or past "
                          "the commit-identity bounds) that names an AI identity (rule cmtidn, fail-safe).")
-    for regex, label in _RAW_IDENTITY_CONTEXTS:
-        match = _ai_value_match(regex, command)
-        if match is not None:
-            hit = "{} {!r}".format(label, match.group(1).strip()[:80])
-            reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
-                      "parse error such as unbalanced quotes, a command line that git runs that could not be "
-                      "parsed or was nested or repeated past the check's bounds, or a command longer than the "
-                      "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
-                      "closed. Remove it and commit as the maintainer.".format(hit))
-            return _deny(reason,
-                         "AIQT guardrail: denied a git command the check could not read in full that "
-                         "appears to record an AI commit identity (rule cmtidn, fail-safe).")
+    for text in _cmtidn_fallback_texts(command):
+        for regex, label in _RAW_IDENTITY_CONTEXTS:
+            match = _ai_value_match(regex, text)
+            if match is not None:
+                hit = "{} {!r}".format(label, match.group(1).strip()[:80])
+                reason = ("AIQT rule cmtidn (commit-identity): the command could not be read in full (a shell "
+                          "parse error such as unbalanced quotes, a command line that git runs that could not be "
+                          "parsed or was nested or repeated past the check's bounds, or a command longer than the "
+                          "check reads within the hook timeout) and it appears to set an AI identity ({}); failing "
+                          "closed. Remove it and commit as the maintainer.".format(hit))
+                return _deny(reason,
+                             "AIQT guardrail: denied a git command the check could not read in full that "
+                             "appears to record an AI commit identity (rule cmtidn, fail-safe).")
     return _allow()
+
+
+def _cmtidn_fallback_texts(command):
+    """The texts the raw-string contexts of _commit_identity_fallback read, in order: the raw command, then each
+    de-quoted reading (_decoded_readings) that differs from it, so an --author option or co-author trailer name
+    split by quoting (--au""thor=..., Co-Authored-""By: ...) is read as the word bash assembles, as the token
+    reader reads it when the command parses. The readings are made only after every context has read the raw
+    text and found nothing, so a raw hit denies with the same reason as before; a reading can only add a match,
+    never clear one. A de-quoted reading lets a co-author value run across a removed quote ('Co-Authored-By: J" -m
+    "Claude' reads 'Co-Authored-By: J -m Claude'), a safe-direction over-deny of a command whose quoted text
+    merely places an AI name after a trailer name."""
+    yield command
+    for text in _decoded_readings(command):
+        if text != command:
+            yield text
 
 
 def commit_identity(data):
@@ -7241,7 +8046,9 @@ def commit_identity(data):
     here-document's body that main's lexer reads otherwise (MAIN'S DECISION AS A FLOOR, above
     _MainHashReading), main's segments are read beside the lex's own where main's reading lexes, and where it
     fails the raw fallback a lex that fails takes, which denies or allows, decides in place of this guard's
-    allow."""
+    allow. Where the reader finds nothing in the command, it also reads the static decoded reading
+    (_ansi_c_static_reading: ANSI-C escapes decoded, a locale quote's '$' dropped), so git $'\\x63'ommit
+    --author="<AI>" denies as its plain spelling does."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_identity wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -7286,6 +8093,18 @@ def commit_identity(data):
         if hit is None:
             return _commit_identity_fallback(command, str(exc))
         raw = True
+    if hit is None:
+        # The static decoded reading (_ansi_c_static_reading), read beside the command: a git word, subcommand,
+        # option or trailer spelled with an ANSI-C escape (git $'\x63'ommit --author "<AI>") is found as its plain
+        # spelling is. A reading the reader refuses adds nothing (_ansi_c_static_lexed); one the scan cannot make
+        # with certainty denies (_StaticReadingUncertain).
+        try:
+            hit = _ansi_c_static_lexed(command, find_ai_authorship) or None
+        except _StaticReadingUncertain as exc:
+            return _static_reading_uncertain_deny("cmtidn (commit-identity)", "a git command recording an AI "
+                                                  "identity (a co-author trailer, an --author value, a git "
+                                                  "identity variable, EMAIL, or a user, author or committer name "
+                                                  "or email value)", exc)
     if hit is None:
         # Nothing the reader judges sets an AI identity: the raw text decides next, failing closed when it
         # assigns an identity a value that names an AI, or a value it does not spell in a command that names an AI
@@ -10108,16 +10927,22 @@ def _expbnd_fallback_kind(command):
     command whose text names a git configuration variable, or that runs under a git alias the hook's environment
     carries (_git_alias_outside), every git command counts as a mutation, a breadth stage and a publish, as on a
     parsed command, so two git words (_GIT_WORD_RE), as many as a breadth stage and a later publish need, deny
-    first, and one git word beside a cd notes."""
+    first, and one git word beside a cd notes. Every probe (the git-word count, the breadth and push probes, and
+    the cd, mutation and pruning-fetch probes) reads the de-quoted readings (_decoded_readings) BESIDE the raw
+    text, as the parsed path's de-quoted words and the uncertain-'#' path's _hash_doubt_scan do, so a push split
+    by quoting (git add -A && git p''ush <<< x) denies like its plain spelling, and a mutation or cd split by
+    quoting (cd /tmp && git co''mmit -m y <<<z) notes like its plain spelling; a reading can only add a match,
+    never clear one."""
     named = _git_alias_outside(command)
-    if named and len(_GIT_WORD_RE.findall(command)) > 1:
+    texts = (command,) + _decoded_readings(command)
+    if named and any(len(_GIT_WORD_RE.findall(text)) > 1 for text in texts):
         return "publish"
-    if ((_RAW_EXPBND_ADD_BREADTH_RE.search(command) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(command))
-            and _RAW_EXPBND_PUSH_RE.search(command)):
+    if (any(_RAW_EXPBND_ADD_BREADTH_RE.search(text) or _RAW_EXPBND_COMMIT_BREADTH_RE.search(text) for text in texts)
+            and any(_RAW_EXPBND_PUSH_RE.search(text) for text in texts)):
         return "publish"
-    if (_RAW_EXPBND_CD_RE.search(command) and
-            (_RAW_EXPBND_MUTATE_RE.search(command) or _RAW_EXPBND_PRUNING_FETCH_RE.search(command)
-             or (named and _GIT_WORD_RE.search(command)))):
+    if (any(_RAW_EXPBND_CD_RE.search(text) for text in texts) and
+            any(_RAW_EXPBND_MUTATE_RE.search(text) or _RAW_EXPBND_PRUNING_FETCH_RE.search(text)
+                or (named and _GIT_WORD_RE.search(text)) for text in texts)):
         return "target"
     return None
 
@@ -10155,7 +10980,9 @@ def git_explicit_binding(data):
     otherwise (MAIN'S DECISION AS A FLOOR, above _MainHashReading), main's segments are judged beside the
     lex's own where main's reading lexes, and where it fails the raw fallback a lex that fails takes
     (_expbnd_fallback_kind) denies after this guard's own deny and before its notes, and decides in place of
-    its allow."""
+    its allow. The static decoded reading (_ansi_c_static_reading: ANSI-C escapes decoded, a locale quote's '$'
+    dropped) adds its own readings after the lex's, each judged on its own, so git add --all && git $'\\x70'ush
+    denies as its plain spelling does."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: git_explicit_binding wired to unexpected event {!r}; failing "
                            "closed".format(data.get("hook_event_name")))
@@ -10204,6 +11031,16 @@ def git_explicit_binding(data):
         return _expbnd_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _expbnd_fallback(command)
+    # The static decoded reading (_ansi_c_static_reading) adds its own readings after the lex's, each judged on its
+    # own like them, so a git word, subcommand or option spelled with an ANSI-C escape (git add --all && git
+    # $'\x70'ush) is read as its plain spelling; a reading can only add a deny or a note, and one the scan cannot
+    # make with certainty denies (_StaticReadingUncertain).
+    try:
+        readings = list(readings) + _ansi_c_static_lexed(command, _lex_readings_read, skip_empty=True)
+    except _StaticReadingUncertain as exc:
+        return _static_reading_uncertain_deny("expbnd (explicit-binding-over-ambient-context)", "a whole-tree "
+                                              "breadth stage (git add -A, git commit -a) followed by a git push "
+                                              "that publishes whatever the tree holds", exc)
 
     # BREADTH-THEN-PUBLISH PRE-SCAN: a whole-tree BREADTH stage ('git add -A/./:/', 'git commit -a/--all')
     # FOLLOWED BY a PUBLISH ('git push') ANYWHERE later in the same reading DENIES-and-educates, regardless
@@ -19365,12 +20202,14 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
-    as the caller has just read it, so the raw probes are not run over the command a second time. check_git,
-    True on that ordinary-parse-failure branch, adds the interim check-then-git deny (_gate_check_then_git on the
-    raw text) after every deny here and before the note."""
+    only note or allow ($G commit -nv <<<x) denies. The decision kind reads the de-quoted readings beside the
+    raw text (_gate_fallback_read_kind), so the note tier, like the deny tier, is earned by a checker or swallow
+    spelling split by quoting. kind, when given, is _gate_fallback_read_kind(command) as the caller has just
+    read it, so the probes are not run over the command a second time. check_git, True on that
+    ordinary-parse-failure branch, adds the interim check-then-git deny (_gate_check_then_git on the raw text)
+    after every deny here and before the note."""
     if kind is _GATE_KIND_UNREAD:
-        kind = _gate_weakening_fallback_kind(command)
+        kind = _gate_fallback_read_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -19620,6 +20459,23 @@ def _gate_weakening_fallback_kind(command):
     return None
 
 
+def _gate_fallback_read_kind(command, raw_kind=_GATE_KIND_UNREAD):
+    """The decision _gate_weakening_fallback gives command over its raw text AND its de-quoted readings
+    (_decoded_readings), raw_kind being _gate_weakening_fallback_kind(command) when the caller has read it: the
+    raw kind when it denies, else the first deny kind (_GATE_FALLBACK_DENIES) a de-quoted reading earns, else the
+    raw kind when it is the note ("swallow"), else the first kind a de-quoted reading earns, else None. So a
+    checker split by quoting (pyt''est || true <<<x) notes like its plain spelling, and a bypass spelled only
+    through quoting denies on every path that reads this; a reading can only add a deny or a note, never clear
+    one. A reading equal to the raw text is not read again."""
+    if raw_kind is _GATE_KIND_UNREAD:
+        raw_kind = _gate_weakening_fallback_kind(command)
+    if raw_kind in _GATE_FALLBACK_DENIES:
+        return raw_kind
+    kinds = [_gate_weakening_fallback_kind(text) for text in _decoded_readings(command) if text != command]
+    return (next((k for k in kinds if k in _GATE_FALLBACK_DENIES), None) or raw_kind
+            or next((k for k in kinds if k is not None), None))
+
+
 def _gate_partial_segments(command, doubt=None):
     """(complete, open_segment) from a partial lex of command: complete is the list of complete segments it
     recovers, and open_segment is the in-progress segment the lexer was inside when it stopped (its words
@@ -19720,10 +20576,15 @@ def _gate_dequoted_words(text):
 # \u and \U take up to four and eight hex digits; \c reads the next character as a control character (\c\\
 # takes both backslashes, \c? is DEL); the letter escapes and \\, \', \" and \? decode; any other escape keeps
 # its backslash, so env -S still sees the \_ of $'git\_commit'. The body of one such quote runs to the first
-# quote no backslash escapes (_GATE_ANSI_C_BODY_RE).
+# quote no backslash escapes (_GATE_ANSI_C_BODY_RE). It and _gate_bash_escape are the hooks' one escape table: the
+# static decoded reading (_ansi_c_body, _ansi_c_static_quote, _ansi_c_static_relevant) reads escapes through them.
 _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
+# _GATE_BASH_ESCAPE_RE with \c reading the one character after it, so a \c\\ pair is read as \c\ and an escape
+# after it, as the escape table before the one shared table read it; built from that pattern, so it differs in
+# nothing else. Read only for the extra pair-split reading of _decoded_readings (_ansi_c_pair_split_body).
+_ANSI_C_PAIR_SPLIT_ESCAPE_RE = re.compile(_GATE_BASH_ESCAPE_RE.pattern.replace("|c(\\\\\\\\|.)|", "|c(.)|"), re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
 # A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
 _GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
@@ -19735,31 +20596,47 @@ _GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 _GATE_WORD_BREAK_RE = re.compile(r"[ \t\n;&|()<>`]+")
 
 
+def _gate_bash_escape(m):
+    """The text bash reads for one escape of an ANSI-C $'...' body (a _GATE_BASH_ESCAPE_RE match), with no NUL cut:
+    the character of an octal, \\x, \\x{...}, \\u or \\U code ('' for a code past U+10FFFF, which bash 5.3.9 does
+    not read as nothing: it builds the code as a byte sequence no Unicode character names, \\U110000 as f4 90 80 80
+    under C.UTF-8, so the static decoded reading refuses a quote holding one, _ansi_c_beyond_index, while the
+    no-verify gate keeps reading it as nothing, so its deny of --no-ver$'\\U110000'ify, an over-deny, is kept by the
+    no-reduction rule), the control character
+    of \\cX (one byte read: a multibyte character gives its first byte's control character and U+FFFD), a letter
+    escape's character, \\\\, \\', \\" and \\? as that character, and any other escape kept with its backslash. The
+    one escape table of the hooks: _gate_ansi_c_text and the static decoded reading (_ansi_c_body,
+    _ansi_c_static_relevant) both read escapes through it."""
+    octal, braced, hex2, hex4, hex8, control, other = m.groups()
+    if control is not None:
+        # bash reads one byte here: a multibyte character gives its first byte, and the rest stays text
+        first = control[0].encode("utf-8", "surrogatepass")[0]
+        char = "\x7f" if control == "?" else chr(first & 0x1F)
+        if first > 0x7F:
+            char += "\ufffd"
+    elif other is not None:
+        char = _GATE_ANSI_C_LETTERS.get(other, other if other in "\\'\"?" else "\\" + other)
+    elif octal is not None:
+        char = chr(int(octal, 8) & 0xFF)
+    elif braced is not None:
+        char = chr(int(braced[-2:] or "0", 16))
+    elif hex2 is not None:
+        char = chr(int(hex2, 16))
+    else:
+        code = int(hex4 or hex8, 16)
+        char = chr(code) if code <= 0x10FFFF else ""
+    return char
+
+
 def _gate_ansi_c_text(body):
     """The text bash reads for the body of one ANSI-C $'...' quote: each escape decoded as bash decodes it
-    (_GATE_BASH_ESCAPE_RE), and the body cut at the first escape that yields a NUL byte (\\0, \\x00, \\x{},
-    \\u0000, \\c@ and their kin), since bash ends that quote's text there and keeps the rest of the word."""
+    (_GATE_BASH_ESCAPE_RE, _gate_bash_escape), and the body cut at the first escape that yields a NUL byte (\\0,
+    \\x00, \\x{}, \\u0000, \\c@ and their kin), since bash ends that quote's text there and keeps the rest of the
+    word."""
     out = []
     pos = 0
     for m in _GATE_BASH_ESCAPE_RE.finditer(body):
-        octal, braced, hex2, hex4, hex8, control, other = m.groups()
-        if control is not None:
-            # bash reads one byte here: a multibyte character gives its first byte, and the rest stays text
-            first = control[0].encode("utf-8", "surrogatepass")[0]
-            char = "\x7f" if control == "?" else chr(first & 0x1F)
-            if first > 0x7F:
-                char += "\ufffd"
-        elif other is not None:
-            char = _GATE_ANSI_C_LETTERS.get(other, other if other in "\\'\"?" else "\\" + other)
-        elif octal is not None:
-            char = chr(int(octal, 8) & 0xFF)
-        elif braced is not None:
-            char = chr(int(braced[-2:] or "0", 16))
-        elif hex2 is not None:
-            char = chr(int(hex2, 16))
-        else:
-            code = int(hex4 or hex8, 16)
-            char = chr(code) if code <= 0x10FFFF else ""
+        char = _gate_bash_escape(m)
         out.append(body[pos:m.start()])
         if char[:1] == "\x00":
             return "".join(out)
@@ -21153,9 +22030,8 @@ def gate_weakening(data):
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
             raw_kind = _gate_weakening_fallback_kind(command)
-            if (raw_kind not in _GATE_FALLBACK_DENIES
-                    and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
-                            for text in _decoded_readings(command))):
+            kind = _gate_fallback_read_kind(command, raw_kind)
+            if raw_kind not in _GATE_FALLBACK_DENIES and kind in _GATE_FALLBACK_DENIES:
                 return _deny(
                     "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell "
                     "lexer (an unbalanced quote or an unsupported construct such as a here-string or a "
@@ -21170,7 +22046,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind, check_git=True)
+            return _gate_weakening_fallback(command, runtime=True, kind=kind, check_git=True)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -21337,9 +22213,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        raw_kind = _gate_weakening_fallback_kind(command)
-        if raw_kind in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
+        floor_kind = _gate_fallback_read_kind(command)
+        if floor_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=floor_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -21475,9 +22351,13 @@ def _commit_msg_subst_fallback(command):
     configuration variable and git, its text names git and defines one anywhere, past where the lexer stopped
     included, or a git segment a partial lex recovers defines one or runs under one the session environment
     carries) may run git commit under another name, so a marker anywhere in it denies too.
+    Both probes read the de-quoted readings (_decoded_readings) BESIDE the raw text, as the uncertain-'#'
+    path's _hash_doubt_scan does, so a subcommand split by quoting (git co''mmit -m "$(id)" <<<x) denies like
+    its plain spelling; a reading can only add a match, never clear one.
     Anything else ALLOWS at the true boundary. The probes intentionally over-match."""
-    if (_RAW_COMMIT_MSG_MARKER_RE.search(command)
-            and (_RAW_COMMIT_MSG_GIT_RE.search(command) or _git_alias_recovered(command))):
+    texts = (command,) + _decoded_readings(command)
+    if (any(_RAW_COMMIT_MSG_MARKER_RE.search(text) for text in texts)
+            and (any(_RAW_COMMIT_MSG_GIT_RE.search(text) for text in texts) or _git_alias_recovered(command))):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): the command could not be parsed by the shell "
             "lexer and appears to carry a backtick or $( command substitution in a git commit argument, or in "
@@ -21504,7 +22384,9 @@ def commit_msg_subst(data):
     DENIES. Where a lex read a quoted here-document's body that main's lexer reads otherwise (MAIN'S DECISION
     AS A FLOOR, above _MainHashReading), main's segments are judged beside the lex's own where main's reading
     lexes, and where it fails the raw fallback a lex that fails takes, which denies or allows, decides in place
-    of this guard's allow."""
+    of this guard's allow. The segments of the static decoded reading (_ansi_c_static_reading: ANSI-C escapes
+    decoded, a locale quote's '$' dropped) are read after the lex's own, so $'\\x67'it commit -m "$(id)" denies
+    as its plain spelling does."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: commit_msg_subst wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -21540,7 +22422,17 @@ def commit_msg_subst(data):
         return _commit_msg_subst_fallback(_hash_doubt_scan(command))
     except ValueError:
         return _commit_msg_subst_fallback(command)
-    named = _git_alias_outside(command)
+    # The static decoded reading (_ansi_c_static_reading) is read beside the lex's own segments, so a git word,
+    # subcommand or argument spelled with an ANSI-C escape ($'\x67'it commit -m "$(id)") denies like its plain
+    # spelling; its segments can only add a hit, and a reading the scan cannot make with certainty denies
+    # (_StaticReadingUncertain).
+    try:
+        segments = list(segments) + _ansi_c_static_lexed(command, _lex_command_read, skip_empty=True)
+        named = _git_alias_outside(command) or _git_alias_outside(_ansi_c_static_reading(command))
+    except _StaticReadingUncertain as exc:
+        return _static_reading_uncertain_deny("sectvl (tool-argument-validation)", "a backtick or $( command "
+                                              "substitution in a git commit argument, which the shell runs before "
+                                              "git sees the argument", exc)
     for seg in segments:
         hit = _commit_msg_subst_hit(seg, named)
         if hit is None:
@@ -33895,7 +34787,9 @@ def citation_read_check(data):
 # that commit and equals the authoritative task revision the adopter's authority command prints; the
 # declared review paths equal to the pin's changed set (base derived from the commit's raw parent headers),
 # where a brief that names the worker draft the commit applies has every path the draft's diff headers name
-# declared too, less the paths it records as skipped (_rdp_draft_census);
+# declared too, less the paths it records as skipped (_rdp_draft_census); where a brief names a review
+# export, the export's diff naming that changed set and its head and base copies byte-identical to the
+# pin's and the derived base's blobs (_rdp_export_check);
 # and no uncommitted state over any declared path, except edits inside a checked-out submodule whose HEAD is
 # at the pinned gitlink, which are not read; where the binding declares the carry labels (rule evgcmp), a review
 # carried from another revision transfers only with a byte-identical diff and the paths that differ between
@@ -33910,6 +34804,17 @@ _RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
 # The optional labels a binding declares together or not at all: the brief line naming the worker draft a
 # revision applies, and the lines recording the drafted paths deliberately left out of it.
 _RDP_DRAFT_LABEL_KEYS = frozenset(("draft", "skip"))
+# The optional labels a binding declares together or not at all: the brief lines naming a review export,
+# its root by absolute path, and its diff file and base-copy directory, each by a path relative to that root
+# (_rdp_export_check).
+_RDP_EXPORT_LABEL_KEYS = frozenset(("export", "export_diff", "export_base"))
+# The entries the export walk reads at most (files and directories together); one more is a cannot-evaluate.
+_RDP_EXPORT_MAX_ENTRIES = 50000
+# The bytes the export check reads into memory at most on each side: the copies the walk holds (the diff
+# file apart, which max_brief_bytes bounds) and, separately, the blobs git cat-file returns, whose sizes are
+# read first. One byte more on either side is a cannot-evaluate, so a large export is withheld, never read
+# without bound.
+_RDP_EXPORT_MAX_HELD_BYTES = 128 * 1048576
 # The optional labels of the carried-review check (rule evgcmp), declared together or not at all: the brief
 # line naming the reviewed revision a review is carried from (or none, for a fresh review), and the lines
 # naming each path where review reopens because it differs between the reviewed and the new bases.
@@ -33967,7 +34872,7 @@ def _rdp_time_left(cap):
     return min(cap, left) if left > 0.05 else None
 
 
-def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
+def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT, env_extra=None):
     """One isolated git probe for the review dispatch pin: the _isolate_git_env scrub plus no optional
     locks, replacement refs and grafts disabled (so a `git replace --graft` or an info/grafts file cannot
     change the parents the base is derived from), literal pathspecs (a declared path is matched as a literal
@@ -33976,8 +34881,9 @@ def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
     core.untrackedCache), and the submodule settings that would hide a submodule change or recurse into
     one (diff.ignoreSubmodules, submodule.recurse; a .gitmodules `ignore` value is overridden by each
     diff read's own --ignore-submodules=none). Bytes in and out. The probe is given timeout seconds at most
-    (_RDP_GIT_TIMEOUT unless a caller with its own deadline passes what is left of it). Returns the
-    CompletedProcess, or None when git could not be run,
+    (_RDP_GIT_TIMEOUT unless a caller with its own deadline passes what is left of it); env_extra, a
+    caller's own variables, is applied after the scrub. Returns the CompletedProcess, or None when git
+    could not be run,
     timed out, or the decision's deadline has passed (the caller's cannot-evaluate)."""
     timeout = _rdp_time_left(timeout)
     if timeout is None:
@@ -33991,6 +34897,7 @@ def _review_git(repo, *args, stdin=None, timeout=_RDP_GIT_TIMEOUT):
     # not-a-git-repository answer), so the C locale pins them against translation; LC_ALL
     # outranks LANG and LC_MESSAGES, and gettext ignores LANGUAGE under the C locale
     env["LC_ALL"] = "C"
+    env.update(env_extra or {})
     try:
         return subprocess.run(["git", "-C", repo, "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
                                "-c", "core.untrackedCache=false", "-c", "diff.ignoreSubmodules=none",
@@ -34023,15 +34930,15 @@ def _rdp_binding(reg):
             or any(ch.isspace() or ch == "=" for ch in option):
         return ("bad", "review_dispatch.brief_option is not a single option word")
     labels = raw["labels"]
-    if not isinstance(labels, dict) or set(labels) not in (
-            _RDP_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS, _RDP_LABEL_KEYS | _RDP_CARRY_LABEL_KEYS,
-            _RDP_LABEL_KEYS | _RDP_DRAFT_LABEL_KEYS | _RDP_CARRY_LABEL_KEYS):
-        if isinstance(labels, dict) and set(labels) & _RDP_CARRY_LABEL_KEYS:
-            return ("bad", "review_dispatch.labels must declare exactly {}, optionally with both of {} and "
-                    "optionally with both of {}".format(sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS),
-                                                        sorted(_RDP_CARRY_LABEL_KEYS)))
-        return ("bad", "review_dispatch.labels must declare exactly {}, or those and both of {}".format(
-            sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS)))
+    extra_labels = set(labels) - _RDP_LABEL_KEYS if isinstance(labels, dict) else None
+    if not isinstance(labels, dict) or not _RDP_LABEL_KEYS <= set(labels) or any(
+            extra_labels & group not in (set(), group)
+            for group in (_RDP_DRAFT_LABEL_KEYS, _RDP_CARRY_LABEL_KEYS, _RDP_EXPORT_LABEL_KEYS)) or (
+            extra_labels - _RDP_DRAFT_LABEL_KEYS - _RDP_CARRY_LABEL_KEYS - _RDP_EXPORT_LABEL_KEYS):
+        return ("bad", "review_dispatch.labels must declare exactly {}, optionally with both of {}, optionally "
+                "with both of {} and optionally with all three of {}".format(
+                    sorted(_RDP_LABEL_KEYS), sorted(_RDP_DRAFT_LABEL_KEYS), sorted(_RDP_CARRY_LABEL_KEYS),
+                    sorted(_RDP_EXPORT_LABEL_KEYS)))
     values = list(labels.values())
     if not all(isinstance(v, str) and v and v.strip() == v and "\n" not in v and "\r" not in v
                for v in values):
@@ -34901,6 +35808,470 @@ def _rdp_draft_census(cfg, found, changed, pin):
     return (drafted - skipped, None)
 
 
+# The review export check. A review copy that carries a diff, base copies or a statement that files
+# outside the diff are unchanged takes all of them from the one derived base, so where the binding declares
+# the export labels and a revision brief names an export, the export is checked against the pin and the base
+# the hook derives (never a base the export or the brief names), after the changed-set equality:
+# - P1: the export's diff file is byte-identical to the hook's own diff of the derived base against the pin,
+#   taken by _review_git (every ambient GIT_* scrubbed, replacement objects and grafts disabled) with the
+#   fixed options of _RDP_EXPORT_DIFF_ARGS: plumbing diff-tree, recursive, a full patch with binary content
+#   and full object ids, no rename or copy detection, three context lines and no inter-hunk merging, the
+#   myers algorithm with the indent heuristic, no relative root or order file, a/ and b/ prefixes, quoted
+#   path names, no colour, no external diff, no textconv and every submodule change shown. The diff is also
+#   taken with no attribute in force (_rdp_export_diff_args: attributes read from the empty tree, no
+#   core.attributesFile, no system attributes file) and binary content deflated at the default level 1, so
+#   no `-diff`, `binary` or diff driver attribute the repository commits and no compression setting shapes
+#   it, and the check is usable on files the repository marks binary. So a diff of another base, a merge's
+#   second parent, a series, or a section that is only a binary marker, mode lines or an empty hunk differs
+#   and is refused even where it names the same paths; the bytes are compared as they are, so a commit
+#   changing a CRLF file passes with its genuine diff. A diff that differs is then read by the draft census
+#   parser (_rdp_draft_paths) only to report why (_rdp_export_p1). P1 only ever refuses: whether the export
+#   matches the commit is decided by bytes (P2 and P3), never by the diff's text, whose form git
+#   configuration can still change (a diff driver setting such as diff.default.binary or xfuncname,
+#   $GIT_DIR/info/attributes);
+# - P2: every changed path is exported (a head copy where the pin has the path, a base copy where the base
+#   has it); every head copy, a regular file under the root outside the diff file and the base-copy
+#   directory, is byte for byte the content git cat-file reads for the pin's blob at its path; every base
+#   copy, a regular file under the base-copy directory, is byte for byte the base's blob at its path, so a
+#   path the base lacks has none; every copy's owner execute bit matches its blob's mode (set for 100755,
+#   clear for 100644); and a root commit has no base copy at all (_rdp_export_p2). The blobs are read by one
+#   cat-file under the pinned options (_rdp_export_blobs), which reads an object's own bytes with no
+#   filter, textconv, diff driver or external program; each record is hashed as a blob in the repository's
+#   object format and must be the object id it was read for (_rdp_export_blob_ok), so an object store that
+#   returns other bytes under a blob's id is a cannot-evaluate, never a pass; and the copies are compared
+#   with those verified bytes, never by object id. Only the blob bytes are verified this way: the trees,
+#   the commits and the hook's own diff are taken as git reads them, so object-store integrity is otherwise
+#   assumed;
+# - P3: no changed path whose blob bytes are text on every side (no NUL in the first 8000 bytes, git's own
+#   test) has a binary section in the diff (_rdp_export_hidden), so no configuration or attribute can show
+#   a text change as a binary patch or marker that passes.
+# A brief naming the export only in part, a value that is not an absolute root or a plain relative path, an
+# unreadable or malformed input (the root, the diff file, the base-copy directory), a symlink, a FIFO, device
+# or socket anywhere under the root, a changed path that is a symlink or submodule entry, a failed git read,
+# a blob read whose bytes do not hash to its object id, copies or blobs over _RDP_EXPORT_MAX_HELD_BYTES bytes
+# and a walk past _RDP_EXPORT_MAX_ENTRIES entries or the decision's deadline are each a cannot-evaluate. Every
+# directory under the root is opened without following a symlink and read by its descriptor, so no path the
+# walk reads escapes the root.
+_RDP_EXPORT_DIFF_ARGS = ("-c", "core.quotePath=true", "-c", "diff.suppressBlankEmpty=false", "diff-tree", "-r",
+                         "-p", "--binary", "--full-index", "--no-renames", "-U3", "--inter-hunk-context=0",
+                         "--diff-algorithm=myers", "--indent-heuristic", "--no-relative", "-O" + os.devnull,
+                         "--src-prefix=a/", "--dst-prefix=b/", "--no-color", "--no-ext-diff", "--no-textconv",
+                         "--ignore-submodules=none", "--submodule=short")
+# The empty tree of each object format: the hook's diff reads attributes from it, so it reads none from the
+# working tree, the index or a tree the pin commits.
+_RDP_EMPTY_TREE = {"sha1": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                   "sha256": "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"}
+# The options ahead of _RDP_EXPORT_DIFF_ARGS that take attributes and the compression setting out of the
+# hook's diff: no core.attributesFile, and binary content deflated at level 1 (git's default) whatever
+# core.compression or core.loosecompression says. _RDP_EXPORT_NEUTRAL_ENV drops the system attributes file.
+_RDP_EXPORT_NEUTRAL_ARGS = ("-c", "core.attributesFile=" + os.devnull, "-c", "core.loosecompression=1")
+_RDP_EXPORT_NEUTRAL_ENV = {"GIT_ATTR_NOSYSTEM": "1"}
+_RDP_EXPORT_DIFF_SHOWN = ("GIT_NO_REPLACE_OBJECTS=1 GIT_ATTR_NOSYSTEM=1 git {} --attr-source=$(git hash-object -t "
+                          "tree /dev/null) {} <base> <pin>".format(" ".join(_RDP_EXPORT_NEUTRAL_ARGS),
+                                                                   " ".join(_RDP_EXPORT_DIFF_ARGS)))
+
+
+def _rdp_export_diff_args(fmt):
+    """The git arguments of the hook's own diff for object format fmt: the neutralizing options, attributes
+    read from the empty tree, then _RDP_EXPORT_DIFF_ARGS."""
+    return _RDP_EXPORT_NEUTRAL_ARGS + ("--attr-source=" + _RDP_EMPTY_TREE[fmt],) + _RDP_EXPORT_DIFF_ARGS
+
+
+def _rdp_export_rel(value):
+    """The slash-separated bytes path value names under the export root, or None when it is empty, absolute,
+    or holds an empty, `.` or `..` component (so it cannot name the root itself or a path outside it)."""
+    if not value or value.startswith("/") or any(part in ("", ".", "..") for part in value.split("/")):
+        return None
+    return value.encode("utf-8", "surrogateescape")
+
+
+def _rdp_export_declared(cfg, found):
+    """((root, diff, base), None) for the export a revision brief names, root an absolute path and diff and
+    base slash-separated bytes paths under it; (None, None) when the binding declares no export labels or the
+    brief names no export; (None, (kind, message)) for a declaration that cannot be evaluated."""
+    labels = cfg["labels"]
+    if "export" not in labels:
+        return (None, None)
+    keys = ("export", "export_diff", "export_base")
+    named = [key for key in keys if found[key]]
+    if not named:
+        return (None, None)
+    for key in keys:
+        if len(found[key]) > 1:
+            return (None, ("unverifiable", "the brief has {} {!r} lines; at most one is allowed".format(
+                len(found[key]), labels[key])))
+    if len(named) != len(keys):
+        return (None, ("unverifiable", "the brief names a review export only in part (no {}); an export is "
+                       "declared by its root, its diff file and its base-copy directory together".format(
+                           " or ".join(repr(labels[key]) for key in keys if key not in named))))
+    root = found["export"][0].strip()
+    if not os.path.isabs(root):
+        return (None, ("unverifiable", "the {!r} value {!r} is not an absolute path".format(
+            labels["export"], root)))
+    rels = []
+    for key in ("export_diff", "export_base"):
+        rel = _rdp_export_rel(found[key][0].strip())
+        if rel is None:
+            return (None, ("unverifiable", "the {!r} value {!r} is not a path relative to the export root "
+                           "(empty, absolute, or holding an empty, . or .. component)".format(
+                               labels[key], found[key][0].strip())))
+        rels.append(rel)
+    diff, base = rels
+    if diff == base or diff.startswith(base + b"/") or base.startswith(diff + b"/"):
+        return (None, ("unverifiable", "the export's diff file {!r} and base-copy directory {!r} overlap".format(
+            diff.decode("utf-8", "replace"), base.decode("utf-8", "replace"))))
+    return ((root, diff, base), None)
+
+
+def _rdp_export_walk(root, diff, max_bytes):
+    """(files, dirs, text, None) for the export under root: files maps each regular file's slash-separated
+    bytes path under root, the diff file's excepted, to its bytes and whether its owner execute bit is set;
+    dirs is the set of directory paths;
+    text is the diff file's bytes (None when there is no regular file at diff). (None, None, None, reason)
+    for a cannot-evaluate: a root that cannot be opened as a directory, a symlink, FIFO, device or socket
+    under it, an entry that cannot be read, a diff file over max_bytes, files other than the diff file over
+    _RDP_EXPORT_MAX_HELD_BYTES bytes together (checked from each file's size before it is read), more than
+    _RDP_EXPORT_MAX_ENTRIES entries, or the decision's deadline. Each directory is opened without following a
+    symlink, by name from its parent's descriptor, and each file the same way, its type checked on the open
+    descriptor."""
+    dir_flags = _RDP_OPEN_FLAGS | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        _rdp_check_deadline()
+        top = os.open(root, dir_flags)
+    except (OSError, ValueError) as exc:
+        return (None, None, None, "the export root {} cannot be opened as a directory ({})".format(root, exc))
+    files, dirs, text, count, held = {}, set(), None, 0, 0
+    stack = [(top, b"")]
+    try:
+        while stack:
+            dirfd, prefix = stack.pop()
+            try:
+                names = sorted(os.fsencode(name) for name in os.listdir(dirfd))
+                for name in names:
+                    count += 1
+                    if count > _RDP_EXPORT_MAX_ENTRIES:
+                        return (None, None, None, "the export under {} holds more than {} entries".format(
+                            root, _RDP_EXPORT_MAX_ENTRIES))
+                    _rdp_check_deadline()
+                    rel = prefix + name
+                    shown = rel.decode("utf-8", "replace")
+                    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                    if stat.S_ISLNK(st.st_mode):
+                        return (None, None, None, "the export under {} holds a symlink at {!r}".format(root, shown))
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append((os.open(name, dir_flags, dir_fd=dirfd), rel + b"/"))
+                        dirs.add(rel)
+                        continue
+                    if not stat.S_ISREG(st.st_mode):
+                        return (None, None, None, "the export under {} holds {!r}, which is not a regular file "
+                                "or directory".format(root, shown))
+                    fd = os.open(name, _RDP_OPEN_FLAGS | os.O_NOFOLLOW, dir_fd=dirfd)
+                    try:
+                        fst = os.fstat(fd)
+                        if not stat.S_ISREG(fst.st_mode):
+                            return (None, None, None, "the export under {} holds {!r}, which is not a regular "
+                                    "file".format(root, shown))
+                        if rel == diff:
+                            text = _rdp_read_fd(fd, max_bytes + 1)
+                            if len(text) > max_bytes:
+                                return (None, None, None, "the export's diff file {!r} is larger than "
+                                        "max_brief_bytes ({})".format(shown, max_bytes))
+                        else:
+                            held += fst.st_size
+                            if held > _RDP_EXPORT_MAX_HELD_BYTES:
+                                return (None, None, None, "the export's copies under {} come to more than {} "
+                                        "bytes together, more than the check reads".format(
+                                            root, _RDP_EXPORT_MAX_HELD_BYTES))
+                            data = _rdp_read_fd(fd, fst.st_size + 1)
+                            if len(data) != fst.st_size:
+                                raise OSError("{!r} changed size while it was read".format(shown))
+                            files[rel] = (data, bool(fst.st_mode & stat.S_IXUSR))
+                    finally:
+                        os.close(fd)
+            finally:
+                os.close(dirfd)
+    except (OSError, ValueError) as exc:
+        return (None, None, None, "the export under {} cannot be read ({})".format(root, exc))
+    finally:
+        for dirfd, _prefix in stack:
+            os.close(dirfd)
+    return (files, dirs, text, None)
+
+
+def _rdp_export_tree(repo, rev):
+    """The blob and gitlink entries of rev's tree, each bytes path mapped to (mode, object id), or None when
+    the tree cannot be read or parsed."""
+    tree = _rdp_git_records(repo, "ls-tree", "-r", "-z", "--full-tree", rev)
+    if tree is None:
+        return None
+    entries = {}
+    for line in tree:
+        meta, tab, name = line.partition(b"\t")
+        fields = meta.split(b" ")
+        if not tab or len(fields) != 3:
+            return None
+        entries[name] = (fields[0].decode("ascii", "replace"), fields[2].decode("ascii", "replace"))
+    return entries
+
+
+def _rdp_export_blob_ok(fmt, oid, data):
+    """Whether bytes data are the content of the blob oid: git's object hash in format fmt (sha1 or sha256)
+    of the blob header and data, the way git names a blob, is oid. So bytes an object store returns under
+    another blob's id are told apart from the committed content."""
+    digest = hashlib.new(fmt)
+    digest.update(b"blob %d\0" % len(data))
+    digest.update(data)
+    return digest.hexdigest() == oid
+
+
+def _rdp_export_blobs(repo, fmt, oids):
+    """(blobs, None): each object id in oids mapped to the content of its blob, read by one git cat-file
+    --batch under the hook's pinned options (_RDP_EXPORT_NEUTRAL_ARGS, attributes read from the empty tree,
+    no system attributes file); cat-file reads the object's own bytes, with no filter, textconv, diff driver
+    or external program. Their sizes are read first (cat-file --batch-check), and the content is read only
+    when the blobs come to _RDP_EXPORT_MAX_HELD_BYTES bytes or less. Each record is then hashed as a blob in
+    format fmt and must be the id it was read for (_rdp_export_blob_ok). (None, reason) for a cannot-evaluate:
+    a read that fails, output that is not one blob record per id of the size first read, blobs over the
+    limit, or a record whose bytes do not hash to its id (an object store holding other bytes under it)."""
+    want = sorted(set(oids))
+    if not want:
+        return ({}, None)
+    pinned = (*_RDP_EXPORT_NEUTRAL_ARGS, "--attr-source=" + _RDP_EMPTY_TREE[fmt], "cat-file")
+    stdin = b"".join(oid.encode("ascii") + b"\n" for oid in want)
+    unread = (None, "cannot be read")
+    p = _review_git(repo, *pinned, "--batch-check", stdin=stdin, env_extra=_RDP_EXPORT_NEUTRAL_ENV)
+    if p is None or p.returncode != 0:
+        return unread
+    lines = p.stdout.split(b"\n")
+    if len(lines) != len(want) + 1 or lines[-1]:
+        return unread
+    sizes = {}
+    for oid, line in zip(want, lines):
+        fields = line.split(b" ")
+        if len(fields) != 3 or fields[0] != oid.encode("ascii") or fields[1] != b"blob" \
+                or not fields[2].isdigit():
+            return unread
+        sizes[oid] = int(fields[2])
+    if sum(sizes.values()) > _RDP_EXPORT_MAX_HELD_BYTES:
+        return (None, "come to more than {} bytes together, more than the check reads".format(
+            _RDP_EXPORT_MAX_HELD_BYTES))
+    p = _review_git(repo, *pinned, "--batch", stdin=stdin, env_extra=_RDP_EXPORT_NEUTRAL_ENV)
+    if p is None or p.returncode != 0:
+        return unread
+    out, pos, got = p.stdout, 0, {}
+    for oid in want:
+        end = out.find(b"\n", pos)
+        fields = out[pos:end].split(b" ") if end >= 0 else []
+        if len(fields) != 3 or fields[0] != oid.encode("ascii") or fields[1] != b"blob" \
+                or fields[2] != b"%d" % sizes[oid]:
+            return unread
+        start = end + 1
+        end = start + sizes[oid]
+        if out[end:end + 1] != b"\n":
+            return unread
+        got[oid] = out[start:end]
+        pos = end + 1
+    if pos != len(out):
+        return unread
+    forged = [oid for oid in want if not _rdp_export_blob_ok(fmt, oid, got[oid])]
+    if forged:
+        return (None, "cannot be verified: the object store returns bytes for {} that do not hash to {}, so "
+                "it does not hold the committed content".format(
+                    _rdp_listing(forged), "that object id" if len(forged) == 1 else "those object ids"))
+    return (got, None)
+
+
+def _rdp_export_stale(copies, entries, blobs):
+    """The copies (bytes paths) whose bytes are not, byte for byte, the content of a regular blob at their
+    path in entries (blobs maps object ids to the content cat-file read)."""
+    return [p for p, (data, _exe) in copies.items() if entries.get(p, ("", ""))[0] not in ("100644", "100755")
+            or blobs.get(entries[p][1]) != data]
+
+
+def _rdp_export_binary_shown(own):
+    """The paths (bytes) whose section of the hook's own diff own is a binary marker or a binary patch, read
+    from git's own output, whose `diff --git` lines name one path twice (no rename or copy detection)."""
+    shown, path = set(), None
+    for line in own.split(b"\n"):
+        if line.startswith(b"diff --git "):
+            name = _rdp_diff_git_line(line[len(b"diff --git "):].decode("utf-8", "surrogateescape"))
+            path = None if name is None else name.encode("utf-8", "surrogateescape")
+        elif path is not None and (line == b"GIT binary patch" or line.startswith(b"Binary files ")):
+            shown.add(path)
+    return shown
+
+
+def _rdp_export_text(data):
+    """Whether bytes data is text by git's own test: no NUL in its first 8000 bytes."""
+    return b"\0" not in data[:8000]
+
+
+def _rdp_export_hidden(own, changed, pin_entries, base_entries, blobs):
+    """The changed paths (bytes, sorted) whose content is text on every side that has it, by the blob bytes
+    cat-file read, but whose section of the diff own is binary, so no reader sees the text change: the
+    form a diff driver setting or the one attribute source no option switches off
+    ($GIT_DIR/info/attributes) can give a text file. Decided from the bytes, not from any attribute or
+    configuration value."""
+    binary = _rdp_export_binary_shown(own)
+    hidden = []
+    for path in sorted(changed):
+        sides = [entries[path][1] for entries in (pin_entries, base_entries) if path in entries]
+        if path in binary and all(_rdp_export_text(blobs.get(oid, b"\0")) for oid in sides):
+            hidden.append(path)
+    return hidden
+
+
+def _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, root_commit, blobs):
+    """P2 of the export check: None when every changed path is exported and every head and base copy is
+    byte-identical to the blob at its path in the pin and in the derived base, with the owner execute bit
+    its mode gives, a root commit having no base copy; otherwise (kind, message) for the first failure.
+    changed is the pin's changed set, the entries are _rdp_export_tree maps, heads and bases map each
+    copy's bytes path to its bytes and execute bit, and blobs maps each blob id to the content git cat-file
+    read (_rdp_export_blobs), so copies are compared byte for byte, never by object id."""
+    regular = ("100644", "100755")
+    for path in sorted(changed):
+        for where, entries in ((pin, pin_entries), (base, base_entries)):
+            entry = entries.get(path)
+            if entry is not None and entry[0] not in regular:
+                return ("unverifiable", "the changed path {!r} is a symlink or submodule entry (mode {}) in {}, "
+                        "and the export check compares regular files only".format(
+                            path.decode("utf-8", "replace"), entry[0], where))
+
+    def shown(paths):
+        return _rdp_listing(sorted(p.decode("utf-8", "replace") for p in paths))
+    unexported = [p for p in changed if (p in pin_entries and p not in heads)
+                  or (p in base_entries and p not in bases)]
+    if unexported:
+        return ("deny", "the export does not hold every path {} changes: {} (a changed path needs a head copy "
+                "where {} has it and a base copy where its base {} has it)".format(pin, shown(unexported), pin,
+                                                                                  base))
+    if root_commit and bases:
+        return ("deny", "{} is a root commit, so its export holds no base copy, but it holds {}".format(
+            pin, shown(bases)))
+    stale = _rdp_export_stale(heads, pin_entries, blobs)
+    if stale:
+        return ("deny", "the export's head copies {} are not byte-identical to the blobs at {} (a path {} "
+                "lacks, or other bytes)".format(shown(stale), pin, pin))
+    stale = _rdp_export_stale(bases, base_entries, blobs)
+    if stale:
+        return ("deny", "the export's base copies {} are not byte-identical to the blobs at {}, the base the "
+                "hook derives for {} (a path the base lacks, or other bytes, as when the copies come from "
+                "another base)".format(shown(stale), base, pin))
+    for side, copies, entries, rev in (("head", heads, pin_entries, pin), ("base", bases, base_entries, base)):
+        moded = _rdp_export_mode_stale(copies, entries)
+        if moded:
+            return ("deny", "the export's {} copies {} do not carry the mode of the blobs at {} (an owner "
+                    "execute bit set for a 100644 blob or clear for a 100755 one)".format(side, shown(moded), rev))
+    return None
+
+
+def _rdp_export_mode_stale(copies, entries):
+    """The copies (bytes paths) whose owner execute bit differs from their blob's mode in entries, every
+    copy's entry being a regular blob already."""
+    return [p for p, (_data, exe) in copies.items() if exe != (entries[p][0] == "100755")]
+
+
+def _rdp_export_diff_differs(blob, own):
+    """P1 of the export check: True unless the export's diff file bytes blob are the hook's own diff bytes
+    own, byte for byte (no decoding, line-ending, byte-order-mark or trailing-whitespace normalization)."""
+    return blob != own
+
+
+def _rdp_export_p1(blob, changed, pin, base):
+    """The (kind, message) refusal for an export diff whose bytes are not the hook's own diff of the pin from
+    its derived base: a cannot-evaluate where the bytes are not a git diff the draft census reads (not UTF-8,
+    a NUL, a malformed section), naming the paths that differ where its headers name another path set, and
+    otherwise a refusal of the same paths with other content (another base, a merge's other parent, a
+    binary-only, mode-only or empty section, other options)."""
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return ("unverifiable", "the export's diff file is not valid UTF-8 ({})".format(exc))
+    if text[:1] == chr(0xFEFF):  # one leading byte-order mark is dropped for the census, never for P1
+        text = text[1:]
+    if "\x00" in text:
+        return ("unverifiable", "the export's diff file contains a NUL")
+    named, why = _rdp_draft_paths(text)
+    if named is None:
+        return ("unverifiable", "the export's diff file cannot be read as a git diff: {}".format(why))
+    named = set(p.encode("utf-8", "surrogateescape") for p in named)
+    if named != changed:
+        parts = []
+        missing = sorted(c.decode("utf-8", "replace") for c in changed - named)
+        extra = sorted(d.decode("utf-8", "replace") for d in named - changed)
+        if missing:
+            parts.append("changed by {} but not in the export's diff: {}".format(pin, _rdp_listing(missing)))
+        if extra:
+            parts.append("in the export's diff but not changed by {}: {}".format(pin, _rdp_listing(extra)))
+        return ("deny", "the export's diff does not name the commit's changed set from its derived base {} "
+                "({})".format(base, "; ".join(parts)))
+    return ("deny", "the export's diff names the changed set of {} but is not byte-identical to the diff of "
+            "{} from its derived base {} that the hook takes with {} (a diff from another base or a merge's "
+            "other parent, a binary-only, mode-only or empty section, or other options)".format(
+                pin, pin, base, _RDP_EXPORT_DIFF_SHOWN))
+
+
+def _rdp_export_check(cfg, found, repo, fmt, pin, base, root_commit, changed):
+    """None when the revision brief names no review export (or the binding declares no export labels), or
+    when the export it names passes P1, P2 and P3 against the pin and its derived base; otherwise (kind,
+    message) for the first failure, a blob read that is over the size limit or does not hash to its object
+    id being a cannot-evaluate. changed is the pin's changed set (bytes paths)."""
+    declared, failed = _rdp_export_declared(cfg, found)
+    if failed is not None:
+        return failed
+    if declared is None:
+        return None
+    root, diff, base_dir = declared
+    shadowed = sorted(c.decode("utf-8", "replace") for c in changed
+                      if c in (diff, base_dir) or c.startswith(base_dir + b"/")
+                      or diff.startswith(c + b"/") or base_dir.startswith(c + b"/"))
+    if shadowed:
+        return ("unverifiable", "the export's diff file {!r} or base-copy directory {!r} stands where {} changes "
+                "{}, so its head copy cannot be told apart".format(diff.decode("utf-8", "replace"),
+                                                                   base_dir.decode("utf-8", "replace"), pin,
+                                                                   _rdp_listing(shadowed)))
+    files, dirs, blob, why = _rdp_export_walk(root, diff, cfg["max_brief_bytes"])
+    if why is not None:
+        return ("unverifiable", why)
+    if blob is None:
+        return ("unverifiable", "the export's diff file {!r} is not a regular file under {}".format(
+            diff.decode("utf-8", "replace"), root))
+    if base_dir not in dirs:
+        return ("unverifiable", "the export's base-copy directory {!r} is not a directory under {}".format(
+            base_dir.decode("utf-8", "replace"), root))
+    own = _review_git(repo, *_rdp_export_diff_args(fmt), base, pin, env_extra=_RDP_EXPORT_NEUTRAL_ENV)
+    if own is None or own.returncode != 0:
+        return ("unverifiable", "the diff of {} from its derived base {} cannot be read".format(pin, base))
+    if len(own.stdout) > cfg["max_brief_bytes"]:
+        return ("unverifiable", "the diff of {} from its derived base {} is larger than max_brief_bytes "
+                "({})".format(pin, base, cfg["max_brief_bytes"]))
+    if _rdp_export_diff_differs(blob, own.stdout):
+        return _rdp_export_p1(blob, changed, pin, base)
+    pin_entries = _rdp_export_tree(repo, pin)
+    base_entries = {} if root_commit else _rdp_export_tree(repo, base)
+    if pin_entries is None or base_entries is None:
+        return ("unverifiable", "the trees of {} and its base {} cannot be read".format(pin, base))
+    prefix = base_dir + b"/"
+    heads = {p: copy for p, copy in files.items() if not p.startswith(prefix)}
+    bases = {p[len(prefix):]: copy for p, copy in files.items() if p.startswith(prefix)}
+    blobs, why = _rdp_export_blobs(repo, fmt, [entries[p][1] for copies, entries in (
+        (heads, pin_entries), (bases, base_entries), (dict.fromkeys(changed), pin_entries),
+        (dict.fromkeys(changed), base_entries)) for p in copies
+        if entries.get(p, ("", ""))[0] in ("100644", "100755")])
+    if blobs is None:
+        return ("unverifiable", "the blobs of {} and its base {} {}".format(pin, base, why))
+    failed = _rdp_export_p2(changed, pin_entries, base_entries, heads, bases, pin, base, root_commit, blobs)
+    if failed is not None:
+        return failed
+    hidden = _rdp_export_hidden(own.stdout, changed, pin_entries, base_entries, blobs)
+    if hidden:
+        return ("deny", "the export's diff shows the text change to {} as a binary section, so no reader sees it "
+                "(git took the diff under a diff driver setting or a $GIT_DIR/info/attributes entry; the blob "
+                "bytes are text); remove the setting".format(
+                    _rdp_listing(sorted(h.decode("utf-8", "replace") for h in hidden))))
+    return None
+
+
 def _rdp_carry_diff_argv(base, commit):
     """The git arguments (after _review_git's own) that write the patch from base to commit for the
     carried-review comparison: plumbing diff-tree with every option that shapes its bytes pinned on the
@@ -35190,6 +36561,12 @@ def _rdp_reconcile(cfg, found, root, brief, repo_default, auth_dir=None):
                          "{}".format(found["draft"][0].strip(), pin, labels["skip"], _rdp_listing(unapplied)))
         return ("deny", "the declared review paths do not match the commit's changed set ({})".format(
             "; ".join(parts)))
+    # A brief naming a review export has that export checked against the pin and the derived base: its diff
+    # is the hook's own diff of the pin from that base, byte for byte, and its head and base copies are the
+    # blobs of the pin and that base.
+    failed = _rdp_export_check(cfg, found, repo, fmt, pin, base, not parents, changed_b)
+    if failed is not None:
+        return failed
     paths = sorted(declared)
     staged = _rdp_git_records(repo, "diff-index", "--cached", "-z", "--name-only", "--ignore-submodules=none",
                               pin, "--", *paths)
@@ -37099,6 +38476,42 @@ _RWH_OBJECT_ID_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")  # a full sha1 
 # t, so they do not match. Matching data that merely names git (a message, a path operand)
 # over-holds while a hold is live, a disclosed safe over-deny, never an under-block.
 _RWH_RAW_GIT_WORD_RE = re.compile(r"(?i)\bgit\b")
+
+
+def _rwh_static_git_word(command):
+    """Whether command carries a git word bash assembles from its own text: the plain word
+    (_RWH_RAW_GIT_WORD_RE) or the letters g, i, t split only by quote characters, backslashes, '$'
+    or newlines (_GIT_WORD_RE: g''it, g""it, g\\it, gi$'t', gi$"t", a line continuation) in the
+    raw text, or the word git in one of its de-quoted readings (_decoded_readings: an ANSI-C quote's
+    escapes decoded, gi$'\\x74', gi$'\\164', gi$'\\u0074', each quote matched once, left to right), or
+    either test above on the static decoded reading gate G admits (_ansi_c_static_reading, the reading
+    the four guards read: each quote decoded where bash decodes it, so a $' inside single or double
+    quotes or a comment cannot swallow a later quote's opening, as in echo '$'; gi$'\\x74' checkout x),
+    with a refusal of that reading (_StaticReadingUncertain: a '$' and a line continuation before a
+    quote, a \\c\\\\ pair, a \\U code past U+10FFFF, a backslash before a backslash, '$', backquote or
+    quote or a backquote it does not model inside a backquote substitution's body ahead of a quote that
+    is written or that the body's un-escaping can open, a construct the scan cannot read with certainty;
+    gate G admits every command with a backslash after a backquote)
+    read as a git word, so such a command, even one that names no git, fails closed wherever a git-word
+    command outside the read-only grammar does (a missing or relative cwd included, with no hold live):
+    the disclosed over-refusal. Each reading can only add a match to the raw-text test, never clear one,
+    so a command it matches is judged against the hold set as the plain word is. A git word built at RUN
+    TIME (one whose spelling holds a '$' expansion or substitution or a backquote outside single quotes,
+    an unquoted glob character or brace, or that uses a value assigned earlier in the same command) is
+    not read: the disclosed run-time-word residual, tied to the open design question on a git-side
+    control (PD-SHELL-GUARD-STALL). Linear, never raises."""
+    if _RWH_RAW_GIT_WORD_RE.search(command) is not None or _GIT_WORD_RE.search(command) is not None:
+        return True
+    if any(_RWH_RAW_GIT_WORD_RE.search(text) is not None for text in _decoded_readings(command)):
+        return True
+    try:
+        static = _ansi_c_static_reading(command)
+    except _StaticReadingUncertain:
+        return True
+    return static != command and (_RWH_RAW_GIT_WORD_RE.search(static) is not None
+                                  or _GIT_WORD_RE.search(static) is not None)
+
+
 # The substitution spellings whose presence anywhere in the raw text (even quoted as data) keeps a
 # command out of the one plain-git form a live hold still allows: a command or process
 # substitution opener, a backquote, and the heredoc/here-string operator.
@@ -38993,7 +40406,10 @@ def _rwh_decide(data):
     be resolved at all and withholds the command outright. The rule is
     ONE-PLAIN-GIT-or-fail-closed, judged from the RAW text, so shell grammar is never modelled case
     by case. A command whose raw text carries no git word (git as a word, the git of a git-<name>
-    executable, the git ending an interpreter path) consults nothing beyond the session repository.
+    executable, the git ending an interpreter path, each also with its letters split by quotes,
+    backslashes, '$' or newlines, or spelled by an ANSI-C quote's escapes: _rwh_static_git_word)
+    consults nothing beyond the session repository; a git word built at run time is the disclosed
+    run-time-word residual.
     A command that carries one is judged against its HOLD SET: the repositories of the session cwd,
     of every literal path the raw text names after -C, --git-dir, --work-tree (= and separated
     forms), cd, pushd or a GIT_ assignment (quotes stripped; quoted bodies, heredocs and option
@@ -39114,10 +40530,12 @@ def _rwh_decide(data):
             # an absent command fails closed exactly as it does for an unreadable cwd
             return ("unverifiable", _rwh_probe_text(cwd))
         return ("allow", None)
-    if _RWH_RAW_GIT_WORD_RE.search(command) is None:
-        # no git word anywhere in the raw text: nothing here runs git by a spelling this rule
-        # models (a git reached through an opaque program name is the disclosed indirect-git
-        # residual), so only the session notes (drift, expiry) travel
+    if not _rwh_static_git_word(command):
+        # no git word anywhere in the raw text, its de-quoted readings or its static decoded
+        # reading (whose refusal reads as a git word): nothing here runs git
+        # by a spelling this rule models (a git reached through an opaque program name is the
+        # disclosed indirect-git residual, and a git word built at run time the disclosed
+        # run-time-word residual), so only the session notes (drift, expiry) travel
         return ("note", " ".join(notes)) if notes else ("allow", None)
     try:
         segments = _segments(command, skip_empty=True)
@@ -44717,6 +46135,37 @@ def _fsw_in_spans(spans, pos):
     return k >= 0 and pos < spans[k][1]
 
 
+def _fsw_sched_view(line, base=0, in_subst=None, spans=None):
+    """`line` with each scheduling keyword (_FSW_SCHED_RE) that is not written data blanked to spaces of the
+    same length: one whose first or last character lies inside an inline code span (`spans`), or, when
+    `in_subst` is given (the Bash route, where it is true for an absolute position base+pos that is not data
+    of a store write), one whose first or last character it marks, such as a keyword in shell code that writes
+    nothing. `line` itself (the same object) when no keyword is blanked. Positions are kept, so the view's
+    exempter (_fsw_sched_exempter) reads the same literal positions as the raw line's."""
+    out = None
+    for k in _FSW_SCHED_RE.finditer(line):
+        first, last = k.start(), k.end() - 1
+        if ((spans and (_fsw_in_spans(spans, first) or _fsw_in_spans(spans, last)))
+                or (in_subst is not None and (in_subst(base + first) or in_subst(base + last)))):
+            out = list(line) if out is None else out
+            out[k.start():k.end()] = " " * (k.end() - k.start())
+    return line if out is None else "".join(out)
+
+
+def _fsw_data_sched_exempter(line, base=0, in_subst=None, spans=None):
+    """The scheduling-keyword exemption of _fsw_future_on_line, read over the written data: a position is
+    exempt only when _fsw_sched_exempter exempts it on the raw line AND on _fsw_sched_view(line, ...), the
+    line with every keyword that is not written data blanked. A keyword inside a code span, or in Bash shell
+    code that writes nothing, so exempts no literal; the conjunction keeps every literal the raw line's
+    exemption warns on warning (a view can only remove an exemption, never add one)."""
+    raw = _fsw_sched_exempter(line)
+    view = _fsw_sched_view(line, base, in_subst, spans)
+    if view is line:
+        return raw
+    data = _fsw_sched_exempter(view)
+    return lambda pos: raw(pos) and data(pos)
+
+
 def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_exempt=None, spans=None,
                         nc_spans=None, nc_quoted=False):
     """Future literals on one line not immediately preceded by a scheduling keyword. `in_subst(pos)` is true
@@ -44726,9 +46175,12 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
     `spans`, when given, are the line's inline code spans, and a literal starting inside one is exempt. An
     APPROX or PLACEHOLDER token (_fsw_nonclock_tokens) on the line is returned too, as a _FswNonClock, with no
     clock comparison and under the same exemptions; `nc_spans` (code spans) and `nc_quoted` (the whole line is
-    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them."""
+    quoted text: a blockquote or fenced line) exempt such tokens only, as the Bash route reads them. The
+    scheduling-keyword exemption reads the written data (_fsw_data_sched_exempter): a keyword inside a code span
+    (`spans`, or `nc_spans` on the Bash route) or at a position `in_subst` marks exempts nothing."""
     found, seen, sched = [], set(), None
     cache = {} if cache is None else cache
+    sched_spans = spans if spans is not None else nc_spans
     for m in _FSW_STAMP_RE.finditer(line):
         lit = m.group(0)
         if lit in seen or (in_subst is not None and in_subst(base + m.start())) \
@@ -44740,7 +46192,7 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
         if got is None or got - now_us <= _FSW_FUTURE_SLACK_US:
             continue
         if sched is None:
-            sched = _fsw_sched_exempter(line)
+            sched = _fsw_data_sched_exempter(line, base, in_subst, sched_spans)
         if not sched(m.start()) and not (extra_exempt is not None and extra_exempt(m.start())):
             seen.add(lit)
             found.append(lit)
@@ -44749,7 +46201,7 @@ def _fsw_future_on_line(line, now_us, base=0, in_subst=None, cache=None, extra_e
                 or (nc_spans and _fsw_in_spans(nc_spans, pos)):
             continue
         if sched is None:
-            sched = _fsw_sched_exempter(line)
+            sched = _fsw_data_sched_exempter(line, base, in_subst, sched_spans)
         if not sched(pos) and not (extra_exempt is not None and extra_exempt(pos)):
             seen.add(tok)
             found.append(_FswNonClock(tok))
@@ -44789,9 +46241,26 @@ def _fsw_delim_cell_count(s):
     return s.count("|") + 1
 
 
+def _fsw_header_sched_cols(line, pipes):
+    """The column indexes of table header `line` (its unescaped pipes `pipes`) whose cell carries a scheduling
+    keyword (_FSW_SCHED_RE) that is written data: the cells are read from _fsw_sched_view(line, spans=...), the
+    header with every keyword inside an inline code span (_fsw_code_spans) blanked, so a keyword quoted as code
+    (| Item | `due` |) exempts no column, as a keyword inside a code span on an ordinary line exempts no literal
+    (_fsw_data_sched_exempter). The view keeps every position and blanks no pipe, so its cells are the raw
+    header's cells with those keywords blanked; a cell with a keyword outside every code span still counts. A
+    column counts only when its raw cell AND its cell in the view carry a keyword, so a blank that gives a
+    neighbouring word a new word start adds no column (a view can only remove an exemption, never add one)."""
+    cols = {k for k, c in enumerate(_fsw_table_cells(line, pipes)) if _FSW_SCHED_RE.search(c.strip())}
+    view = _fsw_sched_view(line, spans=_fsw_code_spans(line)) if cols and "`" in line else line
+    if view is line:
+        return cols
+    return cols & {k for k, c in enumerate(_fsw_table_cells(view, pipes)) if _FSW_SCHED_RE.search(c.strip())}
+
+
 def _fsw_row_exempter(line, pipes, sched_cols):
     """A predicate pos -> True when position `pos` of table row `line` lies in a column whose header cell
-    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos)."""
+    carries a scheduling keyword (column k: k unescaped pipes, not counting a leading one, precede pos).
+    sched_cols comes from _fsw_header_sched_cols, which reads the header with its code-span keywords blanked."""
     lead = _fsw_leading_pipe(line, pipes)
 
     def exempt(pos):
@@ -44839,7 +46308,7 @@ def _fsw_table_walk(text, tables=True, ids=None):
                 hcells = _fsw_table_cells(*prev)
                 if ncols == len(hcells):
                     ctx = ids.setdefault((prev[0], line), len(ids))
-                    sched = {k for k, c in enumerate(hcells) if _FSW_SCHED_RE.search(c.strip())}
+                    sched = _fsw_header_sched_cols(*prev)
                     prev = None
                     yield line, None, None
                     continue
@@ -47537,11 +49006,15 @@ def future_stamp_write(data):
     "target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
     through and valid. Each keyword matches as a WHOLE word, optionally plural (so "validated",
     "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
+    A keyword exempts only where it is written data (_fsw_data_sched_exempter): one inside an inline code span, or in
+    Bash shell code that writes nothing (": due; echo ... >> <store file>"), exempts nothing.
 
     Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
     markdown table row is ALSO allowed when the header cell of its column carries a scheduling keyword (the same
     keyword regex, on the stripped header cell text), so `| Item | Due |` over `|---|---|` over a row whose Due
-    cell holds a future time is allowed. This is additive: the keyword-on-line rule above is unchanged. Table
+    cell holds a future time is allowed. Like the keyword-on-line rule, a header keyword counts only where it is
+    written data (_fsw_header_sched_cols): one inside an inline code span (| Item | `due` |) exempts no column.
+    This is additive: the keyword-on-line rule above is unchanged. Table
     context is tracked over EVERY line of the resulting file, including unchanged carry-over lines that are not
     themselves checked, so a new row under an existing header is exempt. The recognized forms follow GFM: a
     header is a line holding at least one unescaped `|` (a leading pipe is optional), immediately followed by a

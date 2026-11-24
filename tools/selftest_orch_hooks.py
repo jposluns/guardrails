@@ -54,6 +54,7 @@ import builtins
 import errno
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -63,6 +64,7 @@ import time
 import datetime
 import hashlib
 import unicodedata
+import zlib
 from fractions import Fraction
 from pathlib import Path
 try:
@@ -1390,6 +1392,8 @@ def _rdp_cases(tmp):
     check("rdp/handler-crash-fails-closed", rc, 2)
     _rdp_label_screen_cases(base)
     _rdp_draft_cases(base)
+    _rdp_export_cases(base)
+    _rdp_export_bytes_cases(base)
     _rdp_carry_cases(base)
     _rdp_scope_cases(base, bare)
 
@@ -2794,6 +2798,187 @@ def _rwh_cases(tmp):
     check("rwh/cwd-inside-held-denies-red-on-revert",
           [kind(held / "sub", "git switch main"),
            _rwh_without_hold(lambda: kind(held / "sub", "git switch main"))], ["deny", "allow"])
+    # a git word bash assembles from the command's own text by quote removal, a backslash, a '$'-quote or an
+    # ANSI-C quote's escapes is judged against the hold set as the plain word is (_rwh_static_git_word), never
+    # read as absent; with the gate reverted to the raw plain-word test alone every one is allowed (red on
+    # revert)
+    split_git = ["g''it", 'g""it', "g\\it", "gi$'t'", "gi$'\\x74'", "gi$'\\164'", 'gi$"t"', "g\\\nit"]
+    split_cmds = [w + " -C " + str(held) + " checkout " + seed for w in split_git] + [
+        "/usr/bin/g''it -C " + str(held) + " checkout " + seed,
+        "true && g''it -C " + str(held) + " reset --hard " + seed]
+
+    def split_kinds():
+        return ([kind(base, c) for c in split_cmds]
+                + [kind(held, "g''it checkout " + seed), kind(held, "g\\it reset --hard " + seed)])
+
+    def raw_gate_only(fn):
+        saved = aiqt_hooks._rwh_static_git_word
+        aiqt_hooks._rwh_static_git_word = lambda command: (
+            aiqt_hooks._RWH_RAW_GIT_WORD_RE.search(command) is not None)
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._rwh_static_git_word = saved
+    check("rwh/split-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in split_kinds()], raw_gate_only(split_kinds)],
+          [[True] * (len(split_cmds) + 2), ["allow"] * (len(split_cmds) + 2)])
+    # the braced \x{...} hex form bash decodes as it decodes \xHH (gi$'\x{74}' is git) is read through the hooks'
+    # one escape table (_gate_bash_escape); with that table's braced form read as written, as the table before the
+    # shared one left it (\x and {74}), every one is allowed (red on revert)
+    braced_cmds = ["gi$'\\x{74}' -C " + str(held) + " checkout " + seed,
+                   "$'\\x{67}'it -C " + str(held) + " reset --hard " + seed,
+                   "g$'\\x{0069}'t -C " + str(held) + " switch main"]
+
+    def braced_kinds():
+        return [kind(base, c) for c in braced_cmds] + [kind(held, "gi$'\\x{74}' checkout " + seed)]
+
+    # each flip reads its name with getattr, so against a tree without the shared table (the revert) the row
+    # reports its failure instead of raising
+    def braced_as_written(fn):
+        saved = getattr(aiqt_hooks, "_gate_bash_escape", None)
+        if saved is None:
+            return fn()
+        aiqt_hooks._gate_bash_escape = lambda m: m.group(0) if m.group(2) is not None else saved(m)
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._gate_bash_escape = saved
+    check("rwh/braced-hex-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in braced_kinds()], braced_as_written(braced_kinds)],
+          [[True] * (len(braced_cmds) + 1), ["allow"] * (len(braced_cmds) + 1)])
+    # a \c\\ pair, which bash reads as one escape, is also read split (_ansi_c_pair_split_body) as the table before
+    # the shared one read it ($'\c\\x67'it as a control character and git), and the static decoded reading refuses
+    # a quote holding one (_ansi_c_pair_index, read as a git word), so a command that table held stays held; with
+    # the split reading read as the shared one and no pair refused each is allowed (red on revert of both)
+    pair_cmds = ["$'\\c\\\\x67'it -C " + str(held) + " checkout " + seed,
+                 "$'\\c\\\\c\\\\x67'it -C " + str(held) + " reset --hard " + seed]
+
+    def pair_kinds():
+        return [kind(base, c) for c in pair_cmds]
+
+    def pair_unsplit(fn):
+        saved = getattr(aiqt_hooks, "_ANSI_C_PAIR_SPLIT_ESCAPE_RE", None)
+        if saved is None:
+            return fn()
+        paired = getattr(aiqt_hooks, "_ansi_c_pair_index", None)
+        aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = aiqt_hooks._GATE_BASH_ESCAPE_RE
+        if paired is not None:
+            aiqt_hooks._ansi_c_pair_index = lambda command: -1
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._ANSI_C_PAIR_SPLIT_ESCAPE_RE = saved
+            if paired is not None:
+                aiqt_hooks._ansi_c_pair_index = paired
+    check("rwh/c-pair-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in pair_kinds()], pair_unsplit(pair_kinds)],
+          [[True] * len(pair_cmds), ["allow"] * len(pair_cmds)])
+    # a real ANSI-C quote whose opening an earlier $' (inside single or double quotes, or in a comment) swallows when
+    # the quotes are matched once, left to right, is read by the static decoded reading, which decodes each quote
+    # only where bash decodes it, and a '$' and a line continuation before a quote, which that reading refuses, is
+    # read as a git word; with the predicate as it stood at a9d4881c (raw text and de-quoted readings only) every
+    # one is allowed (red on revert)
+    swallowed_cmds = ["echo '$'; gi$'\\x74' -C " + str(held) + " checkout " + seed,
+                      "echo \"$'\"; gi$'\\x74' -C " + str(held) + " checkout " + seed,
+                      "# $'\ngi$'\\x74' -C " + str(held) + " checkout " + seed,
+                      "echo '$'; gi$'\\x{74}' -C " + str(held) + " checkout " + seed,
+                      "$\\\n'\\x67'it -C " + str(held) + " checkout " + seed]
+    swallowed_inside = ["echo '$'; gi$'\\x74' checkout " + seed, "echo \"$'\"; gi$'\\x74' checkout " + seed,
+                        "# $'\ngi$'\\x74' checkout " + seed, "echo '$'; gi$'\\x{74}' checkout " + seed]
+
+    def swallowed_kinds():
+        return [kind(base, c) for c in swallowed_cmds] + [kind(held, c) for c in swallowed_inside]
+
+    def static_reading_unread(fn):
+        saved = aiqt_hooks._rwh_static_git_word
+        aiqt_hooks._rwh_static_git_word = lambda command: (
+            aiqt_hooks._RWH_RAW_GIT_WORD_RE.search(command) is not None
+            or aiqt_hooks._GIT_WORD_RE.search(command) is not None
+            or any(aiqt_hooks._RWH_RAW_GIT_WORD_RE.search(text) is not None
+                   for text in aiqt_hooks._decoded_readings(command)))
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._rwh_static_git_word = saved
+    # an ANSI-C quote inside a backquote substitution whose body bash un-escapes before it parses it
+    # (`$'\\x67'it ...` runs git, since bash turns \\ into \ there) is refused by the static decoded reading
+    # (_ANSI_C_BACKQUOTE_UNSURE_RE) and that refusal is read as a git word; with the backquote refusal
+    # dropped (the reading of b50058c0) each is allowed (red on revert)
+    backquote_cmds = ["echo `$'\\\\x67'it -C " + str(held) + " checkout " + seed + "`",
+                      "echo \"`$'\\\\x67'it -C " + str(held) + " reset --hard " + seed + "`\""]
+    backquote_inside = ["echo `$'\\\\x67'it checkout " + seed + "`"]
+
+    def backquote_kinds():
+        return [kind(base, c) for c in backquote_cmds] + [kind(held, c) for c in backquote_inside]
+
+    # the flip reads its name with getattr, so against a tree without the backquote refusal (the revert) the
+    # row reports its failure instead of raising
+    def backquote_unrefused(fn):
+        saved = getattr(aiqt_hooks, "_ANSI_C_BACKQUOTE_UNSURE_RE", None)
+        if saved is None:
+            return fn()
+        aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = re.compile(r"[^\s\S]")
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._ANSI_C_BACKQUOTE_UNSURE_RE = saved
+    # gate G read two backquote forms as irrelevant, so the backquote refusal never ran on them, while bash builds
+    # git from each: $'\\c\\`zz' (bash un-escapes \\` first and reads \\c` as a NUL that drops the rest of the
+    # quote) and $\\\\<newline>' (bash un-escapes \\\\ first and joins $\\<newline>' into $'); gate G now reads a
+    # backslash after a backquote as relevant (_ansi_c_backquote_backslash) and the scan reads up to the quote the
+    # un-escaping can open (_ANSI_C_BACKQUOTE_BUILT_RE), so each is refused and read as a git word; with both
+    # dropped (the reading of e4f04ec4) each is allowed (red on revert)
+    gate_cmds = ["echo `g$'\\c\\`zz'it -C " + str(held) + " checkout " + seed + "`",
+                 "echo `$\\\\\n'\\x67'it -C " + str(held) + " checkout " + seed + "`"]
+    gate_inside = ["echo `g$'\\c\\`zz'it checkout " + seed + "`", "echo `$\\\\\n'\\x67'it checkout " + seed + "`"]
+
+    def gate_kinds():
+        return [kind(base, c) for c in gate_cmds] + [kind(held, c) for c in gate_inside]
+
+    # the flip reads its names with getattr, so against a tree without them (the revert) the row reports its
+    # failure instead of raising
+    def gate_unread(fn):
+        saved_gate = getattr(aiqt_hooks, "_ansi_c_backquote_backslash", None)
+        saved_built = getattr(aiqt_hooks, "_ANSI_C_BACKQUOTE_BUILT_RE", None)
+        if saved_gate is not None:
+            aiqt_hooks._ansi_c_backquote_backslash = lambda command: False
+        if saved_built is not None:
+            aiqt_hooks._ANSI_C_BACKQUOTE_BUILT_RE = re.compile(r"[^\s\S]")
+        try:
+            return fn()
+        finally:
+            if saved_gate is not None:
+                aiqt_hooks._ansi_c_backquote_backslash = saved_gate
+            if saved_built is not None:
+                aiqt_hooks._ANSI_C_BACKQUOTE_BUILT_RE = saved_built
+    check("rwh/swallowed-quote-git-word-held-denies-red-on-revert",
+          [[k != "allow" for k in swallowed_kinds()], static_reading_unread(swallowed_kinds),
+           [k != "allow" for k in backquote_kinds()], backquote_unrefused(backquote_kinds),
+           [k != "allow" for k in gate_kinds()], gate_unread(gate_kinds)],
+          [[True] * (len(swallowed_cmds) + len(swallowed_inside)),
+           ["allow"] * (len(swallowed_cmds) + len(swallowed_inside)),
+           [True] * (len(backquote_cmds) + len(backquote_inside)),
+           ["allow"] * (len(backquote_cmds) + len(backquote_inside)),
+           [True] * (len(gate_cmds) + len(gate_inside)),
+           ["allow"] * (len(gate_cmds) + len(gate_inside))])
+    # the static reading adds no match to text carrying no git word, so ordinary commands run inside the held
+    # worktree stay allowed; with the gate reading every command as a git word each is withheld (the
+    # over-broad gate this row catches)
+    plain_cmds = ["ls -la", "echo legit digit", "cat .gitignore", "grep -rn gitx .", "printf '%s\\n' g it"]
+
+    def plain_kinds():
+        return [kind(held, c) for c in plain_cmds]
+
+    def every_word_git(fn):
+        saved = aiqt_hooks._rwh_static_git_word
+        aiqt_hooks._rwh_static_git_word = lambda command: True
+        try:
+            return fn()
+        finally:
+            aiqt_hooks._rwh_static_git_word = saved
+    check("rwh/non-git-text-held-allowed-over-broad-gate",
+          [plain_kinds(), [k != "allow" for k in every_word_git(plain_kinds)]],
+          [["allow"] * len(plain_cmds), [True] * len(plain_cmds)])
     al = "git -C " + str(base / "alias") + " checkout " + seed
     check("rwh/symlink-alias-denies-red-on-revert",
           [kind(base, al), _rwh_without_hold(lambda: kind(base, al))], ["deny", "allow"])
@@ -5132,6 +5317,569 @@ def _rdp_draft_cases(base):
     lb.write_registry(dict(lb.binding, labels=labels))
     lb_got.append(_rdp_kind(lb.run("ls")))
     check("rdp/draft-labels-declared-together", lb_got, ["unverifiable"] * 3 + ["allow"])
+
+
+def _rdp_blob(root, rev, path):
+    """The bytes of the blob at path in rev of the fixture repository root, or None when rev has no such
+    path."""
+    p = subprocess.run(["git", "-C", str(root), "cat-file", "blob", "{}:{}".format(rev, path)],
+                       capture_output=True, timeout=30)
+    return p.stdout if p.returncode == 0 else None
+
+
+def _rdp_export_diff(root, old, new, *paths, swap=None, ambient=False):
+    """The diff of new from old in the fixture repository root as the review export check takes it: the
+    hook's documented options (_rdp_export_diff_args, attributes and the compression setting neutralized),
+    no ambient GIT_* and replacement objects disabled, as the bytes git writes. swap replaces one option,
+    (old option, new option), to take the diff another way; ambient takes it with the fixed options alone,
+    so with the repository's own attributes and configuration."""
+    fmt = _rdp_git(root, "rev-parse", "--show-object-format")
+    args = list(aiqt_hooks._RDP_EXPORT_DIFF_ARGS if ambient else aiqt_hooks._rdp_export_diff_args(fmt))
+    if swap is not None:
+        args[args.index(swap[0])] = swap[1]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    if not ambient:
+        env.update(aiqt_hooks._RDP_EXPORT_NEUTRAL_ENV)
+    p = subprocess.run(["git", "-C", str(root)] + args + [old, new, "--"] + list(paths), check=True,
+                       capture_output=True, timeout=30, env=env)
+    return p.stdout
+
+
+def _rdp_copy_blob(root, rev, path, dest):
+    """Write the blob at path in rev of the fixture repository root to dest with the owner execute bit its
+    mode gives (0755 for 100755, 0644 otherwise), as a genuine export copy; False when rev has no such
+    path."""
+    blob = _rdp_blob(root, rev, path)
+    if blob is None:
+        return False
+    mode = _rdp_git(root, "ls-tree", rev, "--", path).split(" ")[0]
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(blob)
+    os.chmod(str(dest), 0o755 if mode == "100755" else 0o644)
+    return True
+
+
+def _rdp_export_cases(base):
+    """The review export vectors (rdp/export-*): where the binding declares the export labels, a revision
+    brief naming a review export has the export's diff file byte-identical to the hook's own diff of the pin
+    from its derived base (P1), and every changed path exported, each head copy byte-identical to the pin's blob and
+    each base copy byte-identical to the derived base's blob, with no base copy for a root commit (P2). The
+    fixture is a series of three fixes on top of the RdpFixture change commit, pinned at the third: a diff of
+    the third fix with base copies from the series base is refused, the same with base copies from the third
+    fix's parent is allowed (the series residual), and each unreadable, malformed, symlinked or partial input
+    is a cannot-evaluate."""
+    labels = dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                  repo="Review-repo:", branch="Review-branch:", export="Review-export:",
+                  export_diff="Review-export-diff:", export_base="Review-export-base:")
+    ex = RdpFixture(base, "export")
+    ex.binding = dict(ex.binding, labels=labels)
+    ex.write_registry(ex.binding)
+    series_base = ex.pin
+    fixes = []
+    for edits in ((("seed.txt", "seed 2\n"),), (("src/b.py", "b = 2\n"),),
+                  (("src/a.py", "a = 3\n"), ("src/c.py", "c = 1\n"))):
+        for path, text in edits:
+            (ex.root / path).write_text(text, encoding="utf-8")
+        _rdp_git(ex.root, "add", "-A")
+        _rdp_git(ex.root, "commit", "-q", "-m", "fix {}".format(len(fixes) + 1))
+        fixes.append(_rdp_git(ex.root, "rev-parse", "HEAD"))
+    f1, f2, f3 = fixes
+    ex.authority(f3 + "\n")
+    touched = ("seed.txt", "src/a.py", "src/b.py", "src/c.py")
+
+    def diff_of(old, new, *paths):
+        return _rdp_export_diff(ex.root, old, new, *paths)
+
+    def export(name, base_rev, diff_text, paths=touched, fixture=None, head_rev=None):
+        fixture = fixture or ex
+        root = fixture.briefs / name
+        (root / "base").mkdir(parents=True)
+        (root / "CHANGE.diff").write_bytes(diff_text)
+        for path in paths:
+            for rev, top in ((head_rev or f3, root), (base_rev, root / "base")):
+                if rev:
+                    _rdp_copy_blob(fixture.root, rev, path, top / path)
+        return root
+
+    def copy(src, name):
+        dst = ex.briefs / name
+        shutil.copytree(str(src), str(dst), symlinks=True)
+        return dst
+
+    def lines(root, diff="CHANGE.diff", based="base"):
+        return ["Review-export: " + str(root), "Review-export-diff: " + diff, "Review-export-base: " + based]
+
+    def run(root, fixture=None, pin=None, paths=("src/a.py", "src/c.py"), extra=(), **kw):
+        fixture = fixture or ex
+        return fixture.dispatch(fixture.good(pin=pin or f3, paths=paths, extra=lines(root, **kw) + list(extra)))
+
+    def named(result, *needles):
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        return (_rdp_kind(result), all(needle in reason for needle in needles))
+
+    last = diff_of(f2, f3)
+    series = export("series", series_base, last)
+    good = export("first-parent", f2, last)
+    # The seed row: the third fix's diff with base copies from the series base. P1 holds (the diff names what
+    # the third fix changed), and P2 refuses the base copies of the files the earlier fixes changed, which
+    # are not the blobs at the third fix's parent.
+    check("rdp/export-series-base-copies-denies", named(run(series), "export's base copies 'seed.txt', "
+                                                        "'src/b.py' are not byte-identical to the blobs at " + f2),
+          ("deny", True))
+    # The same export with base copies from the third fix's parent is self-consistent and allowed, though the
+    # earlier fixes stay unreviewed: the series residual the rule text and the authority decide.
+    check("rdp/export-first-parent-base-copies-allows", named(run(good)), ("allow", True))
+    # P1: a diff naming a path whose head and base copies are identical (src/b.py, changed by the second
+    # fix), and a diff that leaves out a changed and exported path.
+    wide = export("wide", f2, diff_of(f1, f3))
+    check("rdp/export-diff-extra-path-denies", named(run(wide), "in the export's diff but not changed by {}: "
+                                                     "'src/b.py'".format(f3)), ("deny", True))
+    narrow = export("narrow", f2, diff_of(f2, f3, "src/a.py"))
+    check("rdp/export-diff-missing-path-denies", named(run(narrow), "changed by {} but not in the export's "
+                                                       "diff: 'src/c.py'".format(f3)), ("deny", True))
+    # An export root that cannot be opened as a directory: missing, a regular file, a symlink to the good
+    # export. The first row is the control.
+    plain = ex.briefs / "plain-root"
+    plain.write_text("x\n", encoding="utf-8")
+    linked = ex.briefs / "linked-root"
+    linked.symlink_to(str(good))
+    check("rdp/export-root-unreadable-unverifiable", [named(run(r), w) for r, w in (
+        (good, ""), (ex.briefs / "absent-root", "cannot be opened as a directory"),
+        (plain, "cannot be opened as a directory"), (linked, "cannot be opened as a directory"))],
+        [("allow", True)] + [("unverifiable", True)] * 3)
+    # A base-copy directory that cannot be read: missing, a regular file, a FIFO.
+    filed = copy(good, "base-file")
+    (filed / "basefile").write_text("x\n", encoding="utf-8")
+    fifo = copy(good, "base-fifo")
+    os.mkfifo(str(fifo / "basefifo"))
+    check("rdp/export-base-dir-unreadable-unverifiable", [named(run(r, based=b), w) for r, b, w in (
+        (good, "base", ""), (good, "absent", "base-copy directory 'absent' is not a directory"),
+        (filed, "basefile", "base-copy directory 'basefile' is not a directory"),
+        (fifo, "basefifo", "'basefifo', which is not a regular file or directory"))],
+        [("allow", True)] + [("unverifiable", True)] * 3)
+    # A symlink anywhere under the root, pointing outside it: among the head copies, among the base copies,
+    # and the base-copy directory itself.
+    outside = ex.briefs / "outside.txt"
+    outside.write_text("seed 2\n", encoding="utf-8")
+    head_link = copy(good, "head-link")
+    (head_link / "seed.txt").unlink()
+    (head_link / "seed.txt").symlink_to(str(outside))
+    base_link = copy(good, "base-link")
+    (base_link / "base" / "extra.txt").symlink_to(str(outside))
+    dir_link = copy(good, "dir-link")
+    shutil.rmtree(str(dir_link / "base"))
+    (dir_link / "base").symlink_to(str(good / "base"))
+    check("rdp/export-symlink-unverifiable", [named(run(r), w) for r, w in (
+        (good, ""), (head_link, "holds a symlink at 'seed.txt'"),
+        (base_link, "holds a symlink at 'base/extra.txt'"), (dir_link, "holds a symlink at 'base'"))],
+        [("allow", True)] + [("unverifiable", True)] * 3)
+    # A root commit has no base: its export holds no base copy. The control is the same export with an empty
+    # base-copy directory.
+    rc = RdpFixture(base, "exportroot")
+    rc.binding = dict(rc.binding, labels=labels)
+    rc.write_registry(rc.binding)
+    _rdp_git(rc.root, "checkout", "-q", "--detach", rc.seed)
+    rc.authority(rc.seed + "\n")
+    empty_tree = _rdp_git(rc.root, "hash-object", "-t", "tree", "/dev/null")
+    root_files = ("old.txt", "seed.txt", "src/a.py")
+    root_diff = _rdp_export_diff(rc.root, empty_tree, rc.seed)
+    root_ok = export("root-ok", None, root_diff, root_files, rc, rc.seed)
+    root_bad = export("root-bad", None, root_diff, root_files, rc, rc.seed)
+    (root_bad / "base" / "seed.txt").write_text("seed\n", encoding="utf-8")
+    check("rdp/export-root-commit-base-copies-denies", [named(run(r, rc, rc.seed, root_files), w) for r, w in (
+        (root_ok, ""), (root_bad, "is a root commit, so its export holds no base copy"))],
+        [("allow", True), ("deny", True)])
+    # The three export labels are declared together or not at all: one or two of them is a malformed binding,
+    # which withholds every Bash call; all three, alone or with the draft labels, is well formed.
+    lb = RdpFixture(base, "exportlabels")
+    lb_got = []
+    for extra in (dict(export="Review-export:"), dict(export="Review-export:", export_diff="Review-export-diff:"),
+                  dict(export_base="Review-export-base:")):
+        lb.write_registry(dict(lb.binding, labels=dict(lb.binding["labels"], **extra)))
+        lb_got.append(_rdp_kind(lb.run("ls")))
+    lb.write_registry(dict(lb.binding, labels=labels))
+    lb_got.append(_rdp_kind(lb.run("ls")))
+    lb.rebind(dict(lb.binding, labels=dict(labels, draft="Review-draft:", skip="Review-skip:")))
+    lb_got.append(_rdp_kind(lb.run("ls")))
+    check("rdp/export-labels-declared-together", lb_got, ["unverifiable"] * 3 + ["allow"] * 2)
+    # A missing parent object stays a cannot-evaluate with an export named.
+    shallow = base / "export-shallow"
+    _rdp_git(base, "clone", "-q", "--depth", "1", "file://" + str(ex.root), str(shallow))
+    check("rdp/export-missing-parent-unverifiable", named(run(good, extra=["Review-repo: " + str(shallow)]),
+                                                          "is not in the repository"), ("unverifiable", True))
+    # P2 is load bearing: with it patched out, the seed row is allowed.
+    check("rdp/export-p2-revert-allows-series", [_rdp_kind(run(series)), _rdp_mutant(
+        [("_rdp_export_p2", lambda *args: None)], lambda: _rdp_kind(run(series)))], ["deny", "allow"])
+    # The brief's export lines: named in part, twice, a relative root, a diff or base path that is absolute or
+    # holds a . or .. component, and a diff file inside the base-copy directory. The first row is the control.
+    part = ["Review-export: " + str(good)]
+    check("rdp/export-brief-declaration-unverifiable", [named(ex.dispatch(ex.good(
+        pin=f3, paths=("src/a.py", "src/c.py"), extra=e)), w) for e, w in (
+        (lines(good), ""), (part, "names a review export only in part"),
+        (part + ["Review-export-diff: CHANGE.diff"], "names a review export only in part"),
+        (lines(good) + part, "has 2 'Review-export:' lines"),
+        (lines(os.path.relpath(str(good))), "is not an absolute path"),
+        (lines(good, diff="../CHANGE.diff"), "is not a path relative to the export root"),
+        (lines(good, based="/base"), "is not a path relative to the export root"),
+        (lines(good, based="base/./x"), "is not a path relative to the export root"),
+        (lines(good, diff="base/CHANGE.diff"), "overlap"))],
+        [("allow", True)] + [("unverifiable", True)] * 8)
+    # A diff file that is missing, a directory, not UTF-8, or not a git diff the census reads.
+    no_diff = copy(good, "no-diff")
+    (no_diff / "CHANGE.diff").unlink()
+    dir_diff = copy(good, "dir-diff")
+    (dir_diff / "CHANGE.diff").unlink()
+    (dir_diff / "CHANGE.diff").mkdir()
+    latin = copy(good, "latin-diff")
+    (latin / "CHANGE.diff").write_bytes(last + b"caf\xe9\n")
+    mangled = copy(good, "mangled-diff")
+    (mangled / "CHANGE.diff").write_bytes(last + b"@@ -1 +1 @@\n")
+    check("rdp/export-diff-unreadable-unverifiable", [named(run(r), w) for r, w in (
+        (good, ""), (no_diff, "is not a regular file under"), (dir_diff, "is not a regular file under"),
+        (latin, "is not valid UTF-8"), (mangled, "cannot be read as a git diff"))],
+        [("allow", True)] + [("unverifiable", True)] * 4)
+    # P2 on the head side and on completeness: a head copy with other bytes, a head copy of a path the pin
+    # deletes, and a changed path with no head copy or no base copy.
+    stale = copy(good, "stale-head")
+    (stale / "src" / "a.py").write_text("a = 9\n", encoding="utf-8")
+    ghost = copy(good, "ghost-head")
+    (ghost / "old.txt").write_text("old\n", encoding="utf-8")
+    no_head = copy(good, "no-head")
+    (no_head / "src" / "c.py").unlink()
+    no_base = copy(good, "no-base")
+    (no_base / "base" / "src" / "a.py").unlink()
+    check("rdp/export-head-copies-and-completeness-deny", [named(run(r), w) for r, w in (
+        (good, ""), (stale, "head copies 'src/a.py' are not byte-identical"),
+        (ghost, "head copies 'old.txt' are not byte-identical"),
+        (no_head, "does not hold every path {} changes: 'src/c.py'".format(f3)),
+        (no_base, "does not hold every path {} changes: 'src/a.py'".format(f3)))],
+        [("allow", True)] + [("deny", True)] * 4)
+    # The walk's entry bound: past it the export is a cannot-evaluate.
+    check("rdp/export-entry-bound-unverifiable", [named(run(good)), _rdp_mutant(
+        [("_RDP_EXPORT_MAX_ENTRIES", 3)], lambda: named(run(good), "holds more than 3 entries"))],
+        [("allow", True), ("unverifiable", True)])
+    # The export check is opt in per brief: a brief under the export binding that names no export is
+    # reconciled as before.
+    check("rdp/export-unnamed-brief-unchanged", [_rdp_kind(ex.dispatch(ex.good(pin=f3, paths=p))) for p in (
+        ("src/a.py", "src/c.py"), ("src/a.py",))], ["allow", "deny"])
+
+
+def _rdp_export_bytes_cases(base):
+    """The review export byte vectors (rdp/export-bytes-*, rdp/export-shape-*): P1 holds the export's diff
+    file to the hook's own diff of the pin from its derived base, byte for byte, so a diff naming the same
+    paths from another base (a series base, a merge's second parent) or with a section that is only a binary
+    marker, mode lines or an empty hunk is refused, and the bytes are compared as they are, so a genuine diff
+    of a CRLF file passes. The shape rows hold a genuine export of a rename, a deletion, a mode-only change,
+    quoted path names, a merge and a CRLF file allowed, and a wrong one refused."""
+    labels = dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                  repo="Review-repo:", branch="Review-branch:", export="Review-export:",
+                  export_diff="Review-export-diff:", export_base="Review-export-base:")
+    ez = RdpFixture(base, "exportbytes")
+    ez.binding = dict(ez.binding, labels=labels)
+    ez.write_registry(ez.binding)
+
+    def commit(message, files=(), removed=(), modes=(), moved=()):
+        for path, data in files:
+            (ez.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (ez.root / path).write_bytes(data)
+        for path in removed:
+            _rdp_git(ez.root, "rm", "-q", "--", path)
+        for old, new in moved:
+            _rdp_git(ez.root, "mv", "--", old, new)
+        for path, mode in modes:
+            os.chmod(str(ez.root / path), mode)
+        touched = [p for p, _d in files] + [p for p, _m in modes]
+        if touched:
+            _rdp_git(ez.root, "add", "--", *touched)
+        _rdp_git(ez.root, "commit", "-q", "-m", message)
+        return _rdp_git(ez.root, "rev-parse", "HEAD")
+
+    def export(name, pin, base_rev, diff_bytes, paths):
+        root = ez.briefs / name
+        (root / "base").mkdir(parents=True)
+        (root / "CHANGE.diff").write_bytes(diff_bytes)
+        for path in paths:
+            for rev, top in ((pin, root), (base_rev, root / "base")):
+                _rdp_copy_blob(ez.root, rev, path, top / path)
+        return root
+
+    def copy(src, name):
+        dst = ez.briefs / name
+        shutil.copytree(str(src), str(dst), symlinks=True)
+        return dst
+
+    def run(root, pin, paths):
+        _rdp_git(ez.root, "checkout", "-q", "--detach", pin)
+        ez.authority(pin + "\n")
+        return ez.dispatch(ez.good(pin=pin, paths=paths, extra=[
+            "Review-export: " + str(root), "Review-export-diff: CHANGE.diff", "Review-export-base: base"]))
+
+    def named(result, *needles):
+        reason = result[1]["hookSpecificOutput"].get("permissionDecisionReason", "") if result[1] else ""
+        return (_rdp_kind(result), all(needle in reason for needle in needles))
+
+    differs = "is not byte-identical to the diff of"
+    # A series of three fixes to Z.txt, pinned at the third, and a merge whose first parent changes the last
+    # line of M.txt and whose second parent changes the first.
+    z0 = commit("z 0", [("Z.txt", b"z\n0\n")])
+    commit("z 1", [("Z.txt", b"z\n1\n")])
+    z2 = commit("z 2", [("Z.txt", b"z\n2\n")])
+    z3 = commit("z 3", [("Z.txt", b"z\n3\n")])
+    middle = b"x1\nx2\nx3\nx4\nx5\nx6\n"
+    commit("m 0", [("M.txt", b"a\n" + middle + b"i\n")])
+    _rdp_git(ez.root, "checkout", "-q", "-b", "side")
+    side = commit("side", [("M.txt", b"a SIDE\n" + middle + b"i\n")])
+    _rdp_git(ez.root, "checkout", "-q", "main")
+    main = commit("main", [("M.txt", b"a\n" + middle + b"i MAIN\n")])
+    _rdp_git(ez.root, "merge", "-q", "--no-edit", "side")
+    merge = _rdp_git(ez.root, "rev-parse", "HEAD")
+    # The shape commits: a rename, a deletion, a mode-only change, paths a diff quotes, a CRLF file.
+    cafe = "caf" + chr(0xE9) + ".txt"
+    shapes = commit("shapes", [("R.txt", b"r\nr\nr\n"), ("D.txt", b"d\n"), ("X.sh", b"echo x\n"),
+                               ("with space.txt", b"s\n"), (cafe, b"c\n"), ("C.txt", b"c\r\nd\r\n")])
+    renamed = commit("rename", moved=[("R.txt", "R2.txt")])
+    deleted = commit("delete", removed=["D.txt"])
+    moded = commit("mode", modes=[("X.sh", 0o755)])
+    quoted = commit("quoted", [("with space.txt", b"t\n"), (cafe, b"d\n")])
+    crlf = commit("crlf", [("C.txt", b"c\r\ne\r\n")])
+    # L1, L2 and B: each names exactly the pin's changed set and carries the right head and base copies.
+    good_z = _rdp_export_diff(ez.root, z2, z3)
+    head_z = good_z.split(b"\n--- ")[0]
+    z_cases = [("z-good", good_z), ("l1-series-base", _rdp_export_diff(ez.root, z0, z3)),
+               ("b-binary", head_z + b"\nBinary files a/Z.txt and b/Z.txt differ\n"),
+               ("b-mode", b"diff --git a/Z.txt b/Z.txt\nold mode 100644\nnew mode 100755\n"),
+               ("b-empty-hunk", head_z + b"\n--- a/Z.txt\n+++ b/Z.txt\n@@ -1,2 +1,2 @@\n z\n-2\n+2\n")]
+    z_roots = [export(name, z3, z2, text, ["Z.txt"]) for name, text in z_cases]
+    m_good = export("m-first-parent", merge, main, _rdp_export_diff(ez.root, main, merge), ["M.txt"])
+    m_second = export("l2-second-parent", merge, main, _rdp_export_diff(ez.root, side, merge), ["M.txt"])
+    m_side_copies = export("m-second-parent-copies", merge, side, _rdp_export_diff(ez.root, main, merge),
+                           ["M.txt"])
+
+    def bytes_rows():
+        return ([named(run(r, z3, ["Z.txt"]), differs) for r in z_roots[1:]]
+                + [named(run(m_second, merge, ["M.txt"]), differs)])
+    check("rdp/export-bytes-same-paths-denies", [named(run(z_roots[0], z3, ["Z.txt"])),
+                                                 named(run(m_good, merge, ["M.txt"]))] + bytes_rows(),
+          [("allow", True)] * 2 + [("deny", True)] * 5)
+    # P1 is load bearing: with the byte comparison patched out, the same five exports are allowed (the
+    # passing rows of the header-path check P1 replaced).
+    check("rdp/export-bytes-revert-allows", _rdp_mutant([("_rdp_export_diff_differs", lambda blob, own: False)],
+                                                        bytes_rows), [("allow", False)] * 5)
+    # The hook's own diff is a git read: one that fails (here an option git rejects) is a cannot-evaluate.
+    check("rdp/export-bytes-own-diff-unreadable-unverifiable", [named(run(z_roots[0], z3, ["Z.txt"])), _rdp_mutant(
+        [("_RDP_EXPORT_DIFF_ARGS", aiqt_hooks._RDP_EXPORT_DIFF_ARGS + ("--no-such-option",))],
+        lambda: named(run(z_roots[0], z3, ["Z.txt"]), "from its derived base", "cannot be read"))],
+        [("allow", True), ("unverifiable", True)])
+    check("rdp/export-shape-merge-pins", [named(run(r, merge, ["M.txt"]), w) for r, w in (
+        (m_good, ""), (m_side_copies, "export's base copies 'M.txt' are not byte-identical"),
+        (m_second, differs))], [("allow", True), ("deny", True), ("deny", True)])
+    # A rename is a deletion and an addition (no rename detection): a -M diff is refused, and so is an
+    # export missing the old path's base copy.
+    rn_paths = ["R.txt", "R2.txt"]
+    rn_good = export("rename-good", renamed, shapes, _rdp_export_diff(ez.root, shapes, renamed), rn_paths)
+    rn_m = export("rename-m", renamed, shapes, _rdp_export_diff(ez.root, shapes, renamed,
+                                                                swap=("--no-renames", "-M")), rn_paths)
+    rn_nobase = copy(rn_good, "rename-no-base")
+    (rn_nobase / "base" / "R.txt").unlink()
+    check("rdp/export-shape-rename", [named(run(r, renamed, rn_paths), w) for r, w in (
+        (rn_good, ""), (rn_m, differs), (rn_nobase, "does not hold every path"))],
+        [("allow", True), ("deny", True), ("deny", True)])
+    # A deletion: a base copy and no head copy; a head copy left in place, or no base copy, is refused.
+    dl_good = export("delete-good", deleted, renamed, _rdp_export_diff(ez.root, renamed, deleted), ["D.txt"])
+    dl_head = copy(dl_good, "delete-head-left")
+    (dl_head / "D.txt").write_bytes(b"d\n")
+    dl_nobase = copy(dl_good, "delete-no-base")
+    (dl_nobase / "base" / "D.txt").unlink()
+    check("rdp/export-shape-deletion", [named(run(r, deleted, ["D.txt"]), w) for r, w in (
+        (dl_good, ""), (dl_head, "head copies 'D.txt' are not byte-identical"),
+        (dl_nobase, "does not hold every path"))], [("allow", True), ("deny", True), ("deny", True)])
+    # A mode-only change: its diff is the mode lines, and it still needs both copies.
+    md_diff = _rdp_export_diff(ez.root, deleted, moded)
+    md_good = export("mode-good", moded, deleted, md_diff, ["X.sh"])
+    md_nohead = copy(md_good, "mode-no-head")
+    (md_nohead / "X.sh").unlink()
+    md_nobase = copy(md_good, "mode-no-base")
+    (md_nobase / "base" / "X.sh").unlink()
+    check("rdp/export-shape-mode-only", [b"\nold mode 100644\nnew mode 100755\n" in md_diff] + [
+        named(run(r, moded, ["X.sh"]), w) for r, w in (
+            (md_good, ""), (md_nohead, "does not hold every path"), (md_nobase, "does not hold every path"))],
+        [True, ("allow", True), ("deny", True), ("deny", True)])
+    # Paths with a space and a non-ASCII name: the quoted diff passes; one taken with core.quotePath=false,
+    # or an export missing a head copy, is refused.
+    q_paths = [cafe, "with space.txt"]
+    q_good = export("quoted-good", quoted, moded, _rdp_export_diff(ez.root, moded, quoted), q_paths)
+    q_raw = export("quoted-raw", quoted, moded, _rdp_export_diff(
+        ez.root, moded, quoted, swap=("core.quotePath=true", "core.quotePath=false")), q_paths)
+    q_nohead = copy(q_good, "quoted-no-head")
+    (q_nohead / "with space.txt").unlink()
+    check("rdp/export-shape-quoted-paths", [named(run(r, quoted, q_paths), w) for r, w in (
+        (q_good, ""), (q_raw, differs), (q_nohead, "does not hold every path"))],
+        [("allow", True), ("deny", True), ("deny", True)])
+    # A CRLF file: its genuine diff carries a carriage return before each LF and is allowed as its bytes; the
+    # same diff with its line endings normalized is refused.
+    cr_diff = _rdp_export_diff(ez.root, quoted, crlf)
+    cr_good = export("crlf-good", crlf, quoted, cr_diff, ["C.txt"])
+    cr_lf = export("crlf-normalized", crlf, quoted, cr_diff.replace(b"\r\n", b"\n"), ["C.txt"])
+    check("rdp/export-shape-crlf", [b"+e\r\n" in cr_diff] + [named(run(r, crlf, ["C.txt"]), w) for r, w in (
+        (cr_good, ""), (cr_lf, differs))], [True, ("allow", True), ("deny", True)])
+    # The copies' modes: the genuine mode-only export holds X.sh as 0755 and its base copy as 0644; a head
+    # copy exported 0644, or a base copy exported 0755, is refused, and with the mode check patched out both
+    # are allowed.
+    md_head = copy(md_good, "mode-head-0644")
+    os.chmod(str(md_head / "X.sh"), 0o644)
+    md_base = copy(md_good, "mode-base-0755")
+    os.chmod(str(md_base / "base" / "X.sh"), 0o755)
+
+    def mode_rows():
+        return [named(run(r, moded, ["X.sh"]), w) for r, w in (
+            (md_good, ""), (md_head, "head copies 'X.sh' do not carry the mode of the blobs at " + moded),
+            (md_base, "base copies 'X.sh' do not carry the mode of the blobs at " + deleted))]
+    check("rdp/export-copy-modes-deny", mode_rows(), [("allow", True), ("deny", True), ("deny", True)])
+    check("rdp/export-copy-modes-revert-allows", _rdp_mutant(
+        [("_rdp_export_mode_stale", lambda copies, entries: [])], lambda: [k for k, _n in mode_rows()]),
+        ["allow"] * 3)
+    # A changed symlink, a symlink turned into a regular file, and a new gitlink: the check compares regular
+    # files only, so each is a cannot-evaluate even with the genuine diff.
+    special = "is a symlink or submodule entry"
+    (ez.root / "L").symlink_to("C.txt")
+    _rdp_git(ez.root, "add", "--", "L")
+    linked = commit("link")
+    (ez.root / "L").unlink()
+    (ez.root / "L").symlink_to("R2.txt")
+    _rdp_git(ez.root, "add", "--", "L")
+    relinked = commit("relink")
+    (ez.root / "L").unlink()
+    unlinked = commit("unlink", [("L", b"l\n")])
+    _rdp_git(ez.root, "update-index", "--add", "--cacheinfo", "160000,{},S".format(z0))
+    gitlinked = commit("gitlink")
+    (ez.root / "S").mkdir()
+    sp_rows = [(export(name, pin, old, _rdp_export_diff(ez.root, old, pin), paths), pin, changed)
+               for name, pin, old, paths, changed in (
+                   ("symlink-changed", relinked, linked, [], ["L"]),
+                   ("symlink-to-file", unlinked, relinked, ["L"], ["L"]),
+                   ("gitlink-added", gitlinked, unlinked, [], ["S"]))]
+    check("rdp/export-symlink-submodule-unverifiable", [named(run(r, pin, changed), special, "'" + changed[0] + "'")
+                                                        for r, pin, changed in sp_rows],
+          [("unverifiable", True)] * 3)
+    # Attributes, compression and diff driver settings. A text change to A.txt and a binary change to B.bin,
+    # genuinely exported, are allowed. A .gitattributes in the working tree marking A.txt binary, as this
+    # repository's own one marks text files, does not shape the hook's diff, so the genuine export is still
+    # allowed and the export holding git's binary patch of A.txt is refused (P1); so is the genuine export
+    # under a core.compression of 9. Where git's diff of A.txt is a binary patch whatever the options say (a
+    # diff.default.binary setting in the repository configuration, or A.txt marked -diff in
+    # .git/info/attributes), the export holding that patch matches the hook's own diff and is refused by the
+    # blob bytes (P3: A.txt is text on both sides), and the genuine text export differs and is refused too.
+    ab = ["A.txt", "B.bin"]
+    a0 = commit("attr 0", [("A.txt", b"a\nb\n"), ("B.bin", bytes(range(256)) * 4)])
+    a1 = commit("attr 1", [("A.txt", b"a\nc\n"), ("B.bin", bytes(range(255, -1, -1)) * 4)])
+    at_text = _rdp_export_diff(ez.root, a0, a1)
+    at_good = export("attr-good", a1, a0, at_text, ab)
+    attrs = ez.root / ".gitattributes"
+    info = ez.root / ".git" / "info" / "attributes"
+    attrs.write_text("A.txt binary\n", encoding="utf-8")
+    at_bin = _rdp_export_diff(ez.root, a0, a1, ambient=True)
+    attrs.unlink()
+    at_patch = export("attr-patch", a1, a0, at_bin, ab)
+    _rdp_git(ez.root, "config", "diff.default.binary", "true")
+    at_cfg_diff = _rdp_export_diff(ez.root, a0, a1)
+    _rdp_git(ez.root, "config", "--unset", "diff.default.binary")
+    at_cfg = export("attr-config", a1, a0, at_cfg_diff, ab)
+    hidden = "shows the text change to 'A.txt' as a binary section"
+
+    def attr_rows():
+        got = [named(run(at_good, a1, ab))]
+        attrs.write_text("A.txt binary\n", encoding="utf-8")
+        try:
+            got += [named(run(at_good, a1, ab)), named(run(at_patch, a1, ab), differs)]
+        finally:
+            attrs.unlink()
+        _rdp_git(ez.root, "config", "core.compression", "9")
+        try:
+            got.append(named(run(at_good, a1, ab)))
+        finally:
+            _rdp_git(ez.root, "config", "--unset", "core.compression")
+        _rdp_git(ez.root, "config", "diff.default.binary", "true")
+        try:
+            got += [named(run(at_cfg, a1, ab), hidden), named(run(at_good, a1, ab), differs)]
+        finally:
+            _rdp_git(ez.root, "config", "--unset", "diff.default.binary")
+        info.parent.mkdir(exist_ok=True)
+        info.write_text("A.txt -diff\n", encoding="utf-8")
+        try:
+            got += [named(run(at_patch, a1, ab), hidden), named(run(at_good, a1, ab), differs)]
+        finally:
+            info.unlink()
+        return got
+    check("rdp/export-text-shown-binary-denies", [
+        b"GIT binary patch" in at_bin.split(b"diff --git a/B.bin")[0],
+        b"GIT binary patch" in at_cfg_diff.split(b"diff --git a/B.bin")[0],
+        b"GIT binary patch" not in at_text.split(b"diff --git a/B.bin")[0]] + attr_rows(),
+        [True, True, True] + [("allow", True)] * 2 + [("deny", True)] + [("allow", True)] + [("deny", True)] * 4)
+    # Each change is load bearing. With P3 patched out, the binary-patch export passes under the diff driver
+    # setting and under info/attributes (the round's MEDIUM 1); with the comparison of the repository's own
+    # diff put back in front of P1 (as the hook made it before), the genuine export under a binary attribute
+    # or a compression setting is refused again (the round's MINOR 3).
+    kinds = lambda: [k for k, _n in attr_rows()]  # noqa: E731
+
+    def ambient_differs(blob, own):
+        ambient = _rdp_export_diff(ez.root, a0, a1, ambient=True)
+        return blob != own or own != ambient
+    check("rdp/export-text-shown-binary-revert-allows", [
+        _rdp_mutant([("_rdp_export_binary_shown", lambda own: set())], kinds),
+        _rdp_mutant([("_rdp_export_diff_differs", ambient_differs)], kinds)], [
+        ["allow", "allow", "deny", "allow", "allow", "deny", "allow", "deny"],
+        ["allow", "deny", "deny", "deny", "deny", "deny", "deny", "deny"]])
+    w0 = commit("w 0", [("W.txt", b"w\n1\n")])
+    w1 = commit("w 1", [("W.txt", b"w\n2\n")])
+    w_root = export("blob-other-bytes", w1, w0, b"", ["W.txt"])
+    (w_root / "CHANGE.diff").write_bytes(_rdp_export_diff(ez.root, w0, w1))
+    w_short = copy(w_root, "blob-held-short")
+    (w_short / "W.txt").write_bytes(b"w")
+    (w_short / "base" / "W.txt").write_bytes(b"w")
+    # The bytes the check holds are bounded: with the limit at 7 bytes, the genuine export of a 4-byte change
+    # (8 bytes of copies) is withheld by the walk before the copies are read, and a one-byte head and base copy
+    # pair (2 bytes) is withheld because cat-file reports 8 bytes of blobs, before their content is read. With
+    # the limit as shipped, the first passes and the second is refused.
+    held = [("_RDP_EXPORT_MAX_HELD_BYTES", 7)]
+    check("rdp/export-held-bytes-withheld", [
+        _rdp_mutant(held, lambda: named(run(w_root, w1, ["W.txt"]), "copies under", "more than 7 bytes")),
+        _rdp_mutant(held, lambda: named(run(w_short, w1, ["W.txt"]), "blobs of", "more than 7 bytes")),
+        named(run(w_root, w1, ["W.txt"])), named(run(w_short, w1, ["W.txt"]), "not byte-identical")],
+        [("unverifiable", True), ("unverifiable", True), ("allow", True), ("deny", True)])
+    # The copies are compared with the bytes git cat-file reads, never by object id, and each record read is
+    # hashed and held to the object id it was read for: where the object store holds other bytes under the
+    # pin's blob id for W.txt (here written over the loose object, as a colliding blob would be), the export
+    # of the committed bytes and the export of the store's bytes are both a cannot-evaluate. With the hash
+    # check patched out, the first is refused and the second passes (the round's MEDIUM 1); with the
+    # comparison by object id put back as well, the first passes. A blob read that fails is a cannot-evaluate.
+    oid = _rdp_git(ez.root, "rev-parse", w1 + ":W.txt")
+    loose = ez.root / ".git" / "objects" / oid[:2] / oid[2:]
+    loose_found = loose.is_file()
+    if loose_found:
+        os.chmod(str(loose), 0o644)
+        loose.write_bytes(zlib.compress(b"blob 4\0w\n9\n"))
+    (w_root / "CHANGE.diff").write_bytes(_rdp_export_diff(ez.root, w0, w1))
+    w_forged = copy(w_root, "blob-store-bytes")
+    (w_forged / "W.txt").write_bytes(b"w\n9\n")
+    fmt = _rdp_git(ez.root, "rev-parse", "--show-object-format")
+
+    def by_id(copies, entries, blobs):
+        return [p for p, (data, _exe) in copies.items() if entries.get(p, ("", ""))[0] not in ("100644", "100755")
+                or entries[p][1] != hashlib.new(fmt, b"blob %d\0" % len(data) + data).hexdigest()]
+    unhashed = [("_rdp_export_blob_ok", lambda fmt, oid, data: True)]
+    forged = "do not hash to that object id"
+    check("rdp/export-copy-bytes-not-id", [
+        loose_found, named(run(w_root, w1, ["W.txt"]), "blobs of", forged),
+        named(run(w_forged, w1, ["W.txt"]), "blobs of", forged),
+        _rdp_mutant(unhashed, lambda: named(run(w_root, w1, ["W.txt"]),
+                                            "head copies 'W.txt' are not byte-identical")),
+        _rdp_mutant(unhashed, lambda: named(run(w_forged, w1, ["W.txt"]))),
+        _rdp_mutant(unhashed + [("_rdp_export_stale", by_id)], lambda: named(run(w_root, w1, ["W.txt"]))),
+        _rdp_mutant([("_rdp_export_blobs", lambda *args: (None, "cannot be read"))],
+                    lambda: named(run(w_root, w1, ["W.txt"]), "blobs of", "cannot be read"))],
+        [True, ("unverifiable", True), ("unverifiable", True), ("deny", True), ("allow", True), ("allow", True),
+         ("unverifiable", True)])
 
 
 def _rdp_carry_commit(fixture, parent, files, message):
