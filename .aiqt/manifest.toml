@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "2755c0c2ff9040d6ce698a89bb8cf86fddab0b805fe277d2ac402a1911011d12"
+tree-sha256 = "0e78e5146087d9118e5c4e568c64a8b1ae262dba6b8887810e2dffcbb75ba9ce"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -2492,8 +2492,8 @@ sha256 = "7a475927ce80162025499065202bd6482b18ea5908170df6e90fe6a343e5f3cc"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 30214
-sha256 = "3165af303b4cbd5c0e3cc058774e205414282414f6d3f58ef290568c6a9e1d36"
+bytes = 33376
+sha256 = "93e4c137f23b63c4ff746e4ea47e130443282ae2c9039b4010af63f7bd8bb2dd"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4752,8 +4752,8 @@ sha256 = "829bc73b78ed431223d127b1bd6ab7e6e48bb50c5d88acd3eb076c0c50293f16"
 
 [[sources]]
 path = "tools/merge_pr.py"
-bytes = 109615
-sha256 = "22b69f2bbfb344a90438cd23ccb74964318e658eda56c0c6af039250d346b874"
+bytes = 131740
+sha256 = "0998a1cfbc743c6cb4a32c819a7c177e43e144f25c6273e67129b20ca4914017"
 
 [[sources]]
 path = "tools/migrate.py"
@@ -4832,8 +4832,8 @@ sha256 = "6965cd97ef287c28e0b83907a30557cd661311f934247e0c934d96c0c2e62ab3"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 348880
-sha256 = "ec399d2330ee1e843eb716155214ff5b642d1fabd8569936ac5a2edb25b57c7b"
+bytes = 350658
+sha256 = "52421b243c508bd23286789d88494540088ee114f0d8f9749896abd908ad7a61"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
