@@ -532,7 +532,8 @@ def load_githooks_manifest(path, corpus_ids, taken_ids):
     extra = set(data) - {"version", "githook"}
     if extra:
         raise ValueError("{}: unknown top-level key(s): {}".format(name, ", ".join(sorted(extra))))
-    if data.get("version") != 1 or isinstance(data.get("version"), bool):
+    # an exact int: a TOML true is a Python int equal to 1 and 1.0 a float equal to it, neither a version
+    if type(data.get("version")) is not int or data.get("version") != 1:
         raise ValueError("{}: version must be the integer 1".format(name))
     githooks = data.get("githook", [])
     if not isinstance(githooks, list):
@@ -1568,6 +1569,25 @@ def self_test_main():
                 m.mkdir()
             if run_caught(t, check=False) != 2:
                 failures.append("githook: case {} expected exit 2 (fail-closed)".format(name))
+        # A TOML true is a Python int equal to 1 and 1.0 a float equal to it: neither is the integer version 1,
+        # so each fails closed by its version check (githook-good, the same manifest at version = 1, is the
+        # control that reads).
+        version_got = []
+        for value in ("true", "1.0"):
+            t = githook_tree("githook-version-" + value.replace(".", "-"))
+            replace_in(t / GITHOOKS_MANIFEST_REL, "version = 1\n", "version = {}\n".format(value))
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    load_githooks_manifest(t / GITHOOKS_MANIFEST_REL, set(), set())
+                version_got.append("reads")
+            except ValueError as exc:
+                version_got.append("refused by version" if "version must be the integer 1" in str(exc)
+                                   else str(exc))
+            got = run_caught(t, check=False)
+            version_got.append(got)
+        if version_got != ["refused by version", 2, "refused by version", 2]:
+            failures.append("githook: version = true and version = 1.0 expected a version refusal and exit 2, "
+                            "got {!r}".format(version_got))
 
         # .aiqt/ above the ledger symlinked outside the root fails closed (exit 2) in --check and write mode with
         # the ledger there untouched; symlinked inside the root, it is read and the ledger rewritten there.

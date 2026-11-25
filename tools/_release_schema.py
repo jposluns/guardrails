@@ -95,7 +95,8 @@ class SchemaError(Exception):
 def _require_format_version(data, where):
     if not isinstance(data, dict):
         raise SchemaError("{}: not a table".format(where))
-    if data.get("format-version") != 1:
+    # a TOML true is a Python int equal to 1 (bool subclasses int), so the version must be an exact int
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1:
         raise SchemaError("{}: format-version must be exactly 1".format(where))
 
 
@@ -220,7 +221,7 @@ def strict_manifest(data, where, development_ok=False):
     if "opf-version" in data and (not isinstance(data["opf-version"], str)
                                   or _parse(data["opf-version"]) is None):
         raise SchemaError("{}: opf-version {!r} is not a bare SemVer".format(where, data["opf-version"]))
-    if data["format-version"] != 1:
+    if type(data["format-version"]) is not int or data["format-version"] != 1:  # a TOML true is no version
         raise SchemaError("{}: format-version must be exactly 1".format(where))
     tree_version = parse_tree_version(data["release-version"])
     if tree_version is not None and tree_version[1] and not development_ok:

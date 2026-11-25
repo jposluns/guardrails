@@ -164,7 +164,8 @@ def load_registry(raw, label):
     if raw is None:
         raise CannotEvaluate("{}: {} is absent".format(label, REGISTRY))
     document = parse_toml(raw, label)
-    if document.get("format-version") != 1 or isinstance(document.get("format-version"), bool):
+    # an exact int: a TOML true is a Python int equal to 1 and 1.0 a float equal to it, neither a version
+    if type(document.get("format-version")) is not int or document.get("format-version") != 1:
         raise CannotEvaluate("{}: format-version must be the integer 1".format(label))
     suites = document.get("suite")
     if not isinstance(suites, list) or not suites:
@@ -186,8 +187,8 @@ def load_record(raw, label):
     if raw is None:
         return {}
     document = parse_toml(raw, label)
-    if set(document) - {"schema", "removal"} or document.get("schema") != 1 or isinstance(
-            document.get("schema"), bool):
+    if set(document) - {"schema", "removal"} or type(document.get("schema")) is not int or \
+            document.get("schema") != 1:
         raise CannotEvaluate("{}: the record holds schema = 1 and [[removal]] entries only".format(label))
     rows = document.get("removal", [])
     if not isinstance(rows, list):
@@ -862,6 +863,14 @@ def self_test():
                            ("cannot/registry-nested-too-deep", b"format-version = 1\nx = " + b"[" * 100000 + b"]"
                             * 100000 + b"\n")):
         check(name, _code(BASE, registry, None, None) == EXIT_CANNOT_EVALUATE)
+    # a TOML true is a Python int equal to 1 and 1.0 a float equal to it: neither is the integer 1 the registry and
+    # the record carry (pass/no-removal and pass/disclosed are the integer-1 controls)
+    got = [_code(BASE, BASE.replace(b"format-version = 1", b"format-version = " + value), None, None)
+           for value in (b"true", b"1.0")]
+    check("cannot/registry-format-version-not-int", got == [EXIT_CANNOT_EVALUATE] * 2, got)
+    got = [_code(BASE, WITHOUT_C, None, _record(DISCLOSED).replace(b"schema = 1", b"schema = " + value))
+           for value in (b"true", b"1.0")]
+    check("cannot/record-schema-not-int", got == [EXIT_CANNOT_EVALUATE] * 2, got)
     check("cannot/base-registry-malformed", _code(b"[[suite\n", BASE, None, None) == EXIT_CANNOT_EVALUATE)
     for name, record in (("cannot/record-unknown-state", _record(dict(DISCLOSED, state="waived"))),
                          ("cannot/record-missing-field", _record({"suite": "s", "id": "c", "state": "disclosed"})),

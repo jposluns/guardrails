@@ -296,6 +296,11 @@ directory below, and a declaration there arms slice confinement.
 }
 ```
 
+`enumerator.timeout` is the number of seconds the enumerator may run before it is stopped: a JSON number
+greater than 0 and at most 600. Any other value runs the enumerator under the default of 60 seconds, for
+example an absent key, 0 or less, more than 600, a string, null, or a JSON `true` or `false` (which Python
+would otherwise read as 1 and 0). An enumerator stopped at its timeout is an enumerator error.
+
 `state_dir` defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/`
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
 `guard-events.jsonl`, `turn-state.json`, `resume-barrier.json`, `pending-asks.jsonl`,

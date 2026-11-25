@@ -2541,7 +2541,8 @@ def _validate_base(base, findings, manifest_rel=None):
             findings.append("[opf].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
         elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION) or (
                 spec_tuple > _parse(SUPPORTED_SPEC_VERSION)
-                and not (sv == HOMES2_SPEC_VERSION and base.get("homes") == 2)):
+                and not (sv == HOMES2_SPEC_VERSION and type(base.get("homes")) is int
+                         and base.get("homes") == 2)):
             # A store declaring an OLDER base spec_version than this tooling implements is fail-closed with
             # its OWN named, remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
             # missing-type findings a newer roster would otherwise raise against the older store (spec 9.x).
@@ -3386,6 +3387,11 @@ def self_test():
             ceiling_anchor, ceiling_anchor + "\nhomes = 2")
         check("spec-version-ceiling-non-homes2-pair-invalid",
               validate_manifest(_t.loads(above_pair)).status == INVALID)
+        # homes = 2.0 (a TOML float equal to 2) beside 2.0.0 is not the pair: the ceiling finding stands
+        mv_float_pair = validate_manifest(_t.loads(homes2_pair.replace("\nhomes = 2", "\nhomes = 2.0")))
+        check("spec-version-ceiling-homes2-float-pair-not-recognized",
+              mv_float_pair.status == INVALID
+              and any("above the" in f and "upgrade the tooling" in f for f in mv_float_pair.findings))
 
         # 10h: [opf].homes is an optional, validated integer generation declaration.
         # Recognition does not activate homes 2 or require a declaration in legacy manifests, and

@@ -1078,7 +1078,8 @@ def _validate_dispositions_data(data, where_rel):
     normalization (exact keysets, values, 6.6 evidence), and per-kind target SYNTAX. Returns the normalized
     rows. Renderer-id EXISTENCE is NOT checked here (it is a consumption concern validated in run() against
     the appropriate declaration scope), so the predecessor record is not held to the current renderer set."""
-    if data.get("format-version") != 1:
+    # a TOML true is a Python int equal to 1 (bool subclasses int), so the version must be an exact int
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1:
         raise GateError("{}: format-version must be exactly 1".format(where_rel))
     extra = set(data) - {"format-version", "disposition"}
     if extra:
@@ -7135,6 +7136,21 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
     # label here as its body's LAST statement; the gate records a NOT RUN failure instead when
     # its probe fails; the final verdict requires EXACTLY ONE record per gate label.
     gate_ran = []
+
+    # A TOML true is a Python int equal to 1 (bool subclasses int), and 1.0 a float equal to it: the
+    # dispositions validator (run on HEAD and predecessor records) takes only an exact int format-version of
+    # 1, so true and 1.0 are refused by that check while the integer 1 validates. Red with the type check
+    # removed.
+    fv_got = []
+    for fv_value in (1, True, 1.0):
+        try:
+            _validate_dispositions_data({"format-version": fv_value}, "fixture")
+            fv_got.append("validates")
+        except GateError as exc:
+            fv_got.append("refused by format-version" if "format-version" in str(exc) else str(exc))
+    if fv_got != ["validates", "refused by format-version", "refused by format-version"]:
+        failures.append("dispositions format-version: _validate_dispositions_data gave {} for 1, true and "
+                        "1.0".format(fv_got))
 
     # PR #530 QA round-3 claude MINOR-4, round-4 codex 1 / claude MINOR-2, round-5 codex 1/2/4: the
     # _GIT_GATE_LABELS/_git_gate alignment is a CHECK over the module source, not a comment, and it

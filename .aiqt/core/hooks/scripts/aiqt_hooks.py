@@ -26964,7 +26964,10 @@ def _orch_enumerate(reg, root):
             isinstance(a, str) and a for a in argv):
         return ("ENUMERATOR_ERROR", "enumerator argv is not a list of non-empty strings")
     timeout = spec.get("timeout")
-    timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
+    # a JSON true is a Python int (bool subclasses int), so it is excluded first: it takes the default 60,
+    # never a 1-second timeout
+    timeout = timeout if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) \
+        and 0 < timeout <= 600 else 60
     try:
         # encoding="utf-8" (strict) so the enumerator's answer decodes the same under every locale:
         # a valid UTF-8 title never denies under LC_ALL=C, and an undecodable byte always raises
@@ -32119,7 +32122,10 @@ def _cite_unseen(fd, size, items):
         if isinstance(row, dict):
             key = tuple(row.get(field) for field in _CITE_KEY)
             rev = key[-1]
-            if all(isinstance(k, (str, int)) for k in key[:-1]) and (rev is None or isinstance(rev, str)):
+            # a JSON true is a Python int equal to 1, so a bool field is no key: a row of start/end true
+            # never stands for, and so never suppresses, the fact at line 1
+            if all(isinstance(k, (str, int)) and not isinstance(k, bool) for k in key[:-1]) \
+                    and (rev is None or isinstance(rev, str)):
                 have.add(key)
     return [(key, line) for key, line in items if key not in have]
 
@@ -34147,7 +34153,10 @@ def _citechk_row(line):
         row = json.loads(line)
     except (ValueError, RecursionError):
         return None
-    if not isinstance(row, dict) or row.get("v") != 1 or row.get("kind") not in ("read", "wrote"):
+    # a JSON true is a Python int equal to 1 (bool subclasses int), so v must be an exact int: a row of v true
+    # is no recorder row
+    if not isinstance(row, dict) or type(row.get("v")) is not int or row.get("v") != 1 \
+            or row.get("kind") not in ("read", "wrote"):
         return None
     path, start, end, digest = row.get("path"), row.get("start"), row.get("end"), row.get("sha256")
     if not (isinstance(path, str) and path and type(start) is int and type(end) is int and 1 <= start <= end
@@ -37231,8 +37240,9 @@ def _rdp_record_read(path):
         doc = json.loads(blob.decode("utf-8"))
     except ValueError as exc:
         return ("bad", "it is not JSON ({})".format(exc))
-    if not isinstance(doc, dict) or doc.get("version") != _RDP_RECORD_VERSION or \
-            not isinstance(doc.get("digest"), str):
+    # the version is an exact int: a JSON 2.0 is a float equal to 2 and true a Python int equal to 1
+    if not isinstance(doc, dict) or type(doc.get("version")) is not int or \
+            doc.get("version") != _RDP_RECORD_VERSION or not isinstance(doc.get("digest"), str):
         return ("bad", "it is not a version {} binding record".format(_RDP_RECORD_VERSION))
     kind, cfg = _rdp_binding(dict(review_dispatch=doc.get("binding")))
     if kind != "ok":
@@ -51123,8 +51133,9 @@ def _gr_parse_config(text, where):
         problem = "{}: {}".format(type(exc).__name__, exc)
     if problem is not None:
         raise _GateRecordError("{} is not valid TOML ({})".format(where, problem))
+    # a TOML true is a Python int equal to 1 (bool subclasses int), so format-version must be an exact int
     if set(doc) - {_HB_CONFIG_KEY} != {"format-version", "pre-commit", "pre-push", "set"} \
-            or doc["format-version"] != 1:
+            or type(doc["format-version"]) is not int or doc["format-version"] != 1:
         raise _GateRecordError("{} must hold exactly format-version = 1, pre-commit, pre-push and [[set]] "
                                "tables, and optionally {}".format(where, _HB_CONFIG_KEY))
     handback = doc.get(_HB_CONFIG_KEY, _HB_DEFAULT_MODE)

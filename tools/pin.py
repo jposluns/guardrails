@@ -326,13 +326,20 @@ def _render_history(rows):
              "# target plus explicit recorded adopter authorization (10.4). Generated; do not hand-edit.",
              "", "schema-version = 1", ""]
     for row in rows:
+        # A history row read back from disk is re-rendered at its own type, never converted: int() would
+        # rewrite a TOML true as 1, 1.5 as 1 and "2" as 2. An absent quorum keeps its 0 default.
+        seq, quorum = row.get("seq"), row.get("quorum", 0)
+        if type(seq) is not int:
+            raise PinError("{}: transition seq {!r} is not an integer; refusing".format(HISTORY_REL, seq))
+        if type(quorum) is not int:
+            raise PinError("{}: transition quorum {!r} is not an integer; refusing".format(HISTORY_REL, quorum))
         lines.append("[[transition]]")
-        lines.append("seq = {}".format(int(row["seq"])))
+        lines.append("seq = {}".format(seq))
         lines.append("version = {}".format(_toml_str(row.get("version", ""))))
         lines.append("tag-object-sha = {}".format(_toml_str(row.get("tag-object-sha", ""))))
         lines.append("commit-sha = {}".format(_toml_str(row.get("commit-sha", ""))))
         lines.append("root = {}".format(_toml_str(row.get("root", ""))))
-        lines.append("quorum = {}".format(int(row.get("quorum", 0))))
+        lines.append("quorum = {}".format(quorum))
         lines.append("utc = {}".format(_toml_str(row.get("utc", ""))))
         lines.append("action = {}".format(_toml_str(row.get("action", ""))))
         lines.append("corruption-finding = {}".format(_toml_str(row.get("corruption-finding", ""))))
@@ -796,11 +803,16 @@ def do_un_adopt(root, authorizer, reason):
             raise PinError("un-adopt requires a chain-valid pin-history; chain is invalid: {}"
                            .format("; ".join(chain_findings)))
         ops = _transition_ops(txn_rec)
+        # The pin's quorum is carried into the intent only as an exact positive int, never converted: int()
+        # would read a TOML true as 1, 1.5 as 1 and "2" as 2 (the same bar recover holds the intent to).
+        quorum = current.get("quorum", 1)
+        if type(quorum) is not int or quorum < 1:
+            raise PinError("pin.toml quorum is not a positive integer; refusing")
         # Publish the durable un-adopt INTENT BEFORE any reversal, so a crash at any later point is COMPLETED
         # by `recover` (10.6), never stranded. Then complete the un-adopt idempotently.
         intent = {"transition-id": txn_rec["transition-id"],
                   "target-version": txn_rec.get("target-version", ""),
-                  "quorum": int(current.get("quorum", 1)), "utc": _utc_now(),
+                  "quorum": quorum, "utc": _utc_now(),
                   "authorization": authorization}
         _atomic_publish(root, UNADOPT_REL, _render_unadopt(intent))
         _complete_un_adopt(root, root_fd, ops, intent)
@@ -1570,6 +1582,65 @@ def self_test():
         check("T8: un-adopt with repoints REFUSES (deferred) exit 2", rc == 2 and "deferred" in out.lower())
         check("T8: pin intact after the refused un-adopt", (b / PIN_REL).is_file())
         (b / REPOINTS_REL).unlink()
+
+        # ---- T8b: un-adopt REFUSES a pin.toml quorum that is not an exact positive integer ----
+        # A TOML true is a Python int equal to 1 (bool subclasses int), so int() would carry it, 1.5 or "1"
+        # into the un-adopt intent as quorum 1; each is refused before any intent or reversal instead, while
+        # the same fresh pin with its quorum = 1 restored then un-adopts (the control: nothing else refuses).
+        t8b = tmp / "T8b" / "root"; t8b.mkdir(parents=True)
+        _run_cli(["pin", "--root", str(t8b), "--staged",
+                  str(_write_staged(tmp / "T8b" / "s", onop, onpay, rel1, []))])
+        _pin_b = (t8b / PIN_REL).read_text(encoding="utf-8")
+        check("T8b: the fixture pin.toml carries quorum = 1", "\nquorum = 1\n" in _pin_b)
+        # quorum = 0 is refused too (an exact int, but not positive), and a valid quorum above 1 still un-adopts.
+        for _bad_q in ("true", "1.5", '"1"', "0"):
+            (t8b / PIN_REL).write_text(_pin_b.replace("\nquorum = 1\n", "\nquorum = {}\n".format(_bad_q), 1),
+                                       encoding="utf-8")
+            rc, out = _run_cli(["un-adopt", "--root", str(t8b), "--authorizer", "ops", "--reason", "x"])
+            check("T8b: un-adopt with pin.toml quorum = {} REFUSES exit 2".format(_bad_q),
+                  rc == 2 and "pin.toml quorum" in out)
+            check("T8b: pin intact and no intent after the refused quorum = {}".format(_bad_q),
+                  (t8b / PIN_REL).is_file() and not (t8b / UNADOPT_REL).exists())
+        (t8b / PIN_REL).write_text(_pin_b, encoding="utf-8")
+        rc, out = _run_cli(["un-adopt", "--root", str(t8b), "--authorizer", "ops", "--reason", "x"])
+        check("T8b: the control un-adopt with quorum = 1 exits 0", rc == 0 and not (t8b / PIN_REL).exists())
+        t8q2 = tmp / "T8b" / "root-q2"; t8q2.mkdir(parents=True)
+        _run_cli(["pin", "--root", str(t8q2), "--staged",
+                  str(_write_staged(tmp / "T8b" / "s-q2", onop, onpay, rel1, []))])
+        (t8q2 / PIN_REL).write_text((t8q2 / PIN_REL).read_text(encoding="utf-8").replace(
+            "\nquorum = 1\n", "\nquorum = 2\n", 1), encoding="utf-8")
+        check("T8b: the quorum-2 fixture pin.toml carries quorum = 2",
+              "\nquorum = 2\n" in (t8q2 / PIN_REL).read_text(encoding="utf-8"))
+        rc, out = _run_cli(["un-adopt", "--root", str(t8q2), "--authorizer", "ops", "--reason", "x"])
+        check("T8b: un-adopt with pin.toml quorum = 2 exits 0", rc == 0 and not (t8q2 / PIN_REL).exists())
+        with _RootFd(t8q2) as _fdq2:
+            _rows_q2 = read_history(_fdq2) or []
+        check("T8b: the quorum-2 un-adopt row records quorum 2 at its own type",
+              bool(_rows_q2) and _rows_q2[-1].get("action") == "un-adopt"
+              and type(_rows_q2[-1].get("quorum")) is int and _rows_q2[-1].get("quorum") == 2)
+
+        # ---- T8c: a history row re-rendered on rollback keeps its seq and quorum at their own type ----
+        # _render_history re-renders rows read back from disk (recover's _trim_last_pin_row); int() would
+        # rewrite a TOML true as 1, 1.5 as 1 and "1" as 1. Each is refused, while an exact int renders as is
+        # and an absent quorum keeps its 0 default.
+        for _field, _bad in (("seq", True), ("seq", 1.0), ("seq", "0"), ("quorum", True), ("quorum", False),
+                             ("quorum", 1.5), ("quorum", "1")):
+            _r8c = row(0, 1, GENESIS)
+            _r8c[_field] = _bad
+            try:
+                _render_history([_r8c])
+                _got8c = "rendered"
+            except PinError as exc:
+                _got8c = "refused" if "transition {}".format(_field) in str(exc) else str(exc)
+            check("T8c: a history row with {} = {!r} is refused on re-render".format(_field, _bad),
+                  _got8c == "refused")
+        _ok8c = _render_history([row(0, 1, GENESIS), row(1, 2, "c1")])
+        check("T8c: exact-int seq and quorum render unchanged",
+              "\nseq = 0\n" in _ok8c and "\nseq = 1\n" in _ok8c and "\nquorum = 1\n" in _ok8c
+              and "\nquorum = 2\n" in _ok8c)
+        _r8c = row(0, 1, GENESIS)
+        del _r8c["quorum"]
+        check("T8c: an absent quorum renders its 0 default", "\nquorum = 0\n" in _render_history([_r8c]))
 
         # ---- T3: crash during preimage capture (before the transition) -> recover sweeps + clean ----
         c = tmp / "C" / "root"; c.mkdir(parents=True)

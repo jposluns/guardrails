@@ -212,7 +212,8 @@ the authority, and the summary further down this page only points to it.
   real CI rerun written outside the grammar, a failed CI rerun call that did start a rerun, or an
   off-grammar check that fails and then passes gets only its note, with no refusal. A state file written
   by an earlier revision of the hook is discarded, so none of its flags arms a refusal, and one of the
-  current revision holding a flag of a kind it never keeps is malformed. Read-only is
+  current revision holding a flag of a kind it never keeps, or a recorded check whose count is not a whole
+  number of at least 0 (a stored `1.0`, `true` or `"1"`), is malformed. Read-only is
   decided only inside the grammar: `env` with any argument, an assignment prefix, a command word holding
   an expansion, and any output redirection whose target is not the unquoted word `/dev/null` count as a
   change; an input redirection and a descriptor duplication or close (`<f`, `>&2`, `>&-`) write nothing.
@@ -249,8 +250,8 @@ files are served from this repository's main branch; for a raw download, use
 | `future-stamp-write.py` | `7f36677587e0dfecd277e57f1f39c3bfae92e1206b464625734868d87b7b40f6` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `84bcb120cc1d30df845e4c2f77d7033a1bb9af473b9a0ffd336a622ae67fe6cd` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `6ea79f2809054e1458f679e4219db8e45188f5f1f63eeccf401aa95478fce1d6` | [record-remove-check.py](record-remove-check.py) |
-| `rerun-pass-check.py` | `319f4de2aff71cca9d1cf33ae990c264982141ca38ec44e939780a0961996f66` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `989eb43701f2a1db39baf76d6c0f6c6ea33d77d2d39c26e113a7fb1d0cbcdb00` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `rerun-pass-check.py` | `e61e27e2eeecca764ddccb6b0478d71e3f845c4665265020352fae5bd780295c` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-truth-stop.py` | `52125faf12b7357625b37f51eea58e1d3fa69b8f0d3c63f3bbec444a039ae105` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `da1917e92cc4dc93585ee6eabac75040926ba3068e5241892dfb87fe83f40842` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `5eedf3c960cdc34f35504ab6ea0935da31a0b3d9bf14126c8e8ee5a4c112b4e0` | [ungated-record.py](ungated-record.py) |
 
