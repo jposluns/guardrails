@@ -3719,7 +3719,8 @@ _NUL_BASH_COMMANDS = (
 # inside the scope an orchestration registry, a review dispatch binding or a live review hold gives them,
 # and inert outside it, so tools/selftest_orch_hooks.py builds that scope for their rows.
 _SCOPED_BASH_HANDLERS = frozenset((
-    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "review_workdir_hold"))
+    "orch_truncation_guard", "orch_untracked_wait_loop", "review_dispatch_pin", "dispatch_brief_present",
+    "review_workdir_hold"))
 # The always-on Bash hooks that deny an empty or blank command on their own (gensrc_guard: its write-sink
 # detector reads no command in it). With the shared reader reverted to the lax empty read their malformed rows
 # still deny, which is pinned; a second revert to a lax read of a harmless command (true) must go red, so
@@ -11009,7 +11010,8 @@ _DEADLINE_CASES = {
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
-    "review_workdir_hold": ("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
+    "dispatch_brief_present": ("git_words", "nest_cmdsubst"),
+    "review_workdir_hold":("git_segments_reset", "cd_git_fetch_unbal", "nest_cmdsubst"),
     "secrets_shift_left": ("cd_git_fetch_unbal", "nest_cmdsubst", "write_secretish"),
     "write_scope_guard": ("write_content", "write_deep_path"),
 }
@@ -11131,10 +11133,11 @@ _DEADLINE_CHILD_TIMEOUT = 900
 
 
 def _deadline_fixtures(tmp):
-    """A plain non-git directory, an orchestration repository (a version-1 registry), and a repository
-    carrying a populated gensrc registry (the shipped registry's size class), as cwds. The gensrc shapes
-    run in the registry repository so their relative sinks resolve to a root and the timed call reaches
-    the registry read and the per-entry matching, the code whose cost grows with the command."""
+    """Four cwds: a plain non-git directory, an orchestration repository (a version-1 registry), a
+    repository carrying a populated gensrc registry (the shipped registry's size class), and a repository
+    whose registry declares dispatch_briefs. The gensrc shapes run in the registry repository so their
+    relative sinks resolve to a root and the timed call reaches the registry read and the per-entry
+    matching, the code whose cost grows with the command."""
     plain = tmp / "deadline-plain"
     plain.mkdir(parents=True, exist_ok=True)
     orch = _init_repo(tmp / "deadline-orch")
@@ -11150,7 +11153,41 @@ def _deadline_fixtures(tmp):
                  "regenerate": "python3 tools/gen_x.py"} for k in range(40)]
     (gensrc / ".aiqt" / "gensrc.json").write_text(
         json.dumps({"version": 1, "generated": entries}), encoding="utf-8")
-    return plain, orch, gensrc
+    # dispatch_brief_present is inert without a dispatch_briefs key, so its shapes run in a repository whose
+    # registry declares one: the timed call reaches the plain-word reading and the declared-name scan
+    dbp = _init_repo(tmp / "deadline-dbp")
+    (dbp / ".aiqt").mkdir(exist_ok=True)
+    (dbp / ".aiqt" / "orchestration.json").write_text(json.dumps(
+        {"version": 1, "dispatch_briefs": [{"commands": ["orch-dispatch"], "brief_option": "--brief"}]}) + "\n",
+        encoding="utf-8")
+    return plain, orch, gensrc, dbp
+
+
+def _deadline_cwd(name, plain, orch, gensrc, dbp):
+    """The cwd a timed handler's shapes run in (_deadline_fixtures): the registry repository for the
+    orchestration, review and citation checks (the citation check is inert outside a git toplevel), the
+    declaring repository for dispatch_brief_present, the gensrc repository for gensrc_guard, else plain."""
+    if name == "dispatch_brief_present":
+        return dbp
+    return orch if name.startswith(("orch_", "review_", "citation_")) else gensrc if name == "gensrc_guard" \
+        else plain
+
+
+def _deadline_dbp_scope_failures(tmp):
+    """(dl-shape-dbp-scope) dispatch_brief_present's shapes are timed where its key is declared: in the cwd
+    _deadline_cwd gives it, a dispatch naming a missing brief is denied. In a cwd with no registry it would
+    be allowed, and its shapes would time only the inert exit, so this line fails then."""
+    plain, orch, gensrc, dbp = _deadline_fixtures(tmp)
+    cwd = str(_deadline_cwd("dispatch_brief_present", plain, orch, gensrc, dbp))
+    data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd, "session_id": "deadline-session",
+            "tool_use_id": "deadline-call",
+            "tool_input": {"command": "orch-dispatch --brief " + os.path.join(cwd, "missing-brief.txt")}}
+    code, stdout_obj, _stderr = aiqt_hooks.HANDLERS["dispatch_brief_present"](data)
+    got = _reduce_result(code, stdout_obj)
+    if got != "deny":
+        return ["(dl-shape-dbp-scope) the timed cwd {} of dispatch_brief_present declares no dispatch: a "
+                "dispatch naming a missing brief got {}, not deny".format(cwd, got)]
+    return []
 
 
 # THE SHARED TIMING JUDGE. Every row that holds a measured time to a fixed absolute bound is judged here
@@ -11845,12 +11882,10 @@ def _deadline_run_text(run):
 def _deadline_shape_runs(tmp, sizes):
     """Every (handler, shape, size) case _TIMED_RUNS times (_timed_runs over _deadline_shape_case):
     [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for each run...)]."""
-    plain, orch, gensrc = _deadline_fixtures(tmp)
+    plain, orch, gensrc, dbp = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
-        # The citation check is inert outside a git toplevel, so it is timed in the repository as well.
-        cwd = str(orch if name.startswith(("orch_", "review_", "citation_")) else
-                  gensrc if name == "gensrc_guard" else plain)
+        cwd = str(_deadline_cwd(name, plain, orch, gensrc, dbp))
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
                 runs.append((name, shape, size, cwd) + tuple(_timed_runs(
@@ -12076,6 +12111,7 @@ def _deadline_shape_failures(tmp):
                      if event in (aiqt_hooks.PRETOOL, aiqt_hooks.PRETOOL_WARN_ONLY) and name not in _DEADLINE_CASES)
     if missing:
         out.append("(dl-shape-coverage) PreToolUse handlers with no timed shape: {}".format(", ".join(missing)))
+    out += _deadline_dbp_scope_failures(tmp / "dl-dbp-scope")
     return out + _deadline_shape_verdicts(_deadline_shape_runs(tmp, _DEADLINE_SIZES), _deadline_shape_case,
                                           _deadline_shape_replay)
 

@@ -483,6 +483,368 @@ def _rdp_kind(result):
     return verdict
 
 
+class DbpFixture:
+    """One dispatch brief presence fixture: a git repo whose registry declares dispatch_briefs (orch-dispatch
+    with --brief and run-worker with -b, unless told otherwise), and a briefs directory beside it holding
+    one good brief. Every path is a real path, so no symbolic link is in any brief's components."""
+
+    def __init__(self, base, name, declaration=True, git=True):
+        self.root = base / name
+        self.briefs = base / (name + "-briefs")
+        self.briefs.mkdir(parents=True)
+        self.root.mkdir(parents=True)
+        if git:
+            _rdp_git(base, "init", "-q", "-b", "main", str(self.root))
+        (self.root / ".aiqt").mkdir()
+        self.declaration = [dict(commands=["orch-dispatch"], brief_option="--brief"),
+                            dict(commands=["run-worker"], brief_option="-b")]
+        self.write_registry(self.declaration if declaration else None)
+        self.good = self.brief("Do the task.\n")
+
+    def write_registry(self, declaration, name="orchestration.local.json", extra=None):
+        reg = dict(version=1, state_dir=str(self.briefs / "state"))
+        if declaration is not None:
+            reg["dispatch_briefs"] = declaration
+        reg.update(extra or {})
+        (self.root / ".aiqt" / name).write_text(json.dumps(reg), encoding="utf-8")
+
+    def brief(self, text, name="brief.txt"):
+        path = self.briefs / name
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def run(self, command, background=False, cwd=None, tool_name="Bash"):
+        payload = dict(hook_event_name="PreToolUse", cwd=str(cwd or self.root), session_id="s1",
+                       tool_input=dict(command=command, run_in_background=background))
+        if tool_name is not None:
+            payload["tool_name"] = tool_name
+        return aiqt_hooks.dispatch_brief_present(payload)
+
+    def kind(self, command, **kw):
+        """The row verdict of one call: _rdp_kind, or "crash:NAME" when the handler raises, so a mutant that
+        breaks the handler fails its row instead of ending the run."""
+        try:
+            return _rdp_kind(self.run(command, **kw))
+        except Exception as exc:  # a row verdict, never a pass
+            return "crash:" + type(exc).__name__
+
+
+def _dbp_cases(tmp):
+    """The dispatch brief presence vectors (dbp/*), each a throwaway fixture under tmp. Each row names in
+    its comment the reverted feature that turns it red; the mutation run reported with the change reverts
+    each feature in turn."""
+    base = Path(os.path.realpath(str(tmp))) / "dbp"
+    base.mkdir()
+    # red when an absent registry fails closed outside registry-required mode
+    bare = DbpFixture(base, "bare", declaration=False)
+    os.unlink(str(bare.root / ".aiqt" / "orchestration.local.json"))
+    check("dbp/registry-absent-inert", bare.kind("orch-dispatch --brief /nonexistent"), "allow")
+    # red when the presence of the key is not tested
+    nk = DbpFixture(base, "nokey", declaration=False)
+    check("dbp/no-key-inert", nk.kind("orch-dispatch --brief /nonexistent"), "allow")
+    # red when the commands of a review_dispatch binding are added to the declared set (decided: no union)
+    un = DbpFixture(base, "nounion")
+    un.write_registry(un.declaration, extra=dict(review_dispatch=dict(
+        commands=["orch-review"], brief_option="--brief", labels=dict(
+            target="T:", revision="R:", path="P:", repo="Q:", branch="B:"),
+        authority=dict(argv=["true"]))))
+    check("dbp/review-dispatch-commands-not-added", un.kind("orch-review --brief /nonexistent"), "allow")
+
+    f = DbpFixture(base, "main")
+    # red when the hook refuses every dispatch
+    check("dbp/present-brief-allows", [f.kind("orch-dispatch --brief " + f.good),
+                                       f.kind("run-worker -b " + f.good),
+                                       f.kind("orch-dispatch --verbose --brief " + f.good)],
+          ["allow", "allow", "allow"])
+    missing = str(f.briefs / "missing.txt")
+    # red when a missing brief passes the existence test
+    check("dbp/missing-brief-denies", [f.kind("orch-dispatch --brief " + missing),
+                                       f.kind("orch-dispatch --brief " + missing, background=True),
+                                       f.kind("orch-dispatch --brief " + f.good + "/x")],
+          ["deny", "deny", "deny"])
+    empty = f.brief("", "empty.txt")
+    # red when the size test is removed
+    check("dbp/empty-brief-denies", f.kind("orch-dispatch --brief " + empty), "deny")
+    (f.briefs / "adir").mkdir()
+    # an entry inside, since an empty directory has size 0 on some filesystems and the size test would
+    # refuse it whatever its type
+    (f.briefs / "adir" / "entry.txt").write_text("x\n", encoding="utf-8")
+    # red when the file type test is removed
+    check("dbp/directory-brief-denies", f.kind("orch-dispatch --brief " + str(f.briefs / "adir")), "deny")
+    link = f.briefs / "link.txt"
+    os.symlink(f.good, str(link))
+    dangling = f.briefs / "dangling.txt"
+    os.symlink(str(f.briefs / "gone.txt"), str(dangling))
+    # red when the link refusal (the walk's link test and the no-follow open together) is removed
+    check("dbp/symlink-brief-denies", [f.kind("orch-dispatch --brief " + str(link)),
+                                       f.kind("orch-dispatch --brief " + str(dangling))], ["deny", "deny"])
+    os.symlink(str(f.briefs), str(base / "main-briefs-link"))
+    # red when only the final component is tested for a link (decided: walk every component as written)
+    check("dbp/symlink-dir-component-denies",
+          f.kind("orch-dispatch --brief " + str(base / "main-briefs-link" / "brief.txt")), "deny")
+    os.symlink(str(f.briefs / "adir"), str(f.briefs / "lnk"))
+    os.symlink(str(f.root), str(base / "main-root-link"))
+    # red when the link test compares the real path with the normalized one (a .. then cancels a linked
+    # component) instead of walking the path as written; the last two are the walk's own controls: a .. from
+    # a link-free directory is allowed, and a component followed by more must be a directory
+    check("dbp/symlink-dotdot-component-denies",
+          [f.kind("orch-dispatch --brief " + str(f.briefs / "lnk" / ".." / "brief.txt")),
+           f.kind("orch-dispatch --brief ../main-briefs/brief.txt", cwd=base / "main-root-link"),
+           f.kind("orch-dispatch --brief " + str(f.briefs / "adir" / ".." / "brief.txt")),
+           f.kind("orch-dispatch --brief " + f.good + "/../brief.txt")],
+          ["deny", "deny", "allow", "deny"])
+    # red when a path beginning with exactly two slashes (implementation-defined in POSIX, kept by normpath,
+    # refused by the real-path comparison this walk replaced) is walked as one slash; three are one
+    check("dbp/two-slash-prefix-denies", [f.kind("orch-dispatch --brief /" + f.good),
+                                          f.kind("orch-dispatch --brief //" + f.good)], ["deny", "allow"])
+
+    def _reason(command, **kw):
+        out = f.run(command, **kw)
+        return (out[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    # red when the walk does not refuse a link where it stands, naming it (without that test a linked
+    # directory component is refused only as not a directory, and a final link only by the open)
+    check("dbp/link-cause-named", ["but it is reached through a symbolic link (" in _reason("orch-dispatch --brief " + brief, **kw)
+                                   for brief, kw in ((str(f.briefs / "lnk" / ".." / "brief.txt"), {}),
+                                                     ("../main-briefs/brief.txt",
+                                                      dict(cwd=base / "main-root-link")),
+                                                     (str(link), {}), (str(dangling), {}))],
+          [True, True, True, True])
+    # red when the open follows a final link: a link put in place between the walk and the open (the walk
+    # stubbed to pass the path through, as a swap after it would) is still refused
+    saved_walk = aiqt_hooks._dbp_walk
+    aiqt_hooks._dbp_walk = lambda path: (path, None)
+    try:
+        raced = f.kind("orch-dispatch --brief " + str(link))
+    finally:
+        aiqt_hooks._dbp_walk = saved_walk
+    check("dbp/open-follows-no-final-link", raced, "deny")
+    import signal as _signal
+
+    class _Blocked(BaseException):
+        """Raised by the alarm; not an OSError, so no handler under test can swallow it."""
+
+    def _alarm(_sig, _frame):
+        raise _Blocked()
+
+    def _bounded(fn):
+        old = _signal.signal(_signal.SIGALRM, _alarm)
+        _signal.alarm(5)
+        try:
+            return fn()
+        except _Blocked:
+            return "blocked"
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old)
+    fifo = f.briefs / "fifo.txt"
+    os.mkfifo(str(fifo))
+    # red when the open blocks (O_NONBLOCK dropped) or a FIFO passes the type test
+    check("dbp/fifo-brief-denies-without-blocking",
+          _bounded(lambda: f.kind("orch-dispatch --brief " + str(fifo))), "deny")
+    unreadable = Path(f.brief("x\n", "unreadable.txt"))
+    unreadable.chmod(0)
+    # red when an open refused for permission passes; a privileged run opens a mode-0 file anyway, so the
+    # row is judged only where it can bite
+    got = f.kind("orch-dispatch --brief " + str(unreadable)) if os.geteuid() != 0 else "deny"
+    unreadable.chmod(0o644)
+    check("dbp/unreadable-brief-denies", got, "deny")
+    (f.briefs / "closed").mkdir()
+    (f.briefs / "closed" / "brief.txt").write_text("x\n", encoding="utf-8")
+    (f.briefs / "closed").chmod(0)
+    # red when a component the walk cannot examine (a directory without search permission) is not refused
+    # in place, naming that component: without the walk's refusal the open still fails for permission, so
+    # the verdict alone cannot tell; a privileged run searches it anyway, so the row is judged only where
+    # it can bite
+    closed_brief = str(f.briefs / "closed" / "brief.txt")
+    got = [f.kind("orch-dispatch --brief " + closed_brief),
+           "its component {} cannot be examined (".format(closed_brief) in _reason(
+               "orch-dispatch --brief " + closed_brief)] if os.geteuid() != 0 else ["deny", True]
+    (f.briefs / "closed").chmod(0o755)
+    check("dbp/unsearchable-component-denies", got, ["deny", True])
+    # red when a zero count of brief options is allowed
+    check("dbp/no-brief-argument-denies", [f.kind("orch-dispatch"), f.kind("orch-dispatch --other " + f.good),
+                                           f.kind("orch-dispatch --brief")], ["deny", "deny", "deny"])
+    other = f.brief("other\n", "other.txt")
+    # red when the exactly-one rule is removed (the abbreviation --brie counts as a brief)
+    check("dbp/two-briefs-denies", f.kind("orch-dispatch --brie " + other + " --brief " + f.good), "deny")
+    # red when the brief-last rule is removed
+    check("dbp/brief-not-last-denies", [f.kind("orch-dispatch --brief " + f.good + " --verbose"),
+                                        f.kind("orch-dispatch -- --brief " + f.good)], ["deny", "deny"])
+    # red when the short option's = form is accepted
+    check("dbp/short-option-equals-denies", f.kind("run-worker -b=" + f.good), "deny")
+    rel_ok = os.path.relpath(f.good, str(f.root))
+    rel_proc = os.path.relpath(other, os.getcwd())
+    # red when a relative brief is resolved against the hook process's cwd instead of the payload's
+    check("dbp/relative-brief-against-payload-cwd",
+          [f.kind("orch-dispatch --brief " + rel_ok),
+           f.kind("orch-dispatch --brief " + rel_proc) if not os.path.exists(
+               os.path.join(str(f.root), rel_proc)) else "deny"], ["allow", "deny"])
+    # red when the command word is matched with regard to case or without taking its basename
+    check("dbp/command-word-case-and-path", [f.kind("ORCH-DISPATCH --brief " + missing),
+                                             f.kind("/usr/local/bin/orch-dispatch --brief " + missing)],
+          ["deny", "deny"])
+    # red when a call that is not plain and names a declared command is allowed
+    check("dbp/compound-mention-denies", [f.kind("cp " + f.good + " " + missing + " && orch-dispatch --brief "
+                                                 + missing),
+                                          f.kind("true; ORCH-DISPATCH --brief " + missing),
+                                          f.kind("o'rch-dis'patch --brief " + missing),
+                                          f.kind("cat " + f.good + " | orch-dispatch --brief " + f.good)],
+          ["deny", "deny", "deny", "deny"])
+    # red when the hook refuses calls that name no declared command
+    check("dbp/unrelated-call-allowed", [f.kind("ls | wc -l"), f.kind("python3 -c 'print(1)'"),
+                                         f.kind("ls docs"), f.kind("cat orch-dispatch.log")],
+          ["allow", "allow", "allow", "allow"])
+    # red when a plain git or opf command naming a declared command is allowed (decided Q4)
+    check("dbp/git-opf-mention-denies", [f.kind("git -c alias.x='!orch-dispatch' x"),
+                                         f.kind("opf run orch-dispatch --brief " + f.good)], ["deny", "deny"])
+    # red when a malformed key reads as absent
+    bad = DbpFixture(base, "badkey")
+    got = []
+    for value in ({}, [], [dict(commands=["x"])], [dict(commands=["a"], brief_option="-a"),
+                                                   dict(commands=["A"], brief_option="-b")],
+                  [dict(commands=["a/b"], brief_option="-a")], [dict(commands=["a"], brief_option="x")],
+                  [dict(commands=["a"], brief_option="-a", extra=1)]):
+        bad.write_registry(value)
+        shutil.rmtree(str(bad.root / ".git" / "aiqt"), ignore_errors=True)
+        got.append(bad.kind("ls"))
+    check("dbp/malformed-key-withholds-every-call", got, ["unverifiable"] * 7)
+    # red when a registry that cannot be read reads as absent
+    ur = DbpFixture(base, "unreadable-registry", declaration=False)
+    reg_file = ur.root / ".aiqt" / "orchestration.local.json"
+    reg_file.write_text("{not json", encoding="utf-8")
+    got = [ur.kind("ls")]
+    reg_file.unlink()
+    reg_file.mkdir()
+    got.append(ur.kind("ls"))
+    check("dbp/unreadable-registry-withholds-every-call", got, ["unverifiable", "unverifiable"])
+    # red when the registry files are read as one, with the local file's whole-file precedence
+    lc = DbpFixture(base, "localcommitted", declaration=False)
+    lc.write_registry(lc.declaration, name="orchestration.json")
+    check("dbp/local-registry-cannot-hide-committed", lc.kind("orch-dispatch --brief " + missing), "deny")
+    # red when the committed file is not read once the local file declares the key: a conflicting option
+    # there withholds that dispatch (the other one still allowed), and a malformed committed file withholds
+    # every call
+    ld = DbpFixture(base, "localdeclares")
+    ld.write_registry([dict(commands=["orch-dispatch"], brief_option="-f")], name="orchestration.json")
+    ld_got = [ld.kind("orch-dispatch --brief " + ld.good), ld.kind("run-worker -b " + ld.good)]
+    lm = DbpFixture(base, "localdeclares-badcommitted")
+    (lm.root / ".aiqt" / "orchestration.json").write_text("{not json", encoding="utf-8")
+    ld_got.append(lm.kind("ls"))
+    check("dbp/local-declaration-cannot-hide-committed", ld_got, ["unverifiable", "allow", "unverifiable"])
+    # red when a command two registries in scope declare with different brief options is judged by one of
+    # them (an ancestor's registry and the repository's own)
+    co = DbpFixture(base, "conflict-outer", git=False)
+    co.write_registry([dict(commands=["orch-dispatch"], brief_option="-z")])
+    ci = DbpFixture(base / "conflict-outer", "inner")
+    check("dbp/conflicting-brief-options-withheld", [ci.kind("orch-dispatch --brief " + ci.good),
+                                                     ci.kind("orch-dispatch -z " + ci.good),
+                                                     ci.kind("run-worker -b " + ci.good)],
+          ["unverifiable", "unverifiable", "allow"])
+    # red when a declaration that cannot be recorded leaves the registry unguarded (the record directory's
+    # parent is a file, so the record cannot be written): every declared dispatch is withheld, other calls run
+    ur2 = DbpFixture(base, "unrecordable")
+    (ur2.root / ".git" / "aiqt").write_text("not a directory\n", encoding="utf-8")
+    check("dbp/unrecordable-declaration-withholds-dispatch", [ur2.kind("orch-dispatch --brief " + ur2.good),
+                                                              ur2.kind("ls")], ["unverifiable", "allow"])
+    # red when a record that cannot be used reads as no record: every Bash call is withheld
+    uu = DbpFixture(base, "unusable-record")
+    uu_first = uu.kind("orch-dispatch --brief " + uu.good)
+    record_dir = uu.root / ".git" / "aiqt" / "dispatch-brief-binding"
+    records = sorted(record_dir.iterdir())
+    for record in records:
+        record.write_text("garbage\n", encoding="utf-8")
+    check("dbp/unusable-record-withholds-every-call", [uu_first, len(records), uu.kind("ls")],
+          ["allow", 1, "unverifiable"])
+    # red when the record home git cannot name is passed over: every Bash call is withheld
+    nh = DbpFixture(base, "no-record-home")
+    saved_home = aiqt_hooks._rdp_record_home
+    aiqt_hooks._rdp_record_home = lambda _root: (None, None, "git cannot name the common git directory")
+    try:
+        nh_got = [nh.kind("ls"), nh.kind("orch-dispatch --brief " + nh.good)]
+    finally:
+        aiqt_hooks._rdp_record_home = saved_home
+    check("dbp/missing-record-home-withholds-every-call", nh_got, ["unverifiable", "unverifiable"])
+    # red when a linked worktree whose main worktree cannot be located (a separated git directory) is read
+    # as unscoped where no declaration is found
+    lw = DbpFixture(base, "linkedsep")
+    _rdp_git(lw.root, "commit", "-q", "--allow-empty", "-m", "seed")
+    _rdp_git(lw.root, "worktree", "add", "-q", "--detach", str(base / "linkedsep-beside"))
+    _rdp_git(lw.root, "init", "-q", "--separate-git-dir=" + str(base / "linkedsep-meta"))
+    subprocess.run(["git", "-C", str(lw.root), "worktree", "repair"], capture_output=True, timeout=30)
+    check("dbp/unlocatable-main-worktree-withholds-every-call",
+          [lw.kind("ls", cwd=base / "linkedsep-beside"),
+           lw.kind("orch-dispatch --brief " + missing, cwd=base / "linkedsep-beside")],
+          ["unverifiable", "unverifiable"])
+    # red when a decision past the budget is used, or when a check that never finishes is not withheld: the
+    # body is replaced by one that allows in time, late (past the deadline, inside the join grace), or never
+    saved_within, saved_budget = aiqt_hooks._dbp_decide_within, aiqt_hooks._RDP_BUDGET
+    grace = aiqt_hooks._RDP_JOIN_GRACE
+    payload = dict(hook_event_name="PreToolUse", tool_name="Bash", cwd=str(f.root), session_id="s1",
+                   tool_input=dict(command="ls"))
+    late = []
+    try:
+        aiqt_hooks._RDP_BUDGET = 1.0
+        for pause in (0.0, 1.0 + grace / 2, 1.0 + grace * 4):
+            aiqt_hooks._dbp_decide_within = (lambda p: lambda _data: (time.sleep(p), ("allow", ""))[1])(pause)
+            late.append(aiqt_hooks._dbp_decide(payload)[0])
+    finally:
+        aiqt_hooks._dbp_decide_within, aiqt_hooks._RDP_BUDGET = saved_within, saved_budget
+    check("dbp/late-or-unfinished-allow-withheld", late, ["allow", "unverifiable", "unverifiable"])
+    # red when the registries on the cwd's ancestors are not read
+    an = DbpFixture(base, "ancestor", git=False)
+    (an.root / "sub").mkdir()
+    check("dbp/ancestor-registry-scopes", an.kind("orch-dispatch --brief " + missing, cwd=an.root / "sub"),
+          "deny")
+    # red when the declaration record is not kept: a registry removed or rewritten in the session would
+    # switch the check off
+    rc = DbpFixture(base, "record")
+    first = rc.kind("orch-dispatch --brief " + rc.good)
+    (rc.root / ".aiqt" / "orchestration.local.json").unlink()
+    removed = [rc.kind("orch-dispatch --brief " + rc.good), rc.kind("ls")]
+    rc.write_registry([dict(commands=["other-dispatch"], brief_option="--brief")])
+    rewritten = rc.kind("orch-dispatch --brief " + missing)
+    check("dbp/record-keeps-check-after-registry-change", [first] + removed + [rewritten],
+          ["allow", "unverifiable", "allow", "unverifiable"])
+    # red when the record compares the meaning instead of the digest of the merged form: a second file that
+    # starts to declare the key, the same declaration with an entry of two commands, is the documented
+    # fail-closed drift (ORCHESTRATION.md, the manifest residue), and removing the record clears it; the
+    # control is the fixture's declaration of one command per entry, whose two forms are the same, so a
+    # second file declaring it is no drift
+    fc = DbpFixture(base, "formchange", declaration=False)
+    fc.write_registry([dict(commands=["orch-dispatch", "run-worker"], brief_option="--brief")])
+    fc_got = [fc.kind("orch-dispatch --brief " + fc.good)]
+    fc.write_registry([dict(commands=["orch-dispatch", "run-worker"], brief_option="--brief")],
+                      name="orchestration.json")
+    fc_got.append(fc.kind("orch-dispatch --brief " + fc.good))
+    shutil.rmtree(str(fc.root / ".git" / "aiqt" / "dispatch-brief-binding"), ignore_errors=True)
+    fc_got.append(fc.kind("orch-dispatch --brief " + fc.good))
+    fs = DbpFixture(base, "formsame")
+    fc_got.append(fs.kind("orch-dispatch --brief " + fs.good))
+    fs.write_registry(fs.declaration, name="orchestration.json")
+    fc_got.append(fs.kind("orch-dispatch --brief " + fs.good))
+    check("dbp/declaring-file-count-change-is-drift", fc_got, ["allow", "unverifiable", "allow", "allow", "allow"])
+    # red when registry-required mode is not honoured
+    env = aiqt_hooks._ORCH_REQUIRE_REGISTRY_ENV
+    saved = os.environ.get(env)
+    os.environ[env] = "1"
+    try:
+        got = [bare.kind("ls"), nk.kind("ls")]
+    finally:
+        if saved is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = saved
+    check("dbp/registry-required-mode-denies-absent", got, ["deny", "allow"])
+    # red when the /proc and /dev rule is removed, or reads only the normalized path (a link into /dev)
+    os.symlink("/dev/null", str(f.briefs / "devlink"))
+    check("dbp/proc-dev-brief-withheld", [f.kind("orch-dispatch --brief /dev/null"),
+                                          f.kind("orch-dispatch --brief " + str(f.briefs / "devlink"))],
+          ["unverifiable", "unverifiable"])
+    # red when the shared payload contracts are skipped
+    check("dbp/shared-contracts", [bare.kind("ls\x00orch-dispatch"), bare.kind("ls", tool_name=None),
+                                   f.kind("x", tool_name="Write")], ["unverifiable", "deny", "allow"])
+
+
 def _rdp_cases(tmp):
     """The review dispatch pin vectors (rdp/*). Each fixture is a throwaway repo under tmp."""
     base = tmp / "rdp"
@@ -6834,6 +7196,23 @@ def _rdp_scope_cases(base, plain):
     (rg.root / ".aiqt" / "orchestration.json").write_text(json.dumps(reg), encoding="utf-8")
     local.write_text(json.dumps(dict(version=1, state_dir=str(rg.briefs / "state"))), encoding="utf-8")
     check("rdp/bindingless-local-registry-cannot-hide-committed-binding", _rdp_kind(rg.dispatch(rg_bad)), "deny")
+    # red when the scope returns the first file that binds: a local binding then hides a committed file that
+    # binds differently, is malformed or cannot be read. Each is withheld; the same binding in both files is
+    # one binding. The record is cleared before each, so the scope itself is judged, not a drift.
+    lb = RdpFixture(base, "localbinds")
+    lb_good = lb.good()
+    lb_committed = lb.root / ".aiqt" / "orchestration.json"
+    lb_got = []
+    for committed in (dict(version=1, state_dir=str(lb.briefs / "state"), review_dispatch=lb.binding),
+                      dict(version=1, state_dir=str(lb.briefs / "state"),
+                           review_dispatch=dict(lb.binding, brief_option="--plan")),
+                      dict(version=1, state_dir=str(lb.briefs / "state"), review_dispatch={}),
+                      None):
+        lb_committed.write_text("{not json" if committed is None else json.dumps(committed), encoding="utf-8")
+        shutil.rmtree(str(lb.root / ".git" / "aiqt" / "review-dispatch-binding"), ignore_errors=True)
+        lb_got.append([_rdp_kind(lb.dispatch(lb_good)), _rdp_kind(lb.run("ls"))])
+    check("rdp/local-binding-cannot-hide-committed", lb_got,
+          [["allow", "allow"]] + [["unverifiable", "unverifiable"]] * 3)
     # The .aiqt directory named without its plain name: a value glued to a short option (alone or in a
     # group), a quoted glob git expands itself, a pathspec after its magic, a subdirectory entered with -C
     # while another word climbs with .., and a .. resolved against a cwd inside .aiqt. Other .aiqt paths,
@@ -26817,6 +27196,7 @@ def _main_isolated(report_path=None):
         _leasehb_write_integrity_cases(tmp)
         _leasehb_status_and_parse_cases(tmp)
         _rdp_cases(tmp)
+        _dbp_cases(tmp)
         pinned = _cite_pin_state(tmp)
         try:
             _citeledger_cases(tmp)
