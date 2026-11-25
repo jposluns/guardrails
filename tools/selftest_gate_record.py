@@ -67,6 +67,19 @@ Rows (the plan's section 7.2; exit 0 pass, 1 refused, 2 cannot evaluate):
   I1-I6  the installer: install and re-run, core.hooksPath set, a symbolic-link hooks directory, a foreign
          pre-commit, the OPF pre-commit stub (refused, with the manual chaining step: orchestrator answer O1),
          and a missing configuration.
+  H1-H30 the hand-back record (rule vfxcmt, gate-record handback apply|status|clear and the handback-staged
+         mode): off (also the absent key) reads nothing; the record holds git's change set with rename
+         detection off (a copy's source left out); a scoped stage, an unstaged rename source or deletion and
+         git commit -- PATHS are refused, naming the path; the commit after the hand-back's commit (or an amend
+         of it) is still judged and keeps the record, an amend that drops a path is refused, and the record is
+         retired only on top of a committed child; a --no-verify commit is refused at the next commit, an
+         amend passes; recorded mode notes a missing record; a missing, unreadable, malformed, applying or
+         stale record cannot evaluate in required mode and is a note in recorded mode; an invalid mode, and an
+         orphan that changes only the mode, are refused; the apply refuses an unreadable patch (by its own
+         pre-check), a census that disagrees with git, an oversize patch, a second record and an already staged
+         path, keeps no record when git apply fails, leaves an applying record when the index after the apply
+         disagrees, records and applies the file's bytes as read once and writes a linked worktree's record in its own git
+         directory; the stubs are unchanged. Each has its flip.
 Each refusal row has a flip: the same fixture without the stubs (or without the refusing condition), where git
 accepts the commit, merge or push (or the installer installs), so a refusal that never fires fails the row.
 
@@ -87,6 +100,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import hashlib
 import json
 import os
 import shutil
@@ -1287,6 +1301,433 @@ def rows_install(base):
     check("I6/flip-config-installs", gate(repo, "install").returncode, 0)
 
 
+# --- the hand-back record (rule vfxcmt) ----------------------------------------------------------------------
+HB_EXPECTED = [{"path": "bin.dat", "expect": "present"}, {"path": "copy.txt", "expect": "present"},
+               {"path": "docs/x.md", "expect": "present"}, {"path": "gone.txt", "expect": "absent"},
+               {"path": "mode.sh", "expect": "present"}, {"path": "new.txt", "expect": "present"},
+               {"path": "old.txt", "expect": "absent"}, {"path": "sp ace*.txt", "expect": "present"},
+               {"path": "src/y.txt", "expect": "present"}]
+FIVE = "".join("line {}\n".format(n) for n in range(1, 6))
+
+
+def hb(repo, *args, extra=None):
+    return gate(repo, "handback", *args, extra=extra)
+
+
+def hb_record_path(repo):
+    return Path(repo) / ".git" / "aiqt" / "handback-record.json"
+
+
+def hb_record(repo):
+    path = hb_record_path(repo)
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def hb_put(repo, data):
+    """Replace the record with data (bytes), mode 0600, as a same-user edit would."""
+    path = hb_record_path(repo)
+    if path.is_symlink() or path.exists():
+        path.unlink()
+    path.write_bytes(data)
+    os.chmod(path, 0o600)
+
+
+def hb_edit(repo, **changes):
+    record = hb_record(repo)
+    record.update(changes)
+    hb_put(repo, json.dumps(record, indent=1).encode("utf-8"))
+
+
+def hb_config(mode):
+    return CONFIG.replace('pre-push = "full"\n', 'pre-push = "full"\nhandback-staged = "{}"\n'.format(mode))
+
+
+def hb_bases(base):
+    """(recorded, required, off, bad, absent): bases holding the hand-back fixture files, with HEAD's
+    configuration setting the key to recorded, required, off or an invalid value, or leaving it out (off, the
+    default)."""
+    work = fixture(base, installed=False)
+    write(work, "src/y.txt", "y\n")
+    write(work, "old.txt", FIVE)
+    write(work, "keep.txt", FIVE.replace("line", "keep"))
+    write(work, "gone.txt", "gone\n")
+    write(work, "mode.sh", "#!/bin/sh\n")
+    git_out(work, "add", "-A")
+    git_out(work, "commit", "-q", "-m", "hand-back fixture files")
+    out = []
+    for mode in ("recorded", "required", "off", "maybe"):
+        other = fixture(work, installed=False)
+        write(other, ".aiqt/gate-record.toml", hb_config(mode))
+        git_out(other, "add", "-A")
+        git_out(other, "commit", "-q", "-m", "handback-staged = " + mode)
+        out.append(other)
+    return out + [work]
+
+
+# The gate-record stubs as main fd3b9c61 writes them, for fixed program paths: the hand-back check runs
+# through the stubs unchanged (H20).
+HB_STUB_TOOLS = {"git": "/usr/bin/git", "python": "/usr/bin/python3", "mktemp": "/usr/bin/mktemp",
+                 "timeout": "/usr/bin/timeout"}
+HB_STUB_SHA256 = {"pre-commit": "e3bba6d4dfded086c6fe3ac0638a3c0438f2b19349db9ec638757357fd265ba4",
+                  "pre-merge-commit": "603d769dc28de22d53af622dd5acfcad8e8d07a7a7a7f5ed9fce0054843dfdc7",
+                  "pre-push": "594f2bd136f1accc9a8f76a8d1962dcfee90e62b38496f9f2dc80309582fec30"}
+
+
+HB_WIDEN_CENSUS = ("real = h._rdp_draft_paths; "
+                   "h._rdp_draft_paths = lambda text: ((real(text)[0] or set()) | {'extra.txt'}, None)")
+HB_INDEX_APPLY_NOOP = ("import subprocess; real = h._gr_git_done; h._gr_git_done = lambda env, args, cwd=None, "
+                       "data=None: subprocess.CompletedProcess(args, 0, b'', b'') if '--index' in args else "
+                       "real(env, args, cwd=cwd, data=data)")
+# Before the first git apply runs, the patch file is replaced with another hand-back, as a same-user rewrite
+# between the apply's read of the file and git's would (H30).
+HB_REWRITE_BEFORE_APPLY = """real = h._gr_git_done
+def rewrite(env, args, cwd=None, data=None):
+    if "apply" in args and "--cached" in args:
+        with open({patch!r}, "wb") as handle:
+            handle.write({other!r})
+    return real(env, args, cwd=cwd, data=data)
+h._gr_git_done = rewrite"""
+
+
+def hb_forced(repo, patch, prelude):
+    """gate-record handback apply run in a child interpreter on the fixture's verifier after prelude (Python
+    run with the verifier imported as h), to reach a state no well-formed patch reaches: HB_WIDEN_CENSUS makes
+    the census and git's reading of the patch disagree, so the call site of the equality check is what refuses
+    (H16); HB_INDEX_APPLY_NOOP makes git apply --index report success without applying, so the index after it
+    does not hold git's reading (H27); HB_REWRITE_BEFORE_APPLY rewrites the patch file before git applies (H30)."""
+    code = ("import sys\nsys.path.insert(0, {lib!r})\nimport aiqt_hooks as h\n{prelude}\n"
+            "sys.exit(h.gate_record_main(['handback', 'apply', {patch!r}]))\n").format(
+                lib=str(Path(repo) / Path(HOOKS_REL).parent), prelude=prelude, patch=str(patch))
+    return subprocess.run([sys.executable, "-I", "-B", "-c", code], cwd=str(repo), env=fixture_env(),
+                          capture_output=True, text=True, timeout=300, check=False)
+
+
+def hb_patch(rec):
+    """The class hand-back: a modify, a create (one in a new directory, one with a space and a glob character),
+    a delete, a rename, a copy, a mode-only change and a binary creation, written as a worker writes it."""
+    work = fixture(rec, installed=False)
+    write(work, "src/y.txt", "y2\n")
+    write(work, "docs/x.md", "x\n")
+    write(work, "sp ace*.txt", "literal\n")
+    os.unlink(work / "gone.txt")
+    git_out(work, "mv", "old.txt", "new.txt")
+    write(work, "copy.txt", FIVE.replace("line", "keep"))
+    os.chmod(work / "mode.sh", 0o755)
+    (work / "bin.dat").write_bytes(b"\x00\x01\x02binary\x00")
+    git_out(work, "add", "-A")
+    text = git(work, "diff", "--cached", "--binary", "-M", "-C", "--find-copies-harder").stdout
+    patch = TMP / "handback.diff"
+    patch.write_text(text, encoding="utf-8")
+    second = TMP / "second.diff"
+    second.write_text("diff --git a/third.txt b/third.txt\nnew file mode 100644\n--- /dev/null\n+++ b/third.txt\n@@ -0,0 +1 @@\n+third\n", encoding="utf-8")
+    return patch, second
+
+
+def hb_applied(rec, patch, installed=True):
+    repo = fixture(rec, installed)
+    done = hb(repo, "apply", str(patch))
+    if done.returncode != 0:
+        raise RuntimeError("fixture hand-back apply failed: " + done.stderr.strip())
+    return repo
+
+
+def hb_verify(repo, gate_first=True):
+    """(exit, stderr) of the pre-commit verifier on the current index, after a passing gate record when the
+    working tree allows one, so the hand-back check's own outcome decides."""
+    if gate_first:
+        gate(repo, "run")
+    done = gate(repo, "verify-commit")
+    return done.returncode, done.stderr
+
+
+def rows_handback(base):
+    rec, req, off, bad, absent = hb_bases(base)
+    patch, second = hb_patch(rec)
+    # H2/H6: the record holds exactly git's own change set, rename detection off; a copy's source is not in it.
+    repo = fixture(rec)
+    before = (repo / ".git" / "index").read_bytes()
+    done = hb(repo, "apply", str(patch))
+    record = hb_record(repo)
+    check("H2/apply-exit", done.returncode, 0)
+    check("H2/record-paths", record and record["paths"], HB_EXPECTED)
+    check("H2/record-state", record and (record["format"], record["state"], record["head"], list(record)),
+          ("aiqt-handback-record/1", "applied", head(repo),
+           ["format", "state", "object_format", "head", "patch", "paths", "applied_at"]))
+    check("H2/index-applied", ((repo / ".git" / "index").read_bytes() != before, (repo / "new.txt").exists(),
+                               (repo / "old.txt").exists()), (True, True, False))
+    check("H6/copy-source-not-recorded", "keep.txt" in [e["path"] for e in record["paths"]], False)
+    # H3: the class reproduction: a scoped stage that leaves a recorded path out is refused, naming it.
+    git_out(repo, "reset", "-q", "--", "docs/x.md")
+    rc, err = hb_verify(repo, gate_first=False)
+    check("H3/scoped-stage-refused", (rc, "aiqt handback: commit refused" in err, "docs/x.md: not staged" in err),
+          (1, True, True))
+    git_out(repo, "add", "-A", "--", "docs/x.md")
+    rc, err = hb_verify(repo)
+    check("H3/flip-staged-passes", (rc, "aiqt handback" in err), (0, False))
+    # H12: the commit lands; the next commit (which could be an amend of it) passes and keeps the record; the
+    # commit after that, on top of a committed child of the hand-back's commit, retires it.
+    before = head(repo)
+    check("H12/handback-commit", commit(repo, "the hand-back").returncode, 0)
+    stage(repo, "c.txt", "c\n")
+    gate(repo, "run")
+    done = commit(repo, "after the hand-back")
+    check("H12/next-commit-keeps-record", (done.returncode, hb_record(repo) is not None, "retired" in done.stderr),
+          (0, True, False))
+    stage(repo, "d.txt", "d\n")
+    gate(repo, "run")
+    done = commit(repo, "on top of the child")
+    check("H12/landed-retired", (done.returncode, hb_record(repo), "retired" in done.stderr), (0, None, True))
+    check("H12/landed-first-parent", git_out(repo, "rev-parse", "HEAD~3"), before)
+    # H24: an amend of the landed hand-back's commit that drops a recorded path is refused in recorded mode and
+    # keeps the record; a message-only amend passes and keeps it; in required mode that amend cannot evaluate
+    # and the record is kept (never removed by a commit that is refused).
+    got = []
+    for config in (rec, req):
+        repo = hb_applied(config, patch)
+        gate(repo, "run")
+        landed = commit(repo, "the hand-back")
+        git_out(repo, "rm", "-q", "--cached", "--", "docs/x.md")
+        os.unlink(repo / "docs" / "x.md")
+        gate(repo, "run")
+        before = head(repo)
+        dropped = commit(repo, "the hand-back, amended", "--amend")
+        after_drop = (head(repo) == before, hb_record(repo) is not None)
+        git_out(repo, "checkout", "-q", before, "--", "docs/x.md")
+        gate(repo, "run")
+        kept = commit(repo, "the hand-back, reworded", "--amend")
+        got.append((landed.returncode, dropped.returncode != 0, after_drop,
+                    "docs/x.md: not staged" in dropped.stderr, kept.returncode, "already landed" in kept.stderr, hb_record(repo) is not None))
+    check("H24/amend-drop-refused", got[0][:4], (0, True, (True, True), True))
+    check("H24/flip-message-amend-passes", got[0][4:], (0, False, True))
+    check("H24/required-amend-keeps-record", got[1][4:], (1, True, True))
+    # H4/H5: an unstaged rename source and an unstaged deletion are refused; staged, they pass.
+    repo = hb_applied(rec, patch)
+    git_out(repo, "reset", "-q", "--", "old.txt", "gone.txt")
+    rc, err = hb_verify(repo, gate_first=False)
+    check("H4/rename-source-required", (rc, "old.txt: deletion not staged" in err), (1, True))
+    check("H5/deletion-required", (rc, "gone.txt: deletion not staged" in err), (1, True))
+    git_out(repo, "add", "-A", "--", "old.txt", "gone.txt")
+    rc, err = hb_verify(repo)
+    check("H4-H5/flip-staged-passes", (rc, "aiqt handback" in err), (0, False))
+    # H7: git commit -- PATHS is read through its temporary index (GIT_INDEX_FILE kept).
+    before = head(repo)
+    done = git(repo, "commit", "-q", "-m", "scoped", "--", "src/y.txt")
+    check("H7/pathspec-commit-refused", (done.returncode != 0, head(repo) == before,
+                                         "docs/x.md: not staged" in done.stderr), (True, True, True))
+    # H13: a deficient commit made with --no-verify is refused at the next commit; an amend that stages it passes.
+    repo = hb_applied(rec, patch)
+    git_out(repo, "reset", "-q", "--", "docs/x.md")
+    landed = commit(repo, "deficient", "--no-verify")
+    rc, err = hb_verify(repo, gate_first=False)
+    check("H13/no-verify-caught-next", (landed.returncode, rc, "which the hand-back was committed in" in err,
+                                        "docs/x.md: not staged" in err), (0, 1, True, True))
+    git_out(repo, "add", "-A", "--", "docs/x.md")
+    rc, err = hb_verify(repo, gate_first=False)
+    check("H13/flip-amend-passes", "aiqt handback" in err, False)
+    # H14: required with no record cannot evaluate; recorded with no record passes, makes no claim and says so
+    # in a note; with the key absent (off, the default) an unstaged recorded path passes and nothing is printed.
+    got = []
+    for config in (req, rec):
+        repo = fixture(config)
+        stage(repo, "b.txt", "b\n")
+        rc, err = hb_verify(repo)
+        got.append((rc, "missing: no hand-back record" in err, "note: no hand-back record exists" in err))
+    check("H14/required-missing", got[0][:2], (2, True))
+    check("H14/flip-recorded-no-record", got[1][:2], (0, False))
+    check("H14/recorded-no-record-note", got[1][2], True)
+    repo = hb_applied(absent, patch)
+    git_out(repo, "rm", "-q", "--cached", "--", "docs/x.md")
+    os.unlink(repo / "docs" / "x.md")
+    rc, err = hb_verify(repo)
+    check("H21/absent-key-off", (rc, "aiqt handback" in err), (0, False))
+    # H8-H11: a record the verifier cannot use: a cannot-evaluate in required mode, a note in recorded mode.
+    for name, kind, damage in (
+        ("H8/unreadable-symlink", "unreadable", "symlink"),
+        ("H8/unreadable-non-utf8", "unreadable", b"\xff\xfe{}"),
+        ("H8/unreadable-group-writable", "unreadable", "mode"),
+        ("H9/malformed-json", "malformed", b"{\"format\": "),
+        ("H9/malformed-extra-key", "malformed", {"extra": 1}),
+        ("H9/malformed-unsorted", "malformed", {"paths": [{"path": "z", "expect": "present"},
+                                                          {"path": "a", "expect": "present"}]}),
+        ("H9/malformed-empty-paths", "malformed", {"paths": []}),
+        ("H9/malformed-state", "malformed", {"state": "done"}),
+        ("H10/record-applying", "incomplete", {"state": "applying"}),
+        ("H11/stale-record", "stale", {"head": "0" * 40}),
+        ("H11/stale-object-format", "stale", {"object_format": "sha256"}),
+    ):
+        got = []
+        for config in (req, rec):
+            repo = hb_applied(config, patch)
+            path = hb_record_path(repo)
+            if damage == "symlink":
+                saved = path.with_name("saved.json")
+                path.rename(saved)
+                os.symlink(saved, path)
+            elif damage == "mode":
+                os.chmod(path, 0o666)
+            elif isinstance(damage, bytes):
+                hb_put(repo, damage)
+            else:
+                hb_edit(repo, **damage)
+            rc, err = hb_verify(repo)
+            got.append((rc, (kind + ":") in err, "note:" in err))
+        check(name, got, [(2, True, False), (0, True, True)])
+    # H11 flip: restoring the record's real head makes it usable again (required mode passes).
+    repo = hb_applied(req, patch)
+    real = hb_record(repo)["head"]
+    hb_edit(repo, head="0" * 40)
+    hb_edit(repo, head=real)
+    check("H11/flip-real-head-passes", hb_verify(repo)[0], 0)
+    # H1: off reads nothing: a malformed record and an unstaged recorded path still pass; required refuses them.
+    got = []
+    for config in (off, req):
+        repo = hb_applied(config, patch)
+        git_out(repo, "rm", "-q", "--cached", "--", "docs/x.md")
+        os.unlink(repo / "docs" / "x.md")
+        rc, err = hb_verify(repo)
+        got.append((rc, "aiqt handback" in err))
+        hb_put(repo, b"not json")
+        rc, err = hb_verify(repo)
+        got.append((rc, "aiqt handback" in err))
+    check("H1/off-inert", got, [(0, False), (0, False), (1, True), (2, True)])
+    # H19: a handback-staged value outside off, recorded and required cannot evaluate, for the verifier and the
+    # recorder alike; the flip is every other row (a valid value, or none).
+    repo = fixture(bad)
+    stage(repo, "b.txt", "b\n")
+    run = gate(repo, "run")
+    done = gate(repo, "verify-commit")
+    check("H19/config-key-invalid", (run.returncode, done.returncode, "handback-staged must be one of" in done.stderr),
+          (2, 2, True))
+    # H29: an orphan branch whose configuration differs from the default branch's only in the handback-staged
+    # mode sets its own bar and is refused; the flip, an orphan keeping the mode, passes.
+    got = []
+    for config_text in (hb_config("off"), None):
+        repo = fixture(rec)
+        git_out(repo, "checkout", "-q", "--orphan", "h29")
+        if config_text is not None:
+            stage(repo, ".aiqt/gate-record.toml", config_text)
+        gate(repo, "run")
+        done = gate(repo, "verify-commit")
+        got.append((done.returncode, "own bar" in done.stderr))
+    check("H29/orphan-mode-only-refused", got[0], (1, True))
+    check("H29/flip-orphan-same-mode", got[1], (0, False))
+    # H15: a patch the census cannot read is refused before anything is applied or recorded, by the pre-check
+    # the row names (its reason is in the refusal, so a removed pre-check that git apply backs up still fails
+    # the row).
+    text = patch.read_text(encoding="utf-8")
+    cut = text[:text.index("+x\n")]
+    for name, data, reason in (
+        ("H15/cut-inside-hunk", cut.encode("utf-8"), "cannot be read as a git diff"),
+        ("H15/prose-only", b"Please create docs/x.md with the text x.\n", "names no file in a diff header"),
+        ("H15/crlf", text.replace("\n", "\r\n").encode("utf-8"), "cannot be read as a git diff"),
+        ("H15/non-utf8", text.encode("utf-8") + b"\xff\n", "is not valid UTF-8"),
+        ("H15/symlink", None, "cannot be opened"),
+    ):
+        repo = fixture(rec)
+        bad_patch = TMP / (name.replace("/", "-") + ".diff")
+        if data is None:
+            os.symlink(patch, bad_patch)
+        else:
+            bad_patch.write_bytes(data)
+        before = (repo / ".git" / "index").read_bytes()
+        done = hb(repo, "apply", str(bad_patch))
+        check(name, (done.returncode, hb_record(repo), (repo / ".git" / "index").read_bytes() == before,
+                     (repo / "docs" / "x.md").exists(), reason in done.stderr), (2, None, True, False, True))
+    # H16: the census and git's reading are compared for equality (in process, on the hook library imported as
+    # tools/orch_doctor.py imports it: no well-formed patch found makes the two readers disagree); the apply's
+    # call of that comparison is held by a run whose census is widened by one path (hb_forced).
+    sys.path.insert(0, str(HOOKS_SRC.parent))
+    import aiqt_hooks
+    check("H16/census-git-disagree", (aiqt_hooks._hb_census_problem({"a"}, {"a": "M", "b": "A"}) is not None,
+                                      aiqt_hooks._hb_census_problem({"a", "b"}, {"a": "M"}) is not None,
+                                      aiqt_hooks._hb_census_problem({"a", "b"}, {"a": "M", "b": "D"})),
+          (True, True, None))
+    repo = fixture(rec)
+    done = hb_forced(repo, patch, HB_WIDEN_CENSUS)
+    check("H16/apply-call-refuses", (done.returncode, "disagree" in done.stderr, hb_record(repo),
+                                     (repo / "docs" / "x.md").exists()), (2, True, None, False))
+    # H27: an index that after git apply --index does not hold git's reading of the patch leaves the record in
+    # the applying state (which every commit then reports as incomplete, H10).
+    repo = fixture(rec)
+    done = hb_forced(repo, patch, HB_INDEX_APPLY_NOOP)
+    check("H27/post-apply-mismatch-applying", (done.returncode, "applying state" in done.stderr,
+                                               (hb_record(repo) or {}).get("state")), (2, True, "applying"))
+    # H28: in a linked worktree the record is written to that worktree's git directory, never the common one.
+    repo = fixture(rec)
+    linked = TMP / "linked-{:03d}".format(_COUNTER[0])
+    git_out(repo, "worktree", "add", "-q", "--detach", str(linked))
+    done = hb(linked, "apply", str(patch))
+    own = Path(repo) / ".git" / "worktrees" / linked.name / "aiqt" / "handback-record.json"
+    check("H28/linked-worktree-record", (done.returncode, own.exists(), hb_record_path(repo).exists()),
+          (0, True, False))
+    # H2: the status read pins rename detection off on its own command line (git diff-index plumbing detects
+    # no rename without -M, so no fixture tells the pin from its absence; the row holds the pin).
+    check("H2/no-renames-pinned", "--no-renames" in aiqt_hooks._HB_STATUS_ARGS, True)
+    # H20: the hand-back check runs through the gate-record stubs unchanged from main fd3b9c61.
+    check("H20/stub-unchanged", {hook: hashlib.sha256(aiqt_hooks._gr_stub(hook, tools=HB_STUB_TOOLS).encode(
+        "utf-8")).hexdigest() for hook in HB_STUB_SHA256}, HB_STUB_SHA256)
+    # H25: the record's patch identity is the sha256 and size of the file's own bytes, a byte-order mark
+    # included, and those bytes are what git applies.
+    marked = TMP / "marked.diff"
+    marked.write_bytes(b"\xef\xbb\xbf" + second.read_bytes())
+    repo = fixture(rec)
+    done = hb(repo, "apply", str(marked))
+    record = hb_record(repo)
+    check("H25/patch-identity-file-bytes", (done.returncode, record and record["patch"]["sha256"],
+                                            record and record["patch"]["bytes"]),
+          (0, hashlib.sha256(marked.read_bytes()).hexdigest(), marked.stat().st_size))
+    # H30: the patch is read once: a rewrite of the file after that read changes neither what git applies nor
+    # what is recorded (git reads the bytes the apply read, on stdin).
+    reread = TMP / "reread.diff"
+    reread.write_bytes(patch.read_bytes())
+    original = hashlib.sha256(reread.read_bytes()).hexdigest()
+    repo = fixture(rec)
+    done = hb_forced(repo, reread, HB_REWRITE_BEFORE_APPLY.format(patch=str(reread), other=second.read_bytes()))
+    record = hb_record(repo)
+    check("H30/patch-read-once", (done.returncode, record and record["paths"], record and record["patch"]["sha256"],
+                                  (repo / "third.txt").exists(), reread.read_bytes() == second.read_bytes()),
+          (0, HB_EXPECTED, original, False, True))
+    # H26: a patch over the hand-back limit is refused in the hand-back's own words, nothing recorded.
+    big = TMP / "big.diff"
+    with open(big, "wb") as handle:
+        handle.truncate(aiqt_hooks._HB_PATCH_MAX + 1)
+    repo = fixture(rec)
+    done = hb(repo, "apply", str(big))
+    check("H26/oversize-wording", (done.returncode, "hand-back patch limit" in done.stderr,
+                                   "max_brief_bytes" in done.stderr, hb_record(repo)), (2, True, False, None))
+    # H17: a second hand-back is refused while a record is outstanding; after clear it applies.
+    repo = hb_applied(rec, patch)
+    done = hb(repo, "apply", str(second))
+    check("H17/second-record-refused", (done.returncode, "outstanding" in done.stderr, (repo / "third.txt").exists()),
+          (1, True, False))
+    shown = hb(repo, "status")
+    check("H17/status-prints", (shown.returncode, '"docs/x.md"' in shown.stdout), (0, True))
+    cleared = hb(repo, "clear")
+    check("H17/clear-removes", (cleared.returncode, hb_record(repo)), (0, None))
+    git_out(repo, "commit", "-q", "--no-verify", "-m", "the first hand-back")
+    check("H17/flip-after-clear-applies", hb(repo, "apply", str(second)).returncode, 0)
+    # H23: status cannot evaluate an unreadable record; clear removes it (the way out of one).
+    hb_put(repo, b"junk")
+    shown = hb(repo, "status")
+    cleared = hb(repo, "clear")
+    check("H23/unreadable-status-clear", (shown.returncode, cleared.returncode, hb_record_path(repo).exists()),
+          (2, 0, False))
+    # H18: a path the hand-back changes that is already staged is refused, nothing applied; unstaged, it applies.
+    repo = fixture(rec)
+    stage(repo, "src/y.txt", "staged first\n")
+    done = hb(repo, "apply", str(patch))
+    check("H18/staged-path-refused", (done.returncode, "already staged" in done.stderr, hb_record(repo),
+                                      (repo / "docs" / "x.md").exists()), (1, True, None, False))
+    # H22: git apply --index failing (the working tree differs from the index on a patched path) keeps no
+    # record and applies nothing.
+    git_out(repo, "reset", "-q", "--", "src/y.txt")
+    done = hb(repo, "apply", str(patch))
+    check("H22/apply-fails-no-record", (done.returncode, hb_record(repo), (repo / "docs" / "x.md").exists()),
+          (1, None, False))
+    git_out(repo, "checkout", "--", "src/y.txt")
+    check("H18-H22/flip-clean-applies", hb(repo, "apply", str(patch)).returncode, 0)
+
+
 def _expected_check_ids():
     import tomllib
     data = None
@@ -1316,6 +1757,7 @@ def run_checks():
         rows_verify(base)
         rows_class(base)
         rows_install(base)
+        rows_handback(base)
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
         # The fixture HOME _git_fixture_env made for this process: its atexit removal never runs here, since

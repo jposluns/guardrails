@@ -957,7 +957,7 @@
           "default": "block",
           "id": "renderers-drift",
           "platform": "ci",
-          "residue": "A byte-identity drift gate over the renderer/generator declaration rendered from each adapter generator's statically parsed RENDERER_DECL and GENSRC_OUTPUTS plus its computed pack-local import closure and framed code digest. It proves the declaration matches the code as bytes; it does not judge whether a semantics-revision bump is honest, and the obligation-altering versus byte-only classification of a renderer change remains a human disposition at the release delta gate. The closure is computed from statically parsed imports, so a truly dynamic pack-local import is out of scope and disclosed at the tool.",
+          "residue": "A byte-identity drift gate over the renderer/generator declaration rendered from each adapter generator's statically parsed RENDERER_DECL and GENSRC_OUTPUTS plus its computed pack-local import closure and framed code digest. It proves the declaration matches the code as bytes; it does not judge whether a semantics-revision bump is honest, and the obligation-altering versus byte-only classification of a renderer change remains a human disposition at the release delta gate. A declared semantics-revision below the renderer's floor in SEMANTICS_FLOORS (agents and adapters 2) is exit 2, so a revision bump reverted on its own is refused; the floors are kept in the same file, so one change that lowers a floor together with the revision passes, and only review sees that. The closure is computed from statically parsed imports, so a truly dynamic pack-local import is out of scope and disclosed at the tool.",
           "script": "tools/gen_renderers.py"
         },
         {
@@ -2384,7 +2384,21 @@
       "corpus-id": "vfxcmt",
       "family": "aiqt",
       "gates": [],
-      "githooks": [],
+      "githooks": [
+        {
+          "class": "c",
+          "default": "block",
+          "entry": "python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record verify-commit (the gate-record stub, unchanged), run from HEAD's committed copy, in the mode HEAD's .aiqt/gate-record.toml sets with handback-staged (off, recorded or required; off when absent); the record is written by gate-record handback apply PATCH",
+          "events": [
+            "pre-commit",
+            "pre-merge-commit"
+          ],
+          "id": "handback-staged",
+          "install": "python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record install",
+          "platform": "git",
+          "residue": "Runs only where gate-record is installed and only on a commit whose HEAD holds the verifier with this check. A commit that runs no pre-commit hook (git commit --no-verify, a clone with no stub, core.hooksPath, plumbing, cherry-pick, revert, rebase or am) is not checked; its record stays, and the next checked commit on top of it refuses unless it stages every recorded path, which also lets a fix-up commit on top of a deficient one pass as an amend would. While HEAD is the hand-back's commit, the next commit (an amend of it or a commit on top of it, which the hook cannot tell apart) is judged against the record's head and keeps the record; the record is retired by the first checked commit whose HEAD is a commit on top of the hand-back's commit and stages every recorded path, and after that a commit made by resetting back to the hand-back's commit (git reset, then git commit --amend or a new commit) is not checked. The last commit before a push, and a record cleared or deleted after such a commit, are never checked; pre-push and CI cannot see the local record. The check compares paths, not content, so git add -p partial staging, a hunk reverted after the apply or a trimmed patch is not caught. An apply made without gate-record handback apply (git apply, git am, an editor) writes no record: recorded mode prints a note and makes no claim, and required mode cannot evaluate. In recorded mode a record that is unreadable, malformed, still applying or stale prints a note and makes no claim; in required mode each is a cannot-evaluate, and so is a commit made while HEAD is the hand-back's commit that already stages every recorded path (an amend of it included), since it has no hand-back of its own. With the key absent the mode is off and nothing is checked. Nothing proves the applied patch is the worker's (only the sha256 and size of the file's bytes as read are recorded), any same-user process can rewrite or delete the record, and a hand-back committed from another worktree is not seen. Inside a session bound for review dispatch the apply command cannot run (the interpreter is withheld and git apply is off the allowlist), so the operator applies outside it."
+        }
+      ],
       "hooks": [
         {
           "class": "c",

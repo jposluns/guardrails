@@ -198,7 +198,7 @@ def _claude_drift(root, corpus):
     try:
         for src, _fm, rel in corpus:
             # The full render gen_rules writes (gen_rules.full_body): a source using the `## Detail` split is
-            # compared as its unsplit original, never as the split text.
+            # compared as its core render, then its detail layer, never as the source text.
             desired[rel] = gen_rules.full_body(gen_rules.read_rule_source(src), src.name)
     except (OSError, ValueError) as exc:
         return (MALFORMED, "cannot read a source rule: {}".format(exc))
@@ -1389,23 +1389,47 @@ def self_test_main():
             failures.append("conformant tree expected C2/C3 PASS in report:\n{}".format(out))
 
         # 1b. Rule sources using the `## Detail` split: the conformant tree with its two non-apex sources split
-        #     (a detail-trigger key, a core layer and the split line added, the rule's text moved below the split
-        #     unchanged) and every surface left as generated from the unsplit originals -> exit 0, C1/C2/C3 PASS.
-        #     Red when C2 compares a surface (.claude/rules, AGENTS.md, the adapters or the Cursor tree) with the
-        #     split source text instead of its full render (gen_rules.full_body).
+        #     (a detail-trigger key added, the rule's text kept as its core layer, then the split line and a
+        #     one-sentence detail layer) and every surface regenerated -> exit 0, C1/C2/C3 PASS; each
+        #     .claude/rules and Cursor file of a split rule carries its core and then its detail, and AGENTS.md
+        #     carries every rule's core before any detail. Red when C2 compares a surface with the split source
+        #     text instead of its render, and red under the previous full_body (the core layer dropped). Then
+        #     AGENTS.md rewritten with each split rule's whole body at the rule's own place (the detail not moved
+        #     after the last rule) -> C2 FAIL.
         split = tmp / "split"
         split.mkdir()
         _build_conformant(split)
         for rel, text in (("aiqt/read-before.md", _ACCUR), ("security/input-validation.md", _SECI)):
-            head, sep, rest = text.partition("\n---\n")
-            title, _nl, body = rest.partition("\n")
+            head, sep, body = text.partition("\n---\n")
             (split / ".aiqt" / "core" / "rules" / rel).write_bytes(
-                (head + "\ndetail-trigger: writing a self-test fixture" + sep + title
-                 + "\n\nA self-test core layer.\n\n## Detail\n" + body).encode("utf-8"))
+                (head + "\ndetail-trigger: writing a self-test fixture" + sep + body
+                 + "\n## Detail\n\nA self-test detail layer.\n").encode("utf-8"))
+        split_corpus = _write_surfaces(split)
         code, out = run_capture(split)
         if code != 0 or any(status_of(out, cid) != PASS for cid in ("C1", "C2", "C3")):
-            failures.append("split-source tree expected exit 0 and C1/C2/C3 PASS (every surface is the full "
-                            "render of its split source):\n{}".format(out))
+            failures.append("split-source tree expected exit 0 and C1/C2/C3 PASS (every surface is the render "
+                            "of its split source):\n{}".format(out))
+        for rel, core_line in (("aiqt/10-ACCUR-read-before-characterizing.md", "A self-test accuracy rule."),
+                               ("security/SECI-input-validation.md", "A self-test security rule.")):
+            rendered = (split / ".claude" / "rules" / rel).read_text(encoding="utf-8")
+            if not rendered.endswith("\n" + core_line + "\n\nA self-test detail layer.\n") \
+                    or "## Detail" in rendered or rendered.count("\n# ") != 1:
+                failures.append("split-source tree: {} must be the core render, a blank line and the detail "
+                                "layer:\n{}".format(rel, rendered))
+        split_agents = (split / "AGENTS.md").read_text(encoding="utf-8")
+        last_core = split_agents.find("A self-test security rule.")  # the last rule's core (_SECI sorts last)
+        if split_agents.count("A self-test detail layer.") != 2 or last_core < 0 or \
+                split_agents.find("A self-test detail layer.") < last_core:
+            failures.append("split-source tree: AGENTS.md must carry both detail layers after the last rule's "
+                            "core:\n{}".format(split_agents))
+        in_place = sorted(((s, fm) for s, fm, _ in split_corpus), key=lambda pf: gen_agents.sort_key(pf[1]))
+        (split / "AGENTS.md").write_bytes(adapter_compose.compose(
+            "AGENTS.md", gen_agents.HEADER, [gen_agents.body_of(s) for s, _fm in in_place],
+            adapter_compose.load_registry(split)).data)
+        code, out = run_capture(split)
+        if code != 1 or status_of(out, "C2") != FAIL:
+            failures.append("split-source tree with each split rule's detail at its own place in AGENTS.md "
+                            "expected exit 1 and C2 FAIL:\n{}".format(out))
 
         # 2. Drifted tree -> non-zero. Corrupt one generated .claude/rules file.
         drifted = tmp / "drifted"

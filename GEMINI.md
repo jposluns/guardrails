@@ -1611,3 +1611,7 @@ Test fixtures, seed data, examples, and documentation use purpose-built syntheti
 validated against the applicable re-identification risk, never real personal data or production records
 copied over for convenience. Version control can retain removed content in history, so later cleanup is not
 the primary safeguard.
+
+## Verify a fix is in its commit (detail)
+
+A commit landing a hand-back stages every path the hand-back changes, a rename's two paths and each deletion included.

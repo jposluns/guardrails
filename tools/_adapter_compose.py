@@ -8,7 +8,9 @@ re-rooted at their own root.
 
 Layouts. The registry gives each of the three targets exactly one:
   legacy    the bytes the generators have always written: the generator header, then each rule body,
-            blank-line separated. No block may be declared for a legacy target.
+            blank-line separated (the bodies come from gen_agents.bodies_of_pairs: every rule's core,
+            then the detail section of every rule using the `## Detail` split, so in the composed layout
+            those detail sections sit inside AIQT-RULES too). No block may be declared for a legacy target.
   composed  the same header (PREFIX, not wrapped), then marker-delimited segments separated by one blank
             line: the before-rules blocks by order, the AIQT-RULES segment holding the rule bodies, then
             the after-rules blocks by order. Each segment is

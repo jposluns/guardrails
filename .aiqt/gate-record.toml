@@ -11,9 +11,15 @@
 # and commit once it passes; the record binds the tree and the HEAD commit it ran on. The
 # pre-commit hook refuses a tree with no passing record of the pre-commit set on HEAD, and the
 # pre-push hook a pushed tip with no passing record of the pre-push set on the tip's first parent.
+# handback-staged (rule vfxcmt): the pre-commit check that a commit stages every path of a hand-back
+# applied with gate-record handback apply PATCH; "off" (the default when the key is absent),
+# "recorded" (no record, or one it cannot use, prints a note and makes no claim) or "required" (each
+# of those cannot evaluate). This repository runs it in recorded mode until it has run clean for one
+# release, then moves to required.
 format-version = 1
 pre-commit = "full"
 pre-push = "full"
+handback-staged = "recorded"
 
 [[set]]
 name = "full"

@@ -1,5 +1,14 @@
-# .aiqt/core/must-deliver.toml: rules whose WHOLE text must lie inside the first
+# .aiqt/core/must-deliver.toml: rules whose whole core layer must lie inside the first
 # check_release_build.CAP_BYTES bytes of AGENTS.md; read by tools/check_must_deliver.py.
+# A rule with no `## Detail` split is all core, so its whole text must fit. A split rule's
+# detail layer is rendered after every rule's core and is never measured. A reader capped
+# at CAP_BYTES receives no detail layer only while the first detail section starts at
+# or past the cap, which holds for this corpus because its core layers alone run past the
+# cap; the gate does not check that. The gate also fails when a listed rule's core text at
+# the comparison base moves into any rule's detail layer, as a whole sentence or as a piece
+# of one sentence of at least MIN_PIECE_BYTES bytes (tools/check_must_deliver.py) moved
+# word for word, or when a listed rule's core layer is empty beside a detail layer. What it does not
+# see is named in its manifest residue.
 # Hand-edited policy, like instruction-budget.toml: additions may be proposed in any PR.
 # A removal must be declared: a rule listed at the comparison base (--base, by default
 # the merge base with origin/main) and dropped from [[rule]] fails the gate unless a

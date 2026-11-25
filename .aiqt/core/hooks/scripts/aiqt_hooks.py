@@ -34999,12 +34999,11 @@ def _rdp_read_fd(fd, limit):
     return b"".join(chunks)
 
 
-def _rdp_read_text(path, max_bytes, what):
-    """(text, None) for a readable file, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
-    regular file, an I/O or permission error, over max_bytes, invalid UTF-8, or a NUL; what names the file
-    in the reason (the brief, the draft). One leading byte-order mark is dropped. The file is opened ONCE,
-    non-blocking and without following a final symlink, and the type is checked on that open descriptor, so
-    no swap can land between a check and the open, and a FIFO or device never blocks the hook."""
+def _rdp_read_bytes(path, max_bytes, what, cap="max_brief_bytes"):
+    """(bytes, None) for a readable file, or (None, reason) for a cannot-evaluate: missing, a symlink, not a
+    regular file, an I/O or permission error, or over max_bytes (cap names that limit in the reason). The file
+    is opened ONCE, non-blocking and without following a final symlink, and the type is checked on that open
+    descriptor, so no swap can land between a check and the open, and a FIFO or device never blocks the hook."""
     try:
         fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
     except (OSError, ValueError) as exc:
@@ -35018,7 +35017,23 @@ def _rdp_read_text(path, max_bytes, what):
     finally:
         os.close(fd)
     if len(blob) > max_bytes:
-        return (None, "the {} {} is larger than max_brief_bytes ({})".format(what, path, max_bytes))
+        return (None, "the {} {} is larger than {} ({})".format(what, path, cap, max_bytes))
+    return (blob, None)
+
+
+def _rdp_read_text(path, max_bytes, what):
+    """(text, None) for a readable file, or (None, reason) for a cannot-evaluate: a file _rdp_read_bytes
+    refuses (under max_brief_bytes), invalid UTF-8, or a NUL; what names the file in the reason (the brief, the
+    draft). One leading byte-order mark is dropped."""
+    blob, why = _rdp_read_bytes(path, max_bytes, what)
+    if blob is None:
+        return (None, why)
+    return _rdp_decode_text(blob, path, what)
+
+
+def _rdp_decode_text(blob, path, what):
+    """(text, None) for bytes that are UTF-8 with no NUL, one leading byte-order mark dropped, or (None,
+    reason)."""
     try:
         text = blob.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -51097,7 +51112,9 @@ def _gr_git(env, *args, cwd=None, check=True, data=None):
 
 
 def _gr_parse_config(text, where):
-    """(sets, pre_commit, pre_push) from the configuration text: sets maps each set name to its argv tuple."""
+    """(sets, pre_commit, pre_push, handback) from the configuration text: sets maps each set name to its argv
+    tuple; handback is the hand-back check's mode (_HB_MODES), _HB_DEFAULT_MODE when the optional
+    handback-staged key is absent."""
     import tomllib
     doc, problem = None, None
     try:
@@ -51106,9 +51123,14 @@ def _gr_parse_config(text, where):
         problem = "{}: {}".format(type(exc).__name__, exc)
     if problem is not None:
         raise _GateRecordError("{} is not valid TOML ({})".format(where, problem))
-    if set(doc) !={"format-version", "pre-commit", "pre-push", "set"} or doc["format-version"] != 1:
+    if set(doc) - {_HB_CONFIG_KEY} != {"format-version", "pre-commit", "pre-push", "set"} \
+            or doc["format-version"] != 1:
         raise _GateRecordError("{} must hold exactly format-version = 1, pre-commit, pre-push and [[set]] "
-                               "tables".format(where))
+                               "tables, and optionally {}".format(where, _HB_CONFIG_KEY))
+    handback = doc.get(_HB_CONFIG_KEY, _HB_DEFAULT_MODE)
+    if not isinstance(handback, str) or handback not in _HB_MODES:
+        raise _GateRecordError("{}: {} must be one of {}".format(where, _HB_CONFIG_KEY, ", ".join(
+            '"{}"'.format(mode) for mode in _HB_MODES)))
     sets = {}
     if not isinstance(doc["set"], list) or not doc["set"]:
         raise _GateRecordError("{} has no [[set]] table".format(where))
@@ -51123,7 +51145,7 @@ def _gr_parse_config(text, where):
     for key in ("pre-commit", "pre-push"):
         if doc[key] not in sets:
             raise _GateRecordError("{}: {} names no [[set]] table".format(where, key))
-    return sets, doc["pre-commit"], doc["pre-push"]
+    return sets, doc["pre-commit"], doc["pre-push"], handback
 
 
 def _gr_now():
@@ -51435,8 +51457,8 @@ def _gr_same_bar(env, mine, where, base, cwd=None):
 
 
 def _gr_commit_base(env, head, index, judge, cwd=None):
-    """(sets, pre_commit, pre_push, where): the configuration a commit on top of head (the HEAD commit, or "" on
-    an unborn branch) is judged by, the one place the pre-commit verifier and the recorder both read it from.
+    """(sets, pre_commit, pre_push, handback, where): the configuration a commit on top of head (the HEAD
+    commit, or "" on an unborn branch) is judged by, the one place the pre-commit verifier and the recorder both read it from.
     HEAD's committed configuration; on an unborn branch, the index's (index: "" for the index, or the recorded
     tree) only when the repository has no commit at all; otherwise (an orphan branch) the default branch's, and
     with judge the orphan's own configuration and verifier must equal it (_gr_same_bar)."""
@@ -51464,7 +51486,7 @@ def _gr_push_base(env, sha):
     every git read."""
     parent = _gr_git(env, "rev-parse", "-q", "--verify", sha + "^1", check=False)
     if parent:
-        sets, _, pre_push = _gr_config_at(env, parent + ":" + _GR_CONFIG, sha + "^1")
+        sets, _, pre_push, _handback = _gr_config_at(env, parent + ":" + _GR_CONFIG, sha + "^1")
         return sets, pre_push, parent
     if _gr_git(env, "rev-parse", "--is-shallow-repository") != "false":
         raise _GateRecordShallow("{} has no parent git can read, and this is a shallow repository, whose shallow "
@@ -51478,9 +51500,10 @@ def _gr_push_base(env, sha):
     if contained not in (0, 1):
         raise _GateRecordError("git merge-base --is-ancestor {} {} failed (exit {})".format(sha, base, contained))
     if contained == 0:
-        sets, _, pre_push = _gr_config_at(env, sha + ":" + _GR_CONFIG, sha + " (the default branch's root commit)")
+        sets, _, pre_push, _handback = _gr_config_at(env, sha + ":" + _GR_CONFIG,
+                                                     sha + " (the default branch's root commit)")
     else:
-        sets, _, pre_push = _gr_same_bar(env, sha, sha + " (a root commit off the default branch)", base)
+        sets, _, pre_push, _handback = _gr_same_bar(env, sha, sha + " (a root commit off the default branch)", base)
     return sets, pre_push, ""
 
 
@@ -51501,7 +51524,7 @@ def _gr_run(args):
     tree, index_tree, head = _gr_read_state(env, top, log)
     # The set and its argv come from the configuration the pre-commit hook reads for a commit on this HEAD
     # (_gr_commit_base), never from the working tree, so the record names the check the hook will judge.
-    sets, pre_commit, _pre_push, where = _gr_commit_base(env, head, index_tree, False, cwd=top)
+    sets, pre_commit, _pre_push, _handback, where = _gr_commit_base(env, head, index_tree, False, cwd=top)
     name = name or pre_commit
     if name not in sets:
         raise _GateRecordError("{} at {} names no set {!r}".format(_GR_CONFIG, where, name))
@@ -51695,15 +51718,511 @@ def _gr_verify_commit():
         raise _GateRecordError("git write-tree returned no tree id")
     head = _gr_head(env)
     try:
-        sets, pre_commit, _, _where = _gr_commit_base(env, head, "", True)
+        sets, pre_commit, _, handback, _where = _gr_commit_base(env, head, "", True)
     except _GateRecordRefusal as exc:
         _stderr_note("aiqt gate-record: commit refused: {}".format(exc))
         return 1
+    # The hand-back check (rule vfxcmt) runs first and prints its own outcome; the gate's judgement follows,
+    # and the commit passes only when both pass. A failed hand-back check decides the exit status.
+    staged = _hb_verify_commit(env, head, handback)
     refusal = _gr_judge(_gr_read_log_file(_gr_log_path(env)), tree, head, pre_commit, sets[pre_commit], True)
     if refusal is not None:
         _stderr_note("aiqt gate-record: commit refused: " + refusal)
-        return 1
+        return staged or 1
+    return staged
+
+
+# --- the hand-back record (rule vfxcmt): a commit that records a worker hand-back stages every path it changed --
+# gate-record handback apply PATCH applies a hand-back with git apply --index and first writes the record of the
+# paths git's own reading of the patch changes (rename detection off, so a rename is its source deleted and its
+# destination created; a copy's unchanged source is not recorded), each expected "present" or "absent", to
+# <this worktree's git directory>/aiqt/handback-record.json. The pre-commit and pre-merge-commit verifier
+# (gate-record verify-commit, with the stub unchanged) compares that record with the index being committed
+# (GIT_INDEX_FILE is kept, so git commit -- PATHS is read through its temporary index). The mode is the
+# optional handback-staged key of HEAD's .aiqt/gate-record.toml: "off" (the default when the key is absent)
+# reads nothing; "recorded" refuses a commit that leaves a recorded path unstaged and, with no record or one it
+# cannot use (unreadable, malformed, still applying, stale), prints a note and makes no claim; "required" makes
+# each of those a cannot-evaluate (exit 2). The record outlives the hand-back's commit: while HEAD is that
+# commit, the next commit (an amend of it, or a commit on top of it) must still stage every recorded path
+# against the record's head, and the record is retired only by a checked commit whose HEAD is a commit on top
+# of the hand-back's commit, never by a commit that could still amend it. Residuals: a commit that runs no
+# hook (--no-verify, plumbing, cherry-pick, rebase, am) is not checked, though its record stays and the next
+# checked commit on top of it refuses; once the record is retired, a commit made after resetting back to the
+# hand-back's commit is not checked; the check is on paths, not content (git add -p, a hunk reverted after
+# the apply); an apply made without this command writes no record; nothing proves the patch is the worker's;
+# any same-user process can rewrite or delete the record; and a hand-back committed from another worktree is
+# not seen.
+_HB_FORMAT = "aiqt-handback-record/1"
+_HB_KEYS = ("format", "state", "object_format", "head", "patch", "paths", "applied_at")
+_HB_PATCH_KEYS = ("path", "sha256", "bytes")
+_HB_STATES = ("applying", "applied")
+_HB_EXPECT = ("present", "absent")
+_HB_MODES = ("off", "recorded", "required")
+_HB_DEFAULT_MODE = "off"
+_HB_CONFIG_KEY = "handback-staged"
+_HB_RECORD = "handback-record.json"
+_HB_LOCK = "handback.lock"
+_HB_RECORD_MAX = 4 * 1048576
+_HB_PATCH_MAX = 16 * 1048576
+_HB_SHA256_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+# The git apply options every apply here pins on its own command line: whitespace handling fixed, so neither
+# repository configuration nor a default changes which bytes git applies or refuses.
+_HB_APPLY = ("-c", "apply.whitespace=nowarn", "-c", "apply.ignoreWhitespace=no", "apply", "--whitespace=nowarn")
+_HB_STATUS_ARGS = ("diff-index", "--cached", "--no-renames", "-z", "--name-status", "--ignore-submodules=none")
+
+
+class _HandbackUnusable(_GateRecordError):
+    """A hand-back record the verifier cannot use, with its kind (unreadable, malformed, incomplete or stale):
+    a cannot-evaluate in required mode, a note in recorded mode."""
+
+    def __init__(self, kind, text):
+        super().__init__("{}: {}".format(kind, text))
+        self.kind = kind
+
+
+def _hb_record_path(env, cwd=None):
+    """The record's path, joined textually onto this worktree's git directory, as the gate-record log's is
+    (_gr_log_path): the index a hand-back is applied to belongs to one worktree."""
+    return os.path.join(os.path.dirname(_gr_log_path(env, cwd=cwd)), _HB_RECORD)
+
+
+def _hb_read_record(path):
+    """The record at path, checked strictly, or None when there is none. The aiqt directory and the record are
+    opened with O_NOFOLLOW and checked on the open descriptors (_gr_open_dir, _gr_open_in); a symbolic link,
+    another kind of file, a wrong owner or mode, an error, a file over _HB_RECORD_MAX or one that is not UTF-8
+    is unreadable, and bad JSON or a wrong schema is malformed (_HandbackUnusable)."""
+    try:
+        dirfd = _gr_open_dir(path, create=False)
+    except _GateRecordError as exc:
+        raise _HandbackUnusable("unreadable", str(exc)) from exc
+    if dirfd is None:
+        return None
+    try:
+        fd = _gr_open_in(dirfd, os.path.basename(path), os.O_RDONLY, path)
+    except FileNotFoundError:
+        return None
+    except _GateRecordError as exc:
+        raise _HandbackUnusable("unreadable", str(exc)) from exc
+    finally:
+        os.close(dirfd)
+    try:
+        blob = _rdp_read_fd(fd, _HB_RECORD_MAX + 1)
+    except OSError as exc:
+        raise _HandbackUnusable("unreadable", "{} cannot be read ({})".format(path, exc.strerror)) from exc
+    finally:
+        os.close(fd)
+    if len(blob) > _HB_RECORD_MAX:
+        raise _HandbackUnusable("unreadable", "{} is larger than {} bytes".format(path, _HB_RECORD_MAX))
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _HandbackUnusable("unreadable", "{} is not valid UTF-8".format(path)) from exc
+    try:
+        record = json.loads(text, object_pairs_hook=_gr_no_dupes, parse_constant=_gr_bad_constant)
+    except (ValueError, RecursionError) as exc:
+        raise _HandbackUnusable("malformed", "{} is not strict JSON ({})".format(path, exc)) from exc
+    problem = _hb_schema_problem(record)
+    if problem is not None:
+        raise _HandbackUnusable("malformed", "{} {}".format(path, problem))
+    return record
+
+
+def _hb_schema_problem(record):
+    """None when record has the record's exact schema, else what is wrong with it."""
+    if not isinstance(record, dict) or tuple(record) != _HB_KEYS:
+        return "does not hold exactly the keys {} in that order".format(", ".join(_HB_KEYS))
+    patch, paths = record["patch"], record["paths"]
+    if (record["format"] != _HB_FORMAT or record["state"] not in _HB_STATES
+            or record["object_format"] not in ("sha1", "sha256")
+            or not isinstance(record["head"], str) or not (record["head"] == "" or _GR_TREE_RE.fullmatch(record["head"]))
+            or not isinstance(record["applied_at"], str) or not _GR_STAMP_RE.fullmatch(record["applied_at"])
+            or not isinstance(patch, dict) or tuple(patch) != _HB_PATCH_KEYS
+            or not isinstance(patch["path"], str) or not isinstance(patch["sha256"], str)
+            or not _HB_SHA256_RE.fullmatch(patch["sha256"]) or type(patch["bytes"]) is not int or patch["bytes"] < 0):
+        return "has a field of the wrong type or value"
+    if not isinstance(paths, list) or not paths:
+        return "records no path"
+    names = []
+    for entry in paths:
+        if (not isinstance(entry, dict) or tuple(entry) != ("path", "expect") or not isinstance(entry["path"], str)
+                or not entry["path"] or "\x00" in entry["path"] or entry["expect"] not in _HB_EXPECT):
+            return "has a path entry that is not exactly a nonempty path and an expect of present or absent"
+        names.append(entry["path"].encode("utf-8", "surrogatepass"))
+    if names != sorted(set(names)):
+        return "has paths that are not sorted by UTF-8 bytes and unique"
+    return None
+
+
+def _hb_status(env, base, cwd=None):
+    """{path: status letter} of the index against base (a commit or tree id), with rename detection off, read
+    from git diff-index -z; output that cannot be read, or an unmerged entry, cannot evaluate."""
+    done = _gr_git_done(env, _HB_STATUS_ARGS + (base, "--"), cwd=cwd)
+    if done.returncode != 0:
+        raise _GateRecordError("git diff-index --cached {} failed (exit {}): {}".format(
+            base, done.returncode, done.stderr.decode("utf-8", "replace").strip()))
+    fields = done.stdout.split(b"\x00")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 2:
+        raise _GateRecordError("git diff-index -z wrote output that cannot be read as status and path pairs")
+    out = {}
+    for k in range(0, len(fields), 2):
+        status, name = fields[k].decode("ascii", "replace"), fields[k + 1].decode("utf-8", "surrogateescape")
+        if status == "U":
+            raise _GateRecordError("the index holds an unmerged entry ({}); resolve it first".format(name))
+        if len(status) != 1 or status not in "ADMT" or not name:
+            raise _GateRecordError("git diff-index -z wrote a status {!r} that cannot be read".format(status))
+        out[name] = status
+    return out
+
+
+def _hb_empty_tree(env, cwd=None):
+    tree = _gr_git(env, "hash-object", "-t", "tree", "--stdin", cwd=cwd, data=b"")
+    if not _GR_TREE_RE.fullmatch(tree or ""):
+        raise _GateRecordError("git named no empty tree id")
+    return tree
+
+
+def _hb_missing(status, paths):
+    """[(path, why)] for each recorded path the status map ({path: letter}, against the record's base) does
+    not cover: a present path not changed there or deleted there, and an absent path not deleted there."""
+    missing = []
+    for entry in paths:
+        got = status.get(entry["path"])
+        if entry["expect"] == "absent" and got != "D":
+            missing.append((entry["path"], "deletion not staged"))
+        elif entry["expect"] == "present" and (got is None or got == "D"):
+            missing.append((entry["path"], "not staged"))
+    return missing
+
+
+def _hb_first_parent(env, commit):
+    """The first parent the raw commit object records ("" for a root commit), replace objects and grafts off."""
+    text = _gr_git(env, "cat-file", "commit", commit)
+    for line in text.split("\n"):
+        if not line:
+            break
+        if line.startswith("parent "):
+            parent = line[len("parent "):]
+            if not _GR_TREE_RE.fullmatch(parent):
+                raise _GateRecordError("commit {} names a parent that cannot be read".format(commit))
+            return parent
+    return ""
+
+
+def _hb_tree_status(env, old, new):
+    """{path: letter} of commit new against old (a commit, or the empty tree), with rename detection off."""
+    done = _gr_git_done(env, ("diff-tree", "-r", "--no-commit-id", "--no-renames", "-z", "--name-status",
+                              "--ignore-submodules=none", old, new, "--"))
+    if done.returncode != 0:
+        raise _GateRecordError("git diff-tree {} {} failed (exit {})".format(old, new, done.returncode))
+    fields = done.stdout.split(b"\x00")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 2:
+        raise _GateRecordError("git diff-tree -z wrote output that cannot be read as status and path pairs")
+    return {fields[k + 1].decode("utf-8", "surrogateescape"): fields[k].decode("ascii", "replace")
+            for k in range(0, len(fields), 2)}
+
+
+def _hb_note(text):
+    _stderr_note("aiqt handback: " + text)
+
+
+def _hb_refuse(record, missing, landed=None):
+    where = ("this commit (an amend of {}, which the hand-back was committed in, or a commit on top of "
+             "it)".format(landed) if landed else "this commit")
+    _hb_note("commit refused: the hand-back {} (sha256 {}, applied on {}) changes {} path(s) that {} does not "
+             "stage:".format(record["patch"]["path"], record["patch"]["sha256"], record["head"] or "an unborn "
+                             "branch", len(missing), where))
+    for name, why in missing:
+        _hb_note("  {}: {}".format(name, why))
+    _hb_note("stage them (git add -A -- PATH... stages a deletion too) and commit again; to leave a path out on "
+             "purpose, run gate-record handback clear and say so in the commit message")
+    return 1
+
+
+def _hb_judge(env, head, record, path, mode):
+    """0 (covered), 1 (refused) or 2 (cannot evaluate, its note printed) for a usable record, or None once the
+    record is retired (removed; the commit is then judged as one with no record); _HandbackUnusable for one that
+    is still applying or stale. Every commit the pre-commit hook can see that could drop or change a recorded
+    path is judged on the index being committed, against the record's head:
+    - HEAD is the record's head: the commit that lands the hand-back.
+    - HEAD's first parent is the record's head (HEAD is the hand-back's commit): the hook cannot tell an amend of
+      HEAD from a commit on top of it, so either must still stage every recorded path, and the record is kept
+      whatever the outcome, since this commit can still be refused or abandoned. In required mode, when HEAD's
+      own change already covers the record, the commit has no hand-back of its own, a cannot-evaluate.
+    - HEAD's first-parent grandparent is the record's head and HEAD's change from it covers the record: the
+      hand-back's commit is under a committed child, which no amend of HEAD replaces, so the record is retired."""
+    if record["state"] != "applied":
+        raise _HandbackUnusable("incomplete", "the record is still in the applying state (the apply did not "
+                                "finish); inspect the index, then run gate-record handback clear")
+    object_format = _gr_git(env, "rev-parse", "--show-object-format")
+    if record["object_format"] != object_format:
+        raise _HandbackUnusable("stale", "the record is for a {} repository, this is {}; run gate-record handback "
+                                "clear".format(record["object_format"], object_format))
+    old = record["head"] or _hb_empty_tree(env)
+    if head == record["head"]:
+        missing = _hb_missing(_hb_status(env, old), record["paths"])
+        return _hb_refuse(record, missing) if missing else 0
+    parent = _hb_first_parent(env, head) if head else None
+    if parent == record["head"]:
+        missing = _hb_missing(_hb_status(env, old), record["paths"])
+        if missing:
+            return _hb_refuse(record, missing, landed=head)
+        if mode == "required" and not _hb_missing(_hb_tree_status(env, old, head), record["paths"]):
+            _hb_note("cannot evaluate: the hand-back {} already landed in {}, so this commit (an amend of it, or a "
+                     "commit on top of it) has no hand-back record of its own, and {} sets {} = \"required\"; "
+                     "the record is kept".format(record["patch"]["path"], head, _GR_CONFIG, _HB_CONFIG_KEY))
+            return 2
+        return 0
+    if parent and _hb_first_parent(env, parent) == record["head"] \
+            and not _hb_missing(_hb_tree_status(env, old, head), record["paths"]):
+        _hb_remove(path)
+        _hb_note("the hand-back {} landed: {}, a commit on top of the hand-back's commit {}, stages every recorded "
+                 "path; its record was retired".format(record["patch"]["path"], head, parent))
+        return None
+    raise _HandbackUnusable("stale", "the record was applied on {}, but HEAD is {}; reset to {} or run "
+                            "gate-record handback clear".format(record["head"] or "an unborn branch",
+                                                                head or "unborn", record["head"] or "it"))
+
+
+def _hb_verify_commit(env, head, mode):
+    """The hand-back check of one commit (exit 0, 1 or 2), printing its own outcome."""
+    if mode == "off":
+        return 0
+    try:
+        path = _hb_record_path(env)
+        record = _hb_read_record(path)
+        verdict = None if record is None else _hb_judge(env, head, record, path, mode)
+    except _GateRecordError as exc:
+        if mode == "recorded":
+            _hb_note("note: the hand-back record cannot be used ({}); recorded mode makes no claim about this "
+                     "commit".format(exc))
+            return 0
+        _hb_note("cannot evaluate: {}".format(exc))
+        return 2
+    if verdict is not None:
+        return verdict
+    if mode == "required":
+        _hb_note("cannot evaluate: missing: no hand-back record exists, and {} sets {} = \"required\"; apply the "
+                 "hand-back with gate-record handback apply PATCH".format(_GR_CONFIG, _HB_CONFIG_KEY))
+        return 2
+    if record is None:
+        _hb_note("note: no hand-back record exists in {}; recorded mode makes no claim about this commit".format(path))
     return 0
+
+
+def _hb_open_dir(path):
+    return _gr_open_dir(path, create=True)
+
+
+def _hb_write(path, record):
+    """Write the record atomically: a new temporary file beside it (mode 0600), fsync, then os.replace, all
+    relative to the aiqt directory's descriptor."""
+    dirfd = _hb_open_dir(path)
+    tmp = ".{}.{}".format(_HB_RECORD, os.getpid())
+    try:
+        data = (json.dumps(record, ensure_ascii=False, indent=1, allow_nan=False) + "\n").encode("utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, _HB_RECORD, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        os.fsync(dirfd)
+    except OSError as exc:
+        try:
+            os.unlink(tmp, dir_fd=dirfd)
+        except OSError:
+            pass
+        raise _GateRecordError("could not write {} ({})".format(path, exc.strerror)) from exc
+    finally:
+        os.close(dirfd)
+
+
+def _hb_remove(path):
+    dirfd = _gr_open_dir(path, create=False)
+    if dirfd is None:
+        return
+    try:
+        os.unlink(_HB_RECORD, dir_fd=dirfd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise _GateRecordError("could not remove {} ({})".format(path, exc.strerror)) from exc
+    finally:
+        os.close(dirfd)
+
+
+def _hb_locked(path):
+    """An open descriptor holding the exclusive hand-back lock (<aiqt dir>/handback.lock)."""
+    dirfd = _hb_open_dir(path)
+    try:
+        fd = _gr_open_in(dirfd, _HB_LOCK, os.O_RDWR | os.O_CREAT, os.path.join(os.path.dirname(path), _HB_LOCK))
+    finally:
+        os.close(dirfd)
+    try:
+        _gr_lock(fd, "the hand-back lock")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _hb_paths_of(status):
+    """The record's sorted path list from a {path: letter} map: a deletion is absent, every other change present."""
+    names = sorted(status, key=lambda name: name.encode("utf-8", "surrogateescape"))
+    for name in names:
+        try:
+            name.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _GateRecordError("the hand-back changes a path that is not UTF-8 ({!r}), which the record "
+                                   "cannot hold".format(name)) from exc
+    return [{"path": name, "expect": "absent" if status[name] == "D" else "present"} for name in names]
+
+
+def _hb_census_problem(census, changed):
+    """None when the patch's own headers (census) name exactly the paths git's reading of it changes, else why
+    not: two independent readers, so a gap in either is a cannot-evaluate, never a short record."""
+    if census != set(changed):
+        only_census = sorted(census - set(changed))
+        only_git = sorted(set(changed) - census)
+        return ("the patch's headers and git's reading of it disagree on the paths it changes (headers only: {}; "
+                "git only: {})".format(", ".join(only_census) or "none", ", ".join(only_git) or "none"))
+    return None
+
+
+def _hb_apply(patch_arg):
+    """gate-record handback apply PATCH: record the hand-back's paths, then apply it with git apply --index."""
+    import hashlib
+    env = _gr_env(_GR_CONFIG_KEEP)
+    top = _gr_git(env, "rev-parse", "--show-toplevel", cwd=os.getcwd())
+    object_format = _gr_git(env, "rev-parse", "--show-object-format", cwd=top)
+    path = _hb_record_path(env, cwd=top)
+    patch = os.path.abspath(patch_arg)
+    lock = _hb_locked(path)
+    try:
+        if _hb_read_record(path) is not None:
+            raise _GateRecordRefusal("a hand-back record is outstanding in {}; commit that hand-back, or run "
+                                     "gate-record handback clear, first".format(path))
+        # The patch is read once: these bytes are the recorded identity (sha256 and size of the file as read)
+        # and the input of both git apply runs (on stdin), so a rewrite of the file after this read changes
+        # neither what is applied nor what is recorded.
+        raw, why = _rdp_read_bytes(patch, _HB_PATCH_MAX, "hand-back patch", cap="the hand-back patch limit in bytes")
+        if raw is None:
+            raise _GateRecordError(why)
+        text, why = _rdp_decode_text(raw, patch, "hand-back patch")
+        if text is None:
+            raise _GateRecordError(why)
+        census, why = _rdp_draft_paths(text)
+        if census is None:
+            raise _GateRecordError("the hand-back patch {} cannot be read as a git diff: {}".format(patch, why))
+        if not census:
+            raise _GateRecordError("the hand-back patch {} names no file in a diff header".format(patch))
+        head = _gr_head(env, cwd=top)
+        base = head or _hb_empty_tree(env, cwd=top)
+        scratch = dict(env)
+        index = os.path.join(os.path.dirname(path), "handback-index.{}".format(os.getpid()))
+        scratch["GIT_INDEX_FILE"] = index
+        try:
+            if head:
+                _gr_git(scratch, "read-tree", head, cwd=top)
+            else:
+                _gr_git(scratch, "read-tree", "--empty", cwd=top)
+            done = _gr_git_done(scratch, _HB_APPLY + ("--cached",), cwd=top, data=raw)
+            if done.returncode != 0:
+                raise _GateRecordError("git apply --cached cannot apply the hand-back patch {} (exit {}): {}".format(
+                    patch, done.returncode, done.stderr.decode("utf-8", "replace").strip()))
+            changed = _hb_status(scratch, base, cwd=top)
+        finally:
+            try:
+                os.unlink(index)
+            except FileNotFoundError:
+                pass
+        if not changed:
+            raise _GateRecordError("the hand-back patch {} changes no path".format(patch))
+        problem = _hb_census_problem(census, changed)
+        if problem is not None:
+            raise _GateRecordError(problem)
+        already = sorted(set(_hb_status(env, base, cwd=top)) & set(changed))
+        if already:
+            raise _GateRecordRefusal("{} already staged against HEAD, so the record could not tell the hand-back's "
+                                     "change from it; commit or unstage {} first".format(
+                                         ", ".join(already), "it" if len(already) == 1 else "them"))
+        record = {"format": _HB_FORMAT, "state": "applying", "object_format": object_format, "head": head,
+                  "patch": {"path": patch, "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)},
+                  "paths": _hb_paths_of(changed), "applied_at": _gr_now()}
+        _hb_write(path, record)
+        done = _gr_git_done(env, _HB_APPLY + ("--index",), cwd=top, data=raw)
+        if done.returncode != 0:
+            _hb_remove(path)
+            _hb_note("git apply --index failed (exit {}), so nothing was applied and no record was kept: {}".format(
+                done.returncode, done.stderr.decode("utf-8", "replace").strip()))
+            return 1
+        after = _hb_status(env, base, cwd=top)
+        if any(after.get(name) != letter for name, letter in changed.items()):
+            raise _GateRecordError("the index after git apply --index does not hold the change git read from the "
+                                   "patch; the record stays in the applying state, so inspect the index, then run "
+                                   "gate-record handback clear")
+        record["state"] = "applied"
+        _hb_write(path, record)
+    finally:
+        os.close(lock)
+    mode = _hb_mode_note(env, head, top)
+    _hb_note("applied {} on {}; recorded {} path(s) in {}{}".format(patch, head or "an unborn branch",
+                                                                    len(record["paths"]), path, mode))
+    return 0
+
+
+def _hb_mode_note(env, head, top):
+    try:
+        mode = _gr_commit_base(env, head, "", False, cwd=top)[3]
+    except (_GateRecordError, _GateRecordRefusal):
+        return " (the configuration this commit is judged by could not be read)"
+    if mode == "off":
+        return "; {} sets {} = \"off\", so no commit checks it".format(_GR_CONFIG, _HB_CONFIG_KEY)
+    return "; the commit is checked in {} mode".format(mode)
+
+
+def _hb_show(args):
+    """gate-record handback status | clear: print the record (clear then removes it)."""
+    env = _gr_env(_GR_CONFIG_KEEP)
+    top = _gr_git(env, "rev-parse", "--show-toplevel", cwd=os.getcwd())
+    path = _hb_record_path(env, cwd=top)
+    lock = _hb_locked(path) if args[0] == "clear" else None
+    try:
+        try:
+            record = _hb_read_record(path)
+        except _HandbackUnusable as exc:
+            if args[0] != "clear":
+                raise
+            _hb_note("the record cannot be read ({}); removing it".format(exc))
+            _hb_remove(path)
+            return 0
+        if record is None:
+            _hb_note("no hand-back record in {}".format(path))
+            return 0
+        sys.stdout.write(json.dumps(record, ensure_ascii=False, indent=1) + "\n")
+        sys.stdout.flush()
+        if args[0] == "clear":
+            _hb_remove(path)
+            _hb_note("removed {}".format(path))
+        return 0
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
+def _hb_main(args):
+    if args[:1] == ["apply"] and len(args) == 2:
+        return _hb_apply(args[1])
+    if args in (["status"], ["clear"]):
+        return _hb_show(args)
+    raise _GateRecordError("usage: gate-record handback apply PATCH | status | clear")
 
 
 def _gr_delivery_choice(env, url):
@@ -52125,8 +52644,11 @@ def gate_record_main(args):
             sys.stdout.write(_gr_stub(args[1]))
             sys.stdout.flush()
             return 0
+        if command == "handback":
+            return _hb_main(args[1:])
         _stderr_note("aiqt gate-record: usage: aiqt_hooks.py gate-record run [--set NAME] | verify-commit | "
-                     "verify-push [REMOTE URL] | install | stub HOOK")
+                     "verify-push [REMOTE URL] | install | stub HOOK | handback apply PATCH | handback status | "
+                     "handback clear")
         return 2
     except _GateRecordRefusal as exc:
         _stderr_note("aiqt gate-record: refused: {}".format(exc))

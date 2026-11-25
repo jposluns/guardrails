@@ -227,12 +227,40 @@
 #                        360 and file headers 16263 unchanged. The ratchet rises by the measured delta, 139171
 #                        + 863 = 140034, within the maintainer's authorization of 2026-11-08 for raises up to
 #                        148000.
+#                        Raised 140034 -> 140045 on 2026-11-24 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        verify-fix-in-commit gained its sentence that a commit landing a hand-back stages
+#                        every path the hand-back changes, a rename's two paths and each deletion included
+#                        (vfxcmt.13 added; vfxcmt.1 to vfxcmt.12 unchanged), and dropped its two exempted
+#                        sentences that carry no obligation (the opening rationale and the closing
+#                        disclosure note), so the must-deliver rules after it stay inside the AGENTS.md cap:
+#                        measured PACK 140034 at the merge base fd3b9c61 -> 140045 (+11 units); rule files
+#                        123411 -> 123422; managed block 360 and file headers 16263 unchanged. The ratchet
+#                        rises by the measured delta, 140034 + 11 = 140045, within the maintainer's
+#                        authorization of 2026-11-08 for raises up to 148000.
+#                        Raised 140045 -> 140154 on 2026-11-24 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when
+#                        verify-fix-in-commit was split into a core layer (its text at the merge base
+#                        fd3b9c61, verbatim, so vfxcmt.1 to vfxcmt.12 and both exempted sentences stay) and a
+#                        detail layer holding only its hand-back sentence (vfxcmt.13, now layer detail), and
+#                        AGENTS.md, GEMINI.md and the Copilot instructions render each rule's core at its
+#                        place and every detail layer after the last rule, while the rule file keeps the
+#                        sentence as its own final paragraph: measured PACK 140045 at the pinned base
+#                        089282c0 -> 140154 (+109 units); rule files 123422 -> 123531; managed block 360 and
+#                        file headers 16263 unchanged. The ratchet rises by the measured delta, 140045 + 109
+#                        = 140154, within the maintainer's authorization of 2026-11-08 for raises up to
+#                        148000. Correction to the entry above: the two exempted sentences it records as
+#                        dropped were dropped only from the generated rule file, which had drifted from its
+#                        source (gen_rules --check reported the drift at 089282c0); the source kept them.
+#                        Measured from the merge base fd3b9c61 (PACK 140034, rule files 123411), the two
+#                        entries together raise 140034 -> 140154 (+120 units: the sentence's 118 characters
+#                        and two line feeds).
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 140034
+ratchet = 140154
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
