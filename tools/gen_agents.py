@@ -3,9 +3,12 @@
 
 Same core that feeds Claude's .claude/rules/ tree, so a Codex session gets identical AIQT governance. The
 rules are concatenated in AIQT priority order (apex; then Accuracy, Integrity, Quality, Trust at tier 10;
-then Progress, Speed, Cost; then the security family in CIA-plus-privacy order), each rule's full render
-(gen_rules.full_body: a source using the `## Detail` split reads as its unsplit original) with its title
-demoted to a section heading. The layout (legacy,
+then Progress, Speed, Cost; then the security family in CIA-plus-privacy order), each rule's core render
+(gen_rules.core_render: the whole rule for a source with no split) with its title demoted to a section
+heading; then, after the last rule, the detail layer of every rule using the `## Detail` split, in the
+same order, each under its demoted title with DETAIL_SUFFIX. So every rule's core layer comes before any
+rule's detail layer: a reader capped at a byte limit receives detail text only when the limit lies past the
+end of the last rule's core, and no rule text is left out. The layout (legacy,
 or composed with reviewed blocks around the rules) comes from the block registry
 .aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator shares with
 gen_adapters.py. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or registry, a
@@ -36,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
-from gen_rules import full_body, load_corpus, read_rule_source  # noqa: E402
+from gen_rules import core_render, detail_layer, full_body, load_corpus, read_rule_source  # noqa: E402
 
 AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3}
 CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
@@ -44,7 +47,10 @@ CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
 # Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
-RENDERER_DECL = {"renderer-id": "agents", "semantics-revision": 1}
+RENDERER_DECL = {"renderer-id": "agents", "semantics-revision": 2}
+# Revision 2: each `## Detail` split rule's core renders at its place and every detail layer after the last
+# rule (revision 1 dropped a split rule's core). tools/gen_renderers.py SEMANTICS_FLOORS refuses a
+# revision below 2 here and in gen_adapters, and records why the per-rule renderers kept theirs.
 GENSRC_OUTPUTS = (
     {"target": "AGENTS.md", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml"),
@@ -59,6 +65,8 @@ HEADER = ("# AGENTS.md",
           "order: the apex; Accuracy, Integrity, Quality, Trust; Progress; Speed; Cost; the security",
           "family.",
           "")
+# Appended to a split rule's demoted title to head its detail section after the last rule.
+DETAIL_SUFFIX = " (detail)"
 
 
 def sort_key(fm):
@@ -69,12 +77,9 @@ def sort_key(fm):
     return (2, 0, CIA_FACET_ORDER.get(fm.get("facet", ""), 9), str(fm["slug"]))
 
 
-def body_of(path):
-    """One rule's body for the combined outputs (AGENTS.md, and through gen_adapters GEMINI.md and the
-    Copilot instructions): the rule's full render (gen_rules.full_body, the text gen_rules writes to the
-    .claude/rules/ read tree, so a source using the `## Detail` split reads as its unsplit original, with
-    no core layer and no split line), its frontmatter stripped and its title demoted."""
-    text = full_body(read_rule_source(path), path.name)
+def _demoted(text):
+    """A rendered rule text with its frontmatter stripped, surrounding whitespace stripped and its title
+    demoted to a section heading under the combined output's H1."""
     end = text.find("\n---\n", 4)
     lines = text[end + 5:].strip().split("\n")
     if lines[0].startswith("# "):    # demote the rule title to a section heading under the AGENTS.md H1
@@ -82,10 +87,49 @@ def body_of(path):
     return "\n".join(lines)
 
 
+def body_of(path):
+    """One rule's whole body: the rule's full render (gen_rules.full_body, the text gen_rules writes to the
+    .claude/rules/ read tree: for a source using the `## Detail` split, its core render, which ends in the
+    blank line or lines directly above the split, and its detail layer), its frontmatter stripped and its
+    title demoted. The combined outputs do not place
+    this at the rule's position (see ordered_bodies); it is kept for importers that need the whole rule."""
+    return _demoted(full_body(read_rule_source(path), path.name))
+
+
+def core_body_of(path):
+    """One rule's body at its place in the combined outputs (AGENTS.md, and through gen_adapters GEMINI.md
+    and the Copilot instructions): the rule's core render (gen_rules.core_render: the whole rule for a
+    source with no split, so then equal to body_of), its frontmatter stripped and its title demoted."""
+    return _demoted(core_render(read_rule_source(path), path.name))
+
+
+def detail_body_of(path):
+    """One rule's detail section for the tail of the combined outputs: a section heading naming the rule
+    (its title with DETAIL_SUFFIX), a blank line, then its detail layer (gen_rules.detail_layer). None for
+    a source with no split."""
+    text = read_rule_source(path)
+    layer = detail_layer(text, path.name)
+    if layer is None:
+        return None
+    title = _demoted(core_render(text, path.name)).split("\n", 1)[0]
+    return title + DETAIL_SUFFIX + "\n\n" + layer.strip("\n")
+
+
+def bodies_of_pairs(pairs):
+    """The combined outputs' rule bodies for (path, frontmatter) pairs already in AIQT priority order: every
+    rule's core body (core_body_of) in that order, then the detail section (detail_body_of) of every split
+    rule in the same order. So every detail layer sits after every rule's core, and so after every
+    must-deliver rule, while no rule text is left out."""
+    cores = [core_body_of(src) for src, _fm in pairs]
+    details = [detail_body_of(src) for src, _fm in pairs]
+    return cores + [detail for detail in details if detail is not None]
+
+
 def ordered_bodies(corpus):
-    """The rule bodies of a loaded corpus ([(path, frontmatter, rel)]) in AIQT priority order."""
+    """The rule bodies of a loaded corpus ([(path, frontmatter, rel)]) in AIQT priority order: every core
+    body, then every detail section (bodies_of_pairs)."""
     pairs = sorted(((src, fm) for src, fm, _ in corpus), key=lambda pf: sort_key(pf[1]))
-    return [body_of(src) for src, _fm in pairs]
+    return bodies_of_pairs(pairs)
 
 
 def corpus_bodies(src_dir):
@@ -95,7 +139,7 @@ def corpus_bodies(src_dir):
 
 def render(pairs):
     """The legacy AGENTS.md text for sorted (path, frontmatter) pairs; kept for existing importers."""
-    return legacy_render(HEADER, [body_of(p) for p, _ in pairs])
+    return legacy_render(HEADER, bodies_of_pairs(pairs))
 
 
 def main():
@@ -157,12 +201,16 @@ def main():
 #       A legacy target already in sync is not judged: run() with a stand-in corpus reader returning a
 #       marker-like line writes once, then --check and a rewrite are exit 0, while guard() refuses those
 #       same bytes when asked directly.
-#   T20b a rule using the `## Detail` split renders as its full render (gen_rules.full_body): AGENTS.md from
-#       the split source is byte-equal to the one from its unsplit original, in the legacy and the composed
-#       layout, for a fixture rule and for every gen_rules _SPLIT_CASES pair; neither the core layer nor a
-#       Detail heading appears, the split rule's title is `##`, and the next rule's title is still `##`.
-#   T20c the same split pairs through gen_adapters' own TARGETS and corpus reader: GEMINI.md and the Copilot
-#       instructions from the split source are byte-equal to the ones from its unsplit original.
+#   T20b a rule using the `## Detail` split renders its core render at its place and its detail layer after
+#       the last rule (under its title with DETAIL_SUFFIX): AGENTS.md is exactly the golden bytes in the
+#       legacy and the composed layout (the detail inside AIQT-RULES, before an after-rules block), for a
+#       fixture rule and for every gen_rules _SPLIT_CASES split source; no split line appears.
+#   T20c the same split sources through gen_adapters' own TARGETS and corpus reader: GEMINI.md and the
+#       Copilot instructions carry the same golden rule region under their own headers.
+#   T20d prefix invariance: through the end of the last rule's core, AGENTS.md from a split rule is
+#       byte-identical to AGENTS.md from its core-only twin, in both layouts.
+#   T20e bodies_of_pairs replaced by a mutant rendering the detail at the rule's place, and by one dropping
+#       the core (the previous contract): T20b and T20c fail under each, and T20d under the second.
 #   T21 a write keeps the target's ordinary permission bits and drops its set-user-ID and sticky bits
 #       (umask pinned; the kept bits hold execute bits no creation mode supplies, so a dropped fchmod
 #       cannot pass, and the whole S_IMODE is asserted, so a kept sticky bit, which no write clears, fails)
@@ -292,6 +340,7 @@ def self_test_main(nested_run=False):
     import hashlib
     import io
     import os
+    import re
     import shutil
     import socket
     import stat
@@ -1020,77 +1069,144 @@ def self_test_main(nested_run=False):
             failures.append("T20: guard() must refuse the in-sync legacy bytes it is never asked to judge, got "
                             "{!r}".format(t20_reason))
 
-        # T20b. A rule using the two-layer split renders as its full render (gen_rules.full_body): the combined
-        #      output is byte-equal to the one its unsplit original gives, in the legacy and the composed
-        #      layout, with neither the core layer nor a Detail heading in it, its title a `##` section and
-        #      the rule after it still opening at `##`. Then every gen_rules _SPLIT_CASES pair (the split
-        #      source and its unsplit original) does the same in place of the fixture rule. Red when body_of
-        #      reads the source text instead of its full render.
+        # T20b. A rule using the two-layer split renders its core render (gen_rules.core_render) at its place and
+        #      its detail layer after the last rule: the combined output is exactly the golden bytes (the apex,
+        #      the split rule's title and core, the rule after it, then the split rule's title with
+        #      DETAIL_SUFFIX and its detail), in the legacy and the composed layout (in the composed layout the
+        #      detail section is the last text inside AIQT-RULES, before the after-rules block). Then every
+        #      gen_rules _SPLIT_CASES split source does the same in place of the fixture rule. Red when the core
+        #      is dropped (the previous contract) or the detail is rendered at the rule's own place.
+        # T20c. The same split sources through gen_adapters' own TARGETS and corpus reader: GEMINI.md and the
+        #      Copilot instructions carry the same rule region (the same core and detail placement), each under
+        #      its own header.
+        # T20d. Prefix invariance: AGENTS.md from a split rule is byte-identical, through the end of the last
+        #      rule's core, to AGENTS.md from the core-only rule (the same source with its split line and
+        #      detail layer removed), in both layouts; only bytes after every rule's core differ.
+        # T20e. The T20b to T20d legs rerun with bodies_of_pairs replaced by a mutant that renders the detail
+        #      at the rule's own place, and by one that drops the core (the previous contract): each mutant
+        #      must make the legs fail.
         split_rule = _RULE.replace("---\n\n# Fixture rule\n\nRule text.\n",
                                    "detail-trigger: writing a self-test fixture\n---\n\n# Fixture rule\n\n"
                                    "Core text.\n\n## Detail\n\nDetail text.\n")
-        unsplit_rule = _RULE.replace("Rule text.", "Detail text.")
-        after_rule = _RULE.replace("ruleaa", "rulebb").replace("fixture-rule", "zeta-rule").replace(
-            "# Fixture rule", "# Zeta rule")
-        from gen_rules import _SPLIT_CASES, _split_case_texts
-        t20b_pairs = [("fixture rule", unsplit_rule, split_rule)]
-        t20b_pairs += [(case[0],) + _split_case_texts(case) for case in _SPLIT_CASES]
+        core_only_rule = _RULE.replace("Rule text.", "Core text.")
+        # The rule after every split rule: the last security facet sorts after every aiqt and SECI rule.
+        after_rule = ("---\ncorpus-id: rulebb\norigin: pack\nfamily: security\nfacet: SECP\nslug: zeta-rule\n---\n"
+                      "\n# Zeta rule\n\nRule text.\n")
+        from gen_rules import _SPLIT_CASES, _SPLIT_TITLE, _split_case_layers, _split_case_texts
+        # (name, split source, core-only source, golden core body, golden detail section)
+        t20b_cases = [("fixture rule", split_rule, core_only_rule, "## Fixture rule\n\nCore text.",
+                       "## Fixture rule" + DETAIL_SUFFIX + "\n\nDetail text.")]
+        split_title = "#" + _SPLIT_TITLE.rstrip("\n")
+        for case in _SPLIT_CASES:
+            t20b_core_render, t20b_detail = _split_case_layers(case)
+            t20b_cases.append((case[0], _split_case_texts(case)[1], t20b_core_render,
+                               split_title + "\n" + case[4].rstrip("\n"),
+                               split_title + DETAIL_SUFFIX + "\n\n" + t20b_detail.strip("\n")))
+        apex_body, after_body = "## Project integrity\n\nApex text.", "## Zeta rule\n\nRule text."
 
-        def split_pair_outputs(label, original, split, registry, blocks):
-            # The AGENTS.md bytes after a first write over the unsplit corpus and over the split one; a failed
-            # write is recorded by expect() and reads as None.
-            held = []
-            for text in (original, split):
-                root = tree(registry, blocks=blocks, rules=(_APEX, text, after_rule))
-                expect(label, root, False, 0, unchanged=False)
-                expect(label + " --check", root, True, 0)
-                held.append(read(root / AGENTS_REL))
-            return held
+        def t20_golden(header, layout, core_body, detail_section):
+            inner = "\n\n".join([apex_body, core_body, after_body, detail_section])
+            head = "\n".join(header) + "\n"
+            if layout == "legacy":
+                return (head + inner + "\n").encode("utf-8")
+            return (head + seg_a + "\n\n" + seg("AIQT-RULES", inner) + "\n\n" + seg_z + "\n").encode("utf-8")
 
-        for t20b_name, t20b_original, t20b_split in t20b_pairs:
-            for t20b_layout, t20b_reg, t20b_blocks in (("legacy", ac.registry_text(), ()),
-                                                       ("composed", composed_reg, (_BLOCK_A, _BLOCK_Z))):
-                t20b_label = "T20b split rule {} ({} layout)".format(t20b_name, t20b_layout)
-                t20b_want, t20b_got = split_pair_outputs(t20b_label, t20b_original, t20b_split, t20b_reg,
-                                                         t20b_blocks)
-                if t20b_want is None or t20b_got != t20b_want:
-                    failures.append("{}: AGENTS.md from the split source is not byte-equal to the one from its "
-                                    "unsplit original".format(t20b_label))
+        import gen_adapters
+
+        def t20_split_legs(sink):
+            # One run of the T20b, T20c and T20d legs, every failure appended to sink.
+            for name, split_src, core_src, core_body, detail_section in t20b_cases:
+                for layout, reg, blocks in (("legacy", ac.registry_text(), ()),
+                                            ("composed", composed_reg, (_BLOCK_A, _BLOCK_Z))):
+                    label = "T20b split rule {} ({} layout)".format(name, layout)
+                    root = tree(reg, blocks=blocks, rules=(_APEX, split_src, after_rule))
+                    expect(label, root, False, 0, unchanged=False, fail_list=sink)
+                    expect(label + " --check", root, True, 0, fail_list=sink)
+                    got = read(root / AGENTS_REL)
+                    if got != t20_golden(HEADER, layout, core_body, detail_section):
+                        sink.append("{}: AGENTS.md is not the golden core-then-detail rendering; got {!r}".format(
+                            label, None if got is None else got[-400:]))
+                    # T20d: the core-only twin gives the same bytes through the end of the last rule's core. In
+                    # the composed layout the AIQT-RULES BEGIN line's digest covers the whole rule region, so
+                    # that one 64-hex digest (same length, so no offset moves) is masked in both.
+                    twin = tree(reg, blocks=blocks, rules=(_APEX, core_src, after_rule))
+                    expect(label + " core-only twin", twin, False, 0, unchanged=False, fail_list=sink)
+                    twin_bytes = read(twin / AGENTS_REL) or b""
+                    cut = twin_bytes.find(after_body.encode("utf-8"))
+                    cut = -1 if cut < 0 else cut + len(after_body.encode("utf-8"))
+
+                    def masked(raw):
+                        return re.sub(rb"(AIQT-RULES:BEGIN \(generated sha256=)[0-9a-f]{64}", rb"\g<1>" + b"0" * 64,
+                                      raw or b"")
+                    if got is None or cut < 0 or masked(got)[:cut] != masked(twin_bytes)[:cut]:
+                        sink.append("T20d split rule {} ({} layout): the bytes through the end of the last "
+                                    "rule's core differ from the core-only twin's".format(name, layout))
+                # T20c: gen_adapters composes both of its targets with the same rule region.
+                root = tree(ac.registry_text(), blocks=(), rules=(_APEX, split_src, after_rule))
+                codes = []
+                for check in (False, True):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf), redirect_stderr(buf):
+                        codes.append(ac.run(root, check, gen_adapters.TARGETS, "tools/gen_adapters.py",
+                                            gen_adapters.corpus_bodies))
+                if codes != [0, 0]:
+                    sink.append("T20c split rule {}: gen_adapters write then --check expected exits (0, 0), got "
+                                "{!r}".format(name, codes))
+                for rel, header in gen_adapters.TARGETS:
+                    if read(root / rel) != t20_golden(header, "legacy", core_body, detail_section):
+                        sink.append("T20c split rule {}: {} is not the golden core-then-detail rendering".format(
+                            name, rel))
+
+        t20_split_legs(failures)
         root = tree(ac.registry_text(), blocks=(), rules=(_APEX, split_rule, after_rule))
         expect("T20b split rule, first write", root, False, 0, unchanged=False)
         t20b = (read(root / AGENTS_REL) or b"").decode("utf-8", "replace")
         t20b_heads = [line for line in t20b.split("\n") if line.startswith("#")]
-        if t20b_heads != ["# AGENTS.md", "## Project integrity", "## Fixture rule", "## Zeta rule"]:
+        if t20b_heads != ["# AGENTS.md", "## Project integrity", "## Fixture rule", "## Zeta rule",
+                          "## Fixture rule" + DETAIL_SUFFIX]:
             failures.append("T20b: the combined headings are {!r}; a split rule renders its title as a `##` "
-                            "section with no Detail heading".format(t20b_heads))
-        if "Core text." in t20b or "Detail text." not in t20b:
-            failures.append("T20b: the split rule's core layer leaked, or its detail layer is missing")
+                            "section at its place and its detail section after the last rule".format(t20b_heads))
+        if not (0 <= t20b.find("Core text.") < t20b.find("Zeta rule") < t20b.find("Detail text.")):
+            failures.append("T20b: the split rule's core must precede the next rule and its detail must follow it")
+        if "## Detail\n" in t20b:
+            failures.append("T20b: the split line leaked into AGENTS.md")
 
-        # T20c. gen_adapters (which has no self-test of its own) composes GEMINI.md and the Copilot instructions
-        #      through its own imported corpus reader: for the fixture rule and every _SPLIT_CASES pair, both
-        #      files from the split source are byte-equal to the ones from its unsplit original. Red when
-        #      gen_agents.body_of, the body transform gen_adapters shares, reads the source text instead of
-        #      its full render.
-        import gen_adapters
+        # T20e: the mutants. The module that gen_adapters imports is gen_agents, which is not this module when
+        # this file runs as a script, so both are patched.
+        def detail_in_place(pairs):
+            out = []
+            for src, _fm in pairs:
+                detail = detail_body_of(src)
+                out.append(core_body_of(src) if detail is None else core_body_of(src) + "\n\n" + detail)
+            return out
 
-        def adapters_drive(root, check):
-            buf = io.StringIO()
-            with redirect_stdout(buf), redirect_stderr(buf):
-                code = ac.run(root, check, gen_adapters.TARGETS, "tools/gen_adapters.py", gen_adapters.corpus_bodies)
-            return code, buf.getvalue()
+        def core_dropped(pairs):
+            out = []
+            for src, _fm in pairs:
+                detail = detail_body_of(src)
+                title = core_body_of(src).split("\n", 1)[0]
+                out.append(core_body_of(src) if detail is None else title + "\n\n" + detail.split("\n\n", 1)[1])
+            return out
 
-        for t20c_name, t20c_original, t20c_split in t20b_pairs:
-            t20c_held = []
-            for text in (t20c_original, t20c_split):
-                root = tree(ac.registry_text(), blocks=(), rules=(_APEX, text, after_rule))
-                t20c_codes = (adapters_drive(root, False)[0], adapters_drive(root, True)[0])
-                if t20c_codes != (0, 0):
-                    failures.append("T20c split rule {}: gen_adapters write then --check expected exits (0, 0), "
-                                    "got {!r}".format(t20c_name, t20c_codes))
-                t20c_held.append([read(root / rel) for rel, _h in gen_adapters.TARGETS])
-            if None in t20c_held[0] or t20c_held[1] != t20c_held[0]:
-                failures.append("T20c split rule {}: GEMINI.md and the Copilot instructions from the split source "
-                                "are not byte-equal to the ones from its unsplit original".format(t20c_name))
+        t20e_modules = [sys.modules[__name__]] + ([sys.modules["gen_agents"]] if "gen_agents" in sys.modules
+                                                   and sys.modules["gen_agents"] is not sys.modules[__name__]
+                                                   else [])
+        for mutant_name, mutant in (("detail at the rule's place", detail_in_place), ("core dropped", core_dropped)):
+            saved = [m.bodies_of_pairs for m in t20e_modules]
+            for m in t20e_modules:
+                m.bodies_of_pairs = mutant
+            mutant_failures = []
+            try:
+                t20_split_legs(mutant_failures)
+            finally:
+                for m, original in zip(t20e_modules, saved):
+                    m.bodies_of_pairs = original
+            judged = {line.split(" ", 1)[0] for line in mutant_failures}
+            if not {"T20b", "T20c"} <= judged:
+                failures.append("T20e: with bodies_of_pairs replaced by the {} mutant, T20b and T20c must both "
+                                "fail; failing legs {!r}".format(mutant_name, sorted(judged)))
+            if mutant_name == "core dropped" and "T20d" not in judged:
+                failures.append("T20e: the core-dropped mutant must also fail T20d (prefix invariance)")
 
         # T21. A write keeps the mode and leaves no temporary file; a failed rename leaves the target as it was.
         #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
@@ -2742,8 +2858,10 @@ def self_test_main(nested_run=False):
           "composed target, and compose() refuses one directly; a symlinked target or parent, a dangling "
           "link and a directory target are exit 2 with nothing outside the tree touched; a marker-like rule "
           "body is refused by the body grammar for a legacy target, and an in-sync legacy target is not "
-          "judged; a rule using the `## Detail` split renders AGENTS.md (legacy and composed), GEMINI.md and the "
-          "Copilot instructions byte-equal to its unsplit original, its title a `##` section; a write keeps the "
+          "judged; a rule using the `## Detail` split renders its core at its place and its detail after the "
+          "last rule in AGENTS.md (legacy and composed), GEMINI.md and the Copilot instructions, byte-equal to "
+          "the golden bytes and to its core-only twin through the last rule's core, and a mutant placing the "
+          "detail at the rule or dropping the core fails; a write keeps the "
           "ordinary permission bits, dropping set-ID and sticky bits (under a pinned umask), and leaves no "
           "temporary file, and a failed rename names the one it "
           "leaves; a parent swapped for a symlink after the walk redirects neither a write nor a read; a "

@@ -6,7 +6,9 @@ Copilot session gets identical AIQT governance. Each adapter is the corpus conca
 priority order (apex; then Accuracy, Integrity, Quality, Trust at tier 10; then Progress, Speed, Cost;
 then the security family), with a per-tool header. Gemini CLI reads GEMINI.md and Copilot in the IDE
 reads .github/copilot-instructions.md by default, neither of which loads AGENTS.md, so each needs its
-own file. The body transform is identical to AGENTS.md; only the header and location differ. The layout
+own file. The body transform is identical to AGENTS.md (gen_agents.bodies_of_pairs: each rule's core
+render at its place, then the detail layer of every rule using the `## Detail` split after the last
+rule); only the header and location differ. The layout
 of each file comes from the block registry .aiqt/core/adapter-blocks.toml through
 tools/_adapter_compose.py, the engine shared with gen_agents.py; both adapters are composed and judged
 in one run, so a refused target means neither is written.
@@ -35,7 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
-from gen_agents import body_of, corpus_bodies  # noqa: E402  shared body transform and AIQT ordering
+from gen_agents import bodies_of_pairs, corpus_bodies  # noqa: E402  shared body transform and AIQT ordering
 
 # Each adapter: the output path (relative parts, joined under repo root) and its header lines. The body
 # after the header is identical across adapters (the AIQT-ordered corpus), so only these two differ.
@@ -71,7 +73,7 @@ ADAPTERS = (
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
 # Renderer identity for the manifest-covered declaration (tools/gen_renderers.py; VER-CORE 6.5).
-RENDERER_DECL = {"renderer-id": "adapters", "semantics-revision": 1}
+RENDERER_DECL = {"renderer-id": "adapters", "semantics-revision": 2}
 GENSRC_OUTPUTS = (
     {"target": "GEMINI.md", "kind": "file",
      "sources": (".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml"),
@@ -86,7 +88,7 @@ TARGETS = [("/".join(adapter["parts"]), adapter["header"]) for adapter in ADAPTE
 
 def render(pairs, header):
     """The legacy adapter text for sorted (path, frontmatter) pairs; kept for existing importers."""
-    return legacy_render(header, [body_of(p) for p, _ in pairs])
+    return legacy_render(header, bodies_of_pairs(pairs))
 
 
 def main():

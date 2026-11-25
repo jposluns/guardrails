@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Must-deliver prefix gate: every rule listed in .aiqt/core/must-deliver.toml stays WHOLE inside the
-first check_release_build.CAP_BYTES bytes of AGENTS.md.
+"""Must-deliver prefix gate: the whole core layer of every rule listed in .aiqt/core/must-deliver.toml
+stays inside the first check_release_build.CAP_BYTES bytes of AGENTS.md. A rule with no `## Detail` split
+is all core, so its whole text must fit; a split rule's detail layer is rendered after every rule's core
+(gen_agents) and is never measured. A reader capped at CAP_BYTES receives no detail layer only while the
+first detail section starts at or past the cap: that holds for this corpus, whose core layers alone run
+past the cap, but it follows from the corpus, not from the layout, and this gate does not check it (a
+corpus whose core layers end inside the cap puts detail text inside it).
 
 The first-pin demonstration (tools/gen_first_pin_demo.py) DERIVES its delivered list from AGENTS.md, so
 that list shrinks silently when the rules grow and every byte-identity gate stays green: a rule can fall
@@ -51,9 +56,35 @@ has an empty reason or carries an unknown key is exit 2. Removal rows may stay a
 The spans come from gen_first_pin_demo.measure, the ONE span algorithm the demonstration generator also
 uses: AGENTS.md must be byte-identical to a fresh composition of the rule corpus and the block registry
 (a stale AGENTS.md is exit 2, never measured), offsets are UTF-8 bytes made absolute against the composed
-rule region, and a rule is delivered only when its end offset (exclusive) is at most the cap. This gate
+rule region, a rule's span is its core body (its whole body when it has no split), and a rule is
+delivered only when its end offset (exclusive) is at most the cap. This gate
 never reads the demonstration's own lists; it recomputes everything. The cap is read from
 check_release_build.CAP_BYTES at call time, never copied here.
+
+CORE MOVES. A listed rule's core layer cannot shrink by moving its text into a detail layer, its own or
+another rule's, where the prefix measure no longer sees it (core_moves): against the same comparison base
+as the list ratchet, each sentence of a listed rule's core layer at the base (whitespace runs read as one
+space, then the text cut at each space that follows a . ! or ?, so a dot inside a word such as v1.2 ends no
+sentence) that the working core layer holds fewer times than the base core does (so one copy of a repeated
+sentence counts) has moved when any rule's working detail layer holds the whole sentence, or a piece of
+that one sentence of at least MIN_PIECE_BYTES UTF-8 bytes that the working core holds fewer times than the
+base core does. The floor applies to each sentence on its own: a piece never runs past its sentence's end,
+so a move that crosses a sentence end counts each side of it on its own: a side that is its whole sentence
+counts at any length, and any other side only when it reaches MIN_PIECE_BYTES. A
+piece starts at a word's start or at the word's first letter or digit (so after an opening bracket or
+quote), and ends where the detail layer's copy of it ends or, when the working core holds that longer
+piece at least as often as the base core, at the latest earlier word end that passes the count; so a
+wrapped line or a clause moved word for word is a piece. Any moved text is exit 1 naming the rule, the
+moved bytes, the first FIRST_PIECE_CHARS characters of the first moved piece and the rule whose detail
+layer holds it. A listed rule that has no detail layer of
+its own is compared too. A
+listed rule whose working core layer is empty while it has a detail layer is exit 1 whatever the base
+holds (its title alone stays in the prefix; the prefix measure also exits 2 then, since a title-only core
+body recurs inside its own detail heading). Both layers are cut as gen_rules.core_layer and detail_layer
+cut them (source_layers), without the body grammar, so a base source written under an older grammar is
+still read; the base sources are read from the object store with the same git reads as the base list, and
+a base without the rule directory, or a source there that is not UTF-8, carries no corpus-id or title, or
+repeats another's corpus-id, is exit 2.
 
 The declared file carries exactly format-version, warn-margin-bytes and [[rule]] rows of exactly id and
 reason, and optionally [[removal]] rows of exactly id and reason; every listed id must be a corpus-id
@@ -78,7 +109,21 @@ the list read at it: a .git/shallow file, which also cuts a commit's parents, is
 it, an object written into the object store under the id of the base list's blob or of a commit is
 read as git reads it, and a rewritten ref (refs/remotes/origin/main, HEAD) moves the base it names);
 a
-listed rule cut down to a stub still passes (content is not judged);
+listed rule cut down to a stub still passes (content is not judged); the core-move check sees only text
+that reaches a detail layer as written, as a whole sentence or as a piece of one sentence of at least
+MIN_PIECE_BYTES bytes, so a moved piece of one sentence shorter than MIN_PIECE_BYTES (a parenthetical of a
+few words, the last word of a wrapped sentence), a move that crosses a sentence end with each side shorter
+than MIN_PIECE_BYTES and neither side a whole sentence (up to almost twice MIN_PIECE_BYTES of one line), a
+piece reworded on its way, even by one word, a case change or punctuation inside it, so that no run of it
+of MIN_PIECE_BYTES starting at a word survives, a piece the working core still holds at least as often as
+the base core did (also elsewhere in that core), core text dropped and rewritten in a detail layer, and
+core text moved anywhere other than a rule's detail layer (an unlisted rule's core, which may itself lie
+past the cap, a block, or another file) pass; a sentence dropped from a listed core is refused though
+nothing moved when some detail layer already holds, anywhere in its text and even inside a longer word,
+the whole sentence at any length (Stop. inside Non-Stop.) or a piece of it of at least MIN_PIECE_BYTES,
+an over-refusal (reword the detail text to pass); a move
+already present at the base is not seen, and a rule that is not listed, or has no source at the base, is
+not compared;
 the gate measures the repository file against the configured cap, not any platform's actual truncation
 behaviour or a budget other instruction files may share; and a client that checks AGENTS.md out with CRLF
 line endings inflates what a reader there receives, which this gate does not model (.gitattributes pins
@@ -88,8 +133,10 @@ AGENTS.md to eol=lf).
                                       refs/remotes/origin/main)
   check_must_deliver.py --self-test   build synthetic trees and assert each vector is discriminated
 
-Exit convention: 0 every listed rule is delivered and no rule left the list undeclared; 1 a listed rule
-ends past the cap, or a rule listed at the base is no longer listed with no [[removal]] row; 2 an
+Exit convention: 0 every listed rule's core layer is delivered, no rule left the list undeclared and no
+listed core layer shrank into a detail layer; 1 a listed rule's core layer ends past the cap, a rule
+listed at the base is no longer listed with no [[removal]] row, or a listed rule's core text moved into a
+detail layer or its core layer is empty beside a detail layer (CORE MOVES); 2 an
 unreadable, malformed or ambiguous input, or a comparison base that does not resolve (fail-closed).
 """
 import sys
@@ -107,6 +154,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import os
+import re
 import stat
 import subprocess
 import tomllib
@@ -114,7 +162,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from gen_rules import CID_RE  # noqa: E402
+from gen_rules import CID_RE, DETAIL_HEADING, load_corpus, read_rule_source  # noqa: E402
 from gen_first_pin_demo import measure, DemoError  # noqa: E402  the ONE span algorithm, shared
 import check_release_build  # noqa: E402  the cap, read as check_release_build.CAP_BYTES at call time
 
@@ -559,15 +607,198 @@ def ratchet(root, base):
     return 1 if undeclared else 0
 
 
+# --- the core-move check (CORE MOVES in the module docstring) -------------------------------------------
+
+RULES_REL = ".aiqt/core/rules"
+_UNIT_END_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def source_layers(text, label):
+    """(corpus_id, core, detail) of one rule source's text: the body after the frontmatter's closing `---`
+    line, its title line (the first non-blank body line) dropped, cut at the first line that is exactly the
+    split line gen_rules.DETAIL_HEADING; core is the text above that line and detail the text below it (None
+    with no split, when the whole body below the title is core). The same cut gen_rules.core_layer and
+    detail_layer make, read without the body grammar, so a source at a base commit written under an older
+    grammar is still read. A source with no frontmatter, no corpus-id line or no title line is a DemoError
+    (exit 2)."""
+    lines = text.split("\n")
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        raise DemoError("{} has no frontmatter block".format(label))
+    close = lines.index("---", 1)
+    ids = [line.split(":", 1)[1].strip() for line in lines[1:close]
+           if line.split(":", 1)[0].strip() == "corpus-id" and ":" in line]
+    if len(ids) != 1 or not CID_RE.fullmatch(ids[0]):
+        raise DemoError("{} does not carry exactly one well-formed corpus-id line".format(label))
+    body = lines[close + 1:]
+    title = next((i for i, line in enumerate(body) if line.strip()), None)
+    if title is None:
+        raise DemoError("{} has no title line".format(label))
+    rest = body[title + 1:]
+    if DETAIL_HEADING in rest:
+        cut = rest.index(DETAIL_HEADING)
+        return ids[0], "\n".join(rest[:cut]), "\n".join(rest[cut + 1:])
+    return ids[0], "\n".join(rest), None
+
+
+def _units(text):
+    """The sentence units of text: whitespace runs read as one space, then cut at each space that follows a
+    . ! or ? (a dot inside a word, as in v1.2, ends no unit)."""
+    return [u for u in _UNIT_END_RE.split(" ".join(text.split())) if u]
+
+
+MIN_PIECE_BYTES = 24  # a moved piece of one sentence, shorter than it, counts from this many UTF-8 bytes
+FIRST_PIECE_CHARS = 120  # a failing core-move line prints this many characters of the first moved piece
+
+
+def _moved_piece(unit, base_text, core_text, detail_text):
+    """The longest piece of unit (a base core sentence that has left the working core) that a detail layer
+    holds and that the working core holds fewer times than the base core does, when the piece is the whole
+    sentence or at least MIN_PIECE_BYTES long; None when there is none. The piece lies inside unit, so the
+    floor applies to each sentence on its own. A piece starts at a word's start or at the word's first
+    letter or digit (after an opening bracket or quote), and ends where the detail layer's copy of it ends
+    or, when that piece fails the count, at the latest earlier word end where it passes while it stays at
+    least MIN_PIECE_BYTES long. Every text here has its whitespace runs read as one space."""
+    if unit in detail_text:
+        return unit
+    starts, pos = [], 0
+    for word in unit.split(" "):
+        lead = next((k for k, ch in enumerate(word) if ch.isalnum()), 0)
+        starts += [pos] if lead == 0 else [pos, pos + lead]
+        pos += len(word) + 1
+    best = None
+    for start in starts:
+        lo, hi = start, len(unit)  # the longest prefix of unit[start:] a detail layer holds ends at lo
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if unit[start:mid] in detail_text:
+                lo = mid
+            else:
+                hi = mid - 1
+        for end in [lo] + [e for e in range(lo - 1, start, -1) if unit[e] == " "]:
+            piece = unit[start:end].rstrip(" ")
+            if len(piece.encode("utf-8")) < MIN_PIECE_BYTES:
+                break
+            if core_text.count(piece) < base_text.count(piece):
+                if best is None or len(piece) > len(best):
+                    best = piece
+                break
+    return best
+
+
+def moved_units(base_core, core, details):
+    """The text moved out of a rule's core layer into a detail layer: for each sentence unit of base_core (a
+    rule's core layer at the comparison base) that the working core layer holds fewer times than base_core
+    does, the longest piece of it that one of the working detail layers (details, every rule's) holds and
+    the working core holds fewer times than base_core does, when that piece is the whole sentence or at
+    least MIN_PIECE_BYTES long (_moved_piece). Every text is compared as a substring with whitespace runs
+    read as one space, and a sentence repeated in base_core is judged once, by its count."""
+    base_text, core_text = " ".join(base_core.split()), " ".join(core.split())
+    detail_text = "\n".join(" ".join(d.split()) for d in details if d)
+    moved = []
+    for unit in dict.fromkeys(_units(base_core)):
+        if core_text.count(unit) >= base_text.count(unit):
+            continue
+        piece = _moved_piece(unit, base_text, core_text, detail_text)
+        if piece is not None:
+            moved.append(piece)
+    return moved
+
+
+def _working_layers(root):
+    """{corpus-id: (core, detail)} for every rule source in the working tree, read with the corpus loader
+    (gen_rules.load_corpus) and cut by source_layers."""
+    out = {}
+    for src, _fm, _rel in load_corpus(root / RULES_REL):
+        rid, core, detail = source_layers(read_rule_source(src), "{} ({})".format(src.name, RULES_REL))
+        out[rid] = (core, detail)
+    return out
+
+
+def _base_layers(root, commit, label):
+    """{corpus-id: core} for every rule source (*.md, a regular blob) under RULES_REL at the base commit,
+    read from the object store with the gate's git reads. A base with no rule directory, a source that is
+    not UTF-8, carries no corpus-id or no title, or a corpus-id carried twice is a DemoError (exit 2)."""
+    where = "{} at the base {}".format(RULES_REL, label)
+    proc = _git(root, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", RULES_REL])
+    if proc.returncode != 0:
+        raise DemoError("git ls-tree failed for {} ({})".format(where, _git_err(proc)))
+    entries = [e for e in proc.stdout.split(b"\0") if e]
+    if not entries:
+        raise DemoError("{} does not exist; the base core layers cannot be read".format(where))
+    cores = {}
+    for entry in entries:
+        meta, _tab, path = entry.partition(b"\t")
+        fields = meta.split()
+        name = path.decode("utf-8", "replace")
+        if not name.endswith(".md") or len(fields) != 3 or fields[1] != b"blob":
+            continue
+        if fields[0] not in (b"100644", b"100755"):
+            raise DemoError("{} at the base {} is not a regular file".format(name, label))
+        blob = _git(root, ["cat-file", "blob", fields[2].decode("ascii", "replace")])
+        if blob.returncode != 0:
+            raise DemoError("{} at the base {} is unreadable ({})".format(name, label, _git_err(blob)))
+        try:
+            text = blob.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise DemoError("{} at the base {} is not valid UTF-8 ({})".format(name, label, exc))
+        rid, core, _detail = source_layers(text, "{} at the base {}".format(name, label))
+        if rid in cores:
+            raise DemoError("corpus-id {} is carried twice under {}".format(rid, where))
+        cores[rid] = core
+    return cores
+
+
+def core_moves(root, base):
+    """The core-move check: exit 1 when a listed rule's core layer is empty while it has a detail layer, or
+    when text of a listed rule's core layer at the comparison base (the same base as the list ratchet) has
+    moved into any rule's working detail layer, its own or another's, split or not itself (moved_units),
+    naming the rule, the moved bytes, the first FIRST_PIECE_CHARS characters of the first moved piece and the
+    rule whose detail layer holds it; 0
+    otherwise; 2 when the base, the list or a source cannot be read. A rule not present at the base has
+    nothing moved, and nothing is moved while no rule has a detail layer."""
+    try:
+        ids, _warn, _removals = read_declared(root / DECL_REL)
+        working = _working_layers(root)
+        commit, label = resolve_base(root, base)
+        base_cores = _base_layers(root, commit, label)
+    except (ValueError, OSError, UnicodeError) as exc:
+        print("error: {}; fail-closed".format(exc), file=sys.stderr)
+        return 2
+    failed = 0
+    details = [(did, " ".join(d.split())) for did, (_core, d) in sorted(working.items()) if d is not None]
+    for rid in ids:
+        if rid not in working:
+            continue  # run() reports a listed id with no measured span (exit 2)
+        core, detail = working[rid]
+        if detail is not None and not core.strip():
+            print("must-deliver: FAIL: rule {} has an empty core layer, so all its text lies in its detail "
+                  "layer, after every rule's core".format(rid))
+            failed = 1
+        moved = moved_units(base_cores.get(rid, ""), core, [d for _did, d in details])
+        if moved:
+            holder = next(did for did, d in details if moved[0] in d)
+            print("must-deliver: FAIL: rule {} moves {} bytes of its core layer at the base {} into a detail "
+                  "layer ({} piece(s), the first, in the detail layer of {}: {!r})".format(
+                      rid, sum(len(u.encode("utf-8")) for u in moved), label, len(moved), holder,
+                      moved[0][:FIRST_PIECE_CHARS]))
+            failed = 1
+    print("must-deliver: core-move check against base {}: {} listed rule(s), {} split in the working tree; "
+          "{}".format(label, len(ids), sum(1 for rid in ids if rid in working and working[rid][1] is not None),
+                      "a core layer shrank into a detail layer" if failed else "no core text moved into a "
+                      "detail layer and no listed core layer is empty"))
+    return failed
+
+
 def gate(root, base):
-    """The whole gate: the prefix check (run) and the list ratchet, both always run so every finding is
-    printed. The worse exit wins: 2 over 1 over 0."""
-    return max(run(root), ratchet(root, base))
+    """The whole gate: the prefix check (run), the list ratchet and the core-move check (core_moves), all
+    always run so every finding is printed. The worse exit wins: 2 over 1 over 0."""
+    return max(run(root), ratchet(root, base), core_moves(root, base))
 
 
 def run(root):
-    """Check the tree at root. Exit 0 when every listed rule's whole span lies inside the cap, 1 when a
-    listed rule ends past it, 2 on an unreadable, malformed or ambiguous input. Parameterized on root so
+    """Check the tree at root. Exit 0 when every listed rule's whole span (its whole core layer) lies inside
+    the cap, 1 when a
+    listed rule's core layer ends past it, 2 on an unreadable, malformed or ambiguous input. Parameterized on root so
     the self-test drives it against synthetic trees, never the real repo."""
     try:
         ids, warn, _removals = read_declared(root / DECL_REL)
@@ -675,6 +906,10 @@ def main():
 #       offsets relative to the rule region, without the rules_start shift, passes);
 #   T13 the margin report: the unlisted-rule line, and a WARNING line under warn-margin-bytes that still
 #       exits 0 (a mutant whose warning exits non-zero, or margin off by one, fails).
+#   T13b a listed rule using the `## Detail` split is measured on its core layer: its core ending 10 bytes
+#       inside the cap with a 5000-byte detail layer is exit 0 with margin 10 (a mutant of
+#       gen_agents.bodies_of_pairs rendering the detail at the rule's own place does not pass so), and its
+#       core straddling the cap is exit 1 naming it.
 # The list ratchet (T14 to T38) runs gate() against temporary git repositories built with the same
 # helpers and committed through _git_fixture_env's hermetic environment, the whole self-test inside
 # fixture_git_lifecycle so the gate's own base reads see no caller git configuration either:
@@ -782,6 +1017,62 @@ def main():
 #       gate with the value --self-test, and the real gate refuses that value as not a ref (exit 2), while
 #       exactly --self-test runs the self-test and no argument, --base HEAD and --base=HEAD run the gate (a
 #       mutant that runs the self-test when --self-test appears anywhere dispatches it and exits 0).
+# The core-move check (T43 to T54) runs against committed bases built the same way:
+#   T43 a sentence of listed ruleaa's core at the base moved into its detail layer: exit 1 naming the rule
+#       and the 38 moved bytes (a mutant without core_moves in gate, or one comparing with the working
+#       core instead of the base core, exits 0);
+#   T44 ruleaa's whole core moved into its detail layer: core_moves is exit 1 naming the empty core and the
+#       move, and the whole gate is not exit 0; an empty listed core whose base was already empty is exit
+#       1 on the empty core alone (a mutant without the empty-core test passes it);
+#   T45 a detail sentence the base never held, a core sentence dropped and held nowhere, the T43 move
+#       in an unlisted rule, a dropped core sentence sharing only a piece one byte under MIN_PIECE_BYTES
+#       with a detail layer, a detail piece the working core still holds as often as the base core, a
+#       move that crosses a sentence end with each side under MIN_PIECE_BYTES, and a dropped sentence
+#       whose text up to a dot inside a word (v1.2) a detail layer holds are each exit 0 with the
+#       core-move summary (a mutant judging every rule fails the third, one with a smaller piece floor the
+#       fourth, one not counting the piece in the working core the fifth, one whose pieces cross sentence
+#       ends the sixth, and one cutting at a dot that no space follows the seventh);
+#   T46 a base rule source that is not UTF-8 is exit 2 (a mutant skipping it exits 0);
+#   T47 part of a sentence moved word for word into ruleaa's detail layer (its trailing comma left
+#       behind), the T43 sentence moved into an unlisted rule's detail layer with ruleaa split and with it
+#       unsplit, and one copy of a sentence the base core holds twice moved into ruleaa's detail layer are
+#       each exit 1 naming the moved bytes and the rule whose detail layer holds them (a mutant matching
+#       whole sentences only, reading only ruleaa's own detail layer, skipping an unsplit listed rule, or
+#       testing presence instead of the count exits 0 on its case; one matching whole words only names
+#       24 of the 30 bytes moved);
+#   T48 a bracketed clause moved without its brackets, two short sentences ended by ? and ! moved whole,
+#       a piece that passes the count only at an earlier word end, and a dropped sentence a base detail
+#       layer already held (the disclosed over-refusal) are each exit 1 naming the moved bytes, the rule
+#       whose detail layer holds them and the first moved piece (a mutant starting pieces only at word
+#       starts exits 0 on the first, one not cutting after ? or after ! names the wrong bytes on the
+#       second and one cutting only after . exits 0 on it, one trying only the detail copy's end names
+#       30 of the 60 bytes on the third; the fourth pins the over-refusal the residue discloses); every
+#       T47 row also names its first piece;
+#   T49 the module docstring, the gate's manifest residue and the whole text of the declared file (its
+#       comments and its data rows alike, so a value written in a reason string turns T49 red and a name
+#       written there satisfies it) name MIN_PIECE_BYTES and CAP_BYTES (the first two also
+#       FIRST_PIECE_CHARS) and never write a constant's value as a number (a copy that would go stale when
+#       the constant changes); a gates manifest tomllib runs out of recursion depth or memory on, or whose
+#       gate entries or must-deliver residue have the wrong type, is cannot-evaluate (exit 2), never a T49
+#       failure or a traceback;
+#   T50 a deeply nested gates manifest is that cannot-evaluate, naming RecursionError (a mutant whose
+#       handler drops RecursionError raises it);
+#   T51 the statements corrected for a crossing move's whole-sentence side, the dropped-sentence
+#       over-refusal inside a longer word, "at least as often" and the printed piece's FIRST_PIECE_CHARS
+#       cut are written in the docstring and the residue as pinned (the text, not its truth);
+#   T52 a crossing move whose left side is a short whole sentence (Yes!) and a dropped short sentence
+#       (Stop.) a detail layer holds inside a longer word (Non-Stop.) are each exit 1 naming the bytes,
+#       the holder and the first piece;
+#   T53 a moved sentence longer than FIRST_PIECE_CHARS characters is exit 1 printing exactly its first
+#       FIRST_PIECE_CHARS characters (a mutant printing the whole piece fails it), and a sentence the
+#       working core still holds as often as the base core, also held whole by a detail layer, is exit 0
+#       (a mutant skipping a sentence only when the working core holds it more often refuses it);
+#   T54 the cannot-evaluate path end to end: a deeply nested gates manifest read from a tree is that
+#       cannot-evaluate and the self-test's verdict on it is exit 2 (a mutant whose verdict ignores it
+#       returns 0 there); tomllib raising MemoryError (an injected text whose replace raises it) is
+#       cannot-evaluate naming MemoryError (a mutant whose handler drops MemoryError raises it); and a
+#       gate that is a table, a gate that is an integer and a residue that is not a string are each
+#       cannot-evaluate, never a T49 failure or a traceback.
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -869,6 +1160,7 @@ def _self_test_main_isolated():
     failures = []
     skipped = []
     fixture_error = None
+    t49_error = None
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-check-must-deliver-selftest-"))
     except OSError as exc:
@@ -1151,6 +1443,50 @@ def _self_test_main_isolated():
         if code != 0 or "WARNING" in out:
             failures.append("T13: margin equal to warn-margin-bytes must not warn, got {}\n{}".format(
                 code, out))
+
+        # T13b. A listed split rule is measured on its core layer: ruleaa's core ends CAP - 10 and its 5000-byte
+        #       detail layer goes after the last rule, so it is exit 0 with margin 10; the same tree built with
+        #       gen_agents.bodies_of_pairs replaced by a mutant rendering the detail at the rule's own place is
+        #       not exit 0 with margin 10. A listed split rule whose core straddles the cap is exit 1.
+        t13b_detail = "Detail text " + "d" * 5000 + "."
+        t13b_specs = [("prjint1", True, 0), ("ruleaa", False, 20000, t13b_detail), ("rulebb", False, 400)]
+        t13b = tmp / "t13b"
+        sp = gfpd._tuned(t13b, t13b_specs, "ruleaa", CAP - 10)
+        _decl(t13b, both)
+        code, out = capture(t13b)
+        if code != 0 or "ruleaa  end {:6d}  margin 10".format(CAP - 10) not in out or sp["ruleaa"][1] != CAP - 10:
+            failures.append("T13b: a listed split rule whose core ends 10 bytes inside the cap must be exit 0 with "
+                            "margin 10 (fixture end {}), got {}\n{}".format(sp["ruleaa"][1], code, out))
+
+        def t13b_detail_in_place(pairs):
+            out = []
+            for src, _fm in pairs:
+                detail = gfpd.gen_agents.detail_body_of(src)
+                core = gfpd.gen_agents.core_body_of(src)
+                out.append(core if detail is None else core + "\n\n" + detail)
+            return out
+
+        real_bodies = gfpd.gen_agents.bodies_of_pairs
+        gfpd.gen_agents.bodies_of_pairs = t13b_detail_in_place
+        try:
+            t13b_mutant = tmp / "t13b-mutant"
+            gfpd._tuned(t13b_mutant, t13b_specs, "ruleaa", CAP - 10)
+            _decl(t13b_mutant, both)
+            code, out = capture(t13b_mutant)
+        except Exception as exc:  # noqa: BLE001  a mutant may surface as any exception
+            code, out = "raised {!r}".format(exc), ""
+        finally:
+            gfpd.gen_agents.bodies_of_pairs = real_bodies
+        if code == 0 and "margin 10" in out:
+            failures.append("T13b: with the detail rendered at the rule's own place the gate still passes with "
+                            "margin 10, so the vector does not judge the detail placement:\n{}".format(out))
+        t13b_over = tmp / "t13b-over"
+        sp = gfpd._tuned(t13b_over, t13b_specs, "ruleaa", CAP + 5)
+        _decl(t13b_over, both)
+        code, out = capture(t13b_over)
+        if sp["ruleaa"][1] != CAP + 5 or code != 1 or "FAIL: rule ruleaa ends at {}".format(CAP + 5) not in out:
+            failures.append("T13b: a listed split rule whose core straddles the cap must be exit 1 naming it "
+                            "(fixture end {}), got {}\n{}".format(sp["ruleaa"][1], code, out))
 
         # The list ratchet. Each fixture commits a base listing prjint1 and ruleaa (ruleaa CAP - 10),
         # then edits the working list; the base is passed as its full object id unless stated.
@@ -1694,6 +2030,361 @@ def _self_test_main_isolated():
         if code != 2 or "--base '--self-test' is not a ref" not in out:
             failures.append("T42: --base --self-test must be exit 2 naming it not a ref, got {}\n{}".format(
                 code, out))
+
+        # The core-move check. Each fixture commits a base listing prjint1 and ruleaa, then rewrites
+        # ruleaa in the working tree (AGENTS.md recomposed, so run() passes) and runs the whole gate.
+        moved_sentence = "A sentence the base holds in its core."
+        move_msg = "FAIL: rule ruleaa moves {} bytes of its core layer".format(len(moved_sentence))
+        empty_msg = "FAIL: rule ruleaa has an empty core layer"
+
+        def put_source(root, text):
+            """Write text as ruleaa's source and recompose AGENTS.md from the corpus, as gen_agents does."""
+            rdir = root.joinpath(*gfpd.RULES_PARTS)
+            (rdir / "ruleaa.md").write_text(text, encoding="utf-8")
+            pairs = sorted(((src, fm) for src, fm, _ in gfpd.load_corpus(rdir)),
+                           key=lambda pf: gfpd.gen_agents.sort_key(pf[1]))
+            (root / "AGENTS.md").write_bytes(gfpd.adapter_compose.compose(
+                "AGENTS.md", gfpd.gen_agents.HEADER, gfpd.gen_agents.bodies_of_pairs(pairs),
+                gfpd.adapter_compose.load_registry(root)).data)
+
+        def move_fixture(name, base_spec, head_spec=None, head_source=None, rules=("prjint1", "ruleaa"),
+                         base_source=None, head_bb=("rulebb", False, 400)):
+            root = tmp / name
+            gfpd._write_tree(root, [("prjint1", True, 0), base_spec, ("rulebb", False, 400)])
+            if base_source is not None:
+                put_source(root, base_source)
+            _decl(root, [], raw=raw_decl(rules))
+            commit = commit_base(root)
+            if head_spec is not None:
+                gfpd._write_tree(root, [("prjint1", True, 0), head_spec, head_bb])
+            if head_source is not None:
+                put_source(root, head_source)
+            return root, commit
+
+        # T43. A sentence of ruleaa's core at the base moved into its detail layer: exit 1 naming the rule
+        #      and the moved bytes (a mutant without core_moves, or one comparing with the working core
+        #      instead of the base core, exits 0).
+        t43, base43 = move_fixture("t43", ("ruleaa", False, ". " + moved_sentence[:-1]),
+                                   head_spec=("ruleaa", False, "", moved_sentence))
+        code, out = capture_gate(t43, base43)
+        if code != 1 or move_msg not in out:
+            failures.append("T43: a core sentence moved into the detail layer must be exit 1 naming the rule "
+                            "and {} moved bytes, got {}\n{}".format(len(moved_sentence), code, out))
+
+        # T44. ruleaa's whole core moved into its detail layer, an empty core: exit 1 on both findings;
+        #      and an empty core with nothing moved (the base already empty) is exit 1 on the empty core
+        #      alone (a mutant without the empty-core test passes it).
+        empty_core = ("---\ncorpus-id: ruleaa\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\n"
+                      "slug: fixture-ruleaa\ndetail-trigger: writing a self-test fixture\n---\n\n# Rule ruleaa\n\n"
+                      "## Detail\n\n" + moved_sentence + "\n")
+        #      The whole gate is exit 2 on both trees as well, because run() cannot locate a title-only core
+        #      body that recurs in its own detail heading; core_moves is asserted on its own exit 1.
+        def capture_moves(root, base):
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                code = core_moves(root, base)
+            return code, buf.getvalue()
+
+        t44, base44 = move_fixture("t44", ("ruleaa", False, ". " + moved_sentence[:-1]), head_source=empty_core)
+        code, out = capture_moves(t44, base44)
+        if code != 1 or empty_msg not in out or "FAIL: rule ruleaa moves" not in out:
+            failures.append("T44: a core moved whole into the detail layer must be exit 1 naming the empty "
+                            "core and the move, got {}\n{}".format(code, out))
+        if capture_gate(t44, base44)[0] == 0:
+            failures.append("T44: the whole gate must not pass a listed rule whose core moved whole")
+        t44e, base44e = move_fixture("t44e", ("ruleaa", False, ""), base_source=empty_core)
+        code, out = capture_moves(t44e, base44e)
+        if code != 1 or empty_msg not in out or "FAIL: rule ruleaa moves" in out:
+            failures.append("T44: an empty listed core with nothing moved must be exit 1 on the empty core "
+                            "alone, got {}\n{}".format(code, out))
+
+        # T45. Positive controls, each exit 0: a detail sentence the base never held (the vfxcmt shape
+        #      against main); a sentence dropped from the core and held nowhere (content is not judged);
+        #      the T43 move in a rule that is not listed (a mutant judging every rule fails it); a dropped
+        #      sentence sharing only a piece one byte under MIN_PIECE_BYTES with a detail layer (a mutant
+        #      with a smaller floor fails it); a detail piece the working core still holds as often as
+        #      the base core (a mutant not counting the piece in the working core fails it); a move of
+        #      one line that crosses a sentence end, each side under MIN_PIECE_BYTES, since the floor
+        #      applies to each sentence on its own (a mutant whose pieces cross sentence ends fails it);
+        #      and a dropped sentence whose text up to a dot inside a word (v1.2) a detail layer holds,
+        #      since only a dot that a space follows ends a sentence (a mutant cutting there fails it).
+        crossing = "ending in a number. Code or document"
+        if not all(len(side.encode("utf-8")) < MIN_PIECE_BYTES for side in crossing.split(". ")):
+            failures.append("T45: each side of the crossing move must be under MIN_PIECE_BYTES")
+        if len("sentence the base holds".encode("utf-8")) != MIN_PIECE_BYTES - 1:
+            failures.append("T45: the shared phrase must be one byte under MIN_PIECE_BYTES")
+        for label, base_spec, head_spec, rules in (
+                ("a new detail sentence", ("ruleaa", False, ""), ("ruleaa", False, "", moved_sentence),
+                 ("prjint1", "ruleaa")),
+                ("a dropped core sentence", ("ruleaa", False, ". " + moved_sentence[:-1]),
+                 ("ruleaa", False, "", "Other detail text."), ("prjint1", "ruleaa")),
+                ("an unlisted rule's move", ("ruleaa", False, ". " + moved_sentence[:-1]),
+                 ("ruleaa", False, "", moved_sentence), ("prjint1",)),
+                ("a shared phrase one byte under the floor", ("ruleaa", False, ". " + moved_sentence[:-1]),
+                 ("ruleaa", False, "", "Another sentence the base holds elsewhere."), ("prjint1", "ruleaa")),
+                ("a piece the core still holds", ("ruleaa", False, ". " + moved_sentence[:-1]),
+                 ("ruleaa", False, ". " + moved_sentence[:-1] + " now", moved_sentence[:-1]),
+                 ("prjint1", "ruleaa")),
+                ("a move across a sentence end",
+                 ("ruleaa", False, ". The core keeps this first part of a line " + crossing
+                  + " what follows in it"),
+                 ("ruleaa", False, ". The core keeps this first part of a line what follows in it", crossing),
+                 ("prjint1", "ruleaa")),
+                ("a dot inside a word", ("ruleaa", False, ". Keep v1.2 here"), ("ruleaa", False, "", "Keep v1."),
+                 ("prjint1", "ruleaa"))):
+            root45, base45 = move_fixture("t45-" + label.replace(" ", "-").replace("'", ""), base_spec,
+                                          head_spec=head_spec, rules=rules)
+            code, out = capture_gate(root45, base45)
+            if code != 0 or "core-move check against base" not in out:
+                failures.append("T45 {}: expected exit 0 with the core-move summary, got {}\n{}".format(
+                    label, code, out))
+
+        # T46. A rule source at the base that is not UTF-8 is exit 2 (a mutant skipping unreadable base
+        #      sources reads nothing moved and exits 0).
+        t46, _base46 = move_fixture("t46", ("ruleaa", False, ""))
+        (t46.joinpath(*gfpd.RULES_PARTS) / "zz-bad.md").write_bytes(b"---\ncorpus-id: zzbad\n---\n\xff\n")
+        fixture_git(t46, "add", "-A")
+        fixture_git(t46, "commit", "-q", "-m", "a base source that is not UTF-8")
+        base46 = fixture_git(t46, "rev-parse", "HEAD")
+        (t46.joinpath(*gfpd.RULES_PARTS) / "zz-bad.md").unlink()
+        code, out = capture_gate(t46, base46)
+        if code != 2 or "is not valid UTF-8" not in out:
+            failures.append("T46: a base rule source that is not UTF-8 must be exit 2, got {}\n{}".format(
+                code, out))
+
+        # T47. Moves the whole-sentence test of an earlier revision passed, each exit 1 naming the moved
+        #      bytes and the rule whose detail layer holds them: part of a sentence moved word for word
+        #      into ruleaa's own detail layer, its trailing comma left behind (a mutant matching whole
+        #      sentences only exits 0, and one matching whole words only names 24 bytes, not the 30
+        #      moved); the T43 sentence moved into the detail layer
+        #      of rulebb, an unlisted rule, while ruleaa is split and while ruleaa is unsplit (a mutant
+        #      reading ruleaa's own detail layer only, or skipping an unsplit listed rule, exits 0); and one
+        #      copy of a sentence the base core holds twice moved into ruleaa's detail layer (a mutant
+        #      testing presence instead of the count exits 0).
+        long_core = ". A sentence the base holds, with a clause of its own words, in its core"
+        clause = "with a clause of its own words"
+        # T48. Behaviours the residue states, each exit 1 naming the moved bytes, the holder and the first
+        #      piece: a bracketed clause moved into ruleaa's detail layer without its brackets, a piece
+        #      starting at the word's first letter (a mutant starting pieces only at word starts sees only
+        #      the 16 bytes after the first word, under MIN_PIECE_BYTES, and exits 0); two short sentences
+        #      ended by ? and ! moved whole (a mutant not cutting after ? names 16 bytes, one not cutting
+        #      after ! names 11, one cutting only after . exits 0); a piece that passes the count only at
+        #      an earlier word end, its longer form still held by the core (a mutant trying only the
+        #      detail copy's end names 30 of the 60 bytes); and a sentence dropped from the core while a
+        #      base detail layer already held it, the disclosed over-refusal, refused though nothing moved.
+        bracketed = "sentence pieces count too"
+        if (len(bracketed.encode("utf-8")) < MIN_PIECE_BYTES
+                or len(bracketed.split(" ", 1)[1].encode("utf-8")) >= MIN_PIECE_BYTES):
+            failures.append("T48: the bracketed clause must reach MIN_PIECE_BYTES only with its first word")
+        alpha = "Alpha beta gamma delta epsilon"
+        rows47 = (
+            ("T47 part of a sentence", ("ruleaa", False, long_core),
+             ("ruleaa", False, ". A sentence the base holds in its core", clause),
+             ("rulebb", False, 400), len(clause), "ruleaa", clause),
+            ("T47 a sentence into another rule's detail, split", ("ruleaa", False, ". " + moved_sentence[:-1]),
+             ("ruleaa", False, "", "Other detail text."), ("rulebb", False, 400, moved_sentence),
+             len(moved_sentence), "rulebb", moved_sentence),
+            ("T47 a sentence into another rule's detail, unsplit",
+             ("ruleaa", False, ". " + moved_sentence[:-1]), ("ruleaa", False, ""),
+             ("rulebb", False, 400, moved_sentence), len(moved_sentence), "rulebb", moved_sentence),
+            ("T47 one copy of a repeated sentence",
+             ("ruleaa", False, ". " + moved_sentence + " " + moved_sentence[:-1]),
+             ("ruleaa", False, ". " + moved_sentence[:-1], moved_sentence),
+             ("rulebb", False, 400), len(moved_sentence), "ruleaa", moved_sentence),
+            ("T48 a bracketed clause", ("ruleaa", False, ". A sentence the base holds (" + bracketed + ") in its core"),
+             ("ruleaa", False, ". A sentence the base holds in its core", bracketed),
+             ("rulebb", False, 400), len(bracketed), "ruleaa", bracketed),
+            ("T48 short sentences ended by ? and !", ("ruleaa", False, ". Is it held? Yes! It stays in its core"),
+             ("ruleaa", False, ". It stays in its core", "Is it held? Yes!"),
+             ("rulebb", False, 400), len("Is it held?") + len("Yes!"), "ruleaa", "Is it held?"),
+            ("T48 a piece ending at an earlier word end",
+             ("ruleaa", False, ". " + alpha + " zeta. " + alpha + " theta"),
+             ("ruleaa", False, ". " + alpha + " zeta now", alpha + " zeta"),
+             ("rulebb", False, 400), 2 * len(alpha), "ruleaa", alpha),
+            ("T48 a sentence a base detail layer already held",
+             ("ruleaa", False, ". " + moved_sentence[:-1], moved_sentence), ("ruleaa", False, "", moved_sentence),
+             ("rulebb", False, 400), len(moved_sentence), "ruleaa", moved_sentence),
+            ("T52 a crossing move whose left side is a short whole sentence",
+             ("ruleaa", False, ". Yes! Something else entirely here"),
+             ("ruleaa", False, ". Something else entirely here", "Yes! Some"),
+             ("rulebb", False, 400), len("Yes!"), "ruleaa", "Yes!"),
+            ("T52 a dropped short sentence a detail layer holds inside a longer word",
+             ("ruleaa", False, ". Stop. Keep going with the rest", "Run Non-Stop. Fine."),
+             ("ruleaa", False, ". Keep going with the rest", "Run Non-Stop. Fine."),
+             ("rulebb", False, 400), len("Stop."), "ruleaa", "Stop."))
+        for label, base_spec, head_spec, head_bb, nbytes, holder, first in rows47:
+            root47, base47 = move_fixture(
+                "t4x-" + label.replace(" ", "-").replace("'", "").replace(",", "").replace("?", "q")
+                .replace("!", "x"), base_spec, head_spec=head_spec, head_bb=head_bb)
+            code, out = capture_gate(root47, base47)
+            want = "FAIL: rule ruleaa moves {} bytes of its core layer".format(nbytes)
+            if code != 1 or want not in out or "in the detail layer of {}: {!r}".format(holder, first) not in out:
+                failures.append("{}: expected exit 1 naming {} moved bytes held by {}, the first {!r}, got {}\n"
+                                "{}".format(label, nbytes, holder, first, code, out))
+
+        # T49. The module docstring, the gate's manifest residue and the whole text of the declared file
+        #      (its comments and its data rows alike: a value in a reason string turns T49 red, and a name
+        #      there satisfies it) name the constants they state and never write a constant's value as a
+        #      number, so none goes stale when the constant changes: MIN_PIECE_BYTES and CAP_BYTES in all
+        #      three, FIRST_PIECE_CHARS in the docstring and the residue.
+        def t49_residue(gates_text, sink):
+            """(the must-deliver residue in gates_text, None); (None, None) after a T49 failure appended to
+            sink when gates_text is not TOML or holds no such residue; (None, reason) when tomllib runs out of
+            recursion depth or memory on it, or its gate entries or the residue have the wrong type (a gate
+            that is a table or a scalar, a residue that is not a string), which is cannot-evaluate (exit 2),
+            never a T49 failure or a traceback."""
+            try:
+                gates_doc = tomllib.loads(gates_text)
+                found = next(g["residue"] for g in gates_doc["gate"] if g.get("id") == "must-deliver")
+            except (RecursionError, MemoryError) as exc:
+                return None, "tomllib raised {} on .aiqt/core/gates/manifest.toml".format(type(exc).__name__)
+            except (ValueError, KeyError, StopIteration) as exc:
+                sink.append("T49: the must-deliver residue cannot be read ({})".format(exc))
+                return None, None
+            except (AttributeError, TypeError) as exc:
+                return None, ("the gate entries of .aiqt/core/gates/manifest.toml are not tables "
+                              "({}: {})".format(type(exc).__name__, exc))
+            if not isinstance(found, str):
+                return None, ("the must-deliver residue in .aiqt/core/gates/manifest.toml is a {}, not a "
+                              "string".format(type(found).__name__))
+            return found, None
+
+        def t49_read(root, sink):
+            """(the residue, the declared file's whole text, the cannot-evaluate reason or None) read from the
+            gates manifest and DECL_REL under root; a file that cannot be read appends a T49 failure to sink
+            and gives (None, None, None)."""
+            try:
+                gates_text = (root / ".aiqt/core/gates/manifest.toml").read_text(encoding="utf-8")
+                decl_text = (root / DECL_REL).read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                sink.append("T49: the gates manifest or {} cannot be read ({})".format(DECL_REL, exc))
+                return None, None, None
+            residue, error = t49_residue(gates_text, sink)
+            return residue, decl_text, error
+
+        residue, decl_text, t49_error = t49_read(repo_root(), failures)
+        constants = (("MIN_PIECE_BYTES", MIN_PIECE_BYTES), ("CAP_BYTES", check_release_build.CAP_BYTES),
+                     ("FIRST_PIECE_CHARS", FIRST_PIECE_CHARS))
+        for where, text, names in (("the module docstring", __doc__, ("MIN_PIECE_BYTES", "CAP_BYTES",
+                                                                       "FIRST_PIECE_CHARS")),
+                                   ("the manifest residue", residue, ("MIN_PIECE_BYTES", "CAP_BYTES",
+                                                                      "FIRST_PIECE_CHARS")),
+                                   (DECL_REL, decl_text, ("MIN_PIECE_BYTES", "CAP_BYTES"))):
+            if text is None:
+                continue
+            for name in names:
+                if name not in text:
+                    failures.append("T49: {} must name {}".format(where, name))
+            for name, value in constants:
+                if re.search(r"(?<![\w.]){}(?![\w])".format(value), text):
+                    failures.append("T49: {} must never write the value {} of {}".format(where, value, name))
+
+        # T50. tomllib running out of recursion depth on the gates manifest is cannot-evaluate, never a
+        #      traceback or a T49 failure: a deeply nested array (a mutant whose handler drops RecursionError
+        #      raises it here). T54 runs the MemoryError arm; tools/check_python_floor.py also guards it.
+        too_deep = "a = " + "[" * 100000 + "]" * 100000
+        try:
+            nested = t49_residue(too_deep, failures)
+        except RecursionError:
+            nested = (None, None)
+        if nested[0] is not None or nested[1] is None or "RecursionError" not in nested[1]:
+            failures.append("T50: a gates manifest tomllib cannot nest must be cannot-evaluate naming "
+                            "RecursionError, got {!r}".format(nested))
+
+        # T51. The statements this round corrected, each pinned as written (the text, not its truth: the
+        #      T52 and T53 rows and the T45 to T48 rows pin the behaviour): in the module docstring a crossing
+        #      move's whole-sentence side, the dropped-sentence over-refusal inside a longer word, "at least
+        #      as often" (twice) and the printed piece cut to FIRST_PIECE_CHARS; in the residue the same three.
+        pinned = (
+            ("the module docstring", __doc__, (
+                "a side that is its whole sentence counts at any length, and any other side only when it "
+                "reaches MIN_PIECE_BYTES",
+                "when the working core holds that longer piece at least as often as the base core",
+                "a piece the working core still holds at least as often as the base core did",
+                "already holds, anywhere in its text and even inside a longer word, the whole sentence at any "
+                "length (Stop. inside Non-Stop.)",
+                "the first FIRST_PIECE_CHARS characters of the first moved piece")),
+            ("the manifest residue", residue, (
+                "when the working core holds that longer piece at least as often as the base core",
+                "a piece the working core still holds at least as often as the base core did",
+                "already holds, anywhere in its text and even inside a longer word, the whole sentence at any "
+                "length (Stop. inside Non-Stop.)",
+                "the first FIRST_PIECE_CHARS characters of the first moved piece")))
+        for where, text, phrases in pinned:
+            flat = " ".join((text or "").split())
+            for phrase in phrases:
+                if phrase not in flat:
+                    failures.append("T51: {} must state {!r}".format(where, phrase))
+
+        # T53. The two T51 statements no earlier row pins: a moved sentence longer than FIRST_PIECE_CHARS
+        #      characters is exit 1 printing exactly its first FIRST_PIECE_CHARS characters (a mutant printing
+        #      the whole piece fails it); and a sentence the working core still holds as often as the base
+        #      core, which a detail layer also holds whole, is exit 0 (a mutant skipping a sentence only when
+        #      the working core holds it more often, > for >=, refuses it).
+        long_sentence = ("A long core sentence " + "with many more words " * (FIRST_PIECE_CHARS // 21 + 1)
+                         + "here.")
+        if len(long_sentence) <= FIRST_PIECE_CHARS:
+            failures.append("T53: the long sentence must be longer than FIRST_PIECE_CHARS characters")
+        root53, base53 = move_fixture("t53-cut", ("ruleaa", False, ". " + long_sentence[:-1]),
+                                      head_spec=("ruleaa", False, "", long_sentence))
+        code, out = capture_gate(root53, base53)
+        want = "FAIL: rule ruleaa moves {} bytes of its core layer".format(len(long_sentence.encode("utf-8")))
+        cut = "in the detail layer of ruleaa: {!r})".format(long_sentence[:FIRST_PIECE_CHARS])
+        if code != 1 or want not in out or cut not in out or repr(long_sentence) in out:
+            failures.append("T53 a moved sentence longer than FIRST_PIECE_CHARS: expected exit 1 printing its "
+                            "first FIRST_PIECE_CHARS characters only, got {}\n{}".format(code, out))
+        root53, base53 = move_fixture("t53-held", ("ruleaa", False, ". " + moved_sentence[:-1]),
+                                      head_spec=("ruleaa", False, ". " + moved_sentence[:-1], moved_sentence))
+        code, out = capture_gate(root53, base53)
+        if code != 0 or "core-move check against base" not in out:
+            failures.append("T53 a sentence the core still holds as often, also held by a detail layer: "
+                            "expected exit 0 with the core-move summary, got {}\n{}".format(code, out))
+
+        # T54. The cannot-evaluate path end to end. A tree whose gates manifest tomllib cannot nest is read
+        #      by t49_read, the reader T49 runs on the repository, as cannot-evaluate naming RecursionError
+        #      with no T49 failure, and the self-test's verdict on that is exit 2 reporting it (a mutant whose
+        #      verdict ignores t49_error returns 0 there). tomllib raising MemoryError, injected by a text whose
+        #      replace raises it, is cannot-evaluate naming MemoryError (a mutant whose handler drops
+        #      MemoryError raises it here). A gate that is a table, a gate that is an integer and a residue
+        #      that is not a string are each cannot-evaluate with no T49 failure (a mutant without those
+        #      arms raises AttributeError or TypeError here, or returns the residue).
+        root54 = tmp / "t54"
+        (root54 / ".aiqt/core/gates").mkdir(parents=True)
+        (root54 / ".aiqt/core/gates/manifest.toml").write_text(too_deep, encoding="utf-8")
+        _decl(root54, [("ruleaa", "fixture rule")])
+        sink54 = []
+        try:
+            read54 = t49_read(root54, sink54)
+        except RecursionError:
+            read54 = (None, None, None)
+        if (read54[0] is not None or read54[1] is None or not read54[2] or "RecursionError" not in read54[2]
+                or sink54):
+            failures.append("T54: a tree's gates manifest tomllib cannot nest must read as cannot-evaluate "
+                            "naming RecursionError with no T49 failure, got {!r} {!r}".format(read54, sink54))
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            code = _self_test_verdict(None, read54[2], [], [])
+        if code != 2 or "cannot evaluate" not in buf.getvalue() or str(read54[2]) not in buf.getvalue():
+            failures.append("T54: the verdict on a T49 cannot-evaluate must be exit 2 reporting it, got {}\n"
+                            "{}".format(code, buf.getvalue()))
+
+        class _MemoryErrorText(str):
+            def replace(self, *args):
+                raise MemoryError("injected by the T54 row")
+
+        for label, text, want in (
+                ("tomllib raising MemoryError", _MemoryErrorText("[[gate]]\n"), "MemoryError"),
+                ("a gate that is a table", '[gate]\nid = "must-deliver"\nresidue = "r"\n', "AttributeError"),
+                ("a gate that is an integer", "gate = 1\n", "TypeError"),
+                ("a residue that is not a string", '[[gate]]\nid = "must-deliver"\nresidue = 1\n', "not a string")):
+            sink54 = []
+            try:
+                got = t49_residue(text, sink54)
+            except (MemoryError, AttributeError, TypeError) as exc:
+                got = ("raised", type(exc).__name__)
+            if got[0] is not None or not got[1] or want not in got[1] or sink54:
+                failures.append("T54 {}: must be cannot-evaluate naming {} with no T49 failure, got {!r} "
+                                "{!r}".format(label, want, got, sink54))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -1705,9 +2396,19 @@ def _self_test_main_isolated():
                     pass
         shutil.rmtree(tmp, ignore_errors=True)
 
+    return _self_test_verdict(fixture_error, t49_error, failures, skipped)
+
+
+def _self_test_verdict(fixture_error, t49_error, failures, skipped):
+    """The self-test's report and exit: 2 when a fixture could not be built or T49 cannot evaluate the gates
+    manifest, else 1 when a vector failed, else 0 (T54 runs the cannot-evaluate path through it)."""
     if fixture_error is not None:
         print("SELF-TEST ERROR: a list-ratchet fixture could not be built ({}); cannot evaluate".format(
             fixture_error), file=sys.stderr)
+        return 2
+    if t49_error is not None:
+        print("SELF-TEST ERROR: T49 cannot read the must-deliver residue ({}); cannot evaluate".format(
+            t49_error), file=sys.stderr)
         return 2
     if failures:
         print("SELF-TEST FAIL:")
@@ -1721,7 +2422,9 @@ def _self_test_main_isolated():
           "demonstration's own lists are never read; an unknown or clause id fails closed naming it; the "
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
           "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
-          "(still exit 0) are printed exactly; and against a committed base, a rule dropped from the list "
+          "(still exit 0) are printed exactly; a listed split rule is measured on its core layer, its "
+          "detail after the last rule (a mutant placing it at the rule changes that), and a straddling core "
+          "fails; and against a committed base, a rule dropped from the list "
           "with no [[removal]] row fails naming it (also with the demonstration regenerated without it, "
           "and with HEAD past the base, the list read at the base), "
           "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "
@@ -1742,7 +2445,23 @@ def _self_test_main_isolated():
           "line, and mixed with any other argument it is exit 2, never a self-test run; "
           "and a symlinked base list, a --base starting with -, an expression led by a shadowed "
           "remote-tracking name, an absent remote-tracking ref of a configured remote, and an expression "
-          "led by one (also with its /HEAD planted) fail closed. "
+          "led by one (also with its /HEAD planted) fail closed; and a listed rule's core sentence at the "
+          "base moved into its detail layer fails naming the moved bytes, and so do part of a sentence "
+          "moved word for word, a sentence moved into another rule's detail layer (the listed rule split "
+          "or not), one copy of a repeated sentence, a bracketed clause moved without its brackets, short "
+          "sentences ended by ? and ! moved whole, a piece ending at an earlier word end and a sentence a "
+          "base detail layer already held, each naming the holder and the first piece; an empty listed "
+          "core fails (also with nothing moved), a new detail sentence, a dropped core sentence, an unlisted "
+          "rule's move, a shared phrase one byte under MIN_PIECE_BYTES, a piece the core still holds, a "
+          "move across a sentence end with each side under MIN_PIECE_BYTES and a dot inside a word pass, "
+          "a base rule source that is not UTF-8 fails closed, a crossing move whose one side is a short "
+          "whole sentence and a dropped short sentence a detail layer holds inside a longer word fail "
+          "naming it; the docstring, the residue and the whole declared file name MIN_PIECE_BYTES and "
+          "CAP_BYTES (the first two also FIRST_PIECE_CHARS), never a value, a gates manifest tomllib cannot "
+          "nest is cannot-evaluate, and the corrected statements are written as pinned; a moved piece is "
+          "printed cut to FIRST_PIECE_CHARS and a sentence the core still holds as often passes; a gates "
+          "manifest read from a tree that tomllib cannot nest is exit 2 through the verdict, and MemoryError, "
+          "a gate that is a table or an integer and a residue that is not a string are cannot-evaluate. "
           "{}".format(
               "SKIPPED on this runner: {}.".format("; ".join(skipped)) if skipped
               else "No case was skipped (the mode-000 list ran too)."))

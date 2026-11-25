@@ -15,21 +15,29 @@ Obligation identifier. An obligation is a RULE, named by its `corpus-id` front-m
 manifest's `rules` lists cite. A clause-id (for example prjint1.1) names a clause INSIDE a rule, not a
 rule, so it is not an obligation identifier here; the slug is a path component, not the id.
 
-Rule span. tools/gen_agents.py renders AGENTS.md as a fixed header followed by each rule's body
-(gen_agents.body_of: the source text after the front matter, stripped, its title demoted one level) in
-gen_agents.sort_key order, the bodies separated by blank lines; the block registry
-(.aiqt/core/adapter-blocks.toml, composed by tools/_adapter_compose.py) may wrap that rule region in an
-AIQT-RULES block with reviewed blocks before or after it. A rule's span is the byte range of that body,
-UTF-8 encoded, inside the AGENTS.md bytes. It is located only after AGENTS.md is proven to be
-byte-identical to the composition of the same corpus and registry (so the file is that rendering and
-nothing else), by an in-order scan of the rule region alone that requires each body to occur EXACTLY ONCE
-in it and every gap between consecutive spans to be whitespace only; offsets are then made absolute, so a
-block before the rules moves every span against the cap. Any other shape is ambiguous and fails closed.
+Rule span. tools/gen_agents.py renders AGENTS.md as a fixed header followed by each rule's core body
+(gen_agents.core_body_of: the rule's core render after the front matter, stripped, its title demoted one
+level; for a source with no `## Detail` split that is its whole text) in gen_agents.sort_key order, then
+the detail section (gen_agents.detail_body_of) of every split rule in the same order, all separated by
+blank lines; the block registry (.aiqt/core/adapter-blocks.toml, composed by tools/_adapter_compose.py)
+may wrap that rule region in an AIQT-RULES block with reviewed blocks before or after it. A rule's span is
+the byte range of its core body, UTF-8 encoded, inside the AGENTS.md bytes. It is located only after
+AGENTS.md is proven to be byte-identical to the composition of the same corpus and registry (so the file
+is that rendering and nothing else), by an in-order scan of the rule region alone that requires each core
+body to occur EXACTLY ONCE in it and every gap between consecutive spans to be whitespace only, and the
+rest of the region after the last core body to be exactly the detail sections, in order, each once, with
+whitespace-only gaps; offsets are then made absolute, so a block before the rules moves every span against
+the cap. Any other shape is ambiguous and fails closed.
 
-Delivered. A rule is delivered when its WHOLE span lies inside the first CAP_BYTES bytes, i.e. its end
-offset (exclusive) is at most CAP_BYTES. A rule that starts inside the cap but ends past it STRADDLES the
-cap: a reader capped at CAP_BYTES receives only a truncated part of its text, so its full text does NOT
-lie inside the cap and it is NOT delivered (the decision's wording "full text lies inside"). The floor
+Delivered. A rule is delivered when its WHOLE span (its whole core layer: its whole text when it has no
+split) lies inside the first CAP_BYTES bytes, i.e. its end offset (exclusive) is at most CAP_BYTES. A rule
+that starts inside the cap but ends past it STRADDLES the cap: a reader capped at CAP_BYTES receives only a
+truncated part of its core layer, so its core layer does NOT lie inside the cap and it is NOT delivered
+(the decision's wording "full text lies inside", read as the whole core layer for a split rule). A split
+rule's detail layer lies after every rule's core and is never measured; a reader capped at CAP_BYTES
+receives no detail layer only while the first detail section starts at or past the cap, which holds when
+the core layers alone run past it (as for this corpus), a property of the corpus this generator does not
+check, not of the layout. The floor
 profile is the delivered rules plus the apex rule (the single apex: true rule). A corpus with no apex, or
 more than one, is ambiguous and fails closed; so does a demonstration with no delivered rule at all. The
 apex must also be the FIRST rule span (gen_agents.sort_key places it first); any other order fails closed.
@@ -71,7 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, reconcile, unknown_args_refused  # noqa: E402
 from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
-import gen_agents  # noqa: E402  the AGENTS.md ordering and body transform (sort_key, body_of, HEADER)
+import gen_agents  # noqa: E402  the AGENTS.md ordering and bodies (sort_key, bodies_of_pairs, HEADER)
 import _adapter_compose as adapter_compose  # noqa: E402  the AGENTS.md layout (load_registry, compose)
 # The consumer's contract, single-sourced: the cap, the exact key set, and the superset check it applies.
 from check_release_build import (CAP_BYTES, FIRST_PIN_DEMO_KEYS, FIRST_PIN_DEMO_REL,  # noqa: E402
@@ -116,10 +124,13 @@ def read_agents(path):
     return raw
 
 
-def rule_spans(agents, rules):
-    """Locate each (rule_id, body_bytes) of `rules`, in AGENTS.md order, inside `agents`; return
-    [(rule_id, start, end)] with end exclusive. Each body must occur exactly once, after the previous span,
-    separated from it by whitespace only; anything else is ambiguous (DemoError)."""
+def rule_spans(agents, rules, details=()):
+    """Locate each (rule_id, body_bytes) of `rules` (each rule's core body), in AGENTS.md order, inside
+    `agents`; return [(rule_id, start, end)] with end exclusive. Each body must occur exactly once, after the
+    previous span, separated from it by whitespace only. After the last rule the rest of `agents` must be
+    exactly the (rule_id, detail_bytes) sections of `details`, in order, each occurring exactly once and
+    separated by whitespace only, then whitespace only; anything else is ambiguous (DemoError). The detail
+    sections are not spans: a rule's span is its core body."""
     spans, cursor = [], 0
     for rid, body in rules:
         if not body.strip():
@@ -134,8 +145,19 @@ def rule_spans(agents, rules):
             raise DemoError("non-whitespace bytes lie between rule {} and the previous rule".format(rid))
         spans.append((rid, start, start + len(body)))
         cursor = start + len(body)
+    for rid, detail in details:
+        if not detail.strip():
+            raise DemoError("rule {} renders an empty detail section".format(rid))
+        start = agents.find(detail, cursor)
+        if start < 0 or agents[cursor:start].strip():
+            raise DemoError("rule {} detail section does not follow the previous rule or detail section in {} "
+                            "with whitespace only between".format(rid, AGENTS_REL))
+        if agents.find(detail, 0) != start or agents.find(detail, start + 1) >= 0:
+            raise DemoError("rule {} detail section occurs more than once in {}".format(rid, AGENTS_REL))
+        cursor = start + len(detail)
     if agents[cursor:].strip():
-        raise DemoError("non-whitespace bytes follow the last rule in {}".format(AGENTS_REL))
+        raise DemoError("non-whitespace bytes follow the last rule{} in {}".format(
+            " detail section" if details else "", AGENTS_REL))
     return spans
 
 
@@ -152,8 +174,8 @@ def render_demo(agents_sha, delivered, floor, cap):
         return ["{} = [".format(key)] + ['  "{}",'.format(i) for i in ids] + ["]"]
     lines = ["# Generated by tools/gen_first_pin_demo.py from AGENTS.md and .aiqt/core/rules/; do not hand-edit.",
              "# The first-pin demonstration read by tools/check_release_build.py: delivered-prefix-obligations",
-             "# are the rule ids (corpus-id) whose full text lies inside the first {} bytes of AGENTS.md;".format(
-                 cap),
+             "# are the rule ids (corpus-id) whose whole core layer (the full text of a rule with no detail",
+             "# layer) lies inside the first {} bytes of AGENTS.md;".format(cap),
              "# floor-profile-obligations are those plus the apex rule id.",
              'agents-sha256 = "{}"'.format(agents_sha)]
     return "\n".join(lines + _list("delivered-prefix-obligations", delivered)
@@ -179,7 +201,7 @@ def measure(root):
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
     pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-    composed = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, [gen_agents.body_of(src) for src, _ in pairs],
+    composed = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, gen_agents.bodies_of_pairs(pairs),
                                        adapter_compose.load_registry(root))
     if composed.data != agents:
         raise DemoError("{} is not the gen_agents rendering of the rule corpus and the block registry (run "
@@ -187,18 +209,22 @@ def measure(root):
     apexes = [str(fm["corpus-id"]) for _src, fm in pairs if fm.get("apex") is True]
     if len(apexes) != 1:
         raise DemoError("the rule corpus must carry exactly one apex rule, found {}".format(len(apexes)))
-    rules = []
+    rules, details = [], []
     for src, fm in pairs:
         rid = str(fm["corpus-id"])
         if not CID_RE.match(rid):
             raise DemoError("rule id {!r} is not a well-formed corpus-id".format(rid))
-        rules.append((rid, gen_agents.body_of(src).encode("utf-8")))
+        rules.append((rid, gen_agents.core_body_of(src).encode("utf-8")))
+        detail = gen_agents.detail_body_of(src)
+        if detail is not None:
+            details.append((rid, detail.encode("utf-8")))
     # Spans are located inside the rule region only (the whole file after the header in the legacy layout,
     # the AIQT-RULES inner text when composed), then shifted back to absolute offsets in AGENTS.md, so a
-    # block before the rules moves every span and a block after them is never read as rule text.
+    # block before the rules moves every span and a block after them is never read as rule text. A rule's
+    # span is its core body; the detail sections after the last rule are located, never measured.
     base = composed.rules_start
     spans = [(rid, start + base, end + base)
-             for rid, start, end in rule_spans(agents[base:composed.rules_end], rules)]
+             for rid, start, end in rule_spans(agents[base:composed.rules_end], rules, details)]
     if spans[0][0] != apexes[0]:
         raise DemoError("the apex rule {} is not the first rule in {} (found {} first); the floor profile "
                         "cannot be derived from an unexpected layout".format(apexes[0], AGENTS_REL, spans[0][0]))
@@ -284,24 +310,39 @@ def main():
 #   9. .aiqt/release/ symlinked outside the root fails closed (exit 2) in --check and write mode with the
 #      demonstration there untouched, while one symlinked inside the root is followed and the file rewritten;
 #  10. an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing.
+#  11. a split rule whose core body ends 10 bytes inside the cap, with a detail layer longer than the cap's
+#      remaining room, is delivered (its span is its core body, and its detail section is the last text of
+#      the rule region, after the straddling rule that follows it); the same tree built with
+#      gen_agents.bodies_of_pairs replaced by a mutant rendering the detail at the rule's own place, and by
+#      one dropping the core (the previous contract), does not give that outcome.
+#  12. rule_spans() over the detail tail directly: the exact tail gives the core spans; a stray
+#      non-whitespace byte after the last detail section, a missing detail section, a duplicated one, and
+#      a detail section placed before the last rule's core each fail closed (DemoError).
 
 _APEX = "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
 _RULE = "---\ncorpus-id: {cid}\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: {slug}\n---\n"
 
 
 def _write_tree(root, specs, registry=None, blocks=()):
-    """specs: [(corpus_id, is_apex, pad)], pad an ASCII byte count or a literal fill string; write the corpus,
-    the block registry (registry text, all targets legacy by default) with each block's source (blocks are
-    (id, target, position, order, source, text) rows), and the AGENTS.md _adapter_compose builds from them.
-    Returns the spans dict {corpus_id: (start, end)} measured on the written AGENTS.md."""
+    """specs: [(corpus_id, is_apex, pad)] or [(corpus_id, is_apex, pad, detail)], pad an ASCII byte count or a
+    literal fill string and detail, when given, the text of a `## Detail` layer (the rule is then split, with
+    a detail-trigger key); write the corpus, the block registry (registry text, all targets legacy by
+    default) with each block's source (blocks are (id, target, position, order, source, text) rows), and the
+    AGENTS.md _adapter_compose builds from them. Returns the spans dict {corpus_id: (start, end)} of each
+    rule's core body measured on the written AGENTS.md."""
     rdir = root.joinpath(*RULES_PARTS)
     rdir.mkdir(parents=True, exist_ok=True)
     for old in rdir.iterdir():
         old.unlink()
-    for cid, is_apex, pad in specs:
+    for spec in specs:
+        cid, is_apex, pad = spec[:3]
+        detail = spec[3] if len(spec) > 3 else None
         head = _APEX if is_apex else _RULE.format(cid=cid, slug="fixture-" + cid)
         fill = pad if isinstance(pad, str) else "a" * pad  # an int pads with ASCII; a str is the literal fill
         body = "\n# Rule {}\n\nObligation text {}{}.\n".format(cid, cid, fill)
+        if detail is not None:
+            head = head[:-4] + "detail-trigger: writing a self-test fixture\n---\n"
+            body += "\n## Detail\n\n{}\n".format(detail)
         (rdir / ("{}.md".format(cid))).write_text(head + body, encoding="utf-8")
     reg = root.joinpath(*adapter_compose.REGISTRY_REL.split("/"))
     reg.write_text(adapter_compose.registry_text() if registry is None else registry, encoding="utf-8")
@@ -310,12 +351,12 @@ def _write_tree(root, specs, registry=None, blocks=()):
         (root / source).write_text(text, encoding="utf-8")
     pairs = [(src, fm) for src, fm, _ in load_corpus(rdir)]
     pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
-    raw = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, [gen_agents.body_of(src) for src, _ in pairs],
+    raw = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, gen_agents.bodies_of_pairs(pairs),
                                   adapter_compose.load_registry(root)).data
     (root / AGENTS_REL).write_bytes(raw)
-    return {str(fm["corpus-id"]): (raw.find(gen_agents.body_of(src).encode("utf-8")),
-                                   raw.find(gen_agents.body_of(src).encode("utf-8"))
-                                   + len(gen_agents.body_of(src).encode("utf-8"))) for src, fm in pairs}
+    return {str(fm["corpus-id"]): (raw.find(gen_agents.core_body_of(src).encode("utf-8")),
+                                   raw.find(gen_agents.core_body_of(src).encode("utf-8"))
+                                   + len(gen_agents.core_body_of(src).encode("utf-8"))) for src, fm in pairs}
 
 
 def _tuned(root, specs, which, target_end):
@@ -323,7 +364,7 @@ def _tuned(root, specs, which, target_end):
     the end byte for byte). Returns the measured spans."""
     spans = _write_tree(root, specs)
     delta = target_end - spans[which][1]
-    specs = [(c, a, p + delta if c == which else p) for c, a, p in specs]
+    specs = [(s[0], s[1], s[2] + delta) + tuple(s[3:]) if s[0] == which else s for s in specs]
     return _write_tree(root, specs)
 
 
@@ -657,6 +698,83 @@ def self_test_main():
         failures.extend(linked_dir_failures(
             tmp / "linked", "release", lambda base: _write_tree(base, [("prjint1", True, 0), ("ruleaa", False, 10)]),
             run, ".aiqt/release", DEMO_REL))
+
+        # 11. A split rule is delivered on its core body: ruleaa's core ends 10 bytes inside the cap and its
+        #     detail layer (5000 bytes) goes after rulebb, which straddles the cap. Then the same specs under
+        #     two mutants of gen_agents.bodies_of_pairs must not give exit 0 with [prjint1, ruleaa] delivered.
+        v11_detail = "Detail text " + "d" * 5000 + "."
+        v11_specs = [("prjint1", True, 0), ("ruleaa", False, 20000, v11_detail), ("rulebb", False, 400)]
+
+        def v11_outcome(root):
+            try:
+                sp = _tuned(root, v11_specs, "ruleaa", CAP_BYTES - 10)
+            except Exception as exc:  # noqa: BLE001  a mutant may surface as any exception
+                return "fixture raised {!r}".format(exc), None, None
+            code, out = capture(root, False)
+            delivered = demo_of(root).get("delivered-prefix-obligations") if code == 0 else None
+            return code, delivered, (sp, out)
+
+        def v11_detail_in_place(pairs):
+            out = []
+            for src, _fm in pairs:
+                detail = gen_agents.detail_body_of(src)
+                core = gen_agents.core_body_of(src)
+                out.append(core if detail is None else core + "\n\n" + detail)
+            return out
+
+        def v11_core_dropped(pairs):
+            out = []
+            for src, _fm in pairs:
+                detail = gen_agents.detail_body_of(src)
+                core = gen_agents.core_body_of(src)
+                out.append(core if detail is None else core.split("\n", 1)[0] + "\n\n" + detail.split("\n\n", 1)[1])
+            return out
+
+        code, delivered, info = v11_outcome(tmp / "split-delivered")
+        raw = (tmp / "split-delivered" / AGENTS_REL).read_bytes() if code == 0 else b""
+        if (code, delivered) != (0, ["prjint1", "ruleaa"]):
+            failures.append("split rule: a rule whose core ends inside the cap must be delivered and the "
+                            "straddling rule after it not; got exit {}, delivered {}, {}".format(code, delivered, info))
+        elif not (0 <= raw.find(b"# Rule rulebb") < raw.find(b"Detail text ") and raw.find(b"Detail text ") > CAP_BYTES):
+            failures.append("split rule: the detail section must follow the next rule, past the cap")
+        real_bodies = gen_agents.bodies_of_pairs
+        for mutant_name, mutant in (("detail at the rule's place", v11_detail_in_place),
+                                    ("core dropped", v11_core_dropped)):
+            gen_agents.bodies_of_pairs = mutant
+            try:
+                code, delivered, _info = v11_outcome(tmp / ("split-mutant-" + mutant_name.split(" ")[0]))
+            finally:
+                gen_agents.bodies_of_pairs = real_bodies
+            if (code, delivered) == (0, ["prjint1", "ruleaa"]):
+                failures.append("split rule: the {} mutant still gives exit 0 with [prjint1, ruleaa] delivered, "
+                                "so the vector does not judge the detail placement".format(mutant_name))
+
+        # 12. rule_spans() over the detail tail directly.
+        v12_rules = [("prjint1", b"## A\n\nApex."), ("ruleaa", b"## B\n\nCore."), ("rulebb", b"## C\n\nNext.")]
+        v12_details = [("ruleaa", b"## B (detail)\n\nMore.")]
+        v12_good = b"## A\n\nApex.\n\n## B\n\nCore.\n\n## C\n\nNext.\n\n## B (detail)\n\nMore.\n"
+        try:
+            got = rule_spans(v12_good, v12_rules, v12_details)
+            if [rid for rid, _s, _e in got] != ["prjint1", "ruleaa", "rulebb"] or got[1][2] != v12_good.find(
+                    b"Core.") + len(b"Core."):
+                failures.append("rule_spans tail: the exact tail must give the three core spans, got {}".format(got))
+        except Exception as exc:  # noqa: BLE001
+            failures.append("rule_spans tail: the exact tail raised {!r}".format(exc))
+        for label, agents, details in (
+                ("a stray byte after the last detail section", v12_good + b"x\n", v12_details),
+                ("a missing detail section", v12_good.replace(b"\n\n## B (detail)\n\nMore.", b""), v12_details),
+                ("a duplicated detail section", v12_good + b"\n## B (detail)\n\nMore.\n", v12_details),
+                ("a detail section before the last rule's core",
+                 b"## A\n\nApex.\n\n## B\n\nCore.\n\n## B (detail)\n\nMore.\n\n## C\n\nNext.\n", v12_details),
+                ("a detail section the corpus does not declare", v12_good, [])):
+            try:
+                rule_spans(agents, v12_rules, details)
+            except DemoError:
+                continue
+            except Exception as exc:  # noqa: BLE001
+                failures.append("rule_spans tail ({}): expected DemoError, raised {!r}".format(label, exc))
+                continue
+            failures.append("rule_spans tail ({}): expected DemoError, got spans".format(label))
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -687,7 +805,10 @@ def self_test_main():
           "is never read as rule text; a rule corpus symlinked inside the root is read, and one symlinked "
           "outside the root fails closed (exit 2) with nothing written; an .aiqt/release/ symlinked outside the "
           "root fails closed (exit 2) with the demonstration there untouched, and one inside the root is followed; "
-          "an unknown option is exit 2 with the usage line and runs nothing.")
+          "an unknown option is exit 2 with the usage line and runs nothing; a split rule whose core ends inside "
+          "the cap is delivered with its detail after the next rule, and a mutant placing the detail at the rule "
+          "or dropping the core changes that outcome; a stray, missing, duplicated, misplaced or undeclared "
+          "detail section fails closed.")
     return 0
 
 

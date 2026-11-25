@@ -6,6 +6,7 @@ tier: 10
 facet: ACCUR
 secondary: [INTEG]
 slug: verify-fix-in-commit
+detail-trigger: landing a worker hand-back in a commit
 ---
 
 # Verify a fix is in its commit
@@ -17,3 +18,7 @@ The same discipline applies before independent verification is dispatched over a
 For example, build a non-root commit's review copy from a snapshot bound to the authoritative task revision, diff the commit against its first parent, not a moving main branch, and keep the reviewer's context files from that snapshot, not only selected changed files.
 
 This reconciliation answers only what the declaration and the repository can answer. It does not catch a declaration whose author omitted a path the change semantically needs (the under-scoped-declaration residual: a planned-but-uncommitted path, absent from both the commit and the declaration, leaves the equality check no divergence to surface), an undeclared context file, a submodule whose working tree diverges behind a clean gitlink, content a checkout filter materializes differently from the committed bytes, a merge reviewed by a combined or non-first-parent diff, which can present a different path set than intended, earlier series commits outside the pinned commit's first-parent diff, or a later commit that supersedes the reviewed revision; and a review of an older revision is sound only when the verifier reads a checkout or snapshot bound to it. Base derivation reads the raw parent headers with replacement-ref and graft resolution disabled, and in a shallow or partial clone lacking a needed parent object the reconciliation is a cannot-evaluate, not a review against a wrong or empty base. These bounds are disclosed here, not implied covered.
+
+## Detail
+
+A commit landing a hand-back stages every path the hand-back changes, a rename's two paths and each deletion included.

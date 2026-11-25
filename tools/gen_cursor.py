@@ -17,7 +17,8 @@ https://cursor.com/docs/rules (retrieved 2026-08-17).
                              directory or a symlink to a directory inside the root, and a reserved subtree, a
                              family directory inside it or a .cursor/ above it symlinked outside the root fail
                              closed (exit 2), and that a source using the `## Detail` split generates the
-                             .mdc its unsplit original does, byte for byte
+                             .mdc of its full render (gen_rules.full_body: core render, then detail
+                             layer), byte for byte
 """
 import sys
 
@@ -68,7 +69,9 @@ def cursor_rel(rel):
 def render_rule(path):
     """The full .mdc content for one source rule: the Cursor frontmatter, then the body of the rule's full
     render verbatim (gen_rules.full_body, the text gen_rules writes to the .claude/rules/ read tree, so a
-    source using the `## Detail` split reads as its unsplit original; source frontmatter stripped, H1 kept;
+    source using the `## Detail` split reads as its core render, which ends in the blank line or lines
+    directly above the split, and its detail layer, the split line dropped; source frontmatter stripped,
+    H1 kept;
     do NOT reuse gen_agents.body_of, which demotes the H1 for the single-document concatenations).
     conformance.py imports this so the checker and the generator can never disagree on the shape."""
     text = full_body(read_rule_source(path), path.name)
@@ -320,10 +323,11 @@ def self_test_main():
                                         "written" if want == 0 and source else "not written",
                                         (" and the orphan " + ("kept" if want == 2 else "pruned")) if judged else "",
                                         got, kept, wrote))
-        # A rule source using the `## Detail` split renders as its full render (gen_rules.full_body): for every
-        # gen_rules _SPLIT_CASES pair, the .mdc tree generated from the split source is byte-equal to the one
-        # generated from its unsplit original, and --check over it is clean. Red when render_rule reads the
-        # source text instead of its full render (the core layer and the split line would leak into the .mdc).
+        # A rule source using the `## Detail` split renders as its full render (gen_rules.full_body: core render,
+        # a blank line, detail layer): for every gen_rules _SPLIT_CASES pair, the .mdc tree generated from the
+        # split source is byte-equal to the one generated from its expected full render, and --check over it is
+        # clean. Red when render_rule reads the source text instead of its full render (the split line would
+        # leak into the .mdc), and red under the previous full_body, which dropped the core layer.
         from gen_rules import _SPLIT_CASES, _SPLIT_NAME, _split_case_texts
         for case in _SPLIT_CASES:
             trees = []
@@ -340,7 +344,7 @@ def self_test_main():
                               for f in sorted(out.rglob("*.mdc"))} if out.is_dir() else {})
             if not trees[0] or trees[1] != trees[0]:
                 failures.append("split case {}: the .mdc tree from the split source is not byte-equal to the one "
-                                "from its unsplit original; got {!r}".format(
+                                "from its expected full render; got {!r}".format(
                                     case[0], [v[-300:] for v in trees[1].values()]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -360,8 +364,8 @@ def self_test_main():
           "exits 2 with the generated .mdc kept, and one symlinked to a directory inside the root is read; a "
           "reserved subtree, a family directory inside it or a .cursor/ directory above it symlinked outside the "
           "root exits 2 in write mode with nothing written or deleted there, and one symlinked inside the root is "
-          "read; a rule source using the `## Detail` split generates an .mdc tree byte-equal to its unsplit "
-          "original's ({} split cases); an unknown option is exit 2 with the usage line and runs nothing."
+          "read; a rule source using the `## Detail` split generates an .mdc tree byte-equal to its expected "
+          "full render's, core then detail ({} split cases); an unknown option is exit 2 with the usage line and runs nothing."
           .format(len(_SPLIT_CASES)))
     return 0
 

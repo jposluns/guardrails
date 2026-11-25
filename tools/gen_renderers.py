@@ -31,13 +31,16 @@ spelling the fold cannot see is NOT refused and is in the disclosed residual); a
 be read, declares a source encoding other than UTF-8 or cannot be parsed (any parse error class,
 including a parser stack overflow on deep nesting), or a *.py entry that is not a regular file
 (_declared_renderer_stems, which also discloses the spelled-read and reflective-write residual); a
-missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a pack-local
+missing/malformed RENDERER_DECL or GENSRC_OUTPUTS; a semantics-revision below the renderer's floor in
+SEMANTICS_FLOORS (a revision bump reverted while the change it records stays); a pack-local
 import that cannot be statically resolved (a relative import, or a wildcard `from <pack-local> import *`);
 an unreadable closure member; or any other cannot-evaluate. DISCLOSED RESIDUAL (disclose-guard-residuals):
 the closure is computed from statically-parsed Import/ImportFrom nodes only. A truly-dynamic pack-local
 import (importlib.import_module, __import__, or globals() manipulation) is beyond static analysis; it is
 not used by any declared generator today, and the delta gate's fail-closed-on-incomplete-closure leg is
 the backstop, but this generator does not detect that class and discloses it here rather than implying it.
+The SEMANTICS_FLOORS check refuses a revision lowered on its own, not a floor: the floors are kept in this
+file, so one change that lowers a floor and the revision together passes, and only review sees that.
 
   gen_renderers.py             regenerate .aiqt/core/renderers.toml
   gen_renderers.py --check     exit 1 if the committed file differs from a fresh regeneration; write nothing
@@ -85,6 +88,14 @@ RENDERERS_REL = ".aiqt/core/renderers.toml"
 # tools/*.py file declares RENDERER_DECL but is absent here (_declared_renderer_stems).
 RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_skill",
              "gen_worker_pack")
+# The lowest semantics-revision each renderer may declare, with the change that set it: a declaration
+# below its floor is refused (exit 2), so a revision bump cannot be reverted while the change it records
+# stays. agents and adapters 2: each `## Detail` split rule's core renders at its place and every detail
+# layer after the last rule (revision 1 dropped a split rule's core). The per-rule renderers (rules,
+# cursor, skill) keep their revisions: their split output changed from core dropped to core then detail, but
+# no shipped source used the split before that change, so no published byte changed meaning. Lowering a
+# floor here is not refused by any check (the disclosed residual above); review judges it.
+SEMANTICS_FLOORS = {"agents": 2, "adapters": 2}
 
 
 class GateError(Exception):
@@ -681,6 +692,9 @@ def build_rows(root):
         if not entry.is_file():
             raise GateError("{}: declared renderer generator is absent".format(where))
         rid, rev = _read_renderer_decl(entry, where)
+        if rev < SEMANTICS_FLOORS.get(rid, 0):
+            raise GateError("{}: renderer {} declares semantics-revision {}, below its floor {} "
+                            "(SEMANTICS_FLOORS)".format(where, rid, rev, SEMANTICS_FLOORS[rid]))
         if rid in seen_ids:
             raise GateError("duplicate renderer-id {!r}".format(rid))
         seen_ids.add(rid)
@@ -1209,6 +1223,23 @@ def self_test_main():
         problem = _determinism_failure(run_quiet)
         if problem is not None:
             failures.append(problem)
+
+        # (a2) the semantics-revision floor: with a floor of 2 for alpha, whose declaration is revision 1, the
+        # run is refused naming the floor (a mutant without the floor check exits 0); a floor of 1 passes.
+        saved_floors = dict(SEMANTICS_FLOORS)
+        try:
+            SEMANTICS_FLOORS.clear()
+            SEMANTICS_FLOORS["alpha"] = 2
+            rc, err = run_refused(good, True)
+            if rc != 2 or "below its floor 2" not in err:
+                failures.append("semantics floor: a declaration below its floor expected exit 2 naming the floor, "
+                                "got {!r}: {}".format(rc, err.strip()))
+            SEMANTICS_FLOORS["alpha"] = 1
+            if run_quiet(good, check=True) != 0:
+                failures.append("semantics floor: a declaration at its floor expected exit 0")
+        finally:
+            SEMANTICS_FLOORS.clear()
+            SEMANTICS_FLOORS.update(saved_floors)
         if _determinism_failure(lambda root, check: 2) != \
                 "determinism: second generation expected exit 0, got 2":
             failures.append("determinism control: an injected failing second generation (no write) expected "
@@ -1592,7 +1623,8 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: a conformant renderer set generates and regenerates drift-clean and is "
-          "deterministic; a helper edit inside a closure changes the framed code-digest; a mutated "
+          "deterministic; a semantics-revision below its SEMANTICS_FLOORS floor is refused (exit 2) and one at "
+          "it passes; a helper edit inside a closure changes the framed code-digest; a mutated "
           "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
           "RENDERER_DECL, a non-slug renderer-id, an unlisted generator declaring RENDERER_DECL, {} "
           "unsupported RENDERER_DECL binding or literal-name forms, 5 non-regular *.py entries, {} rebindings "

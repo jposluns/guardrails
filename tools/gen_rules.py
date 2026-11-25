@@ -6,8 +6,8 @@ path is DERIVED from that frontmatter per the two-axis taxonomy (aiqt/ numbered 
 coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check so the read tree can never
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
 
-RULE SOURCE FORMAT (the two-layer split; this step parses and validates it and renders the full text from
-it, and no live source uses it yet):
+RULE SOURCE FORMAT (the two-layer split; this step parses and validates it and renders the core and the
+detail layer from it):
   A rule source is read from its raw bytes as UTF-8 with no newline translation, and a source holding
   any CR byte is refused (check_clauses reads it the same way, through read_rule_source and
   decode_rule_source, so both tools number lines alike). The split is the one body line that reads
@@ -121,12 +121,20 @@ it, and no live source uses it yet):
     - an empty detail layer (blank lines only).
   Every body is read in full, with or without the split.
   FULL RENDER (full_body): each generated file is its source's full render. A source with no split renders
-  as itself, byte for byte. In a split source the detail layer holds the rule's current text verbatim, and
-  the source renders as its unsplit original, byte for byte: the frontmatter with every detail-trigger and
-  detail-reason line dropped, then the body through its title line, then every line below the `## Detail`
-  line (the core layer below the title and the split line are dropped). So the split is invisible in the
-  read tree, in write mode and in the --check drift compare. core_layer returns a split source's core text
-  below its title (blank lines at either end dropped), and None for a source with no split.
+  as itself, byte for byte. A split source is a partition: the core layer holds the rule's text up to the
+  split and the detail layer holds the rest, and the source renders as its core render, then its detail
+  layer. The core render (core_render) is the frontmatter with every detail-trigger and detail-reason line
+  dropped, then the body through its title line, its core layer and every blank line directly above the
+  split (the split needs at least one, so the core render ends in a blank line, and a source with several
+  keeps them all); the detail layer is every line below the `## Detail` line, the blank lines directly
+  below it dropped.
+  Only the split line is dropped, so no core or detail text disappears from the read tree, in write mode
+  or in the --check drift compare. Every renderer that reads a rule body renders the two layers the same
+  way: the per-rule targets (.claude/rules, Cursor, the skill's hash input) carry the full render, and the
+  concatenated targets (AGENTS.md, GEMINI.md, the Copilot instructions; gen_agents) carry each rule's core
+  render at the rule's place and every detail layer after the last rule. core_layer returns a split
+  source's core text below its title and detail_layer its detail text (blank lines at either end dropped),
+  each None for a source with no split.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or manifest, a rule mapping
                          to an id its manifest marks withdrawn, or a read/write failure
@@ -137,8 +145,10 @@ it, and no live source uses it yet):
                             stderr condition; that each listed detail layout case gets its expected
                             exit, and that each guard in the revert table, put back in a scratch copy,
                             changes its case's exit; and that each listed split source renders byte-equal
-                            to its unsplit original in write and check mode, with core_layer giving its
-                            core, and that each split-render guard, put back, makes a split case fail
+                            to its expected full render (core render, then detail layer) in
+                            write and check mode, with core_layer, detail_layer and core_render giving
+                            its layers, and that each split-render guard, put back, makes a split case
+                            fail
 """
 import sys
 
@@ -629,26 +639,72 @@ def _split_lines(text, name):
     return lines, first, title, split
 
 
+def _render_layers(text, name):
+    """(head, detail) for a rule source's text whose body holds the `## Detail` split, or None when it has
+    none. head is the core render's lines: the frontmatter with every detail-trigger and detail-reason line
+    dropped, then the body through the core layer, ending with every blank line directly above the split
+    (at least one, so joining head at LF ends the text in one LF per such blank line). detail is the lines
+    below the split line with the
+    blank lines directly below it dropped. The split line itself is in neither. Raises ValueError as
+    detail_heading_line does."""
+    found = _split_lines(text, name)
+    if found is None:
+        return None
+    lines, first, _title, split = found
+    kept = [line for line in lines[1:first - 2] if _frontmatter_key(line) not in DETAIL_KEYS]
+    detail = lines[split:]
+    while detail and detail[0] == "":
+        detail.pop(0)
+    return lines[:1] + kept + lines[first - 2:split - 1], detail
+
+
 def full_body(text, name):
     """The full render of one rule source's text (decoded by read_rule_source): what gen_rules writes to
     the .claude/rules/ read tree. A source with no `## Detail` split renders as itself, byte for byte. A
-    split source renders as its unsplit original: its frontmatter with every detail-trigger and
-    detail-reason line dropped, then its body through the title line, then every line below the split
-    line. The core layer below the title (every line between the title and the split) and the split line
-    are dropped, and the detail layer, which holds the rule's current text verbatim, follows the title
-    exactly as it did before the split. Raises ValueError as detail_heading_line does."""
+    split source renders as its core render (core_render), which ends with every blank line directly above
+    the split (at least one), followed by its detail layer: the frontmatter with every detail-trigger and
+    detail-reason line dropped, the body through the title line and the core layer, then the lines below
+    the split line, the blank lines directly below it dropped. Only the split line (and the blank lines directly below it) are dropped, so every core and
+    every detail line is rendered. Raises ValueError as detail_heading_line does."""
+    layers = _render_layers(text, name)
+    if layers is None:
+        return text
+    head, detail = layers
+    return "\n".join(head + detail)
+
+
+def core_render(text, name):
+    """The core render of one rule source's text: the full render (full_body) with its detail layer
+    dropped, ending in one LF per blank line directly above the split (at least one). A source with no
+    split is its whole text, as in full_body. This is what
+    gen_agents renders at a rule's place in AGENTS.md, GEMINI.md and the Copilot instructions. Raises
+    ValueError as detail_heading_line does."""
+    layers = _render_layers(text, name)
+    if layers is None:
+        return text
+    return "\n".join(layers[0])
+
+
+def detail_layer(text, name):
+    """The detail layer of one rule source's text: the body lines below the `## Detail` split, with blank
+    lines at either end dropped, each ending in LF. None for a source with no split. Raises ValueError as
+    detail_heading_line does."""
     found = _split_lines(text, name)
     if found is None:
-        return text
-    lines, first, title, split = found
-    kept = [line for line in lines[1:first - 2] if _frontmatter_key(line) not in DETAIL_KEYS]
-    return "\n".join(lines[:1] + kept + lines[first - 2:title] + lines[split:])
+        return None
+    lines, _first, _title, split = found
+    layer = lines[split:]
+    while layer and layer[0] == "":
+        layer.pop(0)
+    while layer and layer[-1] == "":
+        layer.pop()
+    return "".join(line + "\n" for line in layer)
 
 
 def core_layer(text, name):
     """The core layer of one rule source's text below its title: the body lines between the title line
     and the `## Detail` split, with blank lines at either end dropped, each ending in LF ("" when every
-    such line is blank). None for a source with no split, whose full text is its whole body (full_body).
+    such line is blank). None for a source with no split, whose whole body is its core (full_body).
     Raises ValueError as detail_heading_line does."""
     found = _split_lines(text, name)
     if found is None:
@@ -720,8 +776,9 @@ def run(root, check):
                 print("error: {}".format("; ".join(withdrawn)))
                 return 2
             # Each generated file is the source's full render (full_body): a source with no split as
-            # itself, byte for byte, and a split source as its unsplit original, so the split is invisible
-            # in the read tree, in write mode and in the --check drift compare alike.
+            # itself, byte for byte, and a split source as its core render (which ends in the blank line or
+            # lines directly above the split) and its detail layer (the split line dropped), in write mode
+            # and in the --check drift compare alike.
             for src, _fm, rel in corpus:
                 desired[rel] = full_body(read_rule_source(src), src.name)
     except (ValueError, OSError) as exc:
@@ -2746,14 +2803,17 @@ _PARSE_REVERTS = (
     ("fm-r8-indented-under-empty",) + _revert("", "", _FMCOLON, _FMINDENT, _FMTYPE)[1:3]
     + ("r8-indented-under-empty",),
 )
-# The split is invisible in every generated output: a split source (the rule's current text moved below
-# `## Detail` unchanged, a core layer added between its title and the split, and the detail keys added to its
-# frontmatter) must render byte-equal to its unsplit original, in write mode and in the --check drift compare
-# (a target holding the unsplit original is in sync, and one holding the split source as written is drift).
-# Each original is also a source of its own, which renders as itself. core_layer() must return the core text
-# of the split source and None for the original. (name, family lines, detail key lines placed (before
-# corpus-id, before slug, after slug), body lines above the title, core section between the title and the
-# split, the current text below the title, the expected core_layer)
+# The split is a partition rendered whole in every per-rule output: a split source (a core section between
+# its title and the split, a detail section below `## Detail`, and the detail keys added to its frontmatter)
+# must render byte-equal to its expected full render, the "original" here (the frontmatter without the
+# detail keys, the title, the core section, then the detail section with the blank lines directly below the
+# split dropped), in write mode and in the --check drift compare (a target holding that render is in sync,
+# and one holding the split source as written is drift). Each original is also a source of its own, which
+# renders as itself. core_layer() and detail_layer() must return the core and the detail text of the split
+# source and None for the original, and core_render() the original up to the end of the core section.
+# (name, family lines, detail key lines placed (before corpus-id, before slug, after slug), body lines
+# above the title, core section between the title and the split, the detail section below the split, the
+# expected core_layer)
 _SPLIT_FM = ("---\n{head}corpus-id: selfs1\norigin: pack\n{family}{mid}slug: gen-rules-selftest-split\n{tail}"
              "---\n")
 _SPLIT_NAME = "gen-rules-selftest-split.md"
@@ -2783,38 +2843,50 @@ _SPLIT_CASES = (
 )
 
 
-def _unsplit_reference(text):
+def _full_render_reference(text):
     """A second implementation of full_body for a split source that the corpus accepts, by text patterns
     rather than line numbers: drop each frontmatter line that starts with a detail key and `:`, then drop
-    the text from the end of the title line through the end of the `## Detail` line."""
+    the `## Detail` line together with the blank lines directly below it."""
     head, sep, body = text.partition("\n---\n")
     head = "\n".join(line for line in head.split("\n")
                      if not re.match(r"(?:detail-trigger|detail-reason) *:", line))
-    body = re.sub(r"\A(\n*# [^\n]*\n).*?^## Detail\n", r"\1", body, count=1, flags=re.S | re.M)
+    body = re.sub(r"^## Detail\n\n*", "", body, count=1, flags=re.M)
     return head + sep + body
 
 
 def _split_case_texts(case):
-    """(unsplit original, split source) of one _SPLIT_CASES case."""
+    """(expected full render, split source) of one _SPLIT_CASES case."""
     _name, family, (head, mid, tail), lead, core, text, _core = case
-    original = _SPLIT_FM.format(head="", mid="", tail="", family=family) + lead + _SPLIT_TITLE + text
+    original = (_SPLIT_FM.format(head="", mid="", tail="", family=family) + lead + _SPLIT_TITLE + core
+                + text.lstrip("\n"))
     split = (_SPLIT_FM.format(head=head, mid=mid, tail=tail, family=family) + lead + _SPLIT_TITLE + core
              + DETAIL_HEADING + "\n" + text)
     return original, split
 
 
+def _split_case_layers(case):
+    """(core render, detail layer) expected of one _SPLIT_CASES case's split source."""
+    _name, family, _keys, lead, core, text, _core = case
+    return (_SPLIT_FM.format(head="", mid="", tail="", family=family) + lead + _SPLIT_TITLE + core[:-1],
+            text.strip("\n") + "\n")
+
+
 def _split_render_failures(module, base, run_quiet):
     """One failure line per way module (this module, or one with a guard reverted) fails a _SPLIT_CASES case:
-    the split source written in write mode must give exit 0 and the unsplit original byte for byte, then
-    --check exit 0; --check over a target holding the original must exit 0 and over one holding the split
-    source must exit 1 (drift); the original as a source must render as itself; full_body() must give the
-    original for both texts and core_layer() the expected core for the split source and None for the
-    original. base is a directory this call may populate."""
+    the split source written in write mode must give exit 0 and its expected full render (the original) byte
+    for byte, then --check exit 0; --check over a target holding the original must exit 0 and over one
+    holding the split source must exit 1 (drift); the original as a source must render as itself; full_body()
+    must give the original for both texts, core_layer() the expected core and detail_layer() the expected
+    detail for the split source and None for the original, and core_render() the original through its core
+    for the split source and the whole original for the original. base is a directory this call may
+    populate."""
     failures = []
     full, core = getattr(module, "full_body", None), getattr(module, "core_layer", None)
+    detail, core_text = getattr(module, "detail_layer", None), getattr(module, "core_render", None)
     for case in _SPLIT_CASES:
         name, expected_core = case[0], case[-1]
         original, split = _split_case_texts(case)
+        expected_render, expected_detail = _split_case_layers(case)
         rel = derive(parse_source_text(original, name), name)
         for mode, source, prewrite, want in (("write", split, None, 0), ("control", original, None, 0),
                                              ("check-original", split, original, 0),
@@ -2832,23 +2904,26 @@ def _split_render_failures(module, base, run_quiet):
             elif prewrite is None:
                 held = target.read_bytes() if target.is_file() else None
                 if held != original.encode("utf-8"):
-                    failures.append("split case {} ({}): the generated file is not the unsplit original byte for "
-                                    "byte; got {!r}".format(name, mode, None if held is None else held[-300:]))
+                    failures.append("split case {} ({}): the generated file is not the expected full render byte "
+                                    "for byte; got {!r}".format(name, mode, None if held is None else held[-300:]))
                 again = run_quiet(root, True, runner=module.run)
                 if again != 0:
                     failures.append("split case {} ({}): --check after generation expected exit 0, got {!r}"
                                     .format(name, mode, again))
-        if full is None or core is None:
-            failures.append("split case {}: full_body() and core_layer() must both be defined".format(name))
+        if full is None or core is None or detail is None or core_text is None:
+            failures.append("split case {}: full_body(), core_layer(), detail_layer() and core_render() must all "
+                            "be defined".format(name))
             continue
         try:
-            got = (full(split, name), full(original, name), core(split, name), core(original, name))
+            got = (full(split, name), full(original, name), core(split, name), core(original, name),
+                   detail(split, name), detail(original, name), core_text(split, name), core_text(original, name))
         except Exception as exc:  # noqa: BLE001  a revert may surface as any exception
             got = "raised {!r}".format(exc)
-        if got != (original, original, expected_core, None):
-            failures.append("split case {}: expected (full_body of the split source, full_body of the original, "
-                            "core_layer of the split source, core_layer of the original) to be (the original, the "
-                            "original, {!r}, None); got {!r}".format(name, expected_core, got))
+        want = (original, original, expected_core, None, expected_detail, None, expected_render, original)
+        if got != want:
+            failures.append("split case {}: expected (full_body of the split source and of the original, "
+                            "core_layer of each, detail_layer of each, core_render of each) to be {!r}; got {!r}"
+                            .format(name, want, got))
     return failures
 
 
@@ -2858,8 +2933,13 @@ _SPLIT_REVERTS = (
     ("split-render-wiring", "desired[rel] = full_body(read_rule_source(src), src.name)",
      "desired[rel] = read_rule_source(src)"),
     ("split-drop-detail-keys", " if _frontmatter_key(line) not in DETAIL_KEYS]", "]"),
-    ("split-drop-core", "lines[first - 2:title] + lines[split:]", "lines[first - 2:split - 1] + lines[split:]"),
-    ("split-drop-heading", "lines[first - 2:title] + lines[split:]", "lines[first - 2:title] + lines[split - 1:]"),
+    # The previous contract (the core layer dropped, the title followed by the detail) must go red.
+    ("split-drop-core", "lines[first - 2:split - 1], detail", "lines[first - 2:_title] + [\"\"], detail"),
+    ("split-keep-heading", "lines[first - 2:split - 1], detail", "lines[first - 2:split], detail"),
+    ("split-detail-blank-lead", "    detail = lines[split:]\n    while detail and detail[0] == \"\":",
+     "    detail = lines[split:]\n    while False:"),
+    ("split-full-drops-detail", "    return \"\\n\".join(head + detail)", "    return \"\\n\".join(head)"),
+    ("split-detail-layer-heading", "layer = lines[split:]", "layer = lines[split - 1:]"),
     ("split-core-below-title", "core = lines[title:split - 1]", "core = lines[title - 1:split - 1]"),
 )
 
@@ -2997,9 +3077,9 @@ def self_test_main():
                                         else "pruned", got, kept, wrote))
 
         # The two-layer split: a well-formed detail rule generates and then checks clean, its generated
-        # file the whole source byte for byte when it has no split, and otherwise its unsplit render
-        # (_unsplit_reference, a second implementation of full_body); every malformed layout is a malformed
-        # source (exit 2).
+        # file the whole source byte for byte when it has no split, and otherwise its full render
+        # (_full_render_reference, a second implementation of full_body); every malformed layout is a
+        # malformed source (exit 2).
         detail_base = tmp / "detail"
         for name, _keys, _body, expected in _DETAIL_CASES:
             root = _detail_case_root(detail_base, name)
@@ -3011,10 +3091,10 @@ def self_test_main():
                 generated = root / ".claude" / "rules" / derive(parse_source(source), source.name)
                 raw = source.read_bytes()
                 want = raw if b"\n" + DETAIL_HEADING.encode("ascii") + b"\n" not in raw else \
-                    _unsplit_reference(raw.decode("utf-8")).encode("utf-8")
+                    _full_render_reference(raw.decode("utf-8")).encode("utf-8")
                 if not generated.is_file() or generated.read_bytes() != want:
                     failures.append("detail case {}: the generated file is not {} byte for byte".format(
-                        name, "the source" if want == raw else "the source's unsplit render"))
+                        name, "the source" if want == raw else "the source's full render"))
                 if run_quiet(root, check=True) != 0:
                     failures.append("detail case {}: --check after generation expected exit 0".format(name))
         revert_base = tmp / "reverted"
@@ -3030,8 +3110,9 @@ def self_test_main():
                 failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard is "
                                 "what decides it), got {!r}".format(label, case, reverted_exit, got))
 
-        # The split is invisible in the read tree: every split source renders byte-equal to its unsplit
-        # original in write and check mode (_SPLIT_CASES), and each split-render guard put back goes red.
+        # The split is a partition rendered whole in the read tree: every split source renders byte-equal to
+        # its expected full render in write and check mode (_SPLIT_CASES), and each split-render guard put
+        # back goes red.
         failures.extend(_split_render_failures(sys.modules[__name__], tmp / "split", run_quiet))
         for label, old, new in _SPLIT_REVERTS:
             try:
@@ -3226,8 +3307,9 @@ def self_test_main():
           ".claude/, .claude/rules or family directory symlinked outside the root exits 2 in write mode with nothing "
           "written or deleted there, and one symlinked inside the root is read; the MAP_KEYS read refusal "
           "exits 2 with empty stdout under {} stderr conditions ({}); {} detail layout case(s) "
-          "hold and {} guard revert(s) each go red; {} split source(s) render byte-equal to their unsplit "
-          "original in write and check mode, and {} split-render revert(s) each go red; an adopter-shaped "
+          "hold and {} guard revert(s) each go red; {} split source(s) render byte-equal to their full "
+          "render (core render, then detail layer) in write and check mode, and {} split-render "
+          "revert(s) each go red; an adopter-shaped "
           "rule with a non-ASCII value is accepted and goes red under the ASCII-only revert; {} parse-level "
           "revert(s) each go red; {} adopter-mode case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
           "and {} adopter-mode revert(s) each go red; an unknown option is exit 2 with the usage line and runs "

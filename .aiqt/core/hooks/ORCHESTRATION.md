@@ -1235,6 +1235,45 @@ command and the rule text decide the pin. Context files and sealers that never c
 a declared dispatch command are not seen (a context file inside the export root is a head copy and is
 compared with the pin; one a reviewer reads from elsewhere is not).
 
+### The commit side: the hand-back record
+
+The census above runs when a review is dispatched, and only for a brief that names its draft. The
+commit that lands a worker hand-back is checked by git's own pre-commit and pre-merge-commit hooks
+(rule vfxcmt, githook `handback-staged`), through the gate-record stub, which is unchanged:
+
+- Apply the hand-back with
+  `python3 -I -B .aiqt/core/hooks/scripts/aiqt_hooks.py gate-record handback apply PATCH`. It reads
+  the patch once, censuses its file headers as the draft census does, applies those same bytes to a
+  temporary index to read git's own change set (rename detection off), and refuses when the two
+  disagree, when a record is already outstanding, or when a path the patch changes is already staged.
+  It then writes `<git dir>/aiqt/handback-record.json` (this worktree's git directory), with the
+  sha256 and size of the patch file's bytes as read, and applies the same bytes with
+  `git apply --index`. A deleted path and a rename's source are recorded as `absent`, every other
+  changed path as `present`; a copy's unchanged source is not recorded.
+- `gate-record verify-commit` then refuses a commit that leaves a recorded path unstaged, naming each
+  path; it reads the index being committed, so `git commit -- PATHS` is checked through its
+  temporary index. The record outlives the hand-back's commit: while HEAD is that commit, the next
+  commit, an amend of it (`git commit --amend`) or a commit on top of it, which the hook cannot tell
+  apart, must still stage every recorded path against the record's head, and is refused otherwise;
+  the record is kept whatever that commit's outcome. If the hand-back's commit was made with
+  `--no-verify` and missed a path, the next checked commit refuses the same way, unless it stages every
+  recorded path. The record is retired by the first checked commit whose HEAD is a commit on top of
+  the hand-back's commit and stages every recorded path against the record's head.
+- The mode is the `handback-staged` key of HEAD's `.aiqt/gate-record.toml`: `off`, the default when
+  the key is absent, reads nothing; `recorded` prints a note and makes no claim when there is no
+  record, or when the record is unreadable, malformed, still applying or stale; `required` makes each
+  of those a cannot-evaluate (exit 2). In `required` mode a commit made while HEAD is the hand-back's
+  commit that already stages every recorded path has no hand-back of its own, so it is a
+  cannot-evaluate too (the record is kept). This repository sets `recorded`, to move to `required`
+  once it has run clean for one release.
+- `gate-record handback status` prints the record, and `gate-record handback clear` prints and removes
+  it, which is the way out of a stale record or a path left out on purpose (say so in the commit
+  message).
+
+The residuals are listed in the `handback-staged` row of `.aiqt/core/githooks/manifest.toml`: a commit
+that runs no hook, content inside a committed file (the check reads paths), an apply made without the
+command, the patch's provenance, a same-user edit of the record, and other worktrees.
+
 ### The carried review check
 
 Rule evgcmp says a review carried to a rebased or replayed revision transfers only if the replayed

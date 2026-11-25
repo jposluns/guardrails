@@ -666,7 +666,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "vfxcmt"
 status = "partial"
-mechanisms = ["hook:review-dispatch-pin"]
+mechanisms = ["githook:handback-staged", "hook:review-dispatch-pin"]
 
 [[rule]]
 corpus-id = "vrfdiv"
