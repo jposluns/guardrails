@@ -23,6 +23,10 @@ Where a registry is looked up (two scopes):
   there as absent, each of them is inert. A toplevel the loader cannot examine (a regular file, a
   directory this process cannot search, or one holding a regular file named `.aiqt`) reads as bad,
   not absent.
+- The review dispatch binding and the dispatch brief declaration (sections below) read the union of
+  the git-resolved toplevel, its main worktree and every registry on the cwd's ancestors, every
+  registry file on its own, without the local file's whole-file precedence; a conflict between the
+  two files withholds, as each section below states.
 - The truncation guard looks at the UNION of two places: every directory on the cwd's physical
   ancestor chain (a no-follow, descriptor-anchored walk that needs no git) and, where git resolves
   a toplevel for the cwd, that toplevel (which `core.worktree` can place off the ancestor chain).
@@ -1299,9 +1303,12 @@ directory is no linked worktree, so a session with no registry anywhere is not w
 `core.bare` to true in a separated git directory's configuration would end that withholding. A registry without a binding never ends the search: the session
 repository's registry, its main worktree's, and every registry on the cwd's ancestors are read,
 nearest first, and the first binding decides, so a registry of `{"version": 1}` checked out, written
-or nested below an orchestrated tree cannot hide its binding. This hook reads each registry file on
-its own, so a local `.aiqt/orchestration.local.json` without a binding cannot hide a binding in the
-committed `.aiqt/orchestration.json`. In a bound session, a plain command that names a registry file
+or nested below an orchestrated tree cannot hide its binding. This hook reads every registry file, each
+on its own, so a local `.aiqt/orchestration.local.json` with or without a binding cannot hide the
+committed `.aiqt/orchestration.json`: a committed file that cannot be read or whose binding is
+malformed withholds every Bash call beside a local binding, and the two files binding differently
+withhold every Bash call too, since the binding that governs cannot be known. Two files with the same
+binding are one binding. In a bound session, a plain command that names a registry file
 or the `.aiqt` directory is refused unless its command word only reads (`cat`, `head`, `tail`, `wc`,
 `ls`, `stat`, `grep`, `jq`, `cmp`, `diff`). A command that changes the registry without naming it (a git
 command that writes or removes work-tree files, a checkout from a subtree, the removal of a parent
@@ -1418,6 +1425,67 @@ Limits:
   record of allowed pins that a carried revision must name, a check of the mid-operation markers of an
   in-progress rebase, merge, cherry-pick or revert, and diff-shaping keys in the shared config-lane
   poison.
+
+## The dispatch brief declaration
+
+The optional `dispatch_briefs` key turns on the dispatch brief presence hook (`dispatch-brief-present`,
+rules nocncl and exetgt). It is a non-empty array of objects, each with exactly two keys: `commands`, a
+non-empty list of command basenames, and `brief_option`, the one option word that names the brief:
+
+```json
+"dispatch_briefs": [
+  {"commands": ["orch-dispatch"], "brief_option": "--brief"},
+  {"commands": ["run-worker"], "brief_option": "-b"}
+]
+```
+
+Any other key, a missing key, a wrong type, or a command named twice (compared without regard to case)
+makes the key malformed. The commands of a `review_dispatch` binding are not added to it: a command is
+checked by this hook only where `dispatch_briefs` lists it.
+
+- **What it refuses.** A provably plain call of a declared command (the shared plain-command
+  specification of the review dispatch binding) must give the brief option exactly once and last (a
+  short option never in its `=` form, no `--` before it), naming a brief that is, when the hook runs,
+  an existing, nonempty, regular file the hook can open for reading, reached through no symbolic link
+  in any component (the path as written is walked component by component and no link is followed, so a
+  `..` never cancels a linked component: `links/x/../brief`, or a relative `../brief` from a cwd reached
+  through a link, is refused). A brief path that begins with exactly two slashes, which POSIX leaves
+  implementation-defined, is refused; three or more count as one. A brief that is missing, empty, a
+  directory, a FIFO, socket or device, a link in any component, or unreadable is refused the same way,
+  with the cause named. A relative brief resolves against the payload cwd. A brief under `/proc` or
+  `/dev` is withheld as cannot-evaluate.
+- **A brief written in the same call.** It is not modelled: a Bash call that is not one plain command
+  and names a declared command anywhere in its text is refused whole, so the brief is written by one
+  call and dispatched by the next, and a failed write is visible before the dispatch. A plain `git` or
+  `opf` call that names a declared command is refused too, since either can run another program.
+- **Scope.** The union the review dispatch binding reads: the git-resolved top level, its main
+  worktree, and every registry on the cwd's ancestors, every registry file that can declare the key
+  read on its own (neither the local nor the committed file hides the other's declaration). A registry
+  that cannot be read, a malformed key, or an ancestor search that cannot be made withholds every Bash
+  call until an operator repairs it. Two registries, or the local and committed files of one, that
+  declare one command with different brief options withhold that dispatch.
+- **The declaration record.** When the hook first sees the session repository's registry (or its
+  main worktree's) declare the key, it records the declaration in
+  `GIT_COMMON_DIR/aiqt/dispatch-brief-binding/KEY.json` (mode 0600, written without following a
+  symbolic link). While the record exists, a registry that is missing, unreadable, without the key or
+  declaring differently withholds every declared dispatch; an operator restores the declaration or
+  removes the record outside the session, and the next check records the declaration then in force.
+  The record holds the declaration in the form the hook merged it: as written when one file declares
+  the key, one command per entry when both do. The comparison is by digest of that form, so where an
+  entry lists more than one command, a second file that starts to declare the key (even the same
+  thing), or one of two that stops, counts as declaring differently and withholds every declared
+  dispatch until the record is removed. This refusal fails closed. With one command per entry the two
+  forms are the same.
+- **Registry-required mode.** With `AIQT_ORCH_REQUIRE_REGISTRY` set to a value other than an off
+  value, a Bash call from a session with no registry at all is denied, as the truncation guard denies
+  it.
+- **Residue.** The check runs when the hook runs: a brief removed, emptied or swapped between the
+  check and the dispatcher's read, or a directory component swapped for a link between the link test
+  and the open, is not seen. Presence is all it checks (a stale brief under the same name, or one with
+  the wrong content, passes). A dispatcher name assembled at run time (an unset variable or an empty
+  command substitution spliced inside the name, an ANSI-C quoted escape), a dispatch through an undeclared
+  command or a non-Bash tool, and a call that removes both the registry and the record are not caught.
+  The manifest residue of `dispatch-brief-present` is the full list.
 
 ## Review holds
 
@@ -1904,7 +1972,8 @@ equivalent to a blocking hook.
 
 A dispatcher without hooks can run the review dispatch check as a preflight: pipe the PreToolUse
 payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to `aiqt_hooks.py review_dispatch_pin`,
-and withhold the dispatch on exit 2 or on a printed `deny` decision.
+and withhold the dispatch on exit 2 or on a printed `deny` decision. The dispatch brief presence check
+runs the same way: pipe the payload to `aiqt_hooks.py dispatch_brief_present`.
 
 ## Command text that raises a host permission prompt
 

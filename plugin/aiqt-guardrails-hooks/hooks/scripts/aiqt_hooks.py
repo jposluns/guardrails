@@ -37096,9 +37096,13 @@ def _rdp_decide_within(data):
 def _rdp_scope(reg_dir):
     """The binding of the registries at reg_dir as _rdp_binding gives it: (None, None) when there is no
     registry or none declares a binding, so the search goes on; ("bad", detail) for a registry that cannot
-    be read or parsed; ("ok", cfg) for a well-formed binding. Each registry file is read on its own, the
-    local one first, so a local registry WITHOUT a binding cannot hide the committed one's binding, as its
-    whole-file precedence would for the other orchestration hooks."""
+    be read or parsed, a malformed binding in either file, or two files that bind differently; ("ok", cfg)
+    for a well-formed binding. EVERY registry file is read, each on its own: a local registry with or
+    without a binding never hides the committed one (as its whole-file precedence would for the other
+    orchestration hooks), so an unreadable committed file or a malformed committed binding withholds beside
+    a local binding, and the two files binding differently (by _rdp_binding_digest) is a conflict that
+    cannot say which binding governs, withheld the same way; two files binding the same way are one binding."""
+    found = []
     for rel in _ORCH_REGISTRY_FILES:
         status, reg = _orch_registry(reg_dir, nofollow=True, files=(rel,))
         if status == "absent":
@@ -37106,9 +37110,16 @@ def _rdp_scope(reg_dir):
         if status != "ok":
             return ("bad", reg)
         binding, cfg = _rdp_binding(reg)
-        if binding is not None:
+        if binding == "bad":
             return (binding, cfg)
-    return (None, None)
+        if binding is not None:
+            found.append((rel, cfg))
+    if not found:
+        return (None, None)
+    if len({_rdp_binding_digest(cfg) for _rel, cfg in found}) > 1:
+        return ("bad", "the registry files {} at {} bind review dispatch differently, so the binding that "
+                "governs cannot be known".format(" and ".join(rel for rel, _cfg in found), reg_dir))
+    return ("ok", found[0][1])
 
 
 # The binding record. Predicting what a git command or a script does to the registry does not converge, so
@@ -38453,6 +38464,515 @@ def review_dispatch_pin(data):
                      "AIQT guardrail: {}review dispatch withheld (rule vfxcmt).".format(prefix))
     if kind == "note":
         return _allow_note(message)
+    return _allow()
+
+
+# --- nocncl/exetgt: dispatch-brief-present (a declared dispatch reads a brief that is there) ----------
+# A sibling of review_dispatch_pin for every dispatcher, not only review dispatch: the registry key
+# dispatch_briefs lists each dispatch command and the option that names its brief, and a plain call of a
+# declared command is refused unless that option names, last, one existing, nonempty, regular file the hook
+# can read, reached through no symbolic link in any component (the path walked as written, component by
+# component, so a .. never cancels a linked component). Every way the brief can fail that test
+# (missing, empty, a directory, a FIFO or device, a link in any component, unreadable) is one class and is
+# refused the same way, with the cause named. The key lists its commands explicitly: the commands of a
+# review_dispatch binding are not added to it. The scope is review_dispatch_pin's union (the git-resolved
+# top level, its main worktree, and every registry on the cwd's ancestors), and every registry file that can
+# declare the key is read on its own, so neither file hides the other's declaration. A registry that cannot
+# be read, or a malformed key, withholds every Bash call, as review_dispatch_pin does (whose scope also reads
+# every registry file and withholds where the two bind differently, _rdp_scope). A path that begins with
+# exactly two slashes is refused (_dbp_walk). The declaration of
+# the session repository's own registries is recorded in hook-owned state (GIT_COMMON_DIR/aiqt/
+# dispatch-brief-binding/KEY.json, as review_dispatch_pin's binding record), so removing or rewriting the
+# registry in the session withholds every declared dispatch instead of switching the check off. Under
+# registry-required mode (AIQT_ORCH_REQUIRE_REGISTRY, _orch_registry_required) a session with no registry
+# at all is denied, as the truncation guard denies it.
+# RESIDUE (also in the manifest residue): a brief written in the same Bash call as the dispatch is not
+# modelled (a call that is not one plain command and names a declared dispatcher is refused whole), and the
+# brief is checked when the hook runs, so a brief removed, emptied or swapped between the check and the
+# dispatcher's own read (or by a path component swapped between the link test and the open) is not seen.
+_DBP_KEY = "dispatch_briefs"
+_DBP_ENTRY_KEYS = frozenset(("commands", "brief_option"))
+_DBP_RECORD_DIR = ("aiqt", "dispatch-brief-binding")
+_DBP_RECORD_MAX = 65536
+_DBP_RECORD_VERSION = 1
+_DBP_RUNNERS = frozenset(("git", "opf"))   # rule 4's plain programs that can run another program
+
+
+def _dbp_binding(reg, repeats=False):
+    """The registry's dispatch brief declaration: (None, None) when undeclared, ("ok", cfg) when well formed,
+    ("bad", detail) otherwise. cfg is a tuple of (commands, brief_option) pairs, commands a sorted tuple, the
+    pairs sorted. Strict: the value is a non-empty list of objects, each with exactly commands (a non-empty
+    list of command basenames) and brief_option (one option word); a command named twice, compared without
+    regard to case, is malformed, unless repeats is set (a record of the merged declaration of a directory's
+    registry files, _dbp_merge, where one command can carry two options and the dispatch is withheld)."""
+    if "dispatch_briefs" not in reg:
+        return (None, None)
+    raw = reg.get("dispatch_briefs")
+    if not isinstance(raw, list) or not raw:
+        return ("bad", "{} is {}, not a non-empty array".format(_DBP_KEY, _orch_json_kind(raw)))
+    seen = set()
+    entries = []
+    for k, entry in enumerate(raw):
+        where = "{}[{}]".format(_DBP_KEY, k)
+        if not isinstance(entry, dict):
+            return ("bad", "{} is {}, not an object".format(where, _orch_json_kind(entry)))
+        if set(entry) != _DBP_ENTRY_KEYS:
+            return ("bad", "{} must have exactly the keys {} (has {})".format(
+                where, sorted(_DBP_ENTRY_KEYS), sorted(entry)))
+        commands = entry["commands"]
+        if not isinstance(commands, list) or not commands or not all(
+                isinstance(c, str) and c and "/" not in c and c.strip() == c and "\x00" not in c
+                for c in commands):
+            return ("bad", "{}.commands is not a non-empty list of command basenames".format(where))
+        option = entry["brief_option"]
+        if not isinstance(option, str) or not option.startswith("-") or len(option) < 2 \
+                or any(ch.isspace() or ch == "=" or ch == "\x00" for ch in option):
+            return ("bad", "{}.brief_option is not a single option word".format(where))
+        for name in commands:
+            if name.casefold() in seen and not repeats:
+                return ("bad", "{} names the command {!r} twice".format(_DBP_KEY, name))
+            seen.add(name.casefold())
+        entries.append((tuple(sorted(commands)), option))
+    return ("ok", tuple(sorted(entries)))
+
+
+def _dbp_merge(cfgs):
+    """The one declaration of a directory's registry files that declare the key (cfgs, _dbp_binding's cfg
+    each): that cfg when one file declares it, otherwise one (command,) entry per distinct (command, option)
+    pair of every file, so a command the two files declare with different options keeps both and its
+    dispatch is withheld (_dbp_judge). The two forms are digested as they are (_dbp_digest) and the record
+    compares digests, so where an entry lists more than one command the two forms differ: a directory that
+    moves between one declaring file and two (a second file now declaring, even the same thing, or one of
+    two ceasing to) then declares differently from a record of the other form and withholds every declared
+    dispatch until an operator removes the record. That refusal fails closed and is the documented drift
+    (ORCHESTRATION.md, the manifest residue); with one command per entry the two forms are the same."""
+    if len(cfgs) == 1:
+        return cfgs[0]
+    return tuple(sorted({((name,), option) for cfg in cfgs for commands, option in cfg for name in commands}))
+
+
+def _dbp_scope(reg_dir):
+    """The dispatch brief declaration of the registries at reg_dir: (present, kind, cfg). present is whether
+    any registry file is there; kind and cfg are None when none declares the key (the search goes on),
+    "bad" with the detail for a registry that cannot be read or parsed or a malformed key, "ok" with
+    _dbp_merge's cfg. EVERY registry file that can declare the key is read, each on its own: a local file
+    with the key or without it never hides the committed one in the same directory, so a malformed or
+    unreadable committed file withholds and a committed declaration is judged with the local one."""
+    present = False
+    found = []
+    for rel in _ORCH_REGISTRY_FILES:
+        status, loaded = _orch_registry(reg_dir, nofollow=True, files=(rel,))
+        if status == "absent":
+            continue
+        present = True
+        if status != "ok":
+            return (True, "bad", loaded)
+        kind, cfg = _dbp_binding(loaded)
+        if kind == "bad":
+            return (True, kind, cfg)
+        if kind == "ok":
+            found.append(cfg)
+    if found:
+        return (True, "ok", _dbp_merge(found))
+    return (present, None, None)
+
+
+def _dbp_doc(cfg):
+    """A well-formed declaration (_dbp_binding's cfg) as the registry spells it: the form a record stores."""
+    return [dict(commands=list(commands), brief_option=option) for commands, option in cfg]
+
+
+def _dbp_digest(cfg):
+    """The sha256 of a declaration's canonical JSON form, so two spellings of one declaration (key order,
+    entry order) have one digest."""
+    blob = json.dumps(_dbp_doc(cfg), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return __import__("hashlib").sha256(blob.encode("ascii")).hexdigest()
+
+
+def _dbp_record_read(path):
+    """The declaration record at path, read without following a symbolic link and without blocking: (None,
+    None) when there is none; ("ok", (digest, cfg)) when it is well formed; ("bad", detail) otherwise."""
+    try:
+        fd = os.open(path, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (FileNotFoundError, NotADirectoryError):
+        return (None, None)
+    except (OSError, ValueError) as exc:
+        return ("bad", "it cannot be opened ({})".format(exc))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ("bad", "it is not a regular file")
+        blob = _rdp_read_fd(fd, _DBP_RECORD_MAX + 1)
+    except OSError as exc:
+        return ("bad", "it cannot be read ({})".format(exc))
+    finally:
+        os.close(fd)
+    if len(blob) > _DBP_RECORD_MAX:
+        return ("bad", "it is over {} bytes".format(_DBP_RECORD_MAX))
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except ValueError as exc:
+        return ("bad", "it is not JSON ({})".format(exc))
+    if not isinstance(doc, dict) or doc.get("version") != _DBP_RECORD_VERSION or \
+            not isinstance(doc.get("digest"), str):
+        return ("bad", "it is not a version {} declaration record".format(_DBP_RECORD_VERSION))
+    kind, cfg = _dbp_binding({_DBP_KEY: doc.get("declaration")}, repeats=True)
+    if kind != "ok":
+        return ("bad", "its declaration is malformed ({})".format(cfg))
+    if _dbp_digest(cfg) != doc["digest"]:
+        return ("bad", "its digest is not its declaration's")
+    return ("ok", (doc["digest"], cfg))
+
+
+def _dbp_record_write(home, path, identity, rel, cfg):
+    """Record cfg as the declaration of the registry at rel in the worktree identity, at path in home,
+    unless a record is there already; the same atomic, no-follow, mode 0600 write as _rdp_record_write.
+    None when it is recorded, or the detail of the failure."""
+    doc = dict(version=_DBP_RECORD_VERSION, worktree=identity, registry_path=rel,
+               registry_files=list(_ORCH_REGISTRY_FILES), digest=_dbp_digest(cfg), declaration=_dbp_doc(cfg))
+    blob = (json.dumps(doc, sort_keys=True, indent=1, ensure_ascii=True) + "\n").encode("ascii")
+    tmp = "{}.{}.tmp".format(path, os.urandom(8).hex())
+    try:
+        for folder in (os.path.dirname(home), home):
+            try:
+                os.mkdir(folder, 0o700)
+            except FileExistsError:
+                pass
+            if not stat.S_ISDIR(os.lstat(folder).st_mode):
+                return "{} is not a directory".format(folder)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                     0o600)
+        try:
+            view = memoryview(blob)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, path, follow_symlinks=False)
+        except FileExistsError:
+            pass
+        finally:
+            os.unlink(tmp)
+    except (OSError, ValueError) as exc:
+        return "it cannot be written ({})".format(exc)
+    return None
+
+
+def _dbp_record_check(home, own, scope):
+    """The declaration record check for the session repository's own registries own, (reg_dir, identity,
+    rel) each: ("withhold", detail) when a record cannot be used; otherwise (drift, recorded), recorded the
+    cfg of each record found, drift None or the text naming each registry whose live declaration is missing,
+    unreadable or different from its record. Different means a different digest of the merged form
+    (_dbp_merge), so a change between one declaring file and two is a drift even where the meaning is the
+    same, wherever an entry lists more than one command. A declaration seen with no record is recorded here; one that cannot be recorded is a drift, so it
+    never leaves the registry unguarded."""
+    drifts, recorded, seen = [], [], set()
+    for reg_dir, identity, rel in own:
+        path = _rdp_record_path(home, identity, rel)
+        if path in seen:
+            continue
+        seen.add(path)
+        _present, kind, cfg = scope(reg_dir)
+        rkind, held = _dbp_record_read(path)
+        if rkind is None and kind == "ok":
+            failed = _dbp_record_write(home, path, identity, rel, cfg)
+            if failed is not None:
+                drifts.append("the {} declaration of the registry at {} cannot be recorded in {}: {}; an "
+                              "operator makes that directory writable".format(_DBP_KEY, reg_dir, path, failed))
+                continue
+            rkind, held = _dbp_record_read(path)
+        if rkind is None:
+            continue
+        if rkind == "bad":
+            return ("withhold", "the dispatch brief declaration record {} of the registry at {} cannot be "
+                    "used: {}; an operator removes it outside the session (rm {}), and the next check records "
+                    "the declaration then in force".format(path, reg_dir, held, path))
+        digest, rcfg = held
+        recorded.append(rcfg)
+        if kind is None:
+            change = "is missing or carries no {} key".format(_DBP_KEY)
+        elif kind != "ok":
+            change = "cannot be read or its {} key is malformed ({})".format(_DBP_KEY, cfg)
+        elif _dbp_digest(cfg) != digest:
+            change = "declares {} differently (digest {}) from the record (digest {})".format(
+                _DBP_KEY, _dbp_digest(cfg)[:12], digest[:12])
+        else:
+            continue
+        drifts.append("the orchestration registry at {} {} since its declaration was recorded in {}; an "
+                      "operator restores the recorded declaration, or removes the record outside the session "
+                      "(rm {})".format(reg_dir, change, path, path))
+    return ("; ".join(drifts) or None, recorded)
+
+
+def _dbp_walk(brief):
+    """brief (an absolute path) resolved component by component as written, following no symbolic link:
+    (path, None), path the link-free absolute path reached, or (None, cause). Each component is examined
+    with lstat before the next is taken, so a link anywhere is refused where it stands, and a .. is taken
+    only from the link-free directory reached so far (its parent is then its lexical parent), so a later ..
+    can never cancel a linked component (links/x/../brief, or a relative ../brief from a cwd reached
+    through a link). A component that more components follow (a trailing / included) must be a directory,
+    as the kernel requires. A path that begins with exactly two slashes, which POSIX leaves
+    implementation-defined, is refused."""
+    if not brief.startswith("/"):
+        return (None, "it is not an absolute path")
+    if brief.startswith("//") and not brief.startswith("///"):
+        return (None, "its path begins with exactly two slashes, which POSIX leaves implementation-defined")
+    parts = brief.split("/")
+    current = "/"
+    for k, part in enumerate(parts):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = os.path.dirname(current)
+            continue
+        step = os.path.join(current, part)
+        try:
+            st = os.lstat(step)
+        except (FileNotFoundError, NotADirectoryError):
+            return (None, "it does not exist")
+        except (OSError, ValueError) as exc:
+            return (None, "its component {} cannot be examined ({})".format(step, exc))
+        if stat.S_ISLNK(st.st_mode):
+            return (None, "it is reached through a symbolic link ({} is one)".format(step))
+        if k < len(parts) - 1 and not stat.S_ISDIR(st.st_mode):
+            return (None, "it does not exist ({} is not a directory)".format(step))
+        current = step
+    return (current, None)
+
+
+def _dbp_brief_problem(brief):
+    """None when brief (an absolute path) is an existing, nonempty, regular file this process can open for
+    reading, reached through no symbolic link in any component; otherwise the cause, one phrase. The link
+    test walks the path as written component by component without following any link (_dbp_walk); the
+    link-free path it reaches is then opened ONCE for reading, non-blocking and without following a final
+    link (so a file without read permission is refused there), and its type and size are read from that
+    descriptor; nothing is read, so a FIFO or device never blocks the hook."""
+    walked, cause = _dbp_walk(brief)
+    if cause is not None:
+        return cause
+    try:
+        fd = os.open(walked, _RDP_OPEN_FLAGS | os.O_NOFOLLOW)
+    except (FileNotFoundError, NotADirectoryError):
+        return "it does not exist"
+    except (OSError, ValueError) as exc:
+        return "it cannot be opened ({})".format(exc)
+    try:
+        st = os.fstat(fd)
+        if stat.S_ISDIR(st.st_mode):
+            return "it is a directory"
+        if not stat.S_ISREG(st.st_mode):
+            return "it is not a regular file"
+        if st.st_size <= 0:
+            return "it is empty"
+    except OSError as exc:
+        return "it cannot be examined ({})".format(exc)
+    finally:
+        os.close(fd)
+    return None
+
+
+def _dbp_withhold(detail):
+    """The policy for a registry state that cannot say which commands dispatch, as _rdp_withhold."""
+    return ("unverifiable", "{}; every Bash call is withheld until an operator repairs it".format(detail))
+
+
+def _dbp_judge(data, cfgs, drift):
+    """The decision for a Bash payload in a session with well-formed declarations cfgs (the live and the
+    recorded ones). drift, when set, names a registry changed since its declaration was recorded: every
+    declared dispatch is then withheld."""
+    command, unread = _bash_command(data)
+    if unread is not None:
+        return ("unverifiable", "the Bash payload carries no command string ({})".format(unread))
+    options = {}
+    for cfg in cfgs:
+        for commands, option in cfg:
+            for name in commands:
+                options.setdefault(name.casefold(), set()).add(option)
+    names = sorted({name for cfg in cfgs for commands, _option in cfg for name in commands})
+    words, why = _rdp_plain_words(command, names)
+    if words is None:
+        named = _rdp_mentions(command, names)
+        if named:
+            return ("deny", "the command is not one plain command ({}) and names the declared dispatch command "
+                    "{}, so the hook cannot tell which brief it would read or whether the call writes that "
+                    "brief first; split the work into plain calls, and write the dispatch as {} [OPTIONS] "
+                    "BRIEF-OPTION PATH with the brief option last".format(why, named[0], named[0]))
+        return ("allow", "")
+    word = _rdp_basename(words[0])
+    if word.casefold() not in options:
+        if word in _DBP_RUNNERS:
+            named = _rdp_mentions(" ".join(words), names)
+            if named:
+                return ("deny", "the {} command names the declared dispatch command {} and can run another "
+                        "program, so it could run that dispatch with a brief this hook never sees; run the "
+                        "dispatch as its own plain call".format(word, named[0]))
+        return ("allow", "")
+    if drift:
+        return ("unverifiable", "{}; the {} dispatch is withheld".format(drift, word))
+    found = sorted(options[word.casefold()])
+    if len(found) != 1:
+        return ("unverifiable", "the registries in scope declare the {} dispatch with different brief options "
+                "({}), so which word names its brief cannot be known".format(word, ", ".join(found)))
+    option = found[0]
+    args = words[1:]
+    if len(option) == 2 and any(a.startswith(option + "=") for a in args):
+        return ("deny", "the {} dispatch writes the short brief option as {}=PATH, which a getopt parser reads "
+                "as a value starting with an equals sign; write {} PATH".format(word, option, option))
+    briefs = _rdp_brief_args(args, option)
+    if len(briefs) != 1 or not briefs[0] or briefs[0] == "-":
+        return ("deny", "the {} dispatch must pass exactly one brief file as {} PATH (found {})".format(
+            word, option, len(briefs)))
+    last = (len(args) >= 2 and args[-2] == option) or (len(option) > 2 and args[-1].startswith(option + "=")) \
+        or (len(option) == 2 and args[-1].startswith(option) and args[-1] != option)
+    if not last or "--" in args[:-1]:
+        return ("deny", "the {} dispatch must give its brief last, as {} PATH with no word after it and no -- "
+                "before it, so no other option word can replace it".format(word, option))
+    cwd = data.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isabs(cwd) or "\x00" in cwd:
+        return ("unverifiable", "the session cwd {!r} is not an absolute path, so the brief of the {} dispatch "
+                "cannot be located".format(cwd, word))
+    brief = briefs[0] if os.path.isabs(briefs[0]) else os.path.join(cwd, briefs[0])
+    for form in (os.path.normpath(brief), os.path.realpath(brief)):
+        if form.startswith(("/proc/", "/dev/")) or form in ("/proc", "/dev"):
+            return ("unverifiable", "the brief {} is under /proc or /dev, which name a different file in this "
+                    "hook's process than in the dispatcher's".format(brief))
+    problem = _dbp_brief_problem(brief)
+    if problem is not None:
+        return ("deny", "the {} dispatch names the brief {} but {}; a dispatch needs an existing, nonempty, "
+                "regular file reached through no symbolic link, written by an earlier call that succeeded, "
+                "so write the brief first and check that step, then dispatch".format(word, brief, problem))
+    return ("allow", "")
+
+
+def _dbp_decide_within(data):
+    """_dbp_decide's body, run with the deadline set: the union scope of _rdp_decide_within (the
+    git-resolved top level, its main worktree, every registry on the cwd's ancestors), each registry read
+    once. Any registry that cannot be read or carries a malformed key withholds every Bash call; every
+    well-formed declaration found, and every recorded one, is judged together."""
+    cwd = data.get("cwd")
+    root = _orch_root(data)
+    snapshot = {}
+
+    def scope(reg_dir):
+        key = os.path.realpath(reg_dir)
+        if key not in snapshot:
+            snapshot[key] = _dbp_scope(reg_dir)
+        return snapshot[key]
+    own = []
+    withheld = None
+    common = identity = None
+    if root is not None:
+        common, identity, why_common = _rdp_record_home(root)
+        if common is None:
+            return _dbp_withhold("{}, so the dispatch brief declaration record kept there cannot be read and a "
+                                 "registry removed since it was recorded could not be seen".format(why_common))
+        own.append(root)
+        try:
+            main_top, why = _rdp_main_worktree(root)
+        except OSError as exc:
+            main_top, why = _rdp_gitfile_main(root)
+            why = "{}, and {}".format(exc, why) if why else None
+        if main_top is not None:
+            own.append(main_top)
+        withheld = why
+    elif isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd:
+        main_top, withheld = _rdp_gitfile_main(cwd)
+        if main_top is not None:
+            own.append(main_top)
+    where, found = _rdp_registry_dir(cwd)
+    if where == "fail":
+        return _dbp_withhold("the session repository cannot be discovered and " + found)
+    present = False
+    live = []
+    for reg_dir in own + list(found):
+        here, kind, cfg = scope(reg_dir)
+        present = present or here
+        if kind == "bad":
+            return _dbp_withhold("the orchestration registry at {} or its {} key is malformed ({})".format(
+                reg_dir, _DBP_KEY, cfg))
+        if kind == "ok":
+            live.append(cfg)
+    drift, recorded = None, []
+    if common is not None:
+        keyed = [(reg_dir, identity if reg_dir == root else ".", ".") for reg_dir in own]
+        drift, recorded = _dbp_record_check(os.path.join(common, *_DBP_RECORD_DIR), keyed, scope)
+        if drift == "withhold":
+            return _dbp_withhold(recorded)
+    cfgs = live + recorded
+    if cfgs:
+        return _dbp_judge(data, cfgs, drift)
+    if withheld:
+        return _dbp_withhold(withheld)
+    if not present and _orch_registry_required():
+        return ("deny", "registry-required mode: {} is set, so an absent orchestration registry fails closed; "
+                "add the registry, or unset {}".format(_ORCH_REQUIRE_REGISTRY_ENV, _ORCH_REQUIRE_REGISTRY_ENV))
+    return ("allow", "")
+
+
+def _dbp_decide(data):
+    """The dispatch brief decision for one Bash payload, ("allow"|"deny"|"unverifiable", message), run in a
+    worker thread under review_dispatch_pin's budget (_RDP_BUDGET, the same deadline its git probes and
+    reads honour): a probe blocked in the kernel cannot hold the hook past it, and a decision that finishes
+    late never allows. A crash in the worker is raised here, so it reaches main's fail-closed exit."""
+    box = []
+    clock = time.monotonic
+
+    def _work():
+        try:
+            out = (True, _dbp_decide_within(data))
+        except BaseException as exc:   # handed to the caller, which raises it
+            out = (False, exc)
+        box.append(out + (clock(),))
+    deadline = clock() + _RDP_BUDGET
+    _RDP_DEADLINE[0] = deadline
+    try:
+        worker = __import__("threading").Thread(target=_work, name="dispatch-brief-present", daemon=True)
+        worker.start()
+        worker.join(max(0.0, deadline - clock()) + _RDP_JOIN_GRACE)
+    finally:
+        _RDP_DEADLINE[0] = None
+    if not box:
+        return ("unverifiable", "the check did not finish within its {} second budget".format(_RDP_BUDGET))
+    ok, value, finished = box[0]
+    if not ok:
+        raise value
+    if value[0] == "allow" and finished >= deadline:
+        return ("unverifiable", "the check finished past its {} second budget, so its result is not "
+                "used".format(_RDP_BUDGET))
+    return value
+
+
+def dispatch_brief_present(data):
+    """nocncl, exetgt, PreToolUse Bash: a dispatch made through a command the registry's dispatch_briefs key
+    declares reads a brief that is there. The declared brief option must be given once, last, and name an
+    existing, nonempty, regular file the hook can read, reached through no symbolic link in any component;
+    a brief that is missing, empty, a directory, a FIFO or device, a link (in any component) or unreadable
+    is refused the same way, naming the cause. A Bash call that is not one provably plain command and names
+    a declared dispatch command is refused whole (a brief written in the same call is not modelled), as is
+    a plain git or opf command that names one. A registry that cannot be read, or a malformed key,
+    withholds every Bash call; the session repository's declaration is recorded, so removing or rewriting
+    the registry withholds every declared dispatch rather than switching the check off. Inert without the
+    key, except in registry-required mode, where a session with no registry is denied. A command string
+    holding a NUL is withheld in every session. A refusal denies and names its reason; a cannot-evaluate
+    denies with an UNVERIFIABLE: prefix. A crash reaches main's PreToolUse fail-closed exit 2.
+    Residual (disclosed in the manifest residue): the check runs when the hook runs, so a brief changed
+    between the check and the dispatcher's read is not seen. Hookless dispatchers run it as a preflight:
+    `aiqt_hooks.py dispatch_brief_present` with the payload on stdin."""
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("nocncl")
+    if tool_name != "Bash":
+        return _allow()
+    if _bash_command_holds_nul(data):
+        kind, message = ("unverifiable", "the Bash payload carries no readable command string ({})"
+                         .format(_bash_command(data)[1]))
+    else:
+        kind, message = _dbp_decide(data)
+    if kind in ("deny", "unverifiable"):
+        prefix = "UNVERIFIABLE: " if kind == "unverifiable" else ""
+        return _deny("{}AIQT rule nocncl: dispatch withheld: {}.".format(prefix, message),
+                     "AIQT guardrail: {}dispatch withheld, brief not present (rules nocncl, exetgt).".format(
+                         prefix))
     return _allow()
 
 
@@ -49859,6 +50379,7 @@ HANDLERS = {
     "orch_untracked_wait_loop": orch_untracked_wait_loop,
     "orch_dispatch_ledger": orch_dispatch_ledger,
     "review_dispatch_pin": review_dispatch_pin,
+    "dispatch_brief_present": dispatch_brief_present,
     "review_workdir_hold": review_workdir_hold,
     "orch_prompt_stamp": orch_prompt_stamp,
     "orch_resume_audit": orch_resume_audit,
@@ -49909,6 +50430,7 @@ HANDLER_EVENT = {
     "orch_untracked_wait_loop": PRETOOL,
     "orch_dispatch_ledger": "PostToolUse",
     "review_dispatch_pin": PRETOOL,
+    "dispatch_brief_present": PRETOOL,
     "review_workdir_hold": PRETOOL,
     "orch_prompt_stamp": "UserPromptSubmit",
     "orch_resume_audit": "SessionStart",

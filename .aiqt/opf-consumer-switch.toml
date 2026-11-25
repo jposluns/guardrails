@@ -51,6 +51,7 @@ staleness = "The staleness policy object (hour bounds), not a record path."
 yield_tools = "A list of tool names the yield guard scopes to, not a record path."
 dispatch_tools = "A list of tool names the dispatch ledger guard scopes to, not a record path."
 review_dispatch = "The review dispatch binding object, not a record path."
+dispatch_briefs = "The list of dispatch commands and the option naming each one's brief, which the dispatch brief presence hook checks; not a record path."
 companion_stores = "The declared companion store roots the write guard admits, not a project record the switch would flip."
 
 [[detect.registry-use]]
@@ -100,6 +101,12 @@ line-anchor = "    if \"review_dispatch\" not in reg:"
 reason = "A key-presence test (in) that reads no value."
 keys-read = []
 uses = ["\"review_dispatch\" not in reg"]
+
+[[detect.registry-use]]
+line-anchor = "    if \"dispatch_briefs\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+uses = ["\"dispatch_briefs\" not in reg"]
 
 [[detect.registry-use]]
 line-anchor = "    return [rec for rec in p.stdout.split(b\"\\0\") if rec]"

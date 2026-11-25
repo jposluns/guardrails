@@ -186,7 +186,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "exetgt"
 status = "partial"
-mechanisms = ["gate:derived-command-parameters", "hook:write-scope"]
+mechanisms = ["gate:derived-command-parameters", "hook:dispatch-brief-present", "hook:write-scope"]
 
 [[rule]]
 corpus-id = "expbnd"
@@ -261,7 +261,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "nocncl"
 status = "enforced"
-mechanisms = ["hook:inline-errexit", "hook:orch-truncation-guard"]
+mechanisms = ["hook:dispatch-brief-present", "hook:inline-errexit", "hook:orch-truncation-guard"]
 
 [[rule]]
 corpus-id = "nofabr"
