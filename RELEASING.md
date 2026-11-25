@@ -57,6 +57,39 @@ passes. The maintainer disables the extra methods in the repository settings. Th
 merge made outside it (the web interface or the API) while those settings allow another method; its
 BOUNDARY line says so.
 
+The red-main repair route. While main is red the command above refuses every landing (its
+`tools/ci-status.sh --main-health` gate exits 1), the train that fixes main included. That train lands by
+the same command with `--repair-red-main` added, the only way this tool lands while main is red:
+`python3 -I -B tools/merge_pr.py --pr <N> --head <full head SHA> --base main --method squash
+--expect-base <full SHA of main's current tip> --train --repair-red-main`.
+It lands only when all of these hold: the pull request is a merge-train pull request (`--train` is
+required, `--not-train` with `--repair-red-main` is refused, and the head must be a `merge-train-*` branch
+carrying the `merge-train` label); main's newest completed push run is red (`--main-health` exits 1: the
+first completed Quality push run on main among the newest 500 runs listed concluded anything but success;
+a newer push run still in progress neither passes nor blocks, and a schedule or workflow_dispatch run
+never decides; a green main is refused, so land through the normal command instead); the train's own
+Quality run on the exact head is green (`tools/ci-status.sh <head> --require-base main`, unchanged) and
+the train's tree has a successful Quality run and no failed one within the window
+`tools/ci-status.sh --match-tree --head <head>` reads (it exits 0); the pull request's base is main's
+current tip (main's tip, read after the fresh reads, is `--expect-base`); and every other check of the
+normal command passes unchanged, `--require-status` included when given. The tree match's window is
+limited: it sees each run's latest attempt only (a failed attempt later re-run to success is not seen),
+the newest 500 runs only, the trees of the newest 20 distinct head commits of completed Quality runs
+only, and no schedule or workflow_dispatch run, so a failed run on the same tree outside that window does
+not refuse; and it refuses a green train whose successful run is listed after a run on a further head
+commit (past those 20), which can happen while main is red and trains are pushed often. The tip read
+narrows the window before the request but does not close it: as on the normal command, the request pins
+only the head, so a main that moves after that read is caught after the landing (`MERGED ONTO A MOVED
+BASE`, exit 1), not prevented. The run prints a `MODE: REPAIR-RED-MAIN` line after its BOUNDARY line, a
+`NOTE: REPAIR-RED-MAIN` line right after the main-health gate's own `RESULT: MAIN IS RED` output (shown
+unchanged; its advice to merge nothing else onto main holds for every other pull request, not for this
+repair train), and notes the mode on its `MERGED:` line. The post-merge `tools/ci-status.sh --main-health --merge-commit
+<landing SHA>` still runs and reports: exit 0 only when main's push run for the repair is green, and
+`RESULT: LANDED, MAIN IS RED` (exit 1) when the repair left main red. Without `--repair-red-main` nothing
+changes: a red main is refused as before. Whether the train fixes what made main red is the caller's
+judgment; the tool reads only that main's newest completed push run is red and that the train is green
+within the windows above.
+
 1. Freeze. On the release branch, confirm `python3 tools/gen_skill.py --check` is clean and the full
    `bash tools/run_all_checks.sh` is green at the freeze commit. That run FAILS when gitleaks is not on
    PATH or reports another version than the `Secrets (gitleaks)` step of `.github/workflows/quality.yml`

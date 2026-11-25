@@ -3,7 +3,7 @@
 commit the caller checked.
 
   merge_pr.py --pr N --head SHA --base main --method squash --expect-base SHA (--train | --not-train)
-              [--require-status CONTEXT]
+              [--require-status CONTEXT] [--repair-red-main]
   merge_pr.py --self-test [--execution-report ABS_PATH]
   any other argument list is refused (exit 2) before any read
 
@@ -11,13 +11,15 @@ Exit: 0 merged, every landing property below confirmed after the merge, main's p
 main's tip, read after that run, containing the landing commit;
 1 refused (a method other than squash, a base other than main, squash disabled on the hosting service, a
 pull request that is not the one named, the RELEASING.md step 6a attestation pull request, a base commit
-other than --expect-base, an empty pull request body, a red gate or an API rejection; nothing was
-merged), or merged but the post-merge check found a landing property that does not hold, main red, or
-main's tip no longer containing the landing (one RESULT line per property that fails); 2 cannot evaluate
-(a usage error, settings or state that cannot be read or are malformed, an identity mismatch, an
-interruption or unexpected error before the request; nothing was merged), or an UNKNOWN merge outcome
-(the request was sent and its result could not be read, or an interruption or unexpected error ended the
-run once it was sent), or merged with main's push run for it, or main's tip, not evaluable.
+other than --expect-base, an empty pull request body, a red gate or an API rejection, and with
+--repair-red-main also --not-train, a green main, a train tree with a failed Quality run or no successful
+one, or a main tip other than the checked base commit, a red main being no refusal in that mode only;
+nothing was merged), or merged but the post-merge check found a landing property that does not hold,
+main red, or main's tip no longer containing the landing (one RESULT line per property that fails); 2
+cannot evaluate (a usage error, settings or state that cannot be read or are malformed, an identity
+mismatch, an interruption or unexpected error before the request; nothing was merged), or an UNKNOWN
+merge outcome (the request was sent and its result could not be read, or an interruption or unexpected
+error ended the run once it was sent), or merged with main's push run for it, or main's tip, not evaluable.
 
 THE LANDING PROPERTIES. What this tool claims about a landing, each checked before the request where it
 can be and after it always (the self-test drives a refusal row and its flip for each):
@@ -91,18 +93,27 @@ run after the landing: their failure is exit 1 or 2 after a merge (see Exit abov
 confirms a landing that satisfies them all, and a nonzero exit does not show that nothing landed.
 Nothing here changes a hosting setting.
 
-THE SEQUENCE. (1) Bind the target and read the settings; (2) read the pull request and require it open,
-not a draft, not merged, at the named head and base, its head branch in this repository (with --train,
-also a merge-train-* head branch carrying the merge-train label), and compose the squash title and
-message from it; (3) require the head to be up to date with the base (the compare read's behind_by is 0,
-its base_commit and merge_base_commit the same full commit id, and that id --expect-base, recorded as
-the checked base commit), require the compare's file list not to name the attestation path, and read
-the head commit's tree; (4) run the existing gates in this checkout:
-`tools/ci-status.sh --main-health` (main must be green) and `tools/ci-status.sh HEAD --require-base
-BASE`, plus `--pr N --require-status CONTEXT` when --require-status is given (its MERGE-SHA line must
-name the head); (5) read the settings, the pull request, the compare and the head commit again and
-require the same decision, the same head, base commit, tree, title and body: a change is a refusal that
-asks for fresh checks, never an authorization carried over; (6) assert the method is squash and send
+THE SEQUENCE. Before any read the argument list is validated: the method and the base (a missing,
+unknown or malformed value is a usage refusal, exit 2; merge, rebase and a base other than main are
+refused, exit 1); exactly one of --train and --not-train (neither or both given is a usage refusal,
+exit 2); and --repair-red-main with --not-train (refused, exit 1). (1) Bind the target
+and read the settings; (2) read the pull request and require it open, not a draft, not merged, at the
+named head and base, its head branch in this repository (with --train, also a merge-train-* head branch
+carrying the merge-train label), and compose the squash title and message from it; (3) require the head
+to be up to date with the base (the compare read's behind_by is 0, its base_commit and merge_base_commit
+the same full commit id, and that id --expect-base, recorded as the checked base commit), require the
+compare's file list not to name the attestation path, and read the head commit's tree; (4) run the
+existing gates in this checkout, in this order:
+`tools/ci-status.sh --main-health` (main must be green; only THE RED-MAIN REPAIR MODE below requires it
+red instead, refuses a green main and prints a NOTE line after the gate's own MAIN IS RED output), then
+`tools/ci-status.sh HEAD --require-base BASE`, plus `--pr N --require-status CONTEXT` when
+--require-status is given (its MERGE-SHA line must name the head), then, in the repair mode only,
+`tools/ci-status.sh --match-tree --head HEAD` (exit 0 with its COMMIT line naming the head); (5) read the
+settings, the pull request, the compare and the head commit again and require the same decision, the
+same head, base commit, tree, title and body: a change is a refusal that asks for fresh checks, never an
+authorization carried over; then, in the repair mode only, read main's tip (GET git/ref/heads/main) and
+require it to be the checked base commit (another tip is a refusal, an unreadable one cannot-evaluate);
+(6) assert the method is squash and send
 exactly one PUT repos/OWNER/REPO/pulls/N/merge with {"merge_method": "squash", "sha": HEAD,
 "commit_title": TITLE, "commit_message": BODY}, so a head that moved after the last read is rejected by
 the hosting service itself; (7) require merged true and a full landing commit id, read the pull request
@@ -120,6 +131,51 @@ nothing was merged), and from the moment the request is handed to the API it is 
 2, reconcile), never a traceback; a second interruption that arrives while that line is being written can
 still end the process by Python's own handling (a non-zero exit, never 0). Deferred landing (auto-merge, a merge
 queue) and an administrator bypass are not offered: no option reaches them.
+
+THE RED-MAIN REPAIR MODE (--repair-red-main, RELEASING.md's red-main repair route). Without the option
+the main-health gate of step (4) refuses every landing while main is red, so the train that fixes a red
+main could never land through this tool. With it, and only with it, a red main is not a refusal; the
+option is the only way to land while main is red, and it lands only when all of these hold:
+  train    the pull request is a merge-train pull request: --train is required (--repair-red-main with
+           --not-train is refused, exit 1, before any read) and the --train check of step (2) applies,
+           so the head is a merge-train-* branch of this repository carrying the merge-train label;
+  red      main's newest completed push run is red: `tools/ci-status.sh --main-health` exits 1, which it
+           does when the first completed Quality push run on main in its listing (the newest 500 runs)
+           concluded anything but success; a newer push run still in progress neither passes nor blocks,
+           and a schedule or workflow_dispatch run never decides. A green main (exit 0) is refused (exit 1,
+           land through the normal path instead) and an unevaluable one (any other exit) is
+           cannot-evaluate;
+  green    the train's own Quality run on the exact head is green: the head gate of step (4),
+           `tools/ci-status.sh HEAD --require-base BASE`, unchanged; and the train's tree has a successful
+           Quality run and no failed one among the runs `tools/ci-status.sh --match-tree --head HEAD` reads:
+           it must exit 0 with its COMMIT line naming the head (exit 1 is a refusal, any other exit
+           cannot-evaluate). That read's window is limited: it sees the latest attempt of each run only (a
+           failed attempt later re-run to success is not seen), the newest 500 runs listed only, the trees
+           of the newest 20 distinct head commits of completed Quality runs only, and no schedule or
+           workflow_dispatch run, so a failed run on the same tree outside that window does not refuse;
+           and it refuses a green train whose successful run is listed after a run on a further head
+           commit (past those 20);
+  tip      the pull request's base is main's current tip: after the fresh reads of step (5), main's tip
+           is read (GET git/ref/heads/main) and must be the checked base commit, which is --expect-base
+           (another tip is a refusal, an unreadable one cannot-evaluate). This read narrows the window
+           before the request but does not close it: the request pins only the head, as on the normal
+           path, so a main that moves after this read is not prevented and is detected after the landing
+           (MERGED ONTO A MOVED BASE, exit 1);
+  the rest every other check and gate the normal path applies, before and after the request, applies
+           unchanged (the settings, the pull request, the compare, the step 6a refusal, the message, the
+           fresh reads with their refusal of a base or head tree that changed while the gates ran, the
+           --require-status gate when given, the one pinned squash request and every post-merge check).
+The mode is recorded in the output: a MODE line after the BOUNDARY line, a NOTE line right after the
+main-health gate's echoed output when that gate exits 1 (the gate's own output is shown unchanged; its
+advice to merge nothing else onto main holds for every other pull request, while this train is the
+repair), and a note on the MERGED line.
+The post-merge `tools/ci-status.sh --main-health --merge-commit SHA` still runs and reports: the repair
+is exit 0 only when main's push run for the landing commit is green, and a repair that leaves main red is
+exit 1 (RESULT: LANDED, MAIN IS RED), as on the normal path. Without the option nothing changes: the
+normal path refuses a red main exactly as before, and nothing it refuses is accepted outside the
+conditions above. Whether the train actually fixes what made main red is the caller's judgment; this
+tool reads only that main's newest completed push run is red and that the train is green within the
+windows above.
 
 THE ENFORCEMENT BOUNDARY (printed as the BOUNDARY line of every landing run). This tool makes squash the
 only method a landing THROUGH IT can use. It cannot stop anyone with write access, or other automation,
@@ -195,7 +251,23 @@ CONTEXT_RE = re.compile("[{0}][{0}._/:-]{{0,99}}".format(_ALNUM))
 HTTP_STATUS_RE = re.compile(r"\(HTTP ([0-9]{3})\)")
 ORIGIN_PREFIXES = ("https://github.com/", "ssh://git@github.com/", "git@github.com:")
 VALUE_OPTIONS = ("--pr", "--head", "--base", "--method", "--expect-base", "--require-status")
-FLAG_OPTIONS = ("--train", "--not-train")
+# THE RED-MAIN REPAIR MODE: the only option under which a red main is not a refusal.
+REPAIR_OPTION = "--repair-red-main"
+FLAG_OPTIONS = ("--train", "--not-train", REPAIR_OPTION)
+REPAIR_MODE_LINE = ("MODE: REPAIR-RED-MAIN (--repair-red-main): lands only while main's newest completed push "
+                    "run is red, only a merge-train pull request whose own Quality run on this head is green and "
+                    "whose tree has a successful Quality run and no failed one within the window "
+                    "tools/ci-status.sh --match-tree reads (latest attempts, the newest 500 runs, the newest 20 "
+                    "head commits, no schedule or workflow_dispatch run), only on main's tip as read before the "
+                    "request (the request pins only the head, as on the normal path), and every other gate of the "
+                    "normal path applies unchanged.")
+# Printed right after the main-health gate's echoed output when that gate exits 1 in the repair mode: the
+# gate's own MAIN IS RED line is shown unchanged, and this line says how it bears on this run.
+REPAIR_RED_NOTE = ("NOTE: REPAIR-RED-MAIN (--repair-red-main): the main-health result above is the gate's own "
+                   "output, shown unchanged; in this mode a red main is the condition for landing this one "
+                   "merge-train pull request, not a refusal, and the run goes on to its remaining gates and "
+                   "reads. The gate's advice holds for every other pull request: merge nothing else onto main "
+                   "until it is green.")
 
 
 class CannotEvaluate(Exception):
@@ -255,8 +327,8 @@ def parse_args(argv):
             continue
         if name not in VALUE_OPTIONS:
             return EXIT_CANNOT, ("unknown argument {} (only --pr N, --head SHA, --base main, --method squash, "
-                                 "--expect-base SHA, --train or --not-train and --require-status CONTEXT are "
-                                 "accepted; no option is passed through)".format(_shown(name)))
+                                 "--expect-base SHA, --train or --not-train, --require-status CONTEXT and "
+                                 "--repair-red-main are accepted; no option is passed through)".format(_shown(name)))
         if name in options:
             return EXIT_CANNOT, "{} is given more than once; a repeated option is refused".format(name)
         if index + 1 >= len(argv):
@@ -292,6 +364,9 @@ def parse_args(argv):
         return EXIT_REFUSED, ("REFUSED: base {} is refused; this tool lands only into {} (tools/ci-status.sh "
                               "--main-health reads only main's push runs)".format(_shown(options["--base"]),
                                                                                   ALLOWED_BASE))
+    if REPAIR_OPTION in options and "--not-train" in options:
+        return EXIT_REFUSED, ("REFUSED: {} lands only a merge-train pull request (--train); a pull request that "
+                              "is not a train cannot land while main is red".format(REPAIR_OPTION))
     return options
 
 
@@ -555,11 +630,22 @@ class _Run:
 
     def gates(self, repo, opts):
         rc, _lines = self.run_gate(repo, ["--main-health"], "main health")
-        if rc == 1:
-            raise Refused("main is red (tools/ci-status.sh --main-health exit 1)")
-        if rc != 0:
-            raise CannotEvaluate("main's health cannot be evaluated (tools/ci-status.sh --main-health exit "
-                                 "{})".format(rc))
+        if opts.get(REPAIR_OPTION):
+            # THE RED-MAIN REPAIR MODE: main must be red; green is a refusal, anything else cannot evaluate.
+            if rc == 0:
+                raise Refused("main is green (tools/ci-status.sh --main-health exit 0); {} lands only while "
+                              "main is red: land through the normal path, without {}".format(
+                                  REPAIR_OPTION, REPAIR_OPTION))
+            if rc != 1:
+                raise CannotEvaluate("main's health cannot be evaluated (tools/ci-status.sh --main-health exit "
+                                     "{})".format(rc))
+            self.out(REPAIR_RED_NOTE)
+        else:
+            if rc == 1:
+                raise Refused("main is red (tools/ci-status.sh --main-health exit 1)")
+            if rc != 0:
+                raise CannotEvaluate("main's health cannot be evaluated (tools/ci-status.sh --main-health exit "
+                                     "{})".format(rc))
         args = [opts["--head"], "--require-base", opts["--base"]]
         if "--require-status" in opts:
             args += ["--pr", opts["--pr"], "--require-status", opts["--require-status"]]
@@ -572,6 +658,27 @@ class _Run:
             raise CannotEvaluate("tools/ci-status.sh did not report the checked head as its COMMIT")
         if "--require-status" in opts and lines[-1] != "MERGE-SHA: " + opts["--head"]:
             raise CannotEvaluate("tools/ci-status.sh did not print MERGE-SHA for the checked head")
+        if opts.get(REPAIR_OPTION):
+            # The repair mode also requires that no Quality run on the head's tree failed.
+            rc, lines = self.run_gate(repo, ["--match-tree", "--head", opts["--head"]], "head tree")
+            if rc == 1:
+                raise Refused("the train's tree has a failed Quality run or no successful one (tools/ci-status.sh "
+                              "--match-tree exit 1); {} lands only a train whose own run on this head is green "
+                              "with no failed run on the same tree".format(REPAIR_OPTION))
+            if rc != 0:
+                raise CannotEvaluate("the train's tree runs cannot be evaluated (tools/ci-status.sh --match-tree "
+                                     "exit {})".format(rc))
+            if not lines or lines[0] != "COMMIT: " + opts["--head"]:
+                raise CannotEvaluate("tools/ci-status.sh --match-tree did not report the checked head as its COMMIT")
+
+    def repair_tip(self, repo, opts, checked):
+        """THE RED-MAIN REPAIR MODE's tip condition: main's tip, read now, is the checked base commit."""
+        tip = judge_branch_tip(read_json(self.api, "repos/{}/git/ref/heads/{}".format(repo, opts["--base"]),
+                                         "main tip (repair)"), opts["--base"])
+        if tip != checked["base"]:
+            raise Refused("{}'s tip is {}, not the pull request's base {}; {} lands only a train based on main's "
+                          "current tip: update the train on it, check it again and run with that "
+                          "--expect-base".format(opts["--base"], tip, checked["base"], REPAIR_OPTION))
 
     def submit(self, repo, opts, checked):
         """The one merge request; returns (exit code, landing sha or None)."""
@@ -663,8 +770,10 @@ class _Run:
             for line in failed:
                 self.out("RESULT: " + line)
             return EXIT_REFUSED
-        self.out("MERGED: #{} squashed onto {} at {} as {}, tree {} (the head's), message {}".format(
-            opts["--pr"], opts["--base"], checked["base"], sha, landed_tree, _shown(checked["text"][0], 120)))
+        self.out("MERGED: #{} squashed onto {} at {} as {}, tree {} (the head's), message {}{}".format(
+            opts["--pr"], opts["--base"], checked["base"], sha, landed_tree, _shown(checked["text"][0], 120),
+            " (red-main repair mode, {}: main was red before the request)".format(REPAIR_OPTION)
+            if opts.get(REPAIR_OPTION) else ""))
         try:
             rc, _lines = self.run_gate(repo, ["--main-health", "--merge-commit", sha], "post-merge main health")
         except CannotEvaluate as exc:
@@ -707,6 +816,8 @@ class _Run:
         self.out("TARGET: {} pull request #{} into {} at head {} on base commit {}".format(
             repo, opts["--pr"], opts["--base"], opts["--head"], opts["--expect-base"]))
         self.out(BOUNDARY)
+        if opts.get(REPAIR_OPTION):
+            self.out(REPAIR_MODE_LINE)
         try:
             verdict, first = self.snapshot(repo, opts)
             if verdict[0] == "warn":
@@ -723,6 +834,8 @@ class _Run:
                               "again".format(opts["--pr"]))
             if checked != first:
                 raise Refused("the base commit or the head's tree changed while the gates ran; check again")
+            if opts.get(REPAIR_OPTION):
+                self.repair_tip(repo, opts, checked)
         except Refused as exc:
             self.err("REFUSED: {}; nothing was merged".format(exc))
             return EXIT_REFUSED
@@ -985,9 +1098,10 @@ def _gets(settings=None, pr=None, compare=None, after=None, commit=None, head_co
 
 
 def _gate_fn(calls, main=0, head=0, post=0, commit_line=None, merge_sha_line=None, repos=None, main_raises=None,
-             post_raises=None):
+             post_raises=None, tree=0, tree_commit_line=None, tree_raises=None):
     """A recording gate stub: calls gets each argument tuple, repos (when given) the repository each call
-    was bound to; main_raises and post_raises are raised by the main-health and post-merge calls."""
+    was bound to; main_raises and post_raises are raised by the main-health and post-merge calls; tree and
+    tree_commit_line answer the repair mode's --match-tree call, and tree_raises is raised by it."""
     def gate(repo, args):
         calls.append(tuple(args))
         if repos is not None:
@@ -1000,6 +1114,10 @@ def _gate_fn(calls, main=0, head=0, post=0, commit_line=None, merge_sha_line=Non
             if post_raises is not None:
                 raise post_raises
             return post, "RESULT: post-merge fixture\n"
+        if args[:1] == ["--match-tree"]:
+            if tree_raises is not None:
+                raise tree_raises
+            return tree, (tree_commit_line or ("COMMIT: " + FX_HEAD)) + "\nRESULT: tree fixture\n"
         lines = [commit_line or ("COMMIT: " + FX_HEAD), "RESULT: head fixture"]
         if "--require-status" in args:
             lines.append(merge_sha_line or ("MERGE-SHA: " + FX_HEAD))
@@ -1616,6 +1734,156 @@ def _self_test_live_argv():
         check(name, refused != started and len(gate_runs) == (1 if started else 0), (refused, gate_runs))
 
 
+def _self_test_repair():
+    """THE RED-MAIN REPAIR MODE: with --repair-red-main a green train on main's tip lands on a red main;
+    it is refused on a green main, a red train run (on the head or on its tree), a base that is not main's
+    tip, a pull request that is not a train, and by every other normal gate; the normal path still refuses
+    a red main and never runs the repair mode's tree gate or tip read; the post-merge check still reports;
+    the repair mode's NOTE line follows the main-health gate's unchanged output only when that gate is red."""
+    endpoint_put = "repos/{}/pulls/7/merge".format(FX_REPO)
+    tip_read = "repos/{}/git/ref/heads/main".format(FX_REPO)
+    tree_gate = ("--match-tree", "--head", FX_HEAD)
+    repair = FX_ARGS + [REPAIR_OPTION]
+    non_train = _pr(head={"ref": "feature-x"}, labels=[])
+
+    def repair_gets(tip=FX_BASE, **changes):
+        """The fixture with main's tip read twice: before the request (the repair mode's tip condition)
+        and after the post-merge gate (the containment read)."""
+        gets = _gets(after=_merged_after(), **changes)
+        gets[tip_read] = [tip if isinstance(tip, (tuple, dict, BaseException)) else _tip_ref(tip), _tip_ref()]
+        return gets
+
+    # The repair landing: every normal read and gate, the tree gate, the tip read, then the one request.
+    code, api, gates, out, err = _land(repair_gets(), argv=repair, main=1)
+    order = [call[:2] for call in api.calls]
+    check("repair/green-train-on-red-main-lands",
+          code == 0 and api.puts() == [("PUT", endpoint_put, _good_put_payload())]
+          and gates == [("--main-health",), (FX_HEAD, "--require-base", "main"), tree_gate,
+                        ("--main-health", "--merge-commit", FX_LANDED)]
+          and order[8] == ("GET", tip_read) and order[9] == ("PUT", endpoint_put)
+          and any(line.startswith("RESULT: LANDED:") for line in out), (code, api.calls, gates, out, err))
+    check("repair/mode-recorded-in-output",
+          code == 0 and REPAIR_MODE_LINE in out and out.index(REPAIR_MODE_LINE) == out.index(BOUNDARY) + 1
+          and any(line.startswith("MERGED: ") and REPAIR_OPTION in line for line in out), out)
+    # The main-health gate's echoed output is shown unchanged, and the NOTE line follows it at once.
+    check("repair/red-main-note-beside-gate-output",
+          code == 0 and "  | RESULT: main fixture" in out and out.count(REPAIR_RED_NOTE) == 1
+          and out.index(REPAIR_RED_NOTE) == out.index("  | RESULT: main fixture") + 1, out)
+    # --require-status applies unchanged in the repair mode: forwarded to the head gate, before the tree gate.
+    code, api, gates, out, err = _land(repair_gets(), argv=repair + ["--require-status", "local-quality"], main=1)
+    check("repair/require-status-forwarded-lands",
+          code == 0 and api.puts() == [("PUT", endpoint_put, _good_put_payload())]
+          and gates == [("--main-health",),
+                        (FX_HEAD, "--require-base", "main", "--pr", "7", "--require-status", "local-quality"),
+                        tree_gate, ("--main-health", "--merge-commit", FX_LANDED)], (code, api.calls, gates, out, err))
+    head_commit = "repos/{}/commits/{}".format(FX_REPO, FX_HEAD)
+    head_reads = [_commit(FX_HEAD, ("aa" * 20,), tree="13" * 20), _commit(FX_HEAD, ("aa" * 20,))]
+    same_reads = [_commit(FX_HEAD, ("aa" * 20,))] * 2
+    interrupted_before = "an unexpected KeyboardInterrupt before the merge request; nothing was merged"
+
+    for name, gets, argv, gate_kwargs, code_expected, sent, needle in (
+            # the red condition: main's newest push run must be red
+            ("repair/green-main-refused", repair_gets(), repair, {"main": 0}, 1, 0, "main is green"),
+            ("repair/main-unknown-cannot", repair_gets(), repair, {"main": 2}, 2, 0, "cannot be evaluated"),
+            ("repair/red-main-flip-lands", repair_gets(), repair, {"main": 1}, 0, 1, "RESULT: LANDED:"),
+            # the green condition: the train's own run on the head, and no failed run on its tree
+            ("repair/train-head-run-red-refused", repair_gets(), repair, {"main": 1, "head": 1}, 1, 0,
+             "head's CI does not pass"),
+            ("repair/train-head-run-unknown-cannot", repair_gets(), repair, {"main": 1, "head": 2}, 2, 0,
+             "head's CI cannot be evaluated"),
+            ("repair/train-tree-failed-run-refused", repair_gets(), repair, {"main": 1, "tree": 1}, 1, 0,
+             "no failed run on the same tree"),
+            ("repair/train-tree-unknown-cannot", repair_gets(), repair, {"main": 1, "tree": 2}, 2, 0,
+             "tree runs cannot be evaluated"),
+            ("repair/train-tree-other-commit-cannot", repair_gets(), repair,
+             {"main": 1, "tree_commit_line": "COMMIT: " + "ee" * 20}, 2, 0, "--match-tree did not report"),
+            # a timeout or an interruption in the tree gate: cannot evaluate, nothing sent
+            ("repair/train-tree-gate-timeout-cannot", repair_gets(), repair,
+             {"main": 1, "tree_raises": subprocess.TimeoutExpired("ci-status.sh", GATE_TIMEOUT)}, 2, 0,
+             "head tree: tools/ci-status.sh did not finish in time; nothing was merged"),
+            ("repair/train-tree-gate-interrupted-cannot", repair_gets(), repair,
+             {"main": 1, "tree_raises": KeyboardInterrupt()}, 2, 0, interrupted_before),
+            ("repair/train-tree-green-flip-lands", repair_gets(), repair, {"main": 1, "tree": 0}, 0, 1,
+             "RESULT: LANDED:"),
+            # the tip condition: the pull request's base is main's current tip
+            ("repair/base-not-main-tip-refused", repair_gets(tip="11" * 20), repair, {"main": 1}, 1, 0,
+             "not the pull request's base"),
+            ("repair/main-tip-unreadable-cannot", repair_gets(tip=(1, "", "gh: (HTTP 502)")), repair, {"main": 1},
+             2, 0, "main tip (repair)"),
+            ("repair/main-tip-other-ref-cannot", repair_gets(tip=_tip_ref(FX_BASE, ref="refs/heads/dev")), repair,
+             {"main": 1}, 2, 0, "does not name refs/heads/main"),
+            # a timeout or an interruption in the tip read: cannot evaluate, nothing sent
+            ("repair/main-tip-read-timeout-cannot",
+             repair_gets(tip=subprocess.TimeoutExpired("gh", READ_TIMEOUT)), repair, {"main": 1}, 2, 0,
+             "main tip (repair): the read timed out; nothing was merged"),
+            ("repair/main-tip-read-interrupted-cannot", repair_gets(tip=KeyboardInterrupt()), repair, {"main": 1},
+             2, 0, interrupted_before),
+            ("repair/base-is-main-tip-flip-lands", repair_gets(tip=FX_BASE), repair, {"main": 1}, 0, 1,
+             "RESULT: LANDED:"),
+            # the train condition
+            ("repair/not-train-option-refused", repair_gets(pr=non_train), _argv(train="--not-train",
+                                                                                 extra=[REPAIR_OPTION]),
+             {"main": 1}, 1, 0, "lands only a merge-train pull request"),
+            ("repair/non-train-pr-refused", repair_gets(pr=non_train), repair, {"main": 1}, 1, 0,
+             "is not a labelled"),
+            ("repair/train-label-missing-refused", repair_gets(pr=_pr(labels=[])), repair, {"main": 1}, 1, 0,
+             "is not a labelled"),
+            ("repair/train-pr-flip-lands", repair_gets(pr=_pr()), repair, {"main": 1}, 0, 1, "RESULT: LANDED:"),
+            # every other gate of the normal path applies unchanged
+            ("repair/behind-main-refused", repair_gets(compare=_compare(behind=1)), repair, {"main": 1}, 1, 0,
+             "behind"),
+            ("repair/expect-base-differs-refused", repair_gets(), _argv(expect="11" * 20, extra=[REPAIR_OPTION]),
+             {"main": 1}, 1, 0, "not the expected base"),
+            ("repair/attestation-pr-refused",
+             repair_gets(compare=_compare(files=FX_FILES + [{"filename": ATTESTATION_PATH, "status": "modified"}])),
+             repair, {"main": 1}, 1, 0, "step 6a"),
+            ("repair/empty-body-refused", repair_gets(pr=_pr(body="")), repair, {"main": 1}, 1, 0, "empty body"),
+            ("repair/squash-disabled-refused", repair_gets(settings=_settings(squash=False)), repair, {"main": 1},
+             1, 0, "squash merging is disabled"),
+            ("repair/merge-method-refused", repair_gets(), _argv(method="merge", extra=[REPAIR_OPTION]),
+             {"main": 1}, 1, 0, "squash only"),
+            ("repair/head-moved-during-gates-refused",
+             dict(repair_gets(), **{"repos/{}/pulls/7".format(FX_REPO): [_pr(), _pr(head={"sha": "ee" * 20})]}),
+             repair, {"main": 1}, 1, 0, "not the checked head"),
+            ("repair/require-status-other-sha-cannot", repair_gets(), repair + ["--require-status", "local-quality"],
+             {"main": 1, "merge_sha_line": "MERGE-SHA: " + "ee" * 20}, 2, 0, "did not print MERGE-SHA"),
+            ("repair/head-tree-changed-during-gates-refused", dict(repair_gets(), **{head_commit: head_reads}),
+             repair, {"main": 1}, 1, 0, "the head's tree changed while the gates ran"),
+            ("repair/head-tree-unchanged-flip-lands", dict(repair_gets(), **{head_commit: same_reads}), repair,
+             {"main": 1}, 0, 1, "RESULT: LANDED:"),
+            ("repair/repeated-option-refused", repair_gets(), repair + [REPAIR_OPTION], {"main": 1}, 2, 0,
+             "more than once"),
+            # the post-merge main-health check still runs and reports
+            ("repair/post-merge-main-red-reported", repair_gets(), repair, {"main": 1, "post": 1}, 1, 1,
+             "RESULT: LANDED, MAIN IS RED"),
+            ("repair/post-merge-main-unknown-reported", repair_gets(), repair, {"main": 1, "post": 2}, 2, 1,
+             "cannot evaluate main's push run"),
+            # the normal path is unchanged: a red main is refused, with no tree gate, tip read or MODE line
+            ("repair/normal-path-red-main-refused", _gets(after=_merged_after()), FX_ARGS, {"main": 1}, 1, 0,
+             "main is red"),
+            ("repair/normal-path-red-main-not-train-refused", _gets(pr=non_train, after=_merged_after()),
+             _argv(train="--not-train"), {"main": 1}, 1, 0, "main is red"),
+            ("repair/normal-path-head-tree-changed-refused",
+             dict(_gets(after=_merged_after()), **{head_commit: head_reads}), FX_ARGS, {"main": 0}, 1, 0,
+             "the head's tree changed while the gates ran"),
+            ("repair/normal-path-green-main-flip-lands", _gets(after=_merged_after()), FX_ARGS, {"main": 0}, 0, 1,
+             "RESULT: LANDED:")):
+        code, api, gates, out, err = _land(gets, argv=argv, **gate_kwargs)
+        repairing = REPAIR_OPTION in argv
+        parsed = not isinstance(parse_args(argv), tuple)
+        tip_reads = [call for call in api.calls[:api.calls.index(api.puts()[0])] if call[1] == tip_read] \
+            if api.puts() else [call for call in api.calls if call[1] == tip_read]
+        check(name, code == code_expected and len(api.puts()) == sent
+              and (sent == 0 or api.puts()[0][2] == _good_put_payload())
+              and any(needle in line for line in out + err)
+              and (REPAIR_MODE_LINE in out) == (repairing and parsed)
+              and (REPAIR_RED_NOTE in out) == (repairing and ("--main-health",) in gates
+                                               and gate_kwargs.get("main", 0) == 1)
+              and (repairing or (tree_gate not in gates and tip_reads == []))
+              and (code_expected == 0) == any(line.startswith("RESULT: LANDED:") for line in out),
+              (code, api.calls, gates, out, err))
+
+
 def _self_test():
     _self_test_policy()
     _self_test_binding()
@@ -1623,6 +1891,7 @@ def _self_test():
     _self_test_properties()
     _self_test_exit_paths()
     _self_test_live_argv()
+    _self_test_repair()
     got = [_main_exit(argv) for argv in (["--self-test", "--bogus"], ["--execution-report", "relative/report"],
                                          [])]
     check("cli/unrecognized-arguments-exit-2", got == [2, 2, 2], got)
@@ -1646,7 +1915,11 @@ def _self_test():
           "interruption at each phase is exit 2, nothing merged before the request and an unknown outcome "
           "from it on; the step 6a attestation pull request refused; the live gh and git command lines pin "
           "the host and read every origin URL, and the gate child is bound to the validated host and "
-          "repository whatever the ambient environment names)".format(
+          "repository whatever the ambient environment names; the red-main repair mode lands a green train "
+          "on main's tip while main is red and is refused on a green main, a red train run, a base that is "
+          "not main's tip and a pull request that is not a train, every other gate applying unchanged "
+          "(--require-status and the refusal of a head tree that changed while the gates ran included), while "
+          "the normal path still refuses a red main)".format(
               len(EXECUTED)))
     return 0
 
