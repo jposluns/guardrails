@@ -7476,6 +7476,27 @@ def _rdp_scope_cases(base, plain):
                "git clone a b", "git", "git --version")
     check("rdp/plain-git-allowlisted-subcommand-allows", [_rdp_kind(go.run(c)) for c in allowed],
           ["allow"] * len(allowed))
+    # The binding record's version is an exact int: a JSON 2.0 is a float equal to 2, true a Python int equal to
+    # 1 and "2" a string, and none is the version 2 record the hook wrote, which reads back well formed.
+    rv_kind, rv_cfg = aiqt_hooks._rdp_binding(dict(review_dispatch=dict(
+        commands=["orch-dispatch"], brief_option="--brief",
+        labels=dict(target="Review-target:", revision="Reviewed-revision:", path="Review-path:",
+                    repo="Review-repo:", branch="Review-branch:"),
+        authority=dict(argv=[sys.executable, "-I", "-B", "stub.py"], timeout=5), max_brief_bytes=4096)))
+    rv_home = os.path.join(str(base), "rdp-record-version", "home")
+    rv_path = os.path.join(rv_home, "record.json")
+    rv_written = aiqt_hooks._rdp_record_write(rv_home, rv_path, "worktree", ".aiqt/orchestration.local.json",
+                                              rv_cfg) if rv_kind == "ok" else rv_cfg
+    with open(rv_path, encoding="utf-8") as handle:
+        rv_doc = json.load(handle)
+    rv_got = []
+    for rv_version in (2, 2.0, True, "2"):
+        os.chmod(rv_path, 0o600)
+        with open(rv_path, "w", encoding="utf-8") as handle:
+            json.dump(dict(rv_doc, version=rv_version), handle)
+        rv_got.append(aiqt_hooks._rdp_record_read(rv_path)[0])
+    check("rdp/record-version-exact-int", [rv_kind, rv_written, rv_doc.get("version")] + rv_got,
+          ["ok", None, 2, "ok", "bad", "bad", "bad"])
     # The binding record fails closed: once the hook has seen the registry bind, a registry
     # removed or rewritten by any command leaves the next dispatch withheld as UNVERIFIABLE, its reason naming
     # the binding record, never allowed. Each change is made directly, as a command the hook did not judge
@@ -8824,6 +8845,24 @@ def _citeledger_dedup_cases(tmp):
     check("citeledger/dedup-key-separates-facts", [(r["kind"], r["via"], r["rev"]) for r in held],
           [("read", "Read", None), ("read", "git-show", "HEAD"), ("read", "git-show", "main"),
            ("wrote", "Edit", None)])
+    # A ledger row whose start and end are JSON true (a Python int equal to 1) is no fact: it never stands
+    # for, and so never suppresses, the real fact at line 1 a later call records.
+    bstate = str(tmp / "cite-dedup-bool-state")
+    aiqt_hooks._cite_append(bstate, "dedup-bool", [row(start=True, end=True)])
+    aiqt_hooks._cite_append(bstate, "dedup-bool", [row()])
+    bpath = Path(bstate) / "citation-ledger" / (hashlib.sha256(b"dedup-bool").hexdigest()[:16] + ".jsonl")
+    bheld = [json.loads(x) for x in bpath.read_text(encoding="utf-8").splitlines()] if bpath.exists() else []
+    check("citeledger/dedup-bool-span-is-no-fact",
+          [(type(r["start"]).__name__, type(r["end"]).__name__) for r in bheld],
+          [("bool", "bool"), ("int", "int")])
+    # The citation check's row reader takes only an exact int v of 1: a JSON true (a Python int equal to 1),
+    # 1.0 (a float equal to 1) or "1" is no recorder row, while the same line with v 1 is one.
+    v_line = {"v": 1, "ts": "t", "kind": "read", "via": "Read", "path": "/v/a.py", "rel": "a.py",
+              "start": 1, "end": 1, "sha256": "0" * 64, "rev": None}
+    check("citeledger/check-row-version-exact-int",
+          [aiqt_hooks._citechk_row(json.dumps(dict(v_line, v=v)).encode("utf-8")) is not None
+           for v in (1, True, 1.0, "1")],
+          [True, False, False, False])
 
 
 def _citeledger_bound_cases(tmp):
@@ -9003,7 +9042,9 @@ def _cite_probe_timeouts(run, budget):
         run()
     finally:
         aiqt_hooks._recovery_toplevel, aiqt_hooks._review_git = saved
-    return bool(given) and all(isinstance(t, (int, float)) and 0 < t <= budget for t in given)
+    # a bool is an int subclass, so true would pass as a 1 second timeout: it is refused as a non-number
+    return bool(given) and all(isinstance(t, (int, float)) and not isinstance(t, bool) and 0 < t <= budget
+                               for t in given)
 
 
 class _CiteStepClock:
@@ -25334,6 +25375,74 @@ def _main_isolated(report_path=None):
             FAILURES.append("named-text ids drift: listed but not built {}; built but not listed {}".format(
                 sorted(set(_named_text_listed) - set(_named_text)),
                 sorted(set(_named_text) - set(_named_text_listed))))
+
+        # The registry enumerator timeout: a JSON true is a bool (an int subclass), never a 1-second
+        # timeout; it takes the default 60 as any other out-of-range value does. A real enumerator that
+        # sleeps 1.5 s is run under true and, as the control that a number is still used as given, under 1:
+        # only the control times out (the enumerator prints nothing, so a run that is not cut short ends in
+        # the not-JSON error instead). The clipped detail can lose the words "timed out" (the exception text
+        # names the argv, so sys.executable's length), so the hook's subprocess name is pointed at a stand-in
+        # whose run calls the real subprocess.run and records the timeout it was given and whether it returned
+        # or raised: "cut short" is a TimeoutExpired only, never an OSError or ValueError that the same detail
+        # prefix also covers.
+        import types as _enum_types
+        from unittest import mock as _enum_mock
+        _enum_slow = [sys.executable, "-I", "-c", "import time; time.sleep(1.5)"]
+        _enum_timed_out = []
+        for _enum_value in (True, 1):
+            _enum_seen = []
+
+            def _enum_recording_run(argv, capture_output, text, encoding, timeout, cwd):
+                # The launch spells its program as sys.executable, so the maintenance-pin scan resolves its
+                # head (a parameter's value is out of the scan's reach); that is the program only because
+                # the hook passed exactly _enum_slow, so any other argv is recorded and refused, never run.
+                if list(argv) != _enum_slow:
+                    _enum_seen.append((timeout, "unexpected argv"))
+                    raise ValueError("the enumerator argv is not the self-test's slow enumerator")
+                try:
+                    out = subprocess.run([sys.executable, *argv[1:]], shell=False,
+                                         capture_output=capture_output, text=text,
+                                         encoding=encoding, timeout=timeout, cwd=cwd)
+                except subprocess.TimeoutExpired:
+                    _enum_seen.append((timeout, "cut short"))
+                    raise
+                except BaseException as exc:
+                    _enum_seen.append((timeout, type(exc).__name__))
+                    raise
+                _enum_seen.append((timeout, "not cut short"))
+                return out
+            _enum_stand_in = _enum_types.SimpleNamespace(run=_enum_recording_run,
+                                                         TimeoutExpired=subprocess.TimeoutExpired,
+                                                         SubprocessError=subprocess.SubprocessError)
+            with _enum_mock.patch.object(aiqt_hooks, "subprocess", _enum_stand_in):
+                _enum_status, _enum_detail = aiqt_hooks._orch_enumerate(
+                    {"enumerator": {"argv": _enum_slow, "timeout": _enum_value}}, ".")
+            _enum_timed_out.append((_enum_status, _enum_seen))
+        check("core/enum-timeout-bool-takes-default", _enum_timed_out,
+              [("ENUMERATOR_ERROR", [(60, "not cut short")]), ("ENUMERATOR_ERROR", [(1, "cut short")])])
+
+        # The gate-record configuration reader takes only an exact int format-version of 1: a TOML true (a
+        # Python int equal to 1) or 1.0 is refused as any other wrong version is, while 1 reads.
+        _gr_versions = []
+        for _gr_version in ("1", "true", "1.0", "2"):
+            try:
+                aiqt_hooks._gr_parse_config(
+                    "format-version = {}\npre-commit = \"a\"\npre-push = \"a\"\n[[set]]\nname = \"a\"\n"
+                    "argv = [\"x\"]\n".format(_gr_version), "gate-config")
+                _gr_versions.append("read")
+            except aiqt_hooks._GateRecordError as exc:
+                _gr_versions.append("refused" if "format-version = 1" in str(exc) else str(exc))
+        check("core/gate-record-config-version-exact-int", _gr_versions, ["read", "refused", "refused", "refused"])
+
+        # The citation probe-timeout recorder counts a probe as bounded only when its timeout is a number
+        # greater than 0 and at most the budget: true (an int equal to 1) is refused as a non-number, while 1
+        # and 1.5 count. The probe is a stand-in that runs nothing, so only the recorder's own test is exercised.
+        _cpt_got = []
+        for _cpt_value in (True, 1, 1.5):
+            with _enum_mock.patch.object(aiqt_hooks, "_review_git", lambda repo_dir, *a, **k: None):
+                _cpt_got.append(_cite_probe_timeouts(
+                    lambda: aiqt_hooks._review_git(".", timeout=_cpt_value), 5))
+        check("core/cite-probe-timeout-bool-refused", _cpt_got, [False, True, True])
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued

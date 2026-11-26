@@ -235,7 +235,8 @@ def parse_ownership(data):
     extra = set(data) - known_tables
     if extra:
         raise GateError("{}: unknown table/key(s): {}".format(OWNERSHIP_REL, ", ".join(sorted(extra))))
-    if data.get("format-version") != 1:
+    # a TOML true is a Python int equal to 1 (bool subclasses int), so the version must be an exact int
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1:
         raise GateError("{}: format-version must be exactly 1".format(OWNERSHIP_REL))
 
     def rows(name, allowed_keys, class_vocab, class_required):
@@ -645,7 +646,7 @@ def read_genesis(root):
         data = load_toml(root / RELEASES_REL)
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(RELEASES_REL, exc))
-    if data.get("format-version") != 1:
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1:  # a TOML true is no version
         raise GateError("{}: format-version must be exactly 1".format(RELEASES_REL))
     top_allowed = {"format-version", "release"}
     top_extra = set(data) - top_allowed
@@ -695,7 +696,7 @@ def load_renderers(root):
         data = load_toml(root / RENDERERS_REL)
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise GateError("cannot read {} ({})".format(RENDERERS_REL, exc))
-    if data.get("format-version") != 1:
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1:  # a TOML true is no version
         raise GateError("{}: format-version must be exactly 1".format(RENDERERS_REL))
     rows = data.get("renderer", [])
     if not rows:
@@ -1295,9 +1296,19 @@ def _self_test_main_isolated():
         floor_obj = json.loads((floorf / FROZEN_REL).read_text(encoding="utf-8"))
         want_floor = {".aiqt/archive/", ".aiqt/frozen.json", ".aiqt/manifest.toml",
                       ".aiqt/release/announce-snippet.txt", ".aiqt/release/root.txt"}
-        if floor_obj.get("version") != FROZEN_VERSION or set(floor_obj.get("frozen", [])) != want_floor:
+
+        def floor_ok(obj):
+            # an exact int version only: a JSON true or 1.0 equals FROZEN_VERSION but is not the floor's version
+            return (type(obj.get("version")) is int and obj.get("version") == FROZEN_VERSION
+                    and set(obj.get("frozen", [])) == want_floor)
+        if not floor_ok(floor_obj):
             failures.append("EN-8: the frozen floor is not the expected {{derived, manifest-self, archive}} "
                             "selector set (got {!r})".format(floor_obj))
+        # the same floor with a JSON true or 1.0 version (each equal to FROZEN_VERSION) is refused
+        for bad_version in (True, 1.0):
+            if floor_ok(dict(floor_obj, version=bad_version)):
+                failures.append("EN-8: a frozen floor with version {} passed the floor check".format(
+                    json.dumps(bad_version)))
 
         # (d) COMPLETENESS / NO-STRAYS / overlap / concern-2 / stale exclusion.
         comp = _build_fixture(tmp / "completeness", extra_files={"stray-new.txt": "x\n"})

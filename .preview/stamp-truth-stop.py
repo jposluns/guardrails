@@ -1762,7 +1762,9 @@ def load_state(sdir, tp, extra=None, dfd=None):
             blocks = obj.get("blocks", 0)  # absent in a state that predates the counter: no blocks counted
             reset = obj.get("reset", False)  # absent in a state that predates the reset flag: no reset recorded
             unknown = obj.get("unknown", False)  # absent before the unknown marker existed: no unknown history recorded
-            if obj.get("v") != 2 or type(off) is not int or off < 0 or not isinstance(pending, list) \
+            # an exact int version only: a JSON 2.0 is a float equal to 2, and true a bool (an int subclass)
+            if type(obj.get("v")) is not int or obj.get("v") != 2 or type(off) is not int or off < 0 \
+                    or not isinstance(pending, list) \
                     or not (tail is None or _is_hash(tail)) or (off > 0) != (tail is not None) \
                     or not all(_is_hash(h) for h in pending) or type(blocks) is not int or blocks < 0 \
                     or type(reset) is not bool or type(unknown) is not bool:
@@ -6554,6 +6556,20 @@ def _self_test():
                 self.assertTrue(load_state(sdir, self.tr, extra)[3], repr(fields))
                 self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]),
                                  (BLOCK_CAP, False, True), repr(fields))
+
+        def test_non_int_stored_version_makes_the_state_unavailable(self):
+            # the state version is an exact int 2: a JSON 2.0 (a float equal to 2) once read as version 2, and
+            # true, "2", 1 and 3 are refused alike, so each such state is UNAVAILABLE, never a readable one;
+            # the integer 2 is the control that the same state otherwise reads
+            versions = [2.0, True, "2", 1, 3, None]
+            got = []
+            for i, v in enumerate(versions + [2]):
+                sdir = os.path.join(self.tmp, f"sd-dv{i}")
+                self.write([self.user("go")])
+                with open(self.key(sdir=sdir, make=True), "w") as f:
+                    f.write(json.dumps({"v": v, "offset": 0, "tail": None, "pending": [], "blocks": 1}))
+                got.append(load_state(sdir, self.tr, {})[3])
+            self.assertEqual(got, [False] * len(versions) + [True])
 
         def test_pre_reset_key_state_restarts_the_count_once_per_record(self):
             # a v2 state written before the reset flag existed carries no reset key, which reads as False,

@@ -185,8 +185,8 @@ FAILURE DIRECTION
     counter or a non-text flag, is malformed and read as no state (it is never parsed from a cut prefix). A
     well-formed state file without the current STATE_VERSION (written by an earlier revision of the hook) is
     discarded and read as no earlier runs, so no flag it holds arms a refusal; one of the current STATE_VERSION
-    holding a flag without a prefix this version keeps (CI_FLAG "CI rerun command: ", LOCAL_FLAG "local rerun: ")
-    is malformed.
+    holding a flag without a prefix this version keeps (CI_FLAG "CI rerun command: ", LOCAL_FLAG "local rerun: "),
+    or a recorded check whose count is not an int of at least 0 (a stored 1.0, true or "1"), is malformed.
     Any error, an unreadable payload, or an unrecognized event exits 0 with no output. The one exception to
     exit 0 is an interpreter older than Python 3.14 that can start the hook: the guard at the top of this file
     reads no input, writes one line beginning `error: rerun-pass-check.py requires Python 3.14 or newer` to
@@ -419,7 +419,8 @@ def unknown_state():
 def load_state(path):
     """(state, readable): an absent file is (unknown_state(), True), since first use cannot be told from a lost
     file; one without STATE_VERSION is a fresh state that keeps its refusal count; an unreadable or malformed one
-    (also one of STATE_VERSION holding a flag without CI_FLAG or LOCAL_FLAG) is (unknown_state(), False), never a
+    (also one of STATE_VERSION holding a flag without CI_FLAG or LOCAL_FLAG, or a check entry that is not a
+    two-item list whose count is an int, not a bool, of at least 0) is (unknown_state(), False), never a
     fresh count of 0. The file is trusted: a hand-edited state of STATE_VERSION with flags of those prefixes arms
     a refusal."""
     if path is None:
@@ -449,6 +450,9 @@ def load_state(path):
             return dict(new_state(), blocks=obj["blocks"]), True
         if not all(f.startswith((CI_FLAG, LOCAL_FLAG)) for f in obj["flags"]):
             return unknown_state(), False  # a flag this version never keeps: malformed
+        if not all(isinstance(c, list) and len(c) == 2 and type(c[1]) is int and c[1] >= 0
+                   for c in obj["checks"].values()):
+            return unknown_state(), False  # a check count this version never writes (1.0, true, "1"): malformed
         return obj, True
     except Exception:
         return unknown_state(), False
@@ -950,8 +954,10 @@ def after_tool(payload, state, event):
         checks[key] = ["pass", state["change"]]
     while len(checks) > MAX_CHECKS:
         checks.pop(next(iter(checks)))
+    # An exact int count only: a stored 1.0 or true equals a change count of 1 but is not one this hook wrote.
+    # load_state reads a state file holding one as malformed; this guards a state built in memory.
     rerun = not bad and isinstance(prior, list) and len(prior) == 2 and prior[0] == "fail" \
-        and prior[1] == state["change"]
+        and type(prior[1]) is int and prior[1] == state["change"]
     if not bad and changes_beside_check(cmd):
         state["change"] += 1  # counted after this line's own comparison: the same line run twice is a rerun
     if rerun:
@@ -2593,6 +2599,28 @@ def _self_test():
             self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
             doc = " ".join(__doc__.split())
             self.assertIn("UserPromptSubmit (no matcher; it resets the refusal count and gives no output)", doc)
+
+        def test_63_a_stored_failure_count_must_be_an_exact_int(self):
+            # A stored 1.0 or true equals a change count of 1, but this hook only ever writes an int count.
+            path = state_path(dict(session_id="s"), self.env)
+            for count, noted in ((1, True), (1.0, False), (True, False), (0, False)):
+                self.assertTrue(save_state(path, dict(new_state(), change=1, checks={"pytest -q": ["fail", count]})))
+                out = self.bash("pytest -q")
+                self.assertEqual(out is not None and "failed earlier and passed on a rerun"
+                                 in out["hookSpecificOutput"]["additionalContext"], noted, count)
+            # Such a count is malformed state, reported like any other: never ignored as a readable state.
+            for entry in (["fail", 1.0], ["fail", True], ["pass", False], ["fail", "1"], ["fail", None],
+                          ["fail", -1], ["fail"], ["fail", 1, 2], "fail"):
+                state = dict(new_state(), change=1, checks={"pytest -q": entry}, flags=["CI rerun command: x"])
+                self.assertTrue(save_state(path, state))
+                self.assertEqual(load_state(path), (unknown_state(), False), entry)
+                self.assertEqual(self.stop("All tests pass.", active=True), dict(systemMessage=UNREAD), entry)
+            for entry in (["fail", 0], ["pass", 1]):
+                state = dict(new_state(), change=1, checks={"pytest -q": entry})
+                self.assertTrue(save_state(path, state))
+                self.assertEqual(load_state(path), (state, True), entry)
+            doc = " ".join(__doc__.split())
+            self.assertIn("or a recorded check whose count is not an int of at least 0", doc)
 
         def run_hook(self, payload, env):
             base = dict(PATH=os.environ.get("PATH", "/usr/bin:/bin"))

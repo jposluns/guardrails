@@ -774,11 +774,12 @@ count = 1
 class = "EXEMPT"
 reason = "test-code"
 
+# 37 since the homes = 2.0 ceiling check's parse at opf/tools/_opf_store.py:3391 (mv_float_pair)
 [[site]]
 path = "opf/tools/_opf_store.py"
 function = "self_test"
 form = "call"
-count = 36
+count = 37
 class = "EXEMPT"
 reason = "test-code"
 
@@ -1131,6 +1132,22 @@ path = "tools/check_manifest.py"
 function = "_self_test_main_isolated"
 form = "call"
 count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_manifest.py"
+function = "_self_test_main_isolated.<lambda>"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/check_manifest.py"
+function = "_self_test_main_isolated.from_text.<lambda>"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 

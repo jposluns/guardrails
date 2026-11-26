@@ -2143,7 +2143,9 @@ def self_test():
                     plain_payload = json.loads(plain_got[2])
                 except ValueError:
                     plain_payload = None
+                # an exact int version only: a JSON true or 1.0 equals 1 but is not the projection's version
                 if (not isinstance(plain_payload, dict)
+                        or type(plain_payload.get("version")) is not int
                         or plain_payload.get("version") != 1
                         or plain_payload.get("items") != want_plain_items
                         or plain_payload.get("source", {}).get("locator") != str(plain_reg)

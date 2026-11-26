@@ -170,7 +170,8 @@ def _read_staged_plan(staged):
 
 def _mode_of(raw_op, default):
     mode = raw_op.get("mode", default)
-    if not isinstance(mode, int) or not 0 <= mode <= 0o7777:
+    # bool subclasses int: a JSON true or false is refused, never taken as mode 0o1 or 0o0
+    if not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o7777:
         raise RefuseError("op mode must be an octal int in [0, 0o7777]")
     return mode
 
@@ -2719,6 +2720,18 @@ def self_test():
             except _journal.JournalError:
                 pass
             checked += 1
+
+        # FIX-HOOK-BOOL-AS-NUMBER: a plan op mode of JSON true or false is a bool, which subclasses int; it is
+        # refused, never read as mode 0o1 or 0o0, while an int mode and the default still hold.
+        for _bm in (True, False):
+            try:
+                _mode_of({"mode": _bm}, 0o644)
+                failures.append("bool-mode: a plan op mode of {!r} must be refused".format(_bm))
+            except RefuseError:
+                pass
+        if _mode_of({"mode": 0o600}, 0o644) != 0o600 or _mode_of({}, 0o755) != 0o755:
+            failures.append("bool-mode: an int op mode and the default must still be accepted")
+        checked += 1
 
         # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
         close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))

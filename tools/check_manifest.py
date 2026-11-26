@@ -171,14 +171,20 @@ def check_order_record(root, findings):
         data = load_toml(root / ".aiqt" / "core" / "order.toml")
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise gen_manifest.GateError("cannot read order.toml ({})".format(exc))
-    if data.get("format-version") != 1 or data.get("apex-corpus-id") != "prjint1":
+    # a TOML true is a Python int equal to 1 (bool subclasses int), so each version must be an exact int
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1 \
+            or data.get("apex-corpus-id") != "prjint1":
         raise gen_manifest.GateError("order.toml: format-version 1 and apex-corpus-id 'prjint1' required")
     extra = set(data) - {"format-version", "apex-corpus-id", "precedence-tier", "presentation-order"}
     if extra:  # an unknown top-level key (e.g. a typo) is a schema FAIL, never silently tolerated.
         raise gen_manifest.GateError("order.toml: unknown top-level key(s): {}".format(
             ", ".join(sorted(extra))))
     try:
-        declared = {int(t["rank"]): sorted(t["members"]) for t in data.get("precedence-tier", [])}
+        # an exact int rank only: int() would read a TOML true as 1, 10.5 as 10 and "10" as 10
+        for t in data.get("precedence-tier", []):
+            if type(t["rank"]) is not int:
+                raise gen_manifest.GateError("order.toml: a precedence-tier rank must be an integer")
+        declared = {t["rank"]: sorted(t["members"]) for t in data.get("precedence-tier", [])}
         for t in data.get("precedence-tier", []):
             if not isinstance(t.get("members-are-equal"), bool):
                 raise gen_manifest.GateError("order.toml: members-are-equal must be a boolean")
@@ -198,7 +204,8 @@ def check_references(root):
         data = load_toml(root / ".aiqt" / "core" / "references.toml")
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise gen_manifest.GateError("cannot read references.toml ({})".format(exc))
-    if data.get("format-version") != 1 or not isinstance(data.get("quorum"), int) \
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1 \
+            or not isinstance(data.get("quorum"), int) \
             or isinstance(data.get("quorum"), bool) or data["quorum"] < 1:
         raise gen_manifest.GateError("references.toml: format-version 1 and integer quorum >= 1 required")
     extra = set(data) - {"format-version", "quorum", "reference"}
@@ -238,7 +245,7 @@ def check_dispositions(root):
         data = load_toml(root / ".aiqt" / "core" / "dispositions.toml")
     except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         raise gen_manifest.GateError("cannot read dispositions.toml ({})".format(exc))
-    if data.get("format-version") != 1:
+    if type(data.get("format-version")) is not int or data.get("format-version") != 1:  # a TOML true is no version
         raise gen_manifest.GateError("dispositions.toml: format-version must be exactly 1")
     extra = set(data) - {"format-version", "disposition"}
     if extra:  # an unknown top-level key is a schema FAIL, never silently tolerated.
@@ -554,6 +561,87 @@ def _self_test_main_isolated():
                 gm.OPF_VERSION_MAX_BYTES == _opf_declaration.MAX_OPF_VERSION_BYTES == 64):
             failures.append("opf-version: gen_manifest's opf/VERSION cap is not the shared 64 bytes (inside, "
                             "at and over the cap gave {})".format(cap_results))
+
+        # (n) A TOML true is a Python int equal to 1 (bool subclasses int), and 1.0 a float equal to it, so every
+        #     reader that validates a format-version takes only an exact int: each of the six gen_manifest and
+        #     check_manifest readers and the four _release_schema validators refuses true and 1.0 by its
+        #     format-version check, while the fixture's integer 1 is read with no refusal (and, for
+        #     check_order_record, with no finding); and check_order_record
+        #     refuses a precedence-tier rank of true, 10.5 or "10" where int() converted it, while 10 reads.
+        #     Each case is red with its type check removed.
+        import re
+        fv_root = Path(tmp) / "format-version"
+        fv_core = fv_root / ".aiqt" / "core"
+        fv_core.mkdir(parents=True)
+
+        def on_disk(name, reader):
+            def call(text):
+                (fv_core / name).write_text(text, encoding="utf-8")
+                reader()
+            return call
+
+        def from_text(validator):
+            return lambda text: validator(tomllib.loads(text), "fixture")
+
+        def order_read_clean():
+            # check_order_record reports a well-formed disagreement as a finding, not a raise, so its integer
+            # controls are met only by a read that raised nothing AND left its findings list empty.
+            found = []
+            check_order_record(fv_root, found)
+            if found:
+                raise gm.GateError("check_order_record findings: {}".format("; ".join(found)))
+        # strict_order needs the whole [presentation-order] table, which check_order_record's fixture leaves out,
+        # so its integer-1 control is met only by a record the validator really accepts.
+        def toml_list(values):
+            return "[" + ", ".join('"{}"'.format(v) for v in sorted(values)) + "]"
+        order_full = gm._ORDER + "families = {}\naiqt-facets = {}\ntie-breaker = \"slug-bytewise\"\n".format(
+            toml_list(_release_schema.ORDER_FAMILY_VOCAB), toml_list(_release_schema.AIQT_FACET_VOCAB))
+        fv_cases = (
+            ("gen_manifest.parse_ownership", gm._OWN_BASE + gm._OWN_TAIL,
+             lambda text: gm.parse_ownership(tomllib.loads(text))),
+            ("gen_manifest.read_genesis", "format-version = 1\n",
+             on_disk("releases.toml", lambda: gm.read_genesis(fv_root))),
+            ("gen_manifest.load_renderers", gm._RENDERERS,
+             on_disk("renderers.toml", lambda: gm.load_renderers(fv_root))),
+            ("check_order_record", gm._ORDER, on_disk("order.toml", order_read_clean)),
+            ("check_references", gm._REFERENCES, on_disk("references.toml", lambda: check_references(fv_root))),
+            ("check_dispositions", gm._DISPOSITIONS,
+             on_disk("dispositions.toml", lambda: check_dispositions(fv_root))),
+            ("_release_schema.strict_releases", "format-version = 1\n", from_text(_release_schema.strict_releases)),
+            ("_release_schema.strict_renderers", gm._RENDERERS, from_text(_release_schema.strict_renderers)),
+            ("_release_schema.strict_order", order_full, from_text(_release_schema.strict_order)),
+            ("_release_schema.strict_manifest", generated_raw.decode("utf-8"),
+             from_text(_release_schema.strict_manifest)),
+        )
+        for label, text, call in fv_cases:
+            got = []
+            for value in ("1", "true", "1.0"):
+                edited, count = re.subn(r"(?m)^format-version = 1$", "format-version = " + value, text, count=1)
+                if count != 1:
+                    got.append("no format-version = 1 line in the fixture")
+                    continue
+                # "passes" means the reader returned; any refusal is recorded, so an unrelated error can neither
+                # meet the integer-1 control nor stand in for a format-version refusal of true or 1.0.
+                try:
+                    call(edited)
+                    got.append("passes")
+                except (gm.GateError, _release_schema.SchemaError) as exc:
+                    got.append("refused by format-version" if "format-version" in str(exc)
+                               else "refused: {}".format(exc))
+            if got != ["passes", "refused by format-version", "refused by format-version"]:
+                failures.append("format-version: {} gave {} for format-version 1, true and 1.0".format(label, got))
+        rank_got = []
+        for value in ("10", "true", "10.5", '"10"'):
+            (fv_core / "order.toml").write_text(gm._ORDER.replace("rank = 10\n", "rank = {}\n".format(value), 1),
+                                                encoding="utf-8")
+            try:
+                order_read_clean()
+                rank_got.append("reads")
+            except gm.GateError as exc:
+                rank_got.append("refused" if "rank must be an integer" in str(exc) else str(exc))
+        if "rank = 10\n" not in gm._ORDER or rank_got != ["reads", "refused", "refused", "refused"]:
+            failures.append("order.toml rank: check_order_record gave {} for rank 10, true, 10.5 and "
+                            "\"10\"".format(rank_got))
 
         # (b) a wrong SOURCES byte on disk -> exit 1 (bytes/sha256 disagree).
         b = _fresh("badbyte")
