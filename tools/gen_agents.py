@@ -2,13 +2,18 @@
 """Generate AGENTS.md (the Codex adapter) from the .aiqt/core/rules/ sources.
 
 Same core that feeds Claude's .claude/rules/ tree, so a Codex session gets identical AIQT governance. The
-rules are concatenated in AIQT priority order (apex; then Accuracy, Integrity, Quality, Trust at tier 10;
-then Progress, Speed, Cost; then the security family in CIA-plus-privacy order), each rule's core render
-(gen_rules.core_render: the whole rule for a source with no split) with its title demoted to a section
-heading; then, after the last rule, the detail layer of every rule using the `## Detail` split, in the
-same order, each under its demoted title with DETAIL_SUFFIX. So every rule's core layer comes before any
-rule's detail layer: a reader capped at a byte limit receives detail text only when the limit lies past the
-end of the last rule's core, and no rule text is left out. The layout (legacy,
+rules are concatenated with the apex first, then the rules .aiqt/core/must-deliver.toml lists, then every
+other rule, each group in AIQT priority order (apex; then Accuracy, Integrity, Quality, Trust at tier 10;
+then Progress, Speed, Cost; then the security family in CIA-plus-privacy order), so a listed rule never
+sits behind an unlisted one in the capped prefix tools/check_must_deliver.py measures. The list is read
+through tools/_must_deliver.py: absent, symlinked or malformed, or naming an id that is not a corpus-id, is
+exit 2 in both modes with nothing written. GEMINI.md and the Copilot instructions (gen_adapters.py) keep
+AIQT priority order. Each rule contributes its core render (gen_rules.core_render: the whole rule for a
+source with no split) with its title demoted to a section heading; then, after the last rule, the detail
+layer of every rule using the `## Detail` split, in the same order, each under its demoted title with
+DETAIL_SUFFIX. So every rule's core layer comes before any rule's detail layer: a reader capped at a byte
+limit receives detail text only when the limit lies past the end of the last rule's core, and no rule text
+is left out. The layout (legacy,
 or composed with reviewed blocks around the rules) comes from the block registry
 .aiqt/core/adapter-blocks.toml through tools/_adapter_compose.py, the engine this generator shares with
 gen_adapters.py. --check drift-gates AGENTS.md byte for byte; exit 2 on a malformed source or registry, a
@@ -40,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, unknown_args_refused  # noqa: E402
 from _adapter_compose import legacy_render, run  # noqa: E402
 from gen_rules import core_render, detail_layer, full_body, load_corpus, read_rule_source  # noqa: E402
+from _must_deliver import listed_ids  # noqa: E402  the must-deliver list's strict reader
 
 AIQT_FACET_ORDER = {"ACCUR": 0, "INTEG": 1, "QUALI": 2, "TRUST": 3}
 CIA_FACET_ORDER = {"SECC": 0, "SECI": 1, "SECA": 2, "SECP": 3}
@@ -53,9 +59,10 @@ RENDERER_DECL = {"renderer-id": "agents", "semantics-revision": 2}
 # revision below 2 here and in gen_adapters, and records why the per-rule renderers kept theirs.
 GENSRC_OUTPUTS = (
     {"target": "AGENTS.md", "kind": "file",
-     "sources": (".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml"),
+     "sources": (".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml", ".aiqt/core/must-deliver.toml"),
      "regenerate": "python3 tools/gen_agents.py"},
 )
+DECL_NAME = "must-deliver.toml"  # beside the rule corpus directory: .aiqt/core/must-deliver.toml
 
 AGENTS_REL = "AGENTS.md"
 HEADER = ("# AGENTS.md",
@@ -116,7 +123,8 @@ def detail_body_of(path):
 
 
 def bodies_of_pairs(pairs):
-    """The combined outputs' rule bodies for (path, frontmatter) pairs already in AIQT priority order: every
+    """The combined outputs' rule bodies for (path, frontmatter) pairs already in the output's order (AIQT
+    priority order for GEMINI.md and the Copilot instructions, agents_key order for AGENTS.md): every
     rule's core body (core_body_of) in that order, then the detail section (detail_body_of) of every split
     rule in the same order. So every detail layer sits after every rule's core, and so after every
     must-deliver rule, while no rule text is left out."""
@@ -137,6 +145,34 @@ def corpus_bodies(src_dir):
     return ordered_bodies(load_corpus(src_dir))
 
 
+def agents_key(fm, listed):
+    """The AGENTS.md order: the apex, then the rules whose corpus-id is in listed (the must-deliver list),
+    then every other rule, each group in sort_key order. sort_key is read as a module global at call
+    time, and every caller reaches this key through the module (gen_agents.agents_key), never a bound
+    copy, so a self-test that patches either attribute reaches every render and measurement."""
+    group = 0 if fm.get("apex") is True else 1 if str(fm.get("corpus-id")) in listed else 2
+    return (group,) + sort_key(fm)
+
+
+def agents_ordered_bodies(corpus, listed):
+    """The rule bodies of a loaded corpus ([(path, frontmatter, rel)]) in AGENTS.md order (agents_key): every
+    core body, then every detail section, in that order (bodies_of_pairs); listed, the must-deliver ids, is
+    required, so no caller can fall back to priority order by omission."""
+    pairs = sorted(((src, fm) for src, fm, _ in corpus), key=lambda pf: agents_key(pf[1], listed))
+    return bodies_of_pairs(pairs)
+
+
+def agents_corpus_bodies(src_dir):
+    """run()'s corpus reader for AGENTS.md: load the corpus under src_dir, read the must-deliver list beside
+    it (src_dir.parent is lexical, so a corpus directory that is a symlink inside the root still finds
+    .aiqt/core/must-deliver.toml), require every listed id to be a corpus-id (_must_deliver.listed_ids),
+    and return the bodies in AGENTS.md order. Any list error is a ValueError, so run() exits 2 before it
+    writes anything."""
+    corpus = load_corpus(src_dir)
+    listed = listed_ids(src_dir.parent / DECL_NAME, [str(fm["corpus-id"]) for _src, fm, _rel in corpus])
+    return agents_ordered_bodies(corpus, listed)
+
+
 def render(pairs):
     """The legacy AGENTS.md text for sorted (path, frontmatter) pairs; kept for existing importers."""
     return legacy_render(HEADER, bodies_of_pairs(pairs))
@@ -151,7 +187,8 @@ def main():
         return 2
     if "--self-test" in args:
         return self_test_main()
-    return run(repo_root(), "--check" in args, [(AGENTS_REL, HEADER)], "tools/gen_agents.py", corpus_bodies)
+    return run(repo_root(), "--check" in args, [(AGENTS_REL, HEADER)], "tools/gen_agents.py",
+               agents_corpus_bodies)
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -312,6 +349,19 @@ def main():
 #   T39 an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing, for
 #       this generator's main() and for gen_adapters.main() (which has no self-test of its own); each main()
 #       is driven with run and repo_root stood in for, so a reverted guard touches no file.
+#   T40 the AGENTS.md order through agents_corpus_bodies: with the apex, a listed rulezz and an unlisted
+#       ruleaa of the same tier and facet, the order is the apex, rulezz, ruleaa (red with sort_key alone,
+#       which puts ruleaa first); --check is then exit 0.
+#   T41 a must-deliver list that is absent, a symlink, malformed (TOML that does not parse), or names an id
+#       that is not a corpus-id: exit 2 in both modes, the cause named and AGENTS.md unchanged (red without
+#       listed_ids' membership check, which lets the unknown id compose and exit 0).
+#   T42 main() hands run() agents_corpus_bodies (red when main() is reverted to corpus_bodies).
+#   T43 gen_adapters.main()'s own reader keeps GEMINI.md and the Copilot instructions in AIQT priority
+#       order under the same list (a design guard: red when the adapters adopt the listed-first order).
+#   T44 with the corpus a symlink to a directory inside the root and the list at .aiqt/core, run() through
+#       agents_corpus_bodies writes the listed-first order and --check is then exit 0 (red when the list is
+#       read beside the corpus's resolved path, where none exists).
+#   The engine vectors T1-T39 keep drive() with corpus_bodies: the engine does not depend on the order.
 
 _APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
          "\n# Project integrity\n\nApex text.\n")
@@ -1207,6 +1257,110 @@ def self_test_main(nested_run=False):
                                 "fail; failing legs {!r}".format(mutant_name, sorted(judged)))
             if mutant_name == "core dropped" and "T20d" not in judged:
                 failures.append("T20e: the core-dropped mutant must also fail T20d (prefix invariance)")
+
+        # T40-T43. The AGENTS.md order: the apex, then the must-deliver list's rules, then the rest. The
+        #      fixture has the apex, a listed rulezz and an unlisted ruleaa, both ACCUR tier 10, so AIQT
+        #      priority order (their slugs) puts ruleaa first and the listed-first order puts rulezz first.
+        import _must_deliver
+        t40_zz = ("---\ncorpus-id: rulezz\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: zeta-listed\n"
+                  "---\n\n# Zeta listed rule\n\nListed text.\n")
+        t40_heads = ["# AGENTS.md", "## Project integrity", "## Zeta listed rule", "## Fixture rule"]
+
+        def t40_tree(decl, agents=None):
+            root = tree(ac.registry_text(), blocks=(), rules=(_APEX, _RULE, t40_zz), agents=agents)
+            if decl is not None:
+                (root / ".aiqt" / "core" / DECL_NAME).write_text(decl, encoding="utf-8")
+            return root
+
+        def heads_of(data):
+            return [line for line in (data or b"").decode("utf-8", "replace").split("\n") if line.startswith("#")]
+
+        def main_reader(namespace, prog):
+            # The corpus reader a main() hands to run(), with run and repo_root stood in for (no file touched).
+            seen = []
+            saved = namespace["run"], namespace["repo_root"], sys.argv
+            namespace["run"] = lambda _root, _check, _targets, _regen, reader: seen.append(reader) or 0
+            namespace["repo_root"] = lambda: None
+            sys.argv = [prog, "--check"]
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    namespace["main"]()
+            finally:
+                namespace["run"], namespace["repo_root"], sys.argv = saved
+            return seen[0] if len(seen) == 1 else None
+
+        # T40. Through agents_corpus_bodies: apex, rulezz, ruleaa (red with sort_key alone: ruleaa first).
+        root = t40_tree(_must_deliver.fixture_text(["rulezz"]))
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            t40_codes = (ac.run(root, False, agents_only, "tools/gen_agents.py", agents_corpus_bodies),
+                         ac.run(root, True, agents_only, "tools/gen_agents.py", agents_corpus_bodies))
+        if t40_codes != (0, 0) or heads_of(read(root / AGENTS_REL)) != t40_heads:
+            failures.append("T40: the listed rule must follow the apex ahead of the unlisted one: exits {!r}, "
+                            "headings {!r}\n{}".format(t40_codes, heads_of(read(root / AGENTS_REL)), buf.getvalue()))
+
+        # T41. A list that is absent, a symlink, malformed, or names an id that is not a corpus-id: exit 2 in
+        #      both modes, the stale AGENTS.md untouched, the cause named (red without the membership check:
+        #      the unknown id composes and exits 0).
+        stale = b"# AGENTS.md\n\nstale\n"
+        for label, decl, link, want in (
+                ("absent", None, False, "does not exist"),
+                ("a symlink", _must_deliver.fixture_text(["rulezz"]), True, "not a regular file"),
+                ("malformed", "format-version = [\n", False, "does not parse"),
+                ("an unknown id", _must_deliver.fixture_text(["rulezz", "zzzzz9"]), False, "zzzzz9")):
+            for check in (False, True):
+                root = t40_tree(None if link else decl, agents=stale)
+                if link:
+                    (root / "aside.toml").write_text(decl, encoding="utf-8")
+                    os.symlink(root / "aside.toml", root / ".aiqt" / "core" / DECL_NAME)
+                buf = io.StringIO()
+                with redirect_stdout(buf), redirect_stderr(buf):
+                    code = ac.run(root, check, agents_only, "tools/gen_agents.py", agents_corpus_bodies)
+                if code != 2 or want not in buf.getvalue() or read(root / AGENTS_REL) != stale:
+                    failures.append("T41 list {} ({}): expected exit 2 naming {!r} with AGENTS.md unchanged, got "
+                                    "{}\n{}".format(label, "--check" if check else "write", want, code,
+                                                    buf.getvalue()))
+
+        # T42. main() hands run() agents_corpus_bodies (red when main() is reverted to corpus_bodies).
+        t42_reader = main_reader(globals(), "gen_agents.py")
+        if t42_reader is not agents_corpus_bodies:
+            failures.append("T42: gen_agents.main() must pass agents_corpus_bodies to run(), got {!r}".format(
+                t42_reader))
+
+        # T43. Separate order: gen_adapters.main()'s own reader keeps GEMINI.md and the Copilot instructions in
+        #      AIQT priority order under the same list (a design guard: red when the adapters adopt the
+        #      listed-first order).
+        t43_reader = main_reader(vars(gen_adapters), "gen_adapters.py")
+        root = t40_tree(_must_deliver.fixture_text(["rulezz"]))
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            code = (ac.run(root, False, gen_adapters.TARGETS, "tools/gen_adapters.py", t43_reader)
+                    if t43_reader is not None else "no reader recorded")
+        for rel, _h in gen_adapters.TARGETS:
+            heads = heads_of(read(root / rel))[1:]
+            if code != 0 or heads != ["## Project integrity", "## Fixture rule", "## Zeta listed rule"]:
+                failures.append("T43: {} must keep AIQT priority order (the unlisted ruleaa before the listed "
+                                "rulezz), got exit {} and headings {!r}\n{}".format(rel, code, heads, buf.getvalue()))
+
+        # T44. The list is read lexically beside the corpus path: with .aiqt/core/rules a symlink to shared/rules
+        #      inside the root and the list at .aiqt/core, the write is exit 0 in the listed-first order and
+        #      --check is then exit 0 (red when agents_corpus_bodies resolves src_dir first: shared/ holds no list,
+        #      so both runs are exit 2).
+        root = t40_tree(_must_deliver.fixture_text(["rulezz"]))
+        t44_corpus = root / ".aiqt" / "core" / "rules"
+        (root / "shared").mkdir()
+        shutil.move(str(t44_corpus), str(root / "shared" / "rules"))
+        t44_corpus.symlink_to(os.path.relpath(root / "shared" / "rules", t44_corpus.parent))
+        if os.path.lexists(root / "shared" / DECL_NAME) or not t44_corpus.is_symlink():
+            failures.append("T44 precondition: the corpus must be a symlink and shared/ must hold no list")
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            t44_codes = (ac.run(root, False, agents_only, "tools/gen_agents.py", agents_corpus_bodies),
+                         ac.run(root, True, agents_only, "tools/gen_agents.py", agents_corpus_bodies))
+        if t44_codes != (0, 0) or heads_of(read(root / AGENTS_REL)) != t40_heads:
+            failures.append("T44: a corpus symlinked inside the root must still find the list at .aiqt/core: exits "
+                            "{!r}, headings {!r}\n{}".format(t44_codes, heads_of(read(root / AGENTS_REL)),
+                                                             buf.getvalue()))
 
         # T21. A write keeps the mode and leaves no temporary file; a failed rename leaves the target as it was.
         #      The umask is pinned (and restored) and the asserted mode holds execute bits, which the
@@ -2877,7 +3031,11 @@ def self_test_main(nested_run=False):
           "by its path from the root; and no descriptor is left open in an enumeration verified to "
           "hold its sentinel (an unlistable or sentinel-omitting listing, and a sentinel that cannot "
           "be opened or whose close fails, is a named NOT RUN failure, never a pass, and a partial "
-          "listing keeping the sentinel could still hide a leak); an unknown option to this generator or to "
+          "listing keeping the sentinel could still hide a leak); AGENTS.md puts the apex, then the "
+          "must-deliver list's rules, then the rest, while GEMINI.md and the Copilot instructions keep AIQT "
+          "priority order, and an absent, symlinked or malformed list, or one naming an id outside the corpus, "
+          "is exit 2 with AGENTS.md unchanged, while a corpus symlinked inside the root still finds the list "
+          "at .aiqt/core; an unknown option to this generator or to "
           "gen_adapters.py is exit 2 with the usage line and runs nothing.")
     return 0
 

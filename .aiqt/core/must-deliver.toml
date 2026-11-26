@@ -1,5 +1,13 @@
 # .aiqt/core/must-deliver.toml: rules whose whole core layer must lie inside the first
-# check_release_build.CAP_BYTES bytes of AGENTS.md; read by tools/check_must_deliver.py.
+# check_release_build.CAP_BYTES bytes of AGENTS.md; read by tools/check_must_deliver.py
+# through tools/_must_deliver.py, the one reader it shares with tools/gen_agents.py,
+# tools/gen_first_pin_demo.py and tools/conformance.py.
+# The list also drives the AGENTS.md order: the apex first, then the rules listed here,
+# then every other rule, each group in AIQT priority order (gen_agents.agents_key), so a
+# listed rule's core never sits behind an unlisted rule's core (the detail layers follow
+# every core, in that same order). GEMINI.md and the Copilot instructions keep AIQT
+# priority order. An id listed here that is not a corpus-id stops gen_agents (exit 2,
+# nothing written).
 # A rule with no `## Detail` split is all core, so its whole text must fit. A split rule's
 # detail layer is rendered after every rule's core and is never measured. A reader capped
 # at CAP_BYTES receives no detail layer only while the first detail section starts at
@@ -14,10 +22,8 @@
 # the merge base with origin/main) and dropped from [[rule]] fails the gate unless a
 # [[removal]] row (exactly id and reason) names it; review still judges the removal.
 # warn-margin-bytes: the gate prints a WARNING (still exit 0) when the tightest listed
-# margin drops under this figure. The tightest margin is already below it (cmtidn, 20
-# bytes inside the cap when this was last measured), so every run warns; 512 is kept so
-# a tight margin stays visible rather than being tuned away. The gate prints the live
-# margins.
+# margin drops under this figure. 512 is kept so a tight margin stays visible rather than
+# being tuned away; run tools/check_must_deliver.py for the live margins it prints.
 format-version = 1
 warn-margin-bytes = 512
 

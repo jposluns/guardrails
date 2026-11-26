@@ -61,8 +61,9 @@ from pathlib import Path
 # tools/ next to the modules it reuses.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS, _ADOPTER_MODE_CASES
-import gen_agents           # noqa: E402  sort_key, ordered_bodies, AGENTS_REL, HEADER
+import gen_agents           # noqa: E402  ordered_bodies, agents_ordered_bodies, AGENTS_REL, HEADER
 import _adapter_compose as adapter_compose  # noqa: E402  load_registry, compose, registry_text
+import _must_deliver        # noqa: E402  read_declared, listed_ids, the error classes (the AGENTS.md order)
 import gen_adapters         # noqa: E402  ADAPTERS, TARGETS (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
@@ -234,19 +235,79 @@ def _claude_drift(root, corpus):
     return (PASS, ".claude/rules matches regeneration")
 
 
-def _agents_drift(root, corpus):
+# The must-deliver list sets the AGENTS.md order (gen_agents.agents_key: the apex, the listed rules, then the
+# rest). _listed_state reads it ONCE per C2 run, at root / DECL_REL (never through the corpus's resolved
+# path), and every surface that reads the list maps its state through this one table, after its own presence
+# check, so the surfaces cannot disagree:
+#   ok         the listed ids order the composition; no status of its own (None): drift decides.
+#   absent     no list at root / DECL_REL: MALFORMED (exit 2), naming the missing file. gen_agents,
+#              gen_first_pin_demo and check_must_deliver each refuse an absent list with exit 2, so an
+#              installed AGENTS.md has no order to be judged in; conformance refuses it the same way (Q7).
+#   unknown    the list parses but names an id that is not a corpus-id: FAIL, naming the ids (the
+#              generators refuse such a list with exit 2; conformance reports it).
+#   malformed  a list that is not a regular file (a dangling symlink included: _listed_state's lstat never
+#              reads one as absent), unreadable, not UTF-8, not TOML or outside the schema: MALFORMED.
+# A state outside this table is MALFORMED naming it (_list_status), never a fall-through to drift.
+# GEMINI.md and the Copilot instructions keep AIQT priority order (gen_adapters), so only AGENTS.md reads it.
+_LIST_STATUS = {"ok": None, "absent": MALFORMED, "unknown": FAIL, "malformed": MALFORMED}
+
+
+def _listed_state(root, corpus):
+    """The must-deliver list at root / DECL_REL against the loaded corpus: ("ok", ids), ("absent", ()),
+    ("unknown", ids not in the corpus) or ("malformed", message). The unknown-id case is told apart by its
+    class (UnknownListedIdError), never by its message text."""
+    path = root / _must_deliver.DECL_REL
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return ("absent", ())
+    except OSError as exc:  # present but not stat-able (a parent without search permission): never absent
+        return ("malformed", "cannot stat {} ({})".format(_must_deliver.DECL_REL, exc))
+    try:
+        return ("ok", tuple(_must_deliver.listed_ids(path, [str(fm.get("corpus-id")) for _s, fm, _r in corpus])))
+    except _must_deliver.UnknownListedIdError as exc:
+        return ("unknown", exc.ids)
+    except (ValueError, OSError) as exc:
+        return ("malformed", str(exc))
+
+
+def _list_status(listed_state):
+    """(status, detail) for a surface that reads the list, from _LIST_STATUS; (None, None) only for an "ok"
+    list, whose order drift then judges. A state outside the table is MALFORMED naming it, so a new state
+    can never fall through to drift judgment unmapped."""
+    state, payload = listed_state
+    if state not in _LIST_STATUS:
+        return MALFORMED, "must-deliver list state {!r} has no entry in _LIST_STATUS".format(state)
+    status = _LIST_STATUS[state]
+    if status is None:
+        return None, None
+    if state == "absent":
+        return status, ("{} does not exist; AGENTS.md is composed in the order it sets, and gen_agents refuses "
+                        "to compose without it".format(_must_deliver.DECL_REL))
+    if state == "unknown":
+        return status, "must-deliver lists {}, not in the corpus".format(", ".join(payload))
+    return status, "cannot read {}: {}".format(_must_deliver.DECL_REL, payload)
+
+
+def _agents_drift(root, corpus, listed_state):
     """Mirror gen_agents.main()'s composition (_adapter_compose), re-rooted at root, comparing raw bytes.
     Absent AGENTS.md -> NOT APPLICABLE (the adopter did not install the Codex surface). An absent block
     registry reads as every target legacy (an install that predates the registry renders exactly that);
     a malformed or unreadable registry or block source, or an AGENTS.md that is not valid UTF-8 ->
-    MALFORMED."""
+    MALFORMED. The must-deliver list (listed_state, from _listed_state, required so no caller can fall back
+    to AIQT priority order by omission) orders the composition, and its absent (MALFORMED), unknown-id
+    (FAIL) and malformed (MALFORMED) states map through _LIST_STATUS."""
     out = root / "AGENTS.md"
     if not out.exists():
         return (NA, "no AGENTS.md surface installed")
+    status, detail = _list_status(listed_state)
+    if status is not None:
+        return (status, detail)
+    listed = listed_state[1]  # only an "ok" list reaches here (_list_status)
     try:
         registry = adapter_compose.load_registry(root, absent_is_legacy=True)
         content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
-                                          gen_agents.ordered_bodies(corpus), registry).data
+                                          gen_agents.agents_ordered_bodies(corpus, listed), registry).data
         current = out.read_bytes()
         current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
@@ -595,7 +656,8 @@ def _plugin_skill_drift(root, corpus):
 def check_c2(root, cache):
     """Each generated surface the adopter HAS matches regeneration from their .aiqt/core/rules/.
 
-    Reuses load_corpus output (C1) + gen_agents.ordered_bodies and _adapter_compose; re-orchestrates the
+    Reuses load_corpus output (C1) + gen_agents.ordered_bodies (agents_ordered_bodies for AGENTS.md, ordered
+    by the must-deliver list read once by _listed_state) and _adapter_compose; re-orchestrates the
     drift comparison under --root rather than calling the repo-anchored gen_*.main(). No corpus -> NOT
     APPLICABLE."""
     if cache.get("corpus_error"):
@@ -612,8 +674,9 @@ def check_c2(root, cache):
     if not present:
         return Result("C2", "no-drift", NA, "no .aiqt/core/rules/ to regenerate from")
     corpus = cache.get("corpus", [])
+    listed_state = _listed_state(root, corpus)
     cs, cd = _claude_drift(root, corpus)
-    as_, ad = _agents_drift(root, corpus)
+    as_, ad = _agents_drift(root, corpus, listed_state)
     us, ud = _cursor_drift(root, corpus)
     ks, kd = _skill_drift(root, corpus)
     ps, pd = _plugin_skill_drift(root, corpus)
@@ -927,6 +990,15 @@ def main():
 #   3. a missing input degrades to NOT APPLICABLE (not a fake pass),
 #   4. a real mapping finding (a cited id not in its manifest) fails (exit 1),
 #   5. a typo'd --root fails closed (exit 2), not a hollow all-absent pass,
+#   R-a to R-f. the must-deliver list orders AGENTS.md (read once, at root/.aiqt/core/must-deliver.toml, and
+#      mapped through _LIST_STATUS): the empty-core tree's agents surface is FAIL naming apex01, never
+#      MALFORMED; an unknown listed id on a full install is agents FAIL naming it with both adapters PASS; on
+#      an adapter-only install neither an unknown id nor an unparseable list is read (exit 0); an unparseable
+#      list on a full install is MALFORMED; a priority-order AGENTS.md under a reordering list is drift; no
+#      list at all is MALFORMED naming the missing file on a full install (exit 2) and is not read on an
+#      adapter-only one (exit 0); with the corpus a symlink inside the root, the list is still read at the
+#      root (exit 0); R-g a dangling-symlink list is MALFORMED as not a regular file, never read as absent;
+#      R-h a list state outside _LIST_STATUS is MALFORMED naming it; R-i _agents_drift requires listed_state,
 #   16n/16o. gen_skill leaves an adopter tree without the hooks plugin at C5 NOT APPLICABLE, and an installed
 #      plugin's copy of the chat skill is checked (C2 plugin-skill).
 #   16p-16r. CRLF in one download copy only fails C2 skill; a plugin copy with no skill source is MALFORMED with
@@ -1190,18 +1262,57 @@ def _add_skill_surface(base):
             target.write_bytes(content.encode("utf-8"))
 
 
-def _write_adapters(base, corpus, adapters=True, registry_text=None):
-    """Write the block registry (all targets legacy unless registry_text is given), then AGENTS.md and,
-    when adapters, GEMINI.md and .github/copilot-instructions.md, each composed by _adapter_compose from
-    the corpus. Any block source the registry names must already exist under base."""
+def _fixture_listed(base, corpus, listed=None, write_decl=True):
+    """The must-deliver list of a fixture tree, written before anything is composed (the contract of
+    gen_first_pin_demo._write_tree): with write_decl and no list on disk, a list naming exactly `listed` is
+    written, or, with listed None, one naming only the corpus apex (no apex is a ValueError); a list already
+    on disk is left byte-identical and its ids returned, and a `listed` that differs from it is a ValueError.
+    With write_decl False no list is left (a regular file is removed; any other entry is a ValueError) and
+    `listed`, or nothing (AIQT priority order), is returned; C2 refuses such an install's AGENTS.md as
+    MALFORMED (_LIST_STATUS "absent")."""
+    decl = base / _must_deliver.DECL_REL
+    if not write_decl:
+        try:
+            st = os.lstat(decl)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError("fixture: {} is not a regular file".format(_must_deliver.DECL_REL))
+            decl.unlink()
+        if os.path.lexists(decl):
+            raise ValueError("fixture: {} is still present with write_decl=False".format(_must_deliver.DECL_REL))
+        return tuple(listed or ())
+    if os.path.lexists(decl):
+        on_disk = _must_deliver.read_declared(decl)[0]
+        if listed is not None and list(listed) != on_disk:
+            raise ValueError("fixture: listed={!r} differs from the list on disk {!r}".format(list(listed), on_disk))
+        return tuple(on_disk)
+    apexes = [str(fm["corpus-id"]) for _s, fm, _r in corpus if fm.get("apex") is True]
+    if listed is None and not apexes:
+        raise ValueError("fixture: no apex to list; pass listed=")
+    ids = list(listed) if listed is not None else apexes[:1]
+    decl.parent.mkdir(parents=True, exist_ok=True)
+    decl.write_text(_must_deliver.fixture_text(ids), encoding="utf-8")
+    return tuple(ids)
+
+
+def _write_adapters(base, corpus, adapters=True, registry_text=None, listed=None, write_decl=True):
+    """Write the block registry (all targets legacy unless registry_text is given) and the must-deliver list
+    (_fixture_listed), then AGENTS.md in the listed-first order and, when adapters, GEMINI.md and
+    .github/copilot-instructions.md in AIQT priority order, each composed by _adapter_compose from the
+    corpus. Any block source the registry names must already exist under base."""
     reg = base.joinpath(*adapter_compose.REGISTRY_REL.split("/"))
     reg.parent.mkdir(parents=True, exist_ok=True)
     reg.write_text(registry_text if registry_text is not None else adapter_compose.registry_text(),
                    encoding="utf-8")
+    ids = _fixture_listed(base, corpus, listed, write_decl)
     registry = adapter_compose.load_registry(base)
-    bodies = gen_agents.ordered_bodies(corpus)
-    targets = [(gen_agents.AGENTS_REL, gen_agents.HEADER)] + (gen_adapters.TARGETS if adapters else [])
-    for rel, header in targets:
+    targets = [(gen_agents.AGENTS_REL, gen_agents.HEADER, gen_agents.agents_ordered_bodies(corpus, ids))]
+    if adapters:
+        bodies = gen_agents.ordered_bodies(corpus)
+        targets += [(rel, header, bodies) for rel, header in gen_adapters.TARGETS]
+    for rel, header, bodies in targets:
         out = base.joinpath(*rel.split("/"))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(adapter_compose.compose(rel, header, bodies, registry).data)
@@ -1474,7 +1585,7 @@ def self_test_main():
 
         def legacy_agents(b, corpus):
             (b / "AGENTS.md").write_bytes(adapter_compose.compose(
-                "AGENTS.md", gen_agents.HEADER, gen_agents.ordered_bodies(corpus),
+                "AGENTS.md", gen_agents.HEADER, gen_agents.agents_ordered_bodies(corpus, _fixture_listed(b, corpus)),
                 adapter_compose.LEGACY_REGISTRY).data)
             reg_path(b).unlink()
 
@@ -1623,6 +1734,146 @@ def self_test_main():
             failures.append("empty-core tree expected exit 1 (orphans), got {}\n{}".format(code, out))
         if status_of(out, "C2") != FAIL:
             failures.append("empty-core tree expected C2 no-drift FAIL (orphaned surfaces):\n{}".format(out))
+
+        # The must-deliver list (one reader, _listed_state; one status table, _LIST_STATUS). Only AGENTS.md
+        # reads it: GEMINI.md and the Copilot instructions keep AIQT priority order.
+        def c2_line(out):
+            return next((line for line in out.splitlines() if line.split()[:1] == ["C2"]), "")
+
+        def write_list(b, text):
+            (b / _must_deliver.DECL_REL).write_text(text, encoding="utf-8")
+
+        # R-a. The empty-core tree keeps its default list naming apex01, now absent from the corpus: the
+        #      agents surface is FAIL naming apex01 (never MALFORMED, which would make the exit 2).
+        if ("agents: FAIL (must-deliver lists apex01, not in the corpus)" not in c2_line(out)
+                or MALFORMED in c2_line(out)):
+            failures.append("R-a empty-core: expected agents FAIL naming apex01 and no MALFORMED in C2:\n{}".format(
+                out))
+
+        # R-b. A full install whose list names zzzzz9, not in the corpus: exit 1, agents FAIL naming it; the
+        #      adapters do not read the list and PASS.
+        mdl = tmp / "mdl-unknown"
+        mdl.mkdir()
+        _build_conformant(mdl)
+        write_list(mdl, _must_deliver.fixture_text(["apex01", "zzzzz9"]))
+        code, out = run_capture(mdl)
+        line = c2_line(out)
+        if (code != 1 or status_of(out, "C2") != FAIL
+                or "agents: FAIL (must-deliver lists zzzzz9, not in the corpus)" not in line
+                or "gemini: PASS" not in line or "copilot: PASS" not in line):
+            failures.append("R-b full install, unknown listed id: expected exit 1, agents FAIL naming zzzzz9 and "
+                            "both adapters PASS, got {}:\n{}".format(code, out))
+
+        # R-c and R-d. An adapter-only install (AGENTS.md removed, the registry kept) with an unknown listed id,
+        #      and with a list that does not parse: the adapters do not read the list, exit 0, C2 PASS.
+        for label, text in (("R-c unknown id", _must_deliver.fixture_text(["apex01", "zzzzz9"])),
+                            ("R-d malformed", "format-version = [\n")):
+            ao = tmp / ("mdl-adapters-only-" + label.split()[0])
+            ao.mkdir()
+            _build_conformant(ao)
+            (ao / "AGENTS.md").unlink()
+            write_list(ao, text)
+            code, out = run_capture(ao)
+            if code != 0 or status_of(out, "C2") != PASS or "agents: NOT APPLICABLE" not in c2_line(out):
+                failures.append("{} on an adapter-only install: expected exit 0, C2 PASS, agents NOT APPLICABLE, "
+                                "got {}:\n{}".format(label, code, out))
+
+        # A list that does not parse on a full install: agents MALFORMED, exit 2.
+        mdm = tmp / "mdl-malformed"
+        mdm.mkdir()
+        _build_conformant(mdm)
+        write_list(mdm, "format-version = [\n")
+        code, out = run_capture(mdm)
+        if code != 2 or status_of(out, "C2") != MALFORMED or "agents: MALFORMED" not in c2_line(out):
+            failures.append("a malformed list on a full install: expected exit 2, agents MALFORMED, got {}:\n{}".format(
+                code, out))
+
+        # AGENTS.md left in AIQT priority order while the list (apex01, seci001) puts seci001 before accur01:
+        # agents FAIL (drift), exit 1. Red when conformance composes AGENTS.md in priority order.
+        mdp = tmp / "mdl-priority-order"
+        mdp.mkdir()
+        _build_conformant(mdp)
+        write_list(mdp, _must_deliver.fixture_text(["apex01", "seci001"]))
+        code, out = run_capture(mdp)
+        if code != 1 or "agents: FAIL (AGENTS.md drift)" not in c2_line(out):
+            failures.append("a priority-order AGENTS.md under a list that reorders it: expected exit 1, agents FAIL "
+                            "(drift), got {}:\n{}".format(code, out))
+
+        # R-e. No list at all (write_decl=False, its absence checked first). On a full install AGENTS.md has no
+        #      order to be judged in: agents MALFORMED naming the missing file, exit 2, as gen_agents,
+        #      gen_first_pin_demo and check_must_deliver refuse it (red when the absent state maps to no
+        #      status, which judges a priority-order AGENTS.md PASS). On an adapter-only install the list is not
+        #      read: exit 0, C2 PASS, agents NOT APPLICABLE.
+        absent_detail = "agents: MALFORMED ({} does not exist;".format(_must_deliver.DECL_REL)
+        for label, adapters_only in (("full", False), ("adapters-only", True)):
+            nl = tmp / ("mdl-absent-" + label)
+            nl.mkdir()
+            nl_corpus = _build_conformant(nl)
+            _write_adapters(nl, nl_corpus, write_decl=False)
+            if os.path.lexists(nl / _must_deliver.DECL_REL):
+                failures.append("R-e {}: precondition failed, a list is present".format(label))
+                continue
+            if adapters_only:
+                (nl / "AGENTS.md").unlink()
+            code, out = run_capture(nl)
+            if adapters_only:
+                if code != 0 or status_of(out, "C2") != PASS or "agents: NOT APPLICABLE" not in c2_line(out):
+                    failures.append("R-e adapter-only install with no list: expected exit 0, C2 PASS, agents NOT "
+                                    "APPLICABLE, got {}:\n{}".format(code, out))
+            elif code != 2 or status_of(out, "C2") != MALFORMED or absent_detail not in c2_line(out):
+                failures.append("R-e full install with no list: expected exit 2, C2 MALFORMED, {!r}, got {}:\n{}".format(
+                    absent_detail, code, out))
+
+        # R-g. The list a dangling symlink on a full install: agents MALFORMED as not a regular file, exit 2, never
+        #      read as absent (red when _listed_state's os.lstat becomes os.stat, which reads the dangling link
+        #      as absent and names the missing file instead).
+        rg = tmp / "mdl-dangling"
+        rg.mkdir()
+        _build_conformant(rg)
+        (rg / _must_deliver.DECL_REL).unlink()
+        (rg / _must_deliver.DECL_REL).symlink_to("no-such-must-deliver.toml")
+        code, out = run_capture(rg)
+        rg_want = "agents: MALFORMED (cannot read {0}: {0} is not a regular file".format(_must_deliver.DECL_REL)
+        if code != 2 or status_of(out, "C2") != MALFORMED or rg_want not in c2_line(out):
+            failures.append("R-g a dangling-symlink list: expected exit 2, C2 MALFORMED, {!r}, got {}:\n{}".format(
+                rg_want, code, out))
+
+        # R-h. A list state outside _LIST_STATUS is MALFORMED naming it, never a fall-through to drift judgment
+        #      (red when _list_status reads the table with .get and treats a missing state as "drift decides").
+        rh = _list_status(("no-such-state", ()))
+        if rh[0] != MALFORMED or "'no-such-state'" not in (rh[1] or ""):
+            failures.append("R-h a list state outside _LIST_STATUS: expected MALFORMED naming it, got {!r}".format(rh))
+
+        # R-i. _agents_drift requires listed_state: a call without it is a TypeError, never AIQT priority order by
+        #      default (red when the parameter regains a default).
+        try:
+            ri = _agents_drift(rg, [])
+        except TypeError:
+            ri = None
+        if ri is not None:
+            failures.append("R-i _agents_drift without listed_state: expected a TypeError, got {!r}".format(ri))
+
+        # R-f. The 18a in-root shape (the corpus a symlink to a directory elsewhere inside the root) with the list
+        #      (apex01, seci001) and the surfaces written in that order: exit 0, C2 PASS. Red when the list is
+        #      read through the corpus's resolved path (shared/must-deliver.toml, absent).
+        rf = tmp / "mdl-in-root"
+        rf.mkdir()
+        rf_corpus = _build_conformant(rf)
+        write_list(rf, _must_deliver.fixture_text(["apex01", "seci001"]))
+        _write_adapters(rf, rf_corpus)
+        rf_heads = [ln for ln in (rf / "AGENTS.md").read_text(encoding="utf-8").split("\n") if ln.startswith("## ")]
+        seci_head = "#" + next(ln for ln in _SECI.split("\n") if ln.startswith("# "))
+        if not (seci_head in rf_heads and "## Read before characterizing" in rf_heads
+                and rf_heads.index(seci_head) < rf_heads.index("## Read before characterizing")):
+            failures.append("R-f precondition: seci001 does not come before accur01 in AGENTS.md: {}".format(rf_heads))
+        rf_link = rf / ".aiqt" / "core" / "rules"
+        (rf / "shared").mkdir()
+        shutil.move(str(rf_link), str(rf / "shared" / "rules"))
+        rf_link.symlink_to(os.path.relpath(rf / "shared" / "rules", rf_link.parent))
+        code, out = run_capture(rf)
+        if code != 0 or status_of(out, "C2") != PASS:
+            failures.append("R-f corpus symlinked inside the root with a reordering list: expected exit 0, C2 PASS, "
+                            "got {}:\n{}".format(code, out))
 
         # 7. No .claude/rules tree at all -> C3 must be NOT APPLICABLE, never a hollow PASS.
         nosurface = tmp / "nosurface"
@@ -2560,7 +2811,10 @@ def self_test_main():
           "split (compared as their full render); drift (.claude/rules, AGENTS.md, the .cursor/rules Cursor tree, the GEMINI.md/copilot "
           "adapters, and the chat-skill surface in both its SKILL.md text and its binary download zip), "
           "empty-core orphans, fabricated mapping ids, a bare (fit-less) map key, and an id "
-          "asserted both tight and broad fail; a composed AGENTS.md passes, a local edit or a CRLF "
+          "asserted both tight and broad fail; AGENTS.md is judged in the must-deliver list's order, read at "
+          "the root (also with the corpus a symlink inside it), an unknown listed id failing and an unparseable "
+          "list MALFORMED on that surface alone, no list or a dangling-symlink list MALFORMED there (each named), "
+          "a list state outside the status table MALFORMED, and the list state a required argument; a composed AGENTS.md passes, a local edit or a CRLF "
           "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
           "an adapter that is not UTF-8 is MALFORMED, and an absent registry reads as every target legacy "
           "(a composed AGENTS.md then fails, a legacy install passes); the hooks plugin "

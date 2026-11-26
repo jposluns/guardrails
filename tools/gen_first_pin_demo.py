@@ -17,9 +17,11 @@ rule, so it is not an obligation identifier here; the slug is a path component, 
 
 Rule span. tools/gen_agents.py renders AGENTS.md as a fixed header followed by each rule's core body
 (gen_agents.core_body_of: the rule's core render after the front matter, stripped, its title demoted one
-level; for a source with no `## Detail` split that is its whole text) in gen_agents.sort_key order, then
-the detail section (gen_agents.detail_body_of) of every split rule in the same order, all separated by
-blank lines; the block registry (.aiqt/core/adapter-blocks.toml, composed by tools/_adapter_compose.py)
+level; for a source with no `## Detail` split that is its whole text) in gen_agents.agents_key order (the
+apex, then the rules .aiqt/core/must-deliver.toml lists, then the rest, each group in AIQT priority order;
+the list is read through tools/_must_deliver.py, and an absent, malformed or unknown-id list fails
+closed), then the detail section (gen_agents.detail_body_of) of every split rule in the same order, all
+separated by blank lines; the block registry (.aiqt/core/adapter-blocks.toml, composed by tools/_adapter_compose.py)
 may wrap that rule region in an AIQT-RULES block with reviewed blocks before or after it. A rule's span is
 the byte range of its core body, UTF-8 encoded, inside the AGENTS.md bytes. It is located only after
 AGENTS.md is proven to be byte-identical to the composition of the same corpus and registry (so the file
@@ -40,7 +42,7 @@ the core layers alone run past it (as for this corpus), a property of the corpus
 check, not of the layout. The floor
 profile is the delivered rules plus the apex rule (the single apex: true rule). A corpus with no apex, or
 more than one, is ambiguous and fails closed; so does a demonstration with no delivered rule at all. The
-apex must also be the FIRST rule span (gen_agents.sort_key places it first); any other order fails closed.
+apex must also be the FIRST rule span (gen_agents.agents_key places it first); any other order fails closed.
 So in every successful build the apex is delivered and the floor equals the delivered list; obligations()
 still adds an apex that is not delivered, and the self-test drives that path directly.
 
@@ -79,8 +81,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, reconcile, unknown_args_refused  # noqa: E402
 from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E402
 from gen_rules import load_corpus, CID_RE  # noqa: E402
-import gen_agents  # noqa: E402  the AGENTS.md ordering and bodies (sort_key, bodies_of_pairs, HEADER)
+import gen_agents  # noqa: E402  the AGENTS.md ordering and bodies (agents_key, bodies_of_pairs, HEADER)
 import _adapter_compose as adapter_compose  # noqa: E402  the AGENTS.md layout (load_registry, compose)
+import _must_deliver  # noqa: E402  the must-deliver list that sets the AGENTS.md order (listed_ids)
 # The consumer's contract, single-sourced: the cap, the exact key set, and the superset check it applies.
 from check_release_build import (CAP_BYTES, FIRST_PIN_DEMO_KEYS, FIRST_PIN_DEMO_REL,  # noqa: E402
                                  _demo_superset_findings)
@@ -93,7 +96,8 @@ RULES_PARTS = (".aiqt", "core", "rules")
 # it does not affect what this generator produces. No RENDERER_DECL: this is not an adapter renderer.
 GENSRC_OUTPUTS = (
     {"target": ".aiqt/release/first-pin-demonstration.toml", "kind": "file",
-     "sources": ("AGENTS.md", ".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml"),
+     "sources": ("AGENTS.md", ".aiqt/core/rules/", ".aiqt/core/adapter-blocks.toml",
+                 ".aiqt/core/must-deliver.toml"),
      "regenerate": "python3 tools/gen_first_pin_demo.py"},
 )
 
@@ -200,7 +204,12 @@ def measure(root):
     if not dir_present(src_dir, root=root):
         raise DemoError("the rule corpus {} is absent".format("/".join(RULES_PARTS)))
     pairs = [(src, fm) for src, fm, _ in load_corpus(src_dir)]
-    pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
+    # The list is read after the corpus (so the corpus checks above, and the corpus loader's own errors,
+    # come first) and before the sort, from root itself, never through the corpus's resolved path; it
+    # sets the order gen_agents composes AGENTS.md in (the apex, the listed rules, then the rest), the
+    # core bodies in that order and then the detail sections in that same order (bodies_of_pairs).
+    listed = _must_deliver.listed_ids(root / _must_deliver.DECL_REL, [str(fm["corpus-id"]) for _src, fm in pairs])
+    pairs.sort(key=lambda pf: gen_agents.agents_key(pf[1], listed))
     composed = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, gen_agents.bodies_of_pairs(pairs),
                                        adapter_compose.load_registry(root))
     if composed.data != agents:
@@ -295,9 +304,11 @@ def main():
 #      it is not delivered; a two-byte character straddling the cap is reachable only in a block (a rule
 #      body padded with one is refused at the corpus read): after the rules, every rule is delivered; before
 #      them, the apex is past the cap and the build fails closed (exit 2, nothing written);
-#   2c. an apex that is not the first rule span (a patched gen_agents.sort_key) fails closed (exit 2);
+#   2c. an apex that is not the first rule span (a patched gen_agents.agents_key, the patch proven to reach
+#      the render by a precondition) fails closed (exit 2);
 #   3. AGENTS.md under the cap delivers every rule, in AGENTS.md order, and floor equals delivered;
-#   4. a missing apex fails closed (exit 2, nothing written), as does an apex that itself straddles the cap;
+#   4. a missing apex (the list naming ruleaa, as the corpus has no apex to list) fails closed (exit 2,
+#      nothing written), as does an apex that itself straddles the cap;
 #   5. a digest mismatch (a hand-edited agents-sha256, or AGENTS.md regenerated after the demonstration)
 #      is drift (exit 1), and the consumer's _demo_superset_findings flags the hand-edited binding;
 #   6. an unreadable AGENTS.md (mode 000, a directory, absent, invalid UTF-8) and an AGENTS.md that is not
@@ -309,7 +320,7 @@ def main():
 #      fails closed (exit 2) with nothing written;
 #   9. .aiqt/release/ symlinked outside the root fails closed (exit 2) in --check and write mode with the
 #      demonstration there untouched, while one symlinked inside the root is followed and the file rewritten;
-#  10. an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing.
+#  10. an unknown option (--chek, --help, a positional) is exit 2 with the usage line and runs nothing;
 #  11. a split rule whose core body ends 10 bytes inside the cap, with a detail layer longer than the cap's
 #      remaining room, is delivered (its span is its core body, and its detail section is the last text of
 #      the rule region, after the straddling rule that follows it); the same tree built with
@@ -317,19 +328,43 @@ def main():
 #      one dropping the core (the previous contract), does not give that outcome.
 #  12. rule_spans() over the detail tail directly: the exact tail gives the core spans; a stray
 #      non-whitespace byte after the last detail section, a missing detail section, a duplicated one, and
-#      a detail section placed before the last rule's core each fail closed (DemoError).
+#      a detail section placed before the last rule's core each fail closed (DemoError);
+#  13. an AGENTS.md in the listed-first order, which differs from AIQT priority order (rulebb listed, ruleaa
+#      not), is exit 0 with the spans in that order (a measure sorting by sort_key alone exits 2);
+#  14. a list naming an id that is not a corpus-id is exit 2 naming it, nothing written;
+#  15. the fixture helper's write_decl contract: write_decl=False leaves no list (on a new root, on a root
+#      that had one, and through _tuned), and the default writes an apex-only list on a new root and leaves
+#      a hand-written list byte-identical;
+#  16. gen_agents.sort_key patched to sort the apex last, the apex left off the list and rulebb listed: exit 0
+#      with the spans prjint1, rulebb, ruleaa (a key without its apex component puts the apex last, exit 2;
+#      one without its listed component puts ruleaa before rulebb);
+#  17. with no apex and no listed, the default helper refuses (ValueError) rather than write a wrong list;
+#  18. two split rules, ruleaa unlisted and rulebb listed, ruleaa first in AIQT priority order: the cores
+#      run prjint1, rulebb, ruleaa and the detail sections follow every core in that same order (rulebb's,
+#      then ruleaa's), exit 0 delivering all three on their cores (a bodies_of_pairs mutant ordering the
+#      detail sections by sort_key, or an agents_key mutant ignoring the list, gives another order).
 
 _APEX = "---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n---\n"
 _RULE = "---\ncorpus-id: {cid}\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: ACCUR\nslug: {slug}\n---\n"
 
 
-def _write_tree(root, specs, registry=None, blocks=()):
+def _write_tree(root, specs, registry=None, blocks=(), listed=None, write_decl=True):
     """specs: [(corpus_id, is_apex, pad)] or [(corpus_id, is_apex, pad, detail)], pad an ASCII byte count or a
     literal fill string and detail, when given, the text of a `## Detail` layer (the rule is then split, with
     a detail-trigger key); write the corpus, the block registry (registry text, all targets legacy by
-    default) with each block's source (blocks are (id, target, position, order, source, text) rows), and the
-    AGENTS.md _adapter_compose builds from them. Returns the spans dict {corpus_id: (start, end)} of each
-    rule's core body measured on the written AGENTS.md."""
+    default) with each block's source (blocks are (id, target, position, order, source, text) rows), the
+    must-deliver list, and the AGENTS.md _adapter_compose builds from them. Returns the spans dict
+    {corpus_id: (start, end)} of each rule's core body measured on the written AGENTS.md.
+
+    The list (handled after the corpus loads, so the corpus loader's own errors come first): with
+    write_decl and no list on disk, a list naming exactly `listed` is written, or, with listed None, one
+    naming only the corpus apex (no apex and no listed is a ValueError, so a wrong list is never written
+    silently); a list already on disk is left byte-identical and sets the order, and a `listed` whose ids
+    differ from it is a ValueError (the render would differ from what measure composes). With write_decl
+    False no list is left at the path (a regular file there is removed; any other entry is a ValueError)
+    and the order comes from `listed`, or the apex alone. The order key is reached as
+    gen_agents.agents_key at call time, so a vector patching it (or gen_agents.sort_key) reaches this
+    render and measure alike."""
     rdir = root.joinpath(*RULES_PARTS)
     rdir.mkdir(parents=True, exist_ok=True)
     for old in rdir.iterdir():
@@ -350,7 +385,34 @@ def _write_tree(root, specs, registry=None, blocks=()):
         (root / source).parent.mkdir(parents=True, exist_ok=True)
         (root / source).write_text(text, encoding="utf-8")
     pairs = [(src, fm) for src, fm, _ in load_corpus(rdir)]
-    pairs.sort(key=lambda pf: gen_agents.sort_key(pf[1]))
+    decl = root / _must_deliver.DECL_REL
+    apexes = [str(fm["corpus-id"]) for _src, fm in pairs if fm.get("apex") is True]
+    if write_decl:
+        if os.path.lexists(decl):
+            on_disk, _warn, _removals = _must_deliver.read_declared(decl)
+            if listed is not None and list(listed) != on_disk:
+                raise ValueError("fixture: listed={!r} differs from the list on disk {!r}".format(
+                    list(listed), on_disk))
+            order = on_disk
+        else:
+            if listed is None and not apexes:
+                raise ValueError("fixture: no apex to list; pass listed=")
+            order = list(listed) if listed is not None else apexes[:1]
+            decl.write_text(_must_deliver.fixture_text(order), encoding="utf-8")
+    else:
+        try:
+            st = os.lstat(decl)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError("fixture: {} is not a regular file; write_decl=False will not remove it".format(
+                    _must_deliver.DECL_REL))
+            decl.unlink()
+        if os.path.lexists(decl):
+            raise ValueError("fixture: {} is still present with write_decl=False".format(_must_deliver.DECL_REL))
+        order = list(listed) if listed is not None else apexes[:1]
+    pairs.sort(key=lambda pf: gen_agents.agents_key(pf[1], order))
     raw = adapter_compose.compose(AGENTS_REL, gen_agents.HEADER, gen_agents.bodies_of_pairs(pairs),
                                   adapter_compose.load_registry(root)).data
     (root / AGENTS_REL).write_bytes(raw)
@@ -359,13 +421,14 @@ def _write_tree(root, specs, registry=None, blocks=()):
                                    + len(gen_agents.core_body_of(src).encode("utf-8"))) for src, fm in pairs}
 
 
-def _tuned(root, specs, which, target_end):
+def _tuned(root, specs, which, target_end, **kw):
     """Write specs, then re-pad rule `which` so its span ends exactly at target_end (ASCII padding shifts
-    the end byte for byte). Returns the measured spans."""
-    spans = _write_tree(root, specs)
+    the end byte for byte). kw (listed, write_decl) goes to both _write_tree calls. Returns the measured
+    spans."""
+    spans = _write_tree(root, specs, **kw)
     delta = target_end - spans[which][1]
     specs = [(s[0], s[1], s[2] + delta) + tuple(s[3:]) if s[0] == which else s for s in specs]
-    return _write_tree(root, specs)
+    return _write_tree(root, specs, **kw)
 
 
 def self_test_main():
@@ -527,19 +590,105 @@ def self_test_main():
                 failures.append("straddle before-rules: expected exit 2 (the apex past the cap) with nothing "
                                 "written, got {}\n{}".format(code, out))
 
-        # 2c. The apex is not the first rule span: fail closed. gen_agents.sort_key always places the apex
-        # first, so the fixture patches it (restored in finally) to sort the apex last for both the fixture
-        # render and the build.
+        # 2c. The apex is not the first rule span: fail closed. gen_agents.agents_key always places the apex
+        # first (its own leading component), so the fixture patches it (restored in finally) to sort the apex
+        # last for both the fixture render and the build. The precondition proves the patch reached the
+        # render (a key bound where the patch cannot reach it leaves the apex first).
         real_sort_key = gen_agents.sort_key
-        gen_agents.sort_key = lambda fm: (3, 0, 0, "") if fm.get("apex") is True else real_sort_key(fm)
+        real_agents_key = gen_agents.agents_key
+        gen_agents.agents_key = lambda fm, listed: ((3,) + real_sort_key(fm) if fm.get("apex") is True
+                                                    else real_agents_key(fm, listed))
         try:
             al = tmp / "apexlast"
-            _write_tree(al, [("prjint1", True, 0), ("ruleaa", False, 10)])
+            sp = _write_tree(al, [("prjint1", True, 0), ("ruleaa", False, 10)])
             code, out = capture(al, False)
         finally:
-            gen_agents.sort_key = real_sort_key
+            gen_agents.agents_key = real_agents_key
+        if not sp["prjint1"][0] > sp["ruleaa"][0]:
+            failures.append("2c fixture did not place the apex last: {}".format(sp))
         if code != 2 or (al / DEMO_REL).exists() or "is not the first rule" not in out:
             failures.append("apex not first: expected exit 2 with nothing written, got {}\n{}".format(code, out))
+
+        # 16. The apex's own priority, apart from listed priority: gen_agents.sort_key patched to sort the apex
+        # last (as 2c once did), the apex deliberately left off the list and rulebb listed although priority
+        # order puts it after ruleaa. The apex still comes first only through agents_key's apex component, and
+        # rulebb comes next only through its listed component: exit 0, spans prjint1, rulebb, ruleaa.
+        gen_agents.sort_key = lambda fm: (3, 0, 0, "") if fm.get("apex") is True else real_sort_key(fm)
+        try:
+            ap = tmp / "apexpriority"
+            sp = _write_tree(ap, [("prjint1", True, 0), ("ruleaa", False, 10), ("rulebb", False, 10)],
+                             listed=("rulebb",))
+            on_disk = _must_deliver.read_declared(ap / _must_deliver.DECL_REL)[0]
+            code, out = capture(ap, False)
+        finally:
+            gen_agents.sort_key = real_sort_key
+        if on_disk != ["rulebb"]:
+            failures.append("row 16 fixture lists the apex (or not exactly rulebb): {}".format(on_disk))
+        order16 = [rid for rid, _span in sorted(sp.items(), key=lambda kv: kv[1][0])]
+        if code != 0 or order16 != ["prjint1", "rulebb", "ruleaa"]:
+            failures.append("apex and listed priority: expected exit 0 with spans prjint1, rulebb, ruleaa, got {} "
+                            "and {}\n{}".format(code, order16, out))
+
+        # 13. A listed-first AGENTS.md whose order differs from AIQT priority order: rulebb listed, ruleaa not.
+        # Exit 0 with the spans in listed-first order (red when measure sorts by sort_key: its composition is
+        # then not the AGENTS.md bytes, exit 2).
+        lf = tmp / "listedfirst"
+        sp = _write_tree(lf, [("prjint1", True, 0), ("ruleaa", False, 10), ("rulebb", False, 10)],
+                         listed=("prjint1", "rulebb"))
+        code, out = capture(lf, False)
+        order13 = [rid for rid, _span in sorted(sp.items(), key=lambda kv: kv[1][0])]
+        if order13 != ["prjint1", "rulebb", "ruleaa"]:
+            failures.append("listed-first fixture did not place rulebb before ruleaa: {}".format(order13))
+        if code != 0 or demo_of(lf).get("delivered-prefix-obligations") != ["prjint1", "rulebb", "ruleaa"]:
+            failures.append("listed-first: expected exit 0 delivering prjint1, rulebb, ruleaa in that order, got "
+                            "{}\n{}".format(code, out))
+
+        # 14. A list naming an id that is not a corpus-id: exit 2 naming it, nothing written (red without
+        # listed_ids' membership check: the unknown id sorts nowhere and the build passes).
+        uk = tmp / "unknownid"
+        _write_tree(uk, [("prjint1", True, 0), ("ruleaa", False, 10)])
+        (uk / _must_deliver.DECL_REL).write_text(_must_deliver.fixture_text(["prjint1", "zzzzz9"]), encoding="utf-8")
+        code, out = capture(uk, False)
+        if code != 2 or (uk / DEMO_REL).exists() or "zzzzz9" not in out:
+            failures.append("unknown listed id: expected exit 2 naming zzzzz9 with nothing written, got {}\n{}".format(
+                code, out))
+
+        # 15. The helper's write_decl contract (T8 and T18 of check_must_deliver rest on it): write_decl=False
+        # leaves no list on a new root, removes one already there, and _tuned passes it to both its writes;
+        # the default writes an apex-only list on a new root and leaves a hand-written list byte-identical.
+        wd_specs = [("prjint1", True, 0), ("ruleaa", False, 10)]
+        wd_new = tmp / "wd-new"
+        _write_tree(wd_new, wd_specs, write_decl=False)
+        wd_old = tmp / "wd-old"
+        _write_tree(wd_old, wd_specs)
+        _write_tree(wd_old, wd_specs, write_decl=False)
+        wd_tuned = tmp / "wd-tuned"
+        _tuned(wd_tuned, [("prjint1", True, 0), ("ruleaa", False, 20000)], "ruleaa", CAP_BYTES - 10,
+               write_decl=False)
+        for label, wd_root in (("a new root", wd_new), ("a root with a list", wd_old), ("_tuned", wd_tuned)):
+            if os.path.lexists(wd_root / _must_deliver.DECL_REL):
+                failures.append("write_decl=False on {} left a list at {}".format(label, _must_deliver.DECL_REL))
+        wd_default = tmp / "wd-default"
+        _write_tree(wd_default, wd_specs)
+        if not (wd_default / _must_deliver.DECL_REL).is_file() or _must_deliver.read_declared(
+                wd_default / _must_deliver.DECL_REL)[0] != ["prjint1"]:
+            failures.append("the default write_decl must write an apex-only list on a new root")
+        wd_hand = tmp / "wd-hand"
+        hand = ("# hand-written\n" + _must_deliver.fixture_text(["prjint1", "ruleaa"])).encode("utf-8")
+        (wd_hand / ".aiqt" / "core").mkdir(parents=True)
+        (wd_hand / _must_deliver.DECL_REL).write_bytes(hand)
+        _write_tree(wd_hand, wd_specs)
+        if (wd_hand / _must_deliver.DECL_REL).read_bytes() != hand:
+            failures.append("the default write_decl must leave a hand-written list byte-identical")
+
+        # 17. No apex and no listed in the default mode: the helper refuses rather than write a wrong list.
+        try:
+            _write_tree(tmp / "noapex-default", [("ruleaa", False, 10), ("rulebb", False, 10)])
+        except ValueError as exc:
+            if "no apex to list" not in str(exc):
+                failures.append("no apex, default mode: the helper's refusal does not say so: {}".format(exc))
+        else:
+            failures.append("no apex, default mode: the helper must refuse to write a list naming no apex")
 
         # 3. Under the cap: every rule is delivered, in AGENTS.md order; floor equals delivered.
         uc = tmp / "undercap"
@@ -556,7 +705,9 @@ def self_test_main():
 
         # 4. Missing apex: exit 2 and nothing written. An apex that itself straddles the cap: exit 2.
         na = tmp / "noapex"
-        _write_tree(na, [("ruleaa", False, 10), ("rulebb", False, 10)])
+        _write_tree(na, [("ruleaa", False, 10), ("rulebb", False, 10)], listed=("ruleaa",))
+        if _must_deliver.read_declared(na / _must_deliver.DECL_REL)[0] != ["ruleaa"]:
+            failures.append("missing apex: the fixture list must name exactly ruleaa")
         code, out = capture(na, False)
         if code != 2 or (na / DEMO_REL).exists() or "exactly one apex" not in out:
             failures.append("missing apex: expected exit 2 with nothing written, got {}\n{}".format(code, out))
@@ -775,6 +926,57 @@ def self_test_main():
                 failures.append("rule_spans tail ({}): expected DemoError, raised {!r}".format(label, exc))
                 continue
             failures.append("rule_spans tail ({}): expected DemoError, got spans".format(label))
+
+        # 18. The listed-first order with detail layers: ruleaa (unlisted) and rulebb (listed) are both split, and
+        #     AIQT priority order puts ruleaa first. The cores run prjint1, rulebb, ruleaa and the detail sections
+        #     follow every core in that same order, rulebb's then ruleaa's: exit 0 delivering all three on their
+        #     cores. A bodies_of_pairs mutant ordering the detail sections by sort_key, and an agents_key mutant
+        #     ignoring the list, each give another order (the fixture and measure share both, so each mutant
+        #     still builds; the order it writes is what this row judges).
+        v18_specs = [("prjint1", True, 0), ("ruleaa", False, 10, "Detail of ruleaa."),
+                     ("rulebb", False, 10, "Detail of rulebb.")]
+        v18_marks = (b"Obligation text rulebb", b"Obligation text ruleaa", b"Detail of rulebb.", b"Detail of ruleaa.")
+
+        def v18_outcome(name):
+            root = tmp / name
+            try:
+                _write_tree(root, v18_specs, listed=("prjint1", "rulebb"))
+            except Exception as exc:  # noqa: BLE001  a mutant may surface as any exception
+                return "fixture raised {!r}".format(exc), None, None
+            code, out = capture(root, False)
+            raw = (root / AGENTS_REL).read_bytes()
+            delivered = demo_of(root).get("delivered-prefix-obligations") if code == 0 else None
+            return code, delivered, [raw.find(mark) for mark in v18_marks]
+
+        def v18_good(outcome):
+            code, delivered, marks = outcome
+            return (code == 0 and delivered == ["prjint1", "rulebb", "ruleaa"]
+                    and 0 <= marks[0] < marks[1] < marks[2] < marks[3])
+
+        v18 = v18_outcome("listed-split")
+        if not v18_good(v18):
+            failures.append("listed split rules: expected exit 0 delivering prjint1, rulebb, ruleaa with the cores in "
+                            "that order and then the detail sections of rulebb and ruleaa, got {!r}".format(v18))
+
+        def v18_details_by_priority(pairs):
+            by_priority = sorted(pairs, key=lambda pf: gen_agents.sort_key(pf[1]))
+            details = [gen_agents.detail_body_of(src) for src, _fm in by_priority]
+            return [gen_agents.core_body_of(src) for src, _fm in pairs] + [d for d in details if d is not None]
+
+        real_bodies = gen_agents.bodies_of_pairs
+        real_agents_key = gen_agents.agents_key
+        for mutant_name, attr, mutant in (
+                ("detail sections in AIQT priority order", "bodies_of_pairs", v18_details_by_priority),
+                ("the list ignored", "agents_key", lambda fm, listed: real_agents_key(fm, ()))):
+            setattr(gen_agents, attr, mutant)
+            try:
+                v18m = v18_outcome("listed-split-mutant-" + attr)
+            finally:
+                gen_agents.bodies_of_pairs = real_bodies
+                gen_agents.agents_key = real_agents_key
+            if v18_good(v18m):
+                failures.append("listed split rules: the {} mutant still gives the listed-first order, so the row "
+                                "does not judge it".format(mutant_name))
     finally:
         for dirpath, _dirnames, filenames in os.walk(tmp):
             for fn in filenames:
@@ -805,10 +1007,13 @@ def self_test_main():
           "is never read as rule text; a rule corpus symlinked inside the root is read, and one symlinked "
           "outside the root fails closed (exit 2) with nothing written; an .aiqt/release/ symlinked outside the "
           "root fails closed (exit 2) with the demonstration there untouched, and one inside the root is followed; "
+          "the spans follow the listed-first order (the apex, the listed rules, then the rest), each component "
+          "of that order is needed, and a list naming an id outside the corpus fails closed (exit 2); the "
+          "fixture helper writes, keeps or omits the list as asked; "
           "an unknown option is exit 2 with the usage line and runs nothing; a split rule whose core ends inside "
           "the cap is delivered with its detail after the next rule, and a mutant placing the detail at the rule "
           "or dropping the core changes that outcome; a stray, missing, duplicated, misplaced or undeclared "
-          "detail section fails closed.")
+          "detail section fails closed; and the detail sections follow every core in the listed-first order.")
     return 0
 
 

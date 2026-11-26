@@ -3,7 +3,7 @@ format-version = 1
 release-version = "1.1.1-dev"
 opf-version = "1.0.5"
 genesis = true
-tree-sha256 = "e06fb3710900e78df527465997a5384d6a9be969d25336006fdd996956d64a7d"
+tree-sha256 = "8007aac3c3d930e8272c6af8f9863566f687c0edbb0a1133ea2db1caa32c44ff"
 
 [[sources]]
 path = ".aiqt/LICENSE"
@@ -127,8 +127,8 @@ sha256 = "e1391be5a8cf1d83c17171f576f923ad662b4d1842dcb89771c2a7f517a5c2c7"
 
 [[sources]]
 path = ".aiqt/core/must-deliver.toml"
-bytes = 3687
-sha256 = "79994c431fb71218e944f40d0f436bb238cb04a5cec65cf06f6a4d8b73bdd7be"
+bytes = 4186
+sha256 = "220289e921228927bafef5190943bb7d4cdb8e5a1526f201a6057ff8ad814dbb"
 
 [[sources]]
 path = ".aiqt/core/order.toml"
@@ -162,8 +162,8 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 
 [[sources]]
 path = ".aiqt/core/renderers.toml"
-bytes = 3408
-sha256 = "78cc3db0045d7d69ed2a3053d4b7bf6b1c81b7d389964af78aafaf7a198d9604"
+bytes = 3512
+sha256 = "e4f8c0f59ca3e1b65ebea63daa885fd0190d84ee2216207c16fcf981e4a08227"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -852,8 +852,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 16669
-sha256 = "66a3671a8284b777419e1f426f10168417ef1410bbe3d7de169de1d9f47a1d70"
+bytes = 16749
+sha256 = "2b3dd0e01eed7a0ef8ce0fc723420c3cab207153a27f6d13f82da4eb80efee92"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -2377,8 +2377,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 55420
-sha256 = "396814ac6f9c9ade22ebf8b7737326c85496b2fefc36fc542cc6f7d45c464a84"
+bytes = 55455
+sha256 = "12f251e898592f511291f8c0315f2a4c9bd531552ce6cf7e7e3fe4e9f423feb1"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2452,8 +2452,8 @@ sha256 = "eb75564b43c09cc6cfc6e4f5817700565610aba4a0b6a401b9b5a5587714490f"
 
 [[sources]]
 path = "CHANGELOG.md"
-bytes = 682
-sha256 = "4142898bd019ef5150163a6d9bd20b7aff358d189b3bb136fe5677da7636517c"
+bytes = 1774
+sha256 = "8582bb76b77c1ecc398dca19ac13b36e4c273fbc4e08dff14050541827ef89f4"
 
 [[sources]]
 path = "DISCLOSURE.md"
@@ -2527,8 +2527,8 @@ sha256 = "79f4539151ecb22ab0bca929f9d0ec7b6efc2541dd8da708b259ea8642d3ec5a"
 
 [[sources]]
 path = "changelog.toml"
-bytes = 3032
-sha256 = "280e0356fe9f5c8ac290b2ff844a3876d2e3fab5eb0366f8c34a9c8ba175dc83"
+bytes = 4138
+sha256 = "1cfdc218685d69f5bcf158df2d99737bde50e87d01cacae2a5026a635cc3db9e"
 
 [[sources]]
 path = "disclosure.toml"
@@ -4201,6 +4201,11 @@ bytes = 240281
 sha256 = "c64817fb1fbd6dace94d0dc75936c7efd3f5af6d75b30c455c44481d07c28041"
 
 [[sources]]
+path = "tools/_must_deliver.py"
+bytes = 8768
+sha256 = "e9b6c3ced99a505d4d1a2eebd3eb31b941c5b001d6cb786c1703d52de792a6e6"
+
+[[sources]]
 path = "tools/_qa_adapter.py"
 bytes = 199939
 sha256 = "221a387a4812762e1f5e58f84fbfcdbc0ac2d36296079e8d3e9220e1ac0c04fd"
@@ -4402,8 +4407,8 @@ sha256 = "2052ece73005953dd72fdf9bd41da449f78d90d31db5974107104885510e35eb"
 
 [[sources]]
 path = "tools/check_must_deliver.py"
-bytes = 166537
-sha256 = "81d9d37a65e54b27aca44bc5e4f2f05718a7d4d6c054f8847374113c3280fe86"
+bytes = 165837
+sha256 = "2bc650c4115a831578318d541af0a14b0df6aeb62ba95d05944cad0a7ffe6af8"
 
 [[sources]]
 path = "tools/check_newtab.py"
@@ -4597,8 +4602,8 @@ sha256 = "b0fa40d1f94ac44b818660015db141d889882c48c31f3576994f9083dc1e8bcc"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 153938
-sha256 = "2572834067a71f11b039a99730ba5e1353d1b8622f415b549675ebffe2f7d073"
+bytes = 170644
+sha256 = "cd07938acc427cb1529fe4a78a741b921d53b336f530793578fedb5023415475"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4612,8 +4617,8 @@ sha256 = "cebcaa8e761a5f54349418da332d185c27da974ddd4796bbffcb81868e009acf"
 
 [[sources]]
 path = "tools/gen_agents.py"
-bytes = 177310
-sha256 = "902f2f83ab66cfe404d6cd6d2e5943e6b902990a6f80ebb6e0592e3e90e7a119"
+bytes = 188660
+sha256 = "35f97cba7d6351117c567967a1589ba6a5eff47fa9de686d05cd748959e61633"
 
 [[sources]]
 path = "tools/gen_changelog.py"
@@ -4662,8 +4667,8 @@ sha256 = "12205fd5c1d4daa2ba9283367b3edfae7bfaa1ad86fd1d75bbada4b5fb3348e3"
 
 [[sources]]
 path = "tools/gen_first_pin_demo.py"
-bytes = 52192
-sha256 = "19f8a3d90ef81decce0e235a2e7002a0cea1dd0524750b61a2d3ef089e5b3fa3"
+bytes = 66635
+sha256 = "39d0b6b421805b27592a96f169b440e9eb296dd99efee1b55673eafeb62c7ab3"
 
 [[sources]]
 path = "tools/gen_gensrc.py"
