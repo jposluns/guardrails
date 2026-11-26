@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Offline gate for the sitemap.xml and robots.txt Sitemap line of aiqt.ai and opfiles.ai.
+"""Offline gate for the sitemap.xml and robots.txt Sitemap line of aiqt.ai.
 
   check_sitemap.py              exit 0 clean, 1 finding, 2 cannot evaluate
   check_sitemap.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_sitemap.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
 
-For each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) the indexable pages are every *.html
+For each site root (site/ for aiqt.ai; the opfiles.ai root opf/site/ was removed from this repository, and
+the self-test drives a second, fixture root) the indexable pages are every *.html
 file under the root except a 404.html and anything under the root's draft/ or downloads/ directory;
 a page maps to its served URL (index.html to the directory, x.html to /x). The root's sitemap.xml must
 list each indexable page exactly once and nothing else, every <url> with a <loc> on the root's own
@@ -15,7 +16,8 @@ path under /draft/; a path such as /drafty or /drafts/old is not a draft URL and
 no page); the root's robots.txt must carry `Sitemap: https://<host>/sitemap.xml` exactly once. A
 missing sitemap or robots file, a sitemap or robots path that is not a regular file, and each of
 those defects are findings (exit 1). An input that cannot be stat'ed or read, an unwalkable
-directory, a root with no indexable page, an input over MAX_BYTES, a non-UTF-8 input (decoded
+directory, a root with no indexable page, an empty root set (a scan that reads nothing), an input over
+MAX_BYTES, a non-UTF-8 input (decoded
 strictly), a DOCTYPE, XML that does not parse into a sitemap urlset, a urlset child other than <url>,
 and a <url> without exactly one <loc>, exactly one <lastmod> and no other child are cannot-evaluate
 (exit 2), never a pass. The gate reads only the repository; it fetches nothing.
@@ -47,7 +49,12 @@ MAX_BYTES = 262144
 NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 SITE_ROOTS = (
     ("site", "aiqt.ai"),
-    ("opf/site", "opfiles.ai"),
+)
+# The self-test's two roots: site/ and a fixture second root with its own host, so every per-root rule (a
+# sitemap or robots line naming another root's host among them) keeps a second root to hold apart.
+_FIXTURE_ROOTS = (
+    ("site", "aiqt.ai"),
+    ("second/site", "second.example"),
 )
 # Top-level directories of a site root whose pages are never indexed: the staged draft and the downloads.
 UNINDEXED_DIRS = ("draft", "downloads")
@@ -185,10 +192,13 @@ def judge_robots(text, host, where):
     return ["{}: carries {!r} {} times".format(where, line, count)]
 
 
-def scan(root):
-    """(findings, errors) over every site root under root; errors make the run cannot-evaluate."""
+def scan(root, roots=SITE_ROOTS):
+    """(findings, errors) over every site root (`roots`, SITE_ROOTS by default) under root; errors make the
+    run cannot-evaluate. An empty `roots` is an error too: a scan that reads no root is never a pass."""
     findings, errors = [], []
-    for site, host in SITE_ROOTS:
+    if not roots:
+        errors.append("no site root to read; a scan of nothing is never a pass")
+    for site, host in roots:
         site_dir = Path(root) / site
         try:
             pages = indexable_pages(site_dir)
@@ -214,8 +224,11 @@ def scan(root):
     return findings, errors
 
 
-def run_gate(root):
-    findings, errors = scan(root)
+def run_gate(root, roots=None):
+    """The gate over `roots` (SITE_ROOTS when None) under root. A pass names the roots it read: scan() refuses
+    an empty root set and a root with no indexable page, so each root named was read."""
+    roots = SITE_ROOTS if roots is None else roots
+    findings, errors = scan(root, roots)
     for line in errors:
         print("CANNOT EVALUATE: " + line, file=sys.stderr)
     for line in findings:
@@ -224,8 +237,8 @@ def run_gate(root):
         return 2
     if findings:
         return 1
-    print("PASS: sitemap.xml and the robots.txt Sitemap line match the indexable pages on {} site roots".format(
-        len(SITE_ROOTS)))
+    print("PASS: sitemap.xml and the robots.txt Sitemap line match the indexable pages on {} site root(s) read: "
+          "{}".format(len(roots), ", ".join(site + "/" for site, _host in roots)))
     return 0
 
 
@@ -266,7 +279,7 @@ _ENTRIES = (("/", "2026-11-02"), ("/about", "2026-10-01"), ("/guide/", "2026-02-
 def _fixture(tmp, overrides=None):
     """A fixture tree under tmp; overrides maps a relative path to a body (str or bytes) or None (absent)."""
     files = {}
-    for site, host in SITE_ROOTS:
+    for site, host in _FIXTURE_ROOTS:
         for page in _PAGES:
             files["{}/{}".format(site, page)] = "<!doctype html><title>x</title>\n"
         files[site + "/sitemap.xml"] = _sitemap(host, _ENTRIES)
@@ -284,7 +297,7 @@ def _fixture(tmp, overrides=None):
 
 def _scan_case(overrides=None):
     with tempfile.TemporaryDirectory(prefix="sitemap-selftest-") as tmp:
-        return scan(_fixture(tmp, overrides))
+        return scan(_fixture(tmp, overrides), _FIXTURE_ROOTS)
 
 
 def _one_finding(result, needle):
@@ -293,6 +306,9 @@ def _one_finding(result, needle):
 
 
 def _self_test():
+    # The live roots are site/ alone (opf/site/ was removed from this repository); the cases below run over
+    # the two fixture roots.
+    check("registry/live-roots", SITE_ROOTS == (("site", "aiqt.ai"),), SITE_ROOTS)
     result = _scan_case()
     check("pass/both-roots-exact", result == ([], []), result)
 
@@ -307,7 +323,7 @@ def _self_test():
     with tempfile.TemporaryDirectory(prefix="sitemap-selftest-") as tmp:
         _fixture(tmp, {"site/sitemap.xml": None})
         os.makedirs(Path(tmp) / "site" / "sitemap.xml")
-        result = scan(tmp)
+        result = scan(tmp, _FIXTURE_ROOTS)
     check("refuse/sitemap-not-regular-file", _one_finding(result, "site/sitemap.xml: not a regular file"),
           result)
 
@@ -322,7 +338,7 @@ def _self_test():
         _fixture(tmp)
         os.lstat = _lstat_denied
         try:
-            findings, errors = scan(tmp)
+            findings, errors = scan(tmp, _FIXTURE_ROOTS)
         finally:
             os.lstat = real_lstat
     check("refuse/cannot-stat", findings == [] and len(errors) == 2
@@ -340,7 +356,7 @@ def _self_test():
         _fixture(tmp)
         os.scandir = _scandir_denied
         try:
-            findings, errors = scan(tmp)
+            findings, errors = scan(tmp, _FIXTURE_ROOTS)
         finally:
             os.scandir = real_scandir
     check("refuse/unwalkable-directory", findings == [] and len(errors) == 2
@@ -361,9 +377,9 @@ def _self_test():
     result = _scan_case({"site/sitemap.xml": _sitemap("aiqt.ai", _ENTRIES + (("/about", "2026-01-01"),))})
     check("refuse/duplicate-url", _one_finding(result, "more than once"), result)
 
-    result = _scan_case({"opf/site/sitemap.xml": _sitemap("aiqt.ai", _ENTRIES)})
+    result = _scan_case({"second/site/sitemap.xml": _sitemap("aiqt.ai", _ENTRIES)})
     check("refuse/wrong-origin", result[1] == [] and len(result[0]) == 6
-          and all("not on https://opfiles.ai" in line or "is missing" in line for line in result[0]), result)
+          and all("not on https://second.example" in line or "is missing" in line for line in result[0]), result)
 
     # The date check at its ends: the last day of February 2026 passes; the next two do not exist.
     for name, value, ok in (("lastmod/2026-02-28", "2026-02-28", True),
@@ -385,8 +401,8 @@ def _self_test():
     result = _scan_case({"site/robots.txt": "User-agent: *\nDisallow:\n"})
     check("refuse/robots-lacks-sitemap", _one_finding(result, "site/robots.txt: lacks the line"), result)
 
-    result = _scan_case({"opf/site/robots.txt": _robots("aiqt.ai")})
-    check("refuse/robots-wrong-host", _one_finding(result, "opf/site/robots.txt: lacks the line"), result)
+    result = _scan_case({"second/site/robots.txt": _robots("aiqt.ai")})
+    check("refuse/robots-wrong-host", _one_finding(result, "second/site/robots.txt: lacks the line"), result)
 
     result = _scan_case({"site/robots.txt": _robots("aiqt.ai") + "Sitemap: https://aiqt.ai/sitemap.xml\n"})
     check("refuse/robots-duplicate-sitemap", _one_finding(result, "2 times"), result)
@@ -394,8 +410,8 @@ def _self_test():
     result = _scan_case({"site/sitemap.xml": None})
     check("refuse/sitemap-missing", _one_finding(result, "site/sitemap.xml: missing"), result)
 
-    result = _scan_case({"opf/site/robots.txt": None})
-    check("refuse/robots-missing", _one_finding(result, "opf/site/robots.txt: missing"), result)
+    result = _scan_case({"second/site/robots.txt": None})
+    check("refuse/robots-missing", _one_finding(result, "second/site/robots.txt: missing"), result)
 
     original = _read_bytes
 
@@ -455,6 +471,27 @@ def _self_test():
                                          ["--execution-report", "relative/report"])]
     check("refuse/unrecognized-argument", got == [2, 2, 2], got)
 
+    # A scan given no root reads nothing, so it is cannot-evaluate, never a pass.
+    with tempfile.TemporaryDirectory(prefix="sitemap-selftest-") as tmp:
+        result = scan(_fixture(tmp), ())
+    check("refuse/no-site-root-cannot-evaluate", result[0] == [] and len(result[1]) == 1
+          and "no site root" in result[1][0], result)
+
+    # The live gate reads site/ of the tree it is given: over an empty tree it cannot evaluate (site/ has no
+    # indexable page), and over a fixture tree its pass names site/ as the root it read.
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(prefix="sitemap-selftest-") as tmp:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            empty = run_gate(tmp)
+    with tempfile.TemporaryDirectory(prefix="sitemap-selftest-") as tmp:
+        _fixture(tmp)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            fixture_exit = run_gate(tmp)
+    check("live/gate-reads-site-root", empty == 2 and fixture_exit == 0
+          and "on 1 site root(s) read: site/\n" in out.getvalue(), (empty, fixture_exit, out.getvalue()))
+
     got = run_gate(ROOT)
     check("live/real-tree-passes", got == 0, got)
 
@@ -472,7 +509,8 @@ def _self_test():
           "parse, a non-urlset root, a DOCTYPE before or after the declaration, a non-UTF-8 body, an "
           "unexpected urlset child and a <url> without exactly one <loc> and one <lastmod> are "
           "cannot-evaluate; an unrecognized argument exits 2; the size bound holds one byte under, at and "
-          "over; the live tree passes)".format(len(EXECUTED)))
+          "over; a scan of no root is cannot-evaluate; the live gate reads site/ (an empty tree cannot "
+          "evaluate) and names it; the live tree passes)".format(len(EXECUTED)))
     return 0
 
 

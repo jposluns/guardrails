@@ -40,8 +40,8 @@ a read-only target (mode 0444) is now replaced and keeps its mode, where the ear
 failed on it; this is deliberate. A temporary file left in a page folder (a run killed between its write
 and its replace) is reported as stray output by --check and by a normal run.
 
-Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai,
-opf/site/draft-src/ for opfiles.ai), discovered by listing that directory, so a page lands or changes as
+Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai;
+the opfiles.ai sources were removed from this repository), discovered by listing that directory, so a page lands or changes as
 data; each site renders only its own pages, with its own chrome, into its own draft root. A data file names the page's output path, title and kind (landing or
 document) and a body of components (specification section 7); the generator refuses an unknown component,
 an unknown or missing key, a wrong type, a duplicate output path, and a data directory it cannot list
@@ -141,10 +141,11 @@ SCHEME_BUTTON = (
 
 # The registry declaration (read statically by tools/gen_gensrc.py). Each page's sources are the inputs its
 # bytes derive from: the generator and the page's data file, plus VERSION and changelog.toml for a page whose
-# data renders the document control strip (_c_control), STATUS_SOURCE for a page whose data carries the
-# $OPF_STATUS token, and HOOKS_SOURCE for a page whose data carries the $HOOK_COUNT token. The kind "block"
-# entries are the STATUS_LINES files, of which this generator owns only the status line; page_targets() keeps
-# them out of the page set. Two STATUS_LINES files have no entry (_STATUS_LINES_UNREGISTERED). The mappings
+# data renders the document control strip (_c_control), and HOOKS_SOURCE for a page whose data carries the
+# $HOOK_COUNT token (the $OPF_STATUS page token is retired and refused). A kind "block" entry is a
+# STATUS_LINES file of which this generator owns only the status line; page_targets() keeps such entries out
+# of the page set. The live declaration has none: both STATUS_LINES files have no entry
+# (_STATUS_LINES_UNREGISTERED), and the self-test holds the block-entry rules over a fixture declaration. The mappings
 # page also declares the modules whose functions render its bodies (_mappings_data and the _mappings_by_*
 # renderers): tools/gen_mappings.py (rows, registry and wording), tools/gen_rules.py (the rule corpus loader),
 # tools/_standards.py (the manifest loader) and tools/gen_agents.py (the rule order), with the 2 data folders
@@ -197,36 +198,6 @@ GENSRC_OUTPUTS = (
     {"target": "site/teams/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/teams.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml", "opf/tools/opf.py"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/404.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/adopt/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/core-files/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml", "opf/tools/opf.py"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/draft.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/disclosure/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/disclosure.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/license/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/license.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/model/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/model.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/standard/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/llms.txt", "kind": "block",
-     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),
-     "regenerate": "python3 tools/gen_draft_site.py"},
 )
 
 
@@ -265,13 +236,6 @@ KEPT_LIVE_PATHS = (
     "/tracker-labels",
 )
 
-# The opfiles.ai kept live paths: its machine-readable entry point and its adoption guide, each of which
-# exists under opf/site/ today and keeps its path at promotion.
-OPF_KEPT_LIVE_PATHS = (
-    "/adopt.md",
-    "/llms.txt",
-)
-
 # The per-site context; aiqt.ai first. Each site has its own page data directory ("src", 1 TOML file per
 # page, discovered by listing it), its output root, its live root (where its kept live paths must exist),
 # its base path ("/draft/" while staging, "/" at its own promotion; both sites are promoted), its asset
@@ -289,13 +253,6 @@ SITES = (
      "kept": KEPT_LIVE_PATHS,
      "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
              ("mappings/", "Mappings"))},
-    {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site",
-     "live": "opf/site", "base": "/", "assets": DRAFT_BASE, "control": False,
-     "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
-     "github": "https://github.com/jposluns/guardrails/tree/main/opf",
-     "kept": OPF_KEPT_LIVE_PATHS,
-     "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Technical details"),
-             ("adopt/", "Adopt"))},
 )
 
 
@@ -533,15 +490,16 @@ def _any_link(site, href, text, where):
 
 
 def _inline(site, value, cell=False):
-    """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
-    token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
-    the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
-    names none), and the https scheme of each link attribute written in lower case (_inline_https, D15).
-    `cell` true is a table's raw cell (a whole td element), which may also use td. A value that still
-    carries a $BASE/ token once expanded (such as $BASE$BASE//x) is refused here, so the refusal names an
-    inline HTML value as its source."""
+    """An inline HTML value with the $BASE/ token rendered as the site's base path and the $HOOK_COUNT token
+    rendered as the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT
+    when the site names none), and the https scheme of each link attribute written in lower case
+    (_inline_https, D15). `cell` true is a table's raw cell (a whole td element), which may also use td. A
+    value that carries the retired $OPF_STATUS page token is refused (its only carriers were the opfiles.ai
+    pages, removed from this repository), and so is a value that still carries a $BASE/ token once expanded
+    (such as $BASE$BASE//x), so the refusal names an inline HTML value as its source."""
     if "$OPF_STATUS" in value:
-        value = value.replace("$OPF_STATUS", status_note())
+        raise RefusedPage("the $OPF_STATUS page token is retired (the reference CLI status note renders only on "
+                          "the STATUS_LINES lines): {!r}".format(value))
     if "$HOOK_COUNT" in value:
         value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
     expanded = value.replace("$BASE/", site["base"])
@@ -622,21 +580,18 @@ def hook_count(root=ROOT):
 
 
 # The reference CLI status note: generated from VERB_STATUS in opf/tools/opf.py, read as a literal from the
-# file's syntax tree (the module is never imported or run), and rendered wherever the $OPF_STATUS token
-# appears, on the opf/README.md and opf/spec/OPF-SPEC.md lines that start with its prefix, and on the Adopt
-# line of opf/site/llms.txt.
+# file's syntax tree (the module is never imported or run), and rendered on the opf/README.md and
+# opf/spec/OPF-SPEC.md lines that start with its prefix (the opfiles.ai pages and llms.txt that also carried
+# it were removed from this repository, and the $OPF_STATUS page token is retired).
 STATUS_SOURCE = "opf/tools/opf.py"
 STATUS_PREFIX = "Reference CLI status. "
 _STATUS_KINDS = ("available", "partial", "in progress")
 # The lines this generator owns outside the pages: (file, the prefix that names the line, the text before
-# the note). Exactly 1 line of each file starts with its prefix; the generator rewrites only that line.
-_LLMS_ADOPT = ("- [Adopt](/adopt/): installing or adopting OPFiles is at /adopt/. Adopt with your AI development "
-               "assistant through the `opf adopt` flow (investigate, propose one plan, take one approval, apply, "
-               "verify), or create the plain-TOML store and wire its checks by hand. ")
+# the note). Exactly 1 line of each file starts with its prefix; the generator rewrites only that line. Both
+# live leads are empty; the self-test row status/fixture-lead-written holds a non-empty lead over a fixture file.
 STATUS_LINES = (
     ("opf/README.md", STATUS_PREFIX, ""),
     ("opf/spec/OPF-SPEC.md", STATUS_PREFIX, ""),
-    ("opf/site/llms.txt", "- [Adopt](/adopt/): ", _LLMS_ADOPT),
 )
 
 
@@ -2278,7 +2233,6 @@ def run(root, check, outputs=None):
 # hook count and the mappings bodies, what its data carries), and each STATUS_LINES file has its own entry.
 # Each row id is a key of the dict _register_findings returns.
 _FOOTER_ROW = "gensrc/footer-pages-declare-version-and-changelog"
-_NOTE_ROW = "gensrc/status-note-pages-declare-status-source"
 _LINES_ROW = "gensrc/status-lines-registered"
 _BUILT_ROW = "gensrc/page-entries-built"
 _HOOKS_ROW = "gensrc/hook-count-pages-declare-hooks-source"
@@ -2314,39 +2268,41 @@ _OWN_STEM = "gen_draft_site"
 # registering one fails until it is taken off this list.
 _STATUS_LINES_UNREGISTERED = ("opf/README.md", "opf/spec/OPF-SPEC.md")
 # Each flip: (the row it must turn red, alone; the text it replaces inside the GENSRC_OUTPUTS literal, which
-# must occur there exactly once; its replacement). In order: a page that carries the rendered text loses a
-# source (under-declaration); a page that does not carry it gains one (over-declaration); the block entry
-# goes, or loses one of the 2 sources it must name; opf/README.md, on _STATUS_LINES_UNREGISTERED, gains an
-# entry; a page entry names a target the build does not produce; the block entry is declared twice (the upper
-# bound of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a
-# page, so only the kind guard fires; a footer page loses changelog.toml alone, and a page without the footer
+# must occur there exactly once; its replacement). In order: a footer page loses VERSION (under-declaration);
+# a page without the footer gains VERSION (over-declaration); opf/README.md, on _STATUS_LINES_UNREGISTERED,
+# gains an explicit kind "block" entry (a kind "file" copy would also fire _BUILT_ROW); a page entry names a
+# target the build does not produce; a footer page loses changelog.toml alone, and a page without the footer
 # gains changelog.toml alone, so each of the 2 footer sources is held in both directions;
-# opf/spec/OPF-SPEC.md, the other file on _STATUS_LINES_UNREGISTERED, gains an entry; the install details and
-# home entries each lose HOOKS_SOURCE, and the mappings entry loses tools/gen_mappings.py (under-declaration);
-# and a page whose data carries neither the $HOOK_COUNT token nor a mappings component gains HOOKS_SOURCE, or
-# tools/gen_mappings.py (over-declaration).
-_LLMS_ENTRY = ('\n    {"target": "opf/site/llms.txt", "kind": "block",\n'
-               '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
-               '     "regenerate": "python3 tools/gen_draft_site.py"},')
+# opf/spec/OPF-SPEC.md, the other file on _STATUS_LINES_UNREGISTERED, gains a block entry; the install details
+# and home entries each lose HOOKS_SOURCE, and the mappings entry loses tools/gen_mappings.py
+# (under-declaration); and a page whose data carries neither the $HOOK_COUNT token nor a mappings component
+# gains HOOKS_SOURCE, or tools/gen_mappings.py (over-declaration). The live declaration has no block entry
+# (the opf/site/llms.txt entry went with opf/site/), so the block entry's own rules (missing, a source lost,
+# declared twice, the kind "tree") are held over a fixture declaration by the gensrc/fixture-status-line-*
+# rows of the self-test instead of by flips here.
+_TEAMS_ENTRY = ('\n    {"target": "site/teams/index.html", "kind": "file",\n'
+                '     "sources": ("tools/gen_draft_site.py", "site/draft-src/teams.toml"),\n'
+                '     "regenerate": "python3 tools/gen_draft_site.py"},')
+_BLOCK_ENTRY = ('\n    {"target": "opf/README.md", "kind": "block",\n'
+                '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
+                '     "regenerate": "python3 tools/gen_draft_site.py"},')
+# The self-test's fixture STATUS_LINES file and its block entry: with no registered status-line file left in
+# the live tree, the block-entry rules (exactly 1 entry, kind "block", both sources named, no ancestor tree
+# claiming it) are held over this fixture, rebound into STATUS_LINES for those rows only.
+_FIXTURE_STATUS_FILE = "fixture/status-lines.txt"
+_FIXTURE_BLOCK = {"target": _FIXTURE_STATUS_FILE, "kind": "block",
+                  "sources": ("tools/gen_draft_site.py", STATUS_SOURCE),
+                  "regenerate": "python3 tools/gen_draft_site.py"}
 _REGISTER_FLIPS = (
     (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", ', 'site/draft-src/rules.toml", '),
-    (_NOTE_ROW, 'opf/site/draft-src/core-files.toml", "opf/tools/opf.py"', 'opf/site/draft-src/core-files.toml"'),
     (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "VERSION")'),
-    (_NOTE_ROW, '"opf/site/draft-src/license.toml")', '"opf/site/draft-src/license.toml", "opf/tools/opf.py")'),
-    (_LINES_ROW, _LLMS_ENTRY, ''),
-    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
-     '"sources": ("tools/gen_draft_site.py",),\n     "regenerate"'),
-    (_LINES_ROW, '"sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n     "regenerate"',
-     '"sources": ("opf/tools/opf.py",),\n     "regenerate"'),
-    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/README.md"')),
-    (_BUILT_ROW, _LLMS_ENTRY, _LLMS_ENTRY + '\n    {"target": "site/unbuilt/index.html", "kind": "file",\n'
-                              '     "sources": ("tools/gen_draft_site.py",),\n'
-                              '     "regenerate": "python3 tools/gen_draft_site.py"},'),
-    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY),
-    (_LINES_ROW, '"opf/site/llms.txt", "kind": "block"', '"opf/site/llms.txt", "kind": "tree"'),
+    (_LINES_ROW, _TEAMS_ENTRY, _TEAMS_ENTRY + _BLOCK_ENTRY),
+    (_BUILT_ROW, _TEAMS_ENTRY, _TEAMS_ENTRY + '\n    {"target": "site/unbuilt/index.html", "kind": "file",\n'
+                               '     "sources": ("tools/gen_draft_site.py",),\n'
+                               '     "regenerate": "python3 tools/gen_draft_site.py"},'),
     (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", "changelog.toml"', 'site/draft-src/rules.toml", "VERSION"'),
     (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "changelog.toml")'),
-    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/spec/OPF-SPEC.md"')),
+    (_LINES_ROW, _TEAMS_ENTRY, _TEAMS_ENTRY + _BLOCK_ENTRY.replace('"opf/README.md"', '"opf/spec/OPF-SPEC.md"')),
     (_HOOKS_ROW, '".aiqt/core/hooks/manifest.toml", "VERSION"', '"VERSION"'),
     (_HOOKS_ROW, '"site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml")', '"site/draft-src/home.toml")'),
     (_MAPPINGS_ROW, '"tools/gen_mappings.py", ', ''),
@@ -2399,21 +2355,19 @@ def _page_strings(page):
 def _data_carriers(sites=SITES, root=ROOT):
     """{row id: frozenset of page targets}, found from the page models _load_pages returns (its bounded read
     and TOML parse; no data file is read again): _FOOTER_ROW maps to the pages with a body component
-    "control", _NOTE_ROW to the pages with a decoded value carrying the $OPF_STATUS token, _HOOKS_ROW to the
-    pages with a decoded value carrying the $HOOK_COUNT token, and _MAPPINGS_ROW to the pages with a body
-    component "mappings". The register rows hold the last 2 from these sets (a hook count renders as a bare
+    "control", _HOOKS_ROW to the pages with a decoded value carrying the $HOOK_COUNT token, and _MAPPINGS_ROW
+    to the pages with a body component "mappings". The register rows hold the last 2 from these sets (a hook count renders as a bare
     number, a mappings body has no fixed marker). A token is looked for in the decoded values, so a TOML
     comment naming it is no carrier and an escaped spelling is one; a token in a value that renders as
     escaped text rather than through _inline counts too, and the self-test's -found rows then turn red, so
     the sets fail closed rather than miss a page."""
-    found = {_FOOTER_ROW: set(), _NOTE_ROW: set(), _HOOKS_ROW: set(), _MAPPINGS_ROW: set()}
+    found = {_FOOTER_ROW: set(), _HOOKS_ROW: set(), _MAPPINGS_ROW: set()}
     for site in sites:
         for page in _load_pages(Path(root) / site["src"], site["src"]):
             target = "{}/{}".format(site["root"], page["rel"])
             names = {component["component"] for component in page["body"]}
             strings = _page_strings(page)
             for row, carries in ((_FOOTER_ROW, "control" in names),
-                                 (_NOTE_ROW, any("$OPF_STATUS" in value for value in strings)),
                                  (_HOOKS_ROW, any("$HOOK_COUNT" in value for value in strings)),
                                  (_MAPPINGS_ROW, "mappings" in names)):
                 if carries:
@@ -2879,11 +2833,10 @@ def _other_declarations(root=ROOT):
     return others + [(gen_gensrc.SELF, gen_gensrc.OWN_OUTPUTS)]
 
 
-def _register_findings(entries, outputs, footer, note, others, carriers):
+def _register_findings(entries, outputs, footer, others, carriers):
     """{row id: findings} for a declaration `entries` against the built pages `outputs` ({target: text}).
-    `footer` is the control strip's Version and Status markup and `note` the status note, each as rendered.
-    A page entry whose page carries `footer` must declare VERSION and changelog.toml, and one whose page
-    carries `note` must declare STATUS_SOURCE; a page entry declaring either set while its page does not
+    `footer` is the control strip's Version and Status markup as rendered. A page entry whose page carries
+    `footer` must declare VERSION and changelog.toml; a page entry declaring that set while its page does not
     carry the text is a finding too. `carriers` is _data_carriers() of the live data: a page entry among
     its _HOOKS_ROW pages must declare HOOKS_SOURCE, and one among its _MAPPINGS_ROW pages every source of
     _MAPPINGS_SOURCES; a page entry outside those pages declaring any of them is a finding too. A page entry
@@ -2894,7 +2847,7 @@ def _register_findings(entries, outputs, footer, note, others, carriers):
     its exact target or by an ancestor tree target, is a finding, and so is one under an ancestor tree
     target of `entries`, because each such entry would claim the whole file where this generator owns only
     its status line, or claim a file kept off the register."""
-    rows = {_FOOTER_ROW: [], _NOTE_ROW: [], _LINES_ROW: [], _BUILT_ROW: [], _HOOKS_ROW: [], _MAPPINGS_ROW: []}
+    rows = {_FOOTER_ROW: [], _LINES_ROW: [], _BUILT_ROW: [], _HOOKS_ROW: [], _MAPPINGS_ROW: []}
     for entry in entries:
         if entry["kind"] != "file":
             continue
@@ -2904,7 +2857,6 @@ def _register_findings(entries, outputs, footer, note, others, carriers):
             continue
         for row, carries, wanted, holder, thing in (
                 (_FOOTER_ROW, footer in outputs[target], set(_FOOTER_SOURCES), "its page", "the rendered text"),
-                (_NOTE_ROW, note in outputs[target], {STATUS_SOURCE}, "its page", "the rendered text"),
                 (_HOOKS_ROW, target in carriers[_HOOKS_ROW], {HOOKS_SOURCE}, "its data", "the $HOOK_COUNT token"),
                 (_MAPPINGS_ROW, target in carriers[_MAPPINGS_ROW], set(_MAPPINGS_SOURCES), "its data",
                  "a mappings component")):
@@ -3000,8 +2952,16 @@ def _self_test():
     live_outputs = accepted("build/declared-pages-render", build)
     staged_ = staged_sites()
     site = staged_[0]
+    # A self-test-only second site (the opfiles.ai site went with opf/site/): the aiqt.ai pages built again
+    # under another family key and name and their own root, so the per-site rules keep a second site to hold
+    # apart. The key must be a FAMILY key (_origin and the footer cycle look it up there). It keeps the
+    # aiqt.ai live root and kept paths, so the kept-path existence check still holds for it.
+    second = dict(site, key="opfiles", name="OPFiles", root="second-site")
     outputs = accepted("build/staged-pages-render", build, None, staged_, False)
-    if not live_outputs or not outputs:
+    # The declared pages built for the first site and the fixture second site together; the per-site rows
+    # below (chrome, footer cycle, card origin, link resolution, promotion) read the second site's pages here.
+    second_outputs = accepted("build/second-site-pages-render", build, None, (site, second), False)
+    if not live_outputs or not outputs or not second_outputs:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
             print("  - " + failure)
@@ -3051,9 +3011,9 @@ def _self_test():
                    all(lines.count(meta) == 1 and built.count(meta) == 1 for meta in metas), lines)
         else:
             expect("meta/description-absent " + target, "description" not in built.split("</head>", 1)[0])
-    # Every page of both sites, staged and promoted: each card meta once, naming the page's absolute URL on
-    # its own site's domain, the page title and the site's card image.
-    for built_outputs, built_sites in ((outputs, staged_), (live_outputs, SITES)):
+    # Every page of every site (the fixture second site included), staged and promoted: each card meta once,
+    # naming the page's absolute URL on its own site's domain, the page title and the site's card image.
+    for built_outputs, built_sites in ((outputs, staged_), (live_outputs, SITES), (second_outputs, (site, second))):
         for target, built in sorted(built_outputs.items()):
             built_site = next(s for s in built_sites if target.startswith(s["root"] + "/"))
             rel = target[len(built_site["root"]) + 1:]
@@ -3073,10 +3033,25 @@ def _self_test():
                       '<meta name="twitter:image" content="{}">'.format(card)]
             head = built.split("</head>", 1)[0].split("\n")
             expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
-    expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'
-           in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
+    expect("meta/card-url-home", '<meta property="og:url" content="https://aiqt.ai/">'
+           in live_outputs["site/index.html"], live_outputs["site/index.html"][:2000])
     expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
            in outputs["site/draft/install/index.html"])
+    # The card origin is each site's own (_origin reads its FAMILY domain): the fixture second site's home
+    # names opfiles.ai, never the first site's aiqt.ai.
+    second_home = second_outputs["second-site/index.html"]
+    expect("meta/card-url-second-site", '<meta property="og:url" content="https://opfiles.ai/draft/">'
+           in second_home and '<meta property="og:image" content="https://opfiles.ai/assets/opfiles-og.png">'
+           in second_home and "https://aiqt.ai" not in second_home.split("</head>", 1)[0],
+           second_home.split("</head>", 1)[0])
+    # The shell class and the footer cycle are each site's own: the fixture second site's pages carry its key
+    # and start the cycle at its own family slice, with its own card current.
+    expect("second-site/html-class", '<html lang="en" class="site-opfiles">' in second_home
+           and 'class="site-aiqt"' not in second_home)
+    second_slices = re.findall(r'<li class="slice slice-(\d)">', second_home)
+    expect("second-site/footer-cycle", second_slices == ["2", "3", "4", "5", "6", "1"]
+           and second_home.count('aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg"') == 1,
+           second_slices)
     mappings_head = outputs["site/draft/mappings/index.html"].split("</head>", 1)[0]
     expect("meta/mappings-parenthetical", mappings_head.count(
         "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 2, mappings_head)
@@ -3334,8 +3309,9 @@ def _self_test():
            labelled)
 
     # The mappings component renders the two generated bodies from one synthetic (rows, registry) pair,
-    # so the draft markup for each view is pinned exactly, escaping included.
-    global _MAPPINGS_DATA
+    # so the draft markup for each view is pinned exactly, escaping included. (STATUS_LINES is rebound, and
+    # put back, by the fixture status-line rows of the register checks below.)
+    global _MAPPINGS_DATA, STATUS_LINES
     saved_mappings = _MAPPINGS_DATA
     _MAPPINGS_DATA = ([{
         "rule_id": "r1", "rule_title": "R & T", "rule_source": "https://example.com/r1",
@@ -3401,9 +3377,13 @@ def _self_test():
     expect("refuse/kept-bad-fragment", "kept live path" in refused(
         "refuse/kept-bad-fragment", rendered, 'component = "next"\ntext = "T"\nhref = "/evidence#a b"\n'))
     expect("links/kept-fragment-passes", _link_findings(site, '<a href="/evidence#limits">x</a>') == [])
-    expect("links/kept-is-per-site", _link_findings(staged_[1], '<a href="/evidence#limits">x</a>') != [])
+    expect("links/kept-is-per-site", _link_findings(dict(site, kept=("/llms.txt",)),
+                                                    '<a href="/evidence#limits">x</a>') != [])
 
     # The data model refuses what it does not know, with every key named.
+    # The retired $OPF_STATUS page token is refused in an inline HTML value, never rendered silently.
+    expect("refuse/opf-status-token", "$OPF_STATUS page token is retired" in refused(
+        "refuse/opf-status-token", _inline, dict(SITES[0]), "<p>$OPF_STATUS</p>"))
     expect("refuse/unknown-component", "unknown component" in refused(
         "refuse/unknown-component", fixture_page, '[[body]]\ncomponent = "widget"\n'))
     expect("refuse/unknown-page-key", "unknown key" in refused(
@@ -3900,8 +3880,13 @@ def _self_test():
         page_names.close()
         page_names.reset()
     expect("elements/built-pages-within-allowlist", built_problems == [], built_problems)
+    # The allowlisted elements no built page uses are exactly those only a pinned component fixture renders:
+    # <small> (the plan's described variant) and, since the opfiles.ai pages left with opf/site/, <blockquote>
+    # (pullquote), <figure> and <figcaption> (figure) and <h4> (srcview); the row
+    # elements/fixture-only-elements-rendered below holds each of those to its fixture.
+    fixture_only_elements = {"blockquote", "figcaption", "figure", "h4", "small"}
     expect("elements/page-allowlist-used-by-built-pages",
-           _site_markup.ELEMENTS - page_names.names == {"small"} and "<small>" in plan,
+           _site_markup.ELEMENTS - page_names.names == fixture_only_elements and "<small>" in plan,
            sorted(_site_markup.ELEMENTS - page_names.names))
     # A name a browser does not fold to a link attribute (KELVIN SIGN) is not checked as one; the ASCII twin is.
     got = _link_findings(site, '<span xlinK:href="HTTP://example.com/x">t</span>')
@@ -4053,19 +4038,20 @@ def _self_test():
     except RefusedPage as exc:
         expect("refuse/kept-missing-build", "kept live path" in str(exc), str(exc))
     try:
-        build([plain], sites=(site, dict(staged_[1], root=site["root"])))
+        build([plain], sites=(site, dict(second, root=site["root"])))
         expect("refuse/shared-output-path", False)
     except RefusedPage as exc:
         expect("refuse/shared-output-path", "more than 1 site" in str(exc), str(exc))
 
-    # Promotion is per site: 1 site rebuilt at "/" while the other stays under /draft/.
-    promoted_set = build(sites=(dict(site, base="/", assets="/"), staged_[1]), registered=False)
+    # Promotion is per site: 1 site rebuilt at "/" while the other (the fixture second site) stays under
+    # /draft/ (second_outputs, built above, is that pair before the promotion).
+    promoted_set = build(sites=(dict(site, base="/", assets="/"), second), registered=False)
     promoted = promoted_set["site/draft/index.html"]
     expect("base/promotion-drops-robots", "noindex" not in promoted)
     expect("base/promotion-root-paths", 'href="/assets/baseline/fonts.css"' in promoted
            and "/draft/" not in promoted)
-    still = promoted_set["opf/site/draft/index.html"]
-    expect("base/other-site-stays-draft", still == outputs["opf/site/draft/index.html"]
+    still = promoted_set["second-site/draft/index.html"]
+    expect("base/other-site-stays-draft", still == second_outputs["second-site/draft/index.html"]
            and 'href="/draft/assets/baseline/fonts.css"' in still and "noindex" in still)
     # The declared build: both sites at "/", their pages at the live roots, the asset URLs still under
     # /draft/assets/baseline/ (the asset base stays where the files are served), the robots meta gone from
@@ -4090,46 +4076,12 @@ def _self_test():
     expect("base/live-robots-flip-caught", [rel for rel, text in sorted(flipped.items())
                                             if ("noindex" in text) != rel.endswith("/draft/index.html")]
            == ["site/draft/index.html", "site/install/index.html"])
-    expect("base/live-placeholder-home-link", '<a href="/">home page</a>' in live_outputs["site/draft/index.html"]
-           and '<a href="/">home page</a>' in live_outputs["opf/site/draft/index.html"])
+    expect("base/live-placeholder-home-link", '<a href="/">home page</a>' in live_outputs["site/draft/index.html"])
 
-    # opfiles.ai: its own page set, chrome, footer cycle and nav, with no control strip.
-    opf = staged_[1]
-    home = outputs["opf/site/draft/index.html"]
-    expect("opfiles/outputs", sorted(rel for rel in outputs if rel.startswith("opf/site/draft/")) == [
-        "opf/site/draft/404.html", "opf/site/draft/adopt/index.html", "opf/site/draft/core-files/index.html",
-        "opf/site/draft/disclosure/index.html", "opf/site/draft/draft/index.html", "opf/site/draft/index.html",
-        "opf/site/draft/license/index.html", "opf/site/draft/model/index.html",
-        "opf/site/draft/standard/index.html"], sorted(outputs))
-    expect("opfiles/html-class", '<html lang="en" class="site-opfiles">' in home)
-    expect("opfiles/title", "<title>Home | OPFiles.ai</title>" in home)
-    expect("opfiles/favicon", '<link rel="icon" href="/draft/assets/baseline/logos/opfiles-favicon.svg"' in home)
-    expect("opfiles/touch-icon",
-           '<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">' in home)
-    opf_slices = re.findall(r'<li class="slice slice-(\d)">', home)
-    expect("opfiles/footer-cycle", opf_slices == ["2", "3", "4", "5", "6", "1"], opf_slices)
-    expect("opfiles/footer-current-card",
-           home.count('aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg"') == 1)
-    opf_nav = re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>',
-                        outputs["opf/site/draft/model/index.html"]).group(1)
-    expect("opfiles/nav", opf_nav.startswith(
-        '<a href="/draft/model/" aria-current="page">The model</a><a href="/draft/standard/">The standard</a>'
-        '<a href="/draft/core-files/">Technical details</a><a href="/draft/adopt/">Adopt</a>'
-        '<a href="https://github.com/jposluns/guardrails/tree/main/opf" target="_blank"'), opf_nav)
-    expect("opfiles/nav-order", [label for _path, label in opf["nav"]] == [
-        "The model", "The standard", "Technical details", "Adopt"], opf["nav"])
-    expect("opfiles/about", home.count(_about(opf)) == 1)
-    expect("opfiles/no-control-strip", all('class="control"' not in outputs[rel] for rel in outputs
-                                           if rel.startswith("opf/")))
-    model_page = outputs["opf/site/draft/model/index.html"]
-    expect("opfiles/model-figure", model_page.count('<figure class="figure" id="fig-1">') == 1
-           and '<p class="lbl blk">Model</p>' in model_page and "<figcaption>Figure 1. " in model_page)
-    expect("opfiles/model-srcview", model_page.count('<div class="srcview">') == 1
-           and '<script src="/draft/assets/baseline/copy.js" defer></script>' in model_page)
-    expect("opfiles/standard-list", '<ul class="plan three"><li>Store layout and naming</li>'
-           in outputs["opf/site/draft/standard/index.html"])
+    # The opfiles.ai page set, chrome, footer cycle and nav rows went with opf/site/ (its content is the
+    # OPFiles repository's); a site without "control" still refuses the document control strip.
     expect("refuse/control-off-aiqt", "aiqt.ai only" in refused(
-        "refuse/control-off-aiqt", _c_control, opf,
+        "refuse/control-off-aiqt", _c_control, dict(site, control=False),
         {"component": "control", "document": "d", "source_text": "s", "source_href": "https://example.com/"},
         "fixture.body[1]"))
     upper_control = accepted("links/upper-case-https-control-source-lowercased", _c_control, site,
@@ -4209,6 +4161,8 @@ def _self_test():
     # The 5 components the opfiles.ai core files, adopt, disclosure and licence pages use, each pinned exactly.
     pull = rendered('component = "pullquote"\nhtml = "Declare it <em>once</em>."\n')
     expect("component/pullquote", pull == '<blockquote><p>Declare it <em>once</em>.</p></blockquote>', pull)
+    expect("elements/fixture-only-elements-rendered", "<blockquote>" in pull and '<figure class="figure"' in figure
+           and "<figcaption>" in figure and "<h4>" in srcview and "<small>" in plan)
     record = rendered('component = "record"\n[[body.items]]\nterm = "Declares"\nhtml = "<code>[opf]</code>"\n'
                       '[[body.items]]\nterm = "Read by"\nhtml = "R"\n')
     expect("component/record", record == (
@@ -4440,26 +4394,6 @@ def _self_test():
         hostile_page = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html))
         expect(name, refused(name, render_page, site, [hostile_page], hostile_page) != "")
 
-    # opfiles.ai keeps its own live paths: rendered root-relative with no new-tab hint on that site only.
-    opf_kept = COMPONENTS["next"](opf, {"component": "next", "text": "Guide", "href": "/adopt.md"}, "fixture.body[1]")
-    expect("links/opfiles-kept-plain", opf_kept == (
-        '<div class="next"><p class="lbl">Next</p><a class="start" href="/adopt.md">Guide '
-        '<span class="arrow" aria-hidden="true">&rarr;</span></a></div>'), opf_kept)
-    expect("links/opfiles-kept-not-aiqt", _link_findings(site, '<a href="/llms.txt">x</a>') != []
-           and _link_findings(opf, '<a href="/llms.txt">x</a>') == [])
-    expect("refuse/opfiles-kept-prefix", "kept live path" in refused(
-        "refuse/opfiles-kept-prefix", COMPONENTS["next"], opf,
-        {"component": "next", "text": "T", "href": "/llms.txt2"}, "fixture.body[1]"))
-    adopt_page = outputs["opf/site/draft/adopt/index.html"]
-    expect("opfiles/adopt-kept-links", '<a href="/llms.txt"><code>/llms.txt</code></a>' in adopt_page
-           and '<a href="/adopt.md"><code>/adopt.md</code></a>' in adopt_page
-           and 'href="https://opfiles.ai/' not in adopt_page and '<ol class="steps">' in adopt_page
-           and '<pre id="adopt-prompt" class="hascopy prompt-block" tabindex="0">' in adopt_page)
-    core_page = outputs["opf/site/draft/core-files/index.html"]
-    expect("opfiles/core-files-components", '<dl class="record">' in core_page and "<blockquote>" in core_page
-           and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page
-           and '<h3 id="done">' in core_page)
-
     # Link resolution and stray outputs, staged (base /draft/, the declared build) and promoted (the same
     # pages built at base "/" into each site's live root, in a fixture tree holding the asset folder and the
     # redirects files at their promoted places).
@@ -4470,7 +4404,7 @@ def _self_test():
     expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(page_targets())
            and promoted == live_outputs, sorted(promoted))
     expect("links/resolve-live-clean", unresolved_links(live_outputs) == [], unresolved_links(live_outputs))
-    staged_home, opf_home = "site/draft/index.html", "opf/site/draft/index.html"
+    staged_home = "site/draft/index.html"
 
     def with_link(built, target, markup):
         changed = dict(built)
@@ -4482,7 +4416,6 @@ def _self_test():
             ("links/staged-missing-asset-flagged", staged_home, '<img src="/draft/assets/baseline/absent.svg">', 1),
             ("links/staged-asset-folder-itself-flagged", staged_home, '<a href="/draft/assets/baseline/">x</a>', 1),
             ("links/staged-live-only-path-flagged", staged_home, '<a href="/install">x</a>', 1),
-            ("links/staged-other-site-page-flagged", opf_home, '<a href="/draft/install/">x</a>', 1),
             ("links/staged-promoted-url-flagged", staged_home, '<a href="/install/">x</a>', 1),
             ("links/staged-page-with-fragment-passes", staged_home, '<a href="/draft/install/#x">x</a>', 0),
             ("links/staged-redirect-source-passes", staged_home, '<a href="/rule1">x</a>', 0),
@@ -4516,6 +4449,14 @@ def _self_test():
         expect(name, len(got) == want, got)
     got = unresolved_links(with_link(outputs, staged_home, '<a href=" /development">x</a>'), staged_)
     expect("links/staged-whitespace-named", len(got) == 1 and "leading or trailing whitespace" in got[0], got)
+    # A link on one site's page to a page only the other site (the fixture second site) builds is flagged,
+    # and the same link on that other site's own page passes: resolution is per site.
+    other_built = dict(second_outputs)
+    other_built["second-site/only/index.html"] = other_built["second-site/index.html"]
+    got = unresolved_links(with_link(other_built, staged_home, '<a href="/draft/only/">x</a>'), (site, second))
+    got_own = unresolved_links(with_link(other_built, "second-site/index.html", '<a href="/draft/only/">x</a>'),
+                               (site, second))
+    expect("links/staged-other-site-page-flagged", len(got) == 1 and got_own == [], (got, got_own))
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-bare-") as bare:
         for site_ in SITES:
             os.makedirs(Path(bare) / site_["live"])
@@ -4554,18 +4495,35 @@ def _self_test():
                 handle.write("x")
         got = stray_outputs(tmp, promoted_sites_, promoted_targets)
         expect("stray/promoted-kept-placeholder-assets-and-other-files-pass", got == [], got)
-        for rel in ("site/old.html", "site/install/extra.html", "opf/site/model/old.html"):
+        for rel in ("site/old.html", "site/install/extra.html", "site/standard/old.html"):
             with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
                 handle.write("x")
         got = stray_outputs(tmp, promoted_sites_, promoted_targets)
         expect("stray/promoted-unlisted-pages-flagged", sorted(got) == [
-            "opf/site/model/old.html", "site/install/extra.html", "site/old.html"], got)
+            "site/install/extra.html", "site/old.html", "site/standard/old.html"], got)
         with open(Path(tmp) / "site/install/UPPER.HTML", "w", encoding="utf-8") as handle:
             handle.write("x")
         got = stray_outputs(tmp, promoted_sites_, promoted_targets)
         expect("stray/promoted-upper-case-extension-flagged", "site/install/UPPER.HTML" in got, got)
         got = stray_outputs(tmp, staged_, set(outputs))
         expect("stray/promoted-staged-targets-see-none", got == [], got)
+        # Every site's page folders are listed, not the first site's alone: the fixture second site's pages
+        # written beside site/'s, an unlisted page in a folder of each is flagged, and one of the second site's
+        # own kept live paths (its kept list, read per site) is not.
+        second_live = dict(promoted_sites_[0], key="opfiles", name="OPFiles", root="second-site",
+                           live="second-site", kept=("/notes",))
+        second_targets = {"second-site/" + rel[len("site/"):] for rel in promoted_targets}
+        for rel in sorted(second_targets):
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        for rel in ("second-site/old.html", "second-site/install/extra.html", "second-site/notes.html"):
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        got = stray_outputs(tmp, (promoted_sites_[0], second_live), promoted_targets | second_targets)
+        expect("stray/second-site-unlisted-pages-flagged",
+               "second-site/old.html" in got and "second-site/install/extra.html" in got
+               and "site/old.html" in got and "second-site/notes.html" not in got, got)
         # A temporary page file left in a page folder (.<name>.<pid>.tmp, or a later try .<name>.<pid>.<n>.tmp)
         # is stray output; a dot file of another shape beside it is not, nor is a name that only contains a
         # temporary name (TEMP_NAME_RE must match the whole name).
@@ -4623,8 +4581,6 @@ def _self_test():
     expect("status/note-one-pending", status_note(fixture_table[:3]).endswith("In progress: c; it exits 2 in "
                                                                               "this build."))
     live_note = status_note()
-    expect("status/live-note-on-pages", live_note in live_outputs["opf/site/index.html"]
-           and live_note in live_outputs["opf/site/core-files/index.html"], live_note)
     expect("status/live-note-wording", not any(word in live_note.lower() for word in (
         "not ready", "cannot", "not yet", "of 10", "10 command", "sorry")), live_note)
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-") as tmp:
@@ -4637,7 +4593,7 @@ def _self_test():
         with open(Path(tmp) / "opf/README.md", encoding="utf-8") as handle:
             readme = handle.read()
         codes.append(status_lines(tmp, True, fixture_table[:3]))
-        with open(Path(tmp) / "opf/site/llms.txt", "a", encoding="utf-8") as handle:
+        with open(Path(tmp) / STATUS_LINES[-1][0], "a", encoding="utf-8") as handle:
             handle.write(STATUS_LINES[-1][1] + "twice\n")
         codes.append(status_lines(tmp, False, fixture_table))
         with open(Path(tmp) / "opf/README.md", encoding="utf-8") as handle:
@@ -4645,6 +4601,23 @@ def _self_test():
     expect("status/lines-codes", codes == [1, 0, 0, 1, 2], codes)
     expect("status/lines-written", readme == "# T\n\n{}\nkept\n".format(status_note(fixture_table)), readme)
     expect("status/doubled-prefix-writes-nothing", after == readme, after)
+    # The lead column (the text written before the note): both live leads are empty since opf/site/llms.txt
+    # went with opf/site/, so a fixture STATUS_LINES file with a non-empty lead holds it: the line its prefix
+    # names is rewritten as lead + note, and a check after the write is clean.
+    saved_status_lines = STATUS_LINES
+    STATUS_LINES = ((_FIXTURE_STATUS_FILE, "- x: ", "- x: lead text. "),)
+    try:
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-lead-") as tmp:
+            os.makedirs((Path(tmp) / _FIXTURE_STATUS_FILE).parent)
+            with open(Path(tmp) / _FIXTURE_STATUS_FILE, "w", encoding="utf-8") as handle:
+                handle.write("# T\n- x: old\nkept\n")
+            codes = [status_lines(tmp, False, fixture_table), status_lines(tmp, True, fixture_table)]
+            with open(Path(tmp) / _FIXTURE_STATUS_FILE, encoding="utf-8") as handle:
+                lead_text = handle.read()
+    finally:
+        STATUS_LINES = saved_status_lines
+    expect("status/fixture-lead-written", codes == [0, 0]
+           and lead_text == "# T\n- x: lead text. {}\nkept\n".format(status_note(fixture_table)), (codes, lead_text))
     # A temporary file that cannot be written (its name already taken by a directory) refuses the run at
     # exit 2 with every status line file as it was: no file is replaced until every temporary file is written.
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-atomic-") as tmp:
@@ -4685,14 +4658,14 @@ def _self_test():
            others and "gen_gensrc" in {stem for stem, _decl in others}
            and len({stem for stem, _decl in others}) > 1 and _OWN_STEM not in {stem for stem, _decl in others},
            [stem for stem, _decl in others])
-    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, live_note, others,
+    for row, found in sorted(_register_findings(GENSRC_OUTPUTS, live_outputs, footer, others,
                                                 carriers).items()):
         expect(row, found == [], found)
     with open(__file__, encoding="utf-8") as handle:
         own = handle.read()
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-register-") as tmp:
         control = _load_register_mutant(own, tmp, "control")
-        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, live_note, others, carriers)
+        got = control._register_findings(control.GENSRC_OUTPUTS, live_outputs, footer, others, carriers)
         expect("gensrc/flip-control-clean", not any(got.values()), got)
         for position, (row, old, new) in enumerate(_REGISTER_FLIPS):
             name = "{}/flip{}-red".format(row, position)
@@ -4701,26 +4674,20 @@ def _self_test():
                 expect(name, False, "the flip's anchor is not in GENSRC_OUTPUTS exactly once")
                 continue
             mutant = _load_register_mutant(mutated, tmp, "flip{}".format(position))
-            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, live_note, others,
-                                            carriers)
+            got = mutant._register_findings(mutant.GENSRC_OUTPUTS, live_outputs, footer, others, carriers)
             expect(name, sorted(key for key, found in got.items() if found) == [row], got)
 
     def red_rows(entries, extra_others=()):
-        got = _register_findings(entries, live_outputs, footer, live_note, list(others) + list(extra_others),
-                                 carriers)
+        got = _register_findings(entries, live_outputs, footer, list(others) + list(extra_others), carriers)
         return sorted(key for key, found in got.items() if found)
 
-    # The pages that carry the control strip and the status note, found from the data files on their own
-    # (_data_carriers: a body component "control"; the $OPF_STATUS token in a decoded value), must be the
-    # pages whose built text carries the rendered strip and note, and neither set is empty, so the rows below
-    # are never vacuous.
-    control_pages, note_pages = carriers[_FOOTER_ROW], carriers[_NOTE_ROW]
+    # The pages that carry the control strip, found from the data files on their own (_data_carriers: a body
+    # component "control"), must be the pages whose built text carries the rendered strip, and the set is not
+    # empty, so the rows below are never vacuous.
+    control_pages = carriers[_FOOTER_ROW]
     footer_carriers = {target for target, text in live_outputs.items() if footer in text}
-    note_carriers = {target for target, text in live_outputs.items() if live_note in text}
     expect("gensrc/control-pages-found", control_pages and control_pages == footer_carriers,
            (sorted(control_pages), sorted(footer_carriers)))
-    expect("gensrc/status-note-pages-found", note_pages and note_pages == note_carriers,
-           (sorted(note_pages), sorted(note_carriers)))
     # The hooks and mappings carriers (found from the data files) must be the pages whose built bytes change
     # with that input: the hooks manifest of the built tree giving another count, and the mappings rows and
     # registry emptied. Neither set is empty, so the rows below are never vacuous.
@@ -4748,7 +4715,6 @@ def _self_test():
     for name, row, source, pages in (
             ("gensrc/control-pages-drop-version-red", _FOOTER_ROW, "VERSION", footer_carriers),
             ("gensrc/control-pages-drop-changelog-red", _FOOTER_ROW, "changelog.toml", footer_carriers),
-            ("gensrc/status-note-pages-drop-status-source-red", _NOTE_ROW, STATUS_SOURCE, note_carriers),
             ("gensrc/hook-count-pages-drop-hooks-source-red", _HOOKS_ROW, HOOKS_SOURCE, hook_pages)) + tuple(
             ("gensrc/mappings-pages-drop-{}-red".format(source), _MAPPINGS_ROW, source, mappings_pages)
             for source in _MAPPINGS_SOURCES):
@@ -4994,30 +4960,34 @@ def _self_test():
         reading('pass  # ROOT / ".aiqt" / "core" / "hooks"; import gen_hooks; r = ROOT; open("x")'),
         reading("pass", extra=unused))]
     expect("gensrc/mappings-sources-unread-forms-clean", own.count(anchor) == 1 and got == [[]] * 5, got)
-    # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming both tokens
-    # (a.toml) and a literal string spelling \u0024 (c.toml) carry neither token, while a basic string spelling
-    # each token as the escape \u0024 (b.toml) and a plain token in a body value (d.toml) carry it.
+    # The carriers come from decoded values: in a synthetic data folder, a TOML comment naming the token
+    # (a.toml) and a literal string spelling $ (c.toml) carry no token, while a basic string spelling the
+    # token as the escape $ (b.toml) and a plain token in a body value (d.toml) carry it.
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-carriers-") as tmp:
         os.makedirs(Path(tmp) / "draft-src")
         head = 'path = "{}/index.html"\ntitle = "T"\nkind = "document"\nlabel = "L"\nheading = "H"\n'
         for name, text in (
-                ("a", "# $HOOK_COUNT $OPF_STATUS\n[[body]]\ncomponent = \"prose\"\nhtml = \"<p>P</p>\"\n"),
-                ("b", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>\"\n"),
-                ("c", "[[body]]\ncomponent = \"prose\"\nhtml = '<p>\\u0024HOOK_COUNT \\u0024OPF_STATUS</p>'\n"),
+                ("a", "# $HOOK_COUNT\n[[body]]\ncomponent = \"prose\"\nhtml = \"<p>P</p>\"\n"),
+                ("b", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>\\u0024HOOK_COUNT</p>\"\n"),
+                ("c", "[[body]]\ncomponent = \"prose\"\nhtml = '<p>\\u0024HOOK_COUNT</p>'\n"),
                 ("d", "[[body]]\ncomponent = \"prose\"\nhtml = \"<p>$HOOK_COUNT</p>\"\n")):
             with open(Path(tmp) / "draft-src" / (name + ".toml"), "w", encoding="utf-8") as handle:
                 handle.write(head.format(name) + text)
         got = _data_carriers(({"src": "draft-src", "root": "x"},), tmp)
     expect("gensrc/data-carriers-skip-comments-and-literals",
-           not {"x/a/index.html", "x/c/index.html"} & (got[_HOOKS_ROW] | got[_NOTE_ROW]), got)
+           not {"x/a/index.html", "x/c/index.html"} & got[_HOOKS_ROW], got)
     expect("gensrc/data-carriers-decode-escapes",
-           got[_HOOKS_ROW] == {"x/b/index.html", "x/d/index.html"} and got[_NOTE_ROW] == {"x/b/index.html"}, got)
+           got[_HOOKS_ROW] == {"x/b/index.html", "x/d/index.html"}, got)
     # A block entry is never a page: page_targets() leaves it out, and the template pages the site gates read
     # (tools/_template_pages.py) are exactly the page targets, so a block entry neither becomes a template page
-    # nor moves a site's template base.
+    # nor moves a site's template base. The live declaration has no block entry (opf/site/llms.txt went with
+    # opf/site/), so the rule is held over a fixture declaration that adds one; the page set it yields must be
+    # the live one.
     import _template_pages
-    blocks = {entry["target"] for entry in GENSRC_OUTPUTS if entry["kind"] == "block"}
-    expect("gensrc/block-entries-not-pages", blocks and not blocks & page_targets()
+    fixture_decl = GENSRC_OUTPUTS + (_FIXTURE_BLOCK,)
+    blocks = {entry["target"] for entry in fixture_decl if entry["kind"] == "block"}
+    expect("gensrc/block-entries-not-pages", blocks and not blocks & page_targets(fixture_decl)
+           and page_targets(fixture_decl) == page_targets()
            and _template_pages.template_targets(ROOT) == page_targets(), sorted(blocks))
 
     # A STATUS_LINES file named outside this generator's own exact entries: by an exact target or an ancestor
@@ -5042,18 +5012,45 @@ def _self_test():
              other(("opf/spec/OPF-SPEC.md", "block")), [_LINES_ROW]),
             ("gensrc/unregistered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
              other(("opf/spec/", "tree")), [_LINES_ROW]),
-            ("gensrc/registered-ancestor-tree-in-other-generator-red", GENSRC_OUTPUTS,
-             other(("opf/site/", "tree")), [_LINES_ROW]),
             ("gensrc/unregistered-ancestor-tree-in-own-declaration-red", own_tree, (), [_LINES_ROW]),
             ("gensrc/sibling-files-in-other-generator-allowed", GENSRC_OUTPUTS,
              other(("opf/README.mdx", "file"), ("opf/README", "file"), ("opf/spec/OPF-SPEC.md.bak", "block")), []),
             ("gensrc/sibling-trees-in-other-generator-allowed", GENSRC_OUTPUTS,
-             other(("opf/spe/", "tree"), ("opf/spec/OPF-SPEC/", "tree"), ("opf/site/llms/", "tree")), []),
+             other(("opf/spe/", "tree"), ("opf/spec/OPF-SPEC/", "tree")), []),
             ("gensrc/sibling-tree-in-own-declaration-allowed", own_sibling_tree, (), [])):
         expect(name, red_rows(entries, extra) == want, (red_rows(entries, extra), want))
         if extra and want:
-            expect(name, _register_findings(entries, live_outputs, footer, live_note, (), carriers)[_LINES_ROW] == [],
+            expect(name, _register_findings(entries, live_outputs, footer, (), carriers)[_LINES_ROW] == [],
                    "found without the other declarations")
+    # The registered-file cases, over the fixture STATUS_LINES file and its block entry (no registered
+    # status-line file is left in the live tree): the fixture declaration alone is clean; another generator's
+    # ancestor tree over the fixture file is red (and clean without the other declarations); a sibling tree
+    # whose name only begins like it stays clean; and the block entry missing, lacking either source,
+    # declared twice, or of kind "tree" each turn the status-lines row (alone) red.
+    fixture_decl = GENSRC_OUTPUTS + (_FIXTURE_BLOCK,)
+    saved_status_lines = STATUS_LINES
+    STATUS_LINES = saved_status_lines + ((_FIXTURE_STATUS_FILE, "- x: ", ""),)
+    try:
+        ancestor = other(("fixture/", "tree"))
+        expect("gensrc/registered-ancestor-tree-in-other-generator-red",
+               red_rows(fixture_decl, ancestor) == [_LINES_ROW] and red_rows(fixture_decl) == []
+               and _register_findings(fixture_decl, live_outputs, footer, (), carriers)[_LINES_ROW] == [],
+               (red_rows(fixture_decl, ancestor), red_rows(fixture_decl)))
+        expect("gensrc/fixture-sibling-tree-in-other-generator-allowed",
+               red_rows(fixture_decl, other(("fixture/status-lines/", "tree"))) == [],
+               red_rows(fixture_decl, other(("fixture/status-lines/", "tree"))))
+        for name, entries in (
+                ("gensrc/fixture-status-line-missing-red", GENSRC_OUTPUTS),
+                ("gensrc/fixture-status-line-lacks-status-source-red",
+                 GENSRC_OUTPUTS + (dict(_FIXTURE_BLOCK, sources=("tools/gen_draft_site.py",)),)),
+                ("gensrc/fixture-status-line-lacks-generator-red",
+                 GENSRC_OUTPUTS + (dict(_FIXTURE_BLOCK, sources=(STATUS_SOURCE,)),)),
+                ("gensrc/fixture-status-line-declared-twice-red", fixture_decl + (_FIXTURE_BLOCK,)),
+                ("gensrc/fixture-status-line-kind-tree-red",
+                 GENSRC_OUTPUTS + (dict(_FIXTURE_BLOCK, kind="tree"),))):
+            expect(name, red_rows(entries) == [_LINES_ROW], red_rows(entries))
+    finally:
+        STATUS_LINES = saved_status_lines
 
     # The hook count: read from the hooks manifest, rendered for the $HOOK_COUNT token, and the only form the
     # pages state it in.
@@ -5107,7 +5104,8 @@ def _self_test():
         with os.scandir(ROOT / data_site["src"]) as entries:
             hook_data_files.extend("{}/{}".format(data_site["src"], entry.name) for entry in entries
                                    if entry.name.endswith(".toml"))
-    expect("hooks/data-files-every-site", any(rel.startswith("opf/site/draft-src/") for rel in hook_data_files)
+    expect("hooks/data-files-every-site", all(any(rel.startswith(data_site["src"] + "/") for rel in hook_data_files)
+                                              for data_site in SITES)
            and "site/draft-src/home.toml" in hook_data_files, hook_data_files)
     for rel in sorted(hook_data_files):
         with open(ROOT / rel, encoding="utf-8") as handle:
@@ -5570,10 +5568,12 @@ def _self_test():
           "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
           "hook count read from the hooks manifest of the root run() is given (a symbolic link, a FIFO or "
           "a symbolically linked parent directory there refused, each layer of the read driven on its "
-          "own, and its descriptor closed once), no draft-src data file of either site typing a number (digits or a number word) "
+          "own, and its descriptor closed once), no draft-src data file of any site typing a number (digits or a number word) "
           "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
           "decoded, --check exit codes, the register rows with their flips, each source dropped from every "
-          "control-strip, status-note, hook-count and mappings page entry, the carriers read from decoded "
+          "control-strip, hook-count and mappings page entry, the retired $OPF_STATUS token refused, the "
+          "block-entry rules over a fixture status-line file and a non-empty status-line lead, the fixture "
+          "second site's own shell class, footer cycle, card origin and stray pages, the carriers read from decoded "
           "data values, _MAPPINGS_SOURCES held to the inputs derived from the mappings renderers, status "
           "lines named by an exact or ancestor tree target in any generator's declaration, an explicit empty "
           "defaulted label refused while an optional key "

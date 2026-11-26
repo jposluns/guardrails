@@ -25033,7 +25033,7 @@ KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync",
                "record")
 
 # The status of each KNOWN_VERBS verb in this build, the one source of the published status note
-# (tools/gen_draft_site.py renders it on opfiles.ai, in opf/README.md and in opf/site/llms.txt). Each row is
+# (tools/gen_draft_site.py renders it in opf/README.md and opf/spec/OPF-SPEC.md). Each row is
 # (verb, status, scope): "available" runs through its own handler; "partial" runs through its own handler for
 # the subcommands its scope names as running, and each subcommand it names as exiting 2 refuses every argument
 # list in this build; "in progress" exits 2 in this build, through the fail-closed stub or through a handler

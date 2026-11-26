@@ -17,10 +17,10 @@
 Each pin records, in the package README's format, the baseline version (`version = "X.Y.Z"`) and a [files]
 table from each copied file's repository path to its SHA-256. Every path in a pin lies under one copy root, a
 directory whose last 2 components are assets/baseline. PINS registers every pin with the 1 copy root it is
-bound to (.baseline/pin.toml for site/draft/assets/baseline, .baseline/opfiles-pin.toml for
-opf/site/draft/assets/baseline while staging); a pin that names any other root, and a registry that repeats
-a pin or a root, are cannot-evaluate, so 2 pins can never validate the same copy and leave the other one
-unchecked. For each registered pair the gate hashes every pinned file under the copy root and reports a
+bound to (.baseline/pin.toml for site/draft/assets/baseline; the opfiles.ai pin .baseline/opfiles-pin.toml and
+its copy under opf/site/ were removed from this repository); a pin that names any other root, and a registry
+that repeats a pin or a root, are cannot-evaluate, so 2 pins can never validate the same copy and leave the
+other one unchecked (the self-test holds that over a synthetic 2-pair registry). For each registered pair the gate hashes every pinned file under the copy root and reports a
 file whose bytes differ, a
 pinned file that is missing, a file under a copy root that the pin does not list (a stray), a
 symbolic link or other non-regular entry anywhere in a copy root, including the root itself, and a parent
@@ -158,7 +158,6 @@ ROOT = Path(__file__).resolve().parents[1]
 # Every pin and the 1 copy root it is bound to, in check order; both columns are unique.
 PINS = (
     (".baseline/pin.toml", "site/draft/assets/baseline"),
-    (".baseline/opfiles-pin.toml", "opf/site/draft/assets/baseline"),
 )
 PIN_REL = PINS[0][0]
 MAX_PIN_BYTES = 1 << 20
@@ -968,10 +967,11 @@ def check(name, ok, detail=""):
 
 FIXTURE_ROOT = "site/draft/assets/baseline"
 FIXTURE_FILES = {"baseline.css": b"body{}\n", "fonts/a.woff2": b"wOF2\x00\x01", "marks/NOTICE.md": b"# n\n"}
-# The single-pair registry most cases use, and the 2-pair registry the live tree uses.
+# The single-pair registry most cases use, and a synthetic 2-pair registry (the live tree has 1 pair since the
+# opfiles.ai pin left with opf/site/), so the multi-pair rules keep a second pin and root.
 FIXTURE_PINS = ((PIN_REL, FIXTURE_ROOT),)
-SECOND_PIN = PINS[1][0]
-SECOND_ROOT = PINS[1][1]
+SECOND_PIN = ".baseline/second-pin.toml"
+SECOND_ROOT = "fixture/second/draft/assets/baseline"
 TWO_PINS = ((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, SECOND_ROOT))
 # The build tool a fixture pins outside its copy root, at the registered path.
 TOOL_REL = BUILD_TOOLS[0]
@@ -2378,9 +2378,12 @@ def _self_test():
     # The registry: every pin is bound to its own copy root. Both pairs pass together; a defect in the
     # second copy is reported against the second root and pin; a pin naming another root (so 2 pins would
     # validate 1 copy) and a registry repeating a pin or a root are cannot-evaluate.
-    check("registry/live-pairs", PINS == ((".baseline/pin.toml", "site/draft/assets/baseline"),
-                                          (".baseline/opfiles-pin.toml", "opf/site/draft/assets/baseline")),
-          PINS)
+    check("registry/live-pairs", PINS == ((".baseline/pin.toml", "site/draft/assets/baseline"),), PINS)
+    # The synthetic second pair is not live, so re-coupling the fixtures to the live registry is red.
+    check("registry/fixture-second-pair-not-live",
+          SECOND_PIN not in {pin for pin, _root in PINS} and SECOND_ROOT not in {root for _pin, root in PINS}
+          and SECOND_ROOT.endswith(COPY_DIR) and all(PART_RE.fullmatch(part) for part in SECOND_ROOT.split("/")),
+          (SECOND_PIN, SECOND_ROOT, PINS))
     findings, errors = _scan_case(pins=TWO_PINS, second=(None, None))
     check("registry/two-pairs-pass", findings == [] and errors == [], (findings, errors))
 

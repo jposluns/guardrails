@@ -16,15 +16,14 @@ token whose version is outside that set is a finding. A development token `AIQT 
 cut or tag tree) no development token is valid, so a development label left behind after a cut is a finding.
 
 Two rules share the one scan:
-  - CURRENCY (blocking). Every bare or qualified token under site/**/*.html, opf/site/**/*.html and the
-    declared public Markdown files (PUBLIC_TEXT_FILES) names a currently valid version. opf/site/ keeps the
-    currency coverage it had; reading the qualified form there too only widens it (no qualified token
-    exists there today).
+  - CURRENCY (blocking). Every bare or qualified token under site/**/*.html and the declared public
+    Markdown files (PUBLIC_TEXT_FILES) names a currently valid version. The opfiles.ai sources under
+    opf/site/ were removed from this repository, so opf/site/ is no longer read.
   - QUALIFICATION (the maintainer's pack-version naming decision). In guardrails public text every
     mention of the pack version reads `AIQT pack X.Y.Z`, so a bare `AIQT X.Y.Z` there is a qualification
     finding. Guardrails
-    public text here is site/**/*.html (QUALIFIED_ROOTS) plus PUBLIC_TEXT_FILES. opf/site/ is OPF's public
-    text and is outside this rule (OPF wording is handed to OPF). The rule lands REPORT-ONLY behind the one
+    public text here is site/**/*.html (QUALIFIED_ROOTS) plus PUBLIC_TEXT_FILES. A coverage root outside
+    QUALIFIED_ROOTS keeps currency coverage only. The rule lands REPORT-ONLY behind the one
     constant QUALIFICATION_ENFORCED: while it is False the findings and their count are printed and do not
     change the exit code; the public text is reworded at the 1.1.1 cut, and flipping the constant to True
     is part of that cut, after which a bare token in guardrails public text exits 1.
@@ -120,12 +119,13 @@ del _saved_sys_path
 SKIP_DIRS = set()  # scan the whole of site/ (matching check_newtab); skipping no content directory means a
 # page under a node_modules/, __pycache__/, or similar cannot escape the currency check.
 
-# Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the index.html placeholder plus the
-# opf/site/draft staging tree). Each is a REQUIRED input; the version-currency rule is identical on both.
-COVERAGE_ROOTS = ("site", "opf/site")
+# Coverage roots: site/ (aiqt.ai). Each is a REQUIRED input; the version-currency rule is identical on every
+# root. The opfiles.ai root opf/site/ was removed from this repository; the self-test drives a second,
+# fixture root outside QUALIFIED_ROOTS.
+COVERAGE_ROOTS = ("site",)
 
-# The coverage roots holding guardrails public text, where the qualification rule applies. opf/site/ is
-# OPF's public text: its wording is handed to OPF, so it keeps currency coverage only.
+# The coverage roots holding guardrails public text, where the qualification rule applies. A coverage root
+# outside this list keeps currency coverage only.
 QUALIFIED_ROOTS = ("site",)
 
 # Declared guardrails public Markdown files (repository-relative). Each is a REQUIRED input for both rules:
@@ -270,6 +270,10 @@ def run(root):
         valid.add(planned)
     dev_valid = {planned + DEV_SUFFIX} if planned is not None else set()
 
+    # An empty COVERAGE_ROOTS fails closed: a scan that reads no site root is never a pass.
+    if not COVERAGE_ROOTS:
+        print("error: no coverage root to read; a scan of nothing is never a pass; fail-closed", file=sys.stderr)
+        return 2
     bare = []  # qualification findings across all guardrails public text, reported once below
     worst = 0
     for subdir in COVERAGE_ROOTS:
@@ -426,12 +430,13 @@ def _self_test():
         site.mkdir()
         for pname, content in pages.items():
             write(site / pname, content)
-        # opf/site is a second required coverage root. Give it one benign, version-token-free page so the
-        # existing site/-driven cases exercise the two-root run() without opf/site contributing a verdict;
-        # the opf/site-specific behaviour is covered by its own legs below.
-        opf_site = root / "opf" / "site"
-        opf_site.mkdir(parents=True)
-        (opf_site / "index.html").write_text("<p>coming soon</p>", encoding="utf-8")
+        # The fixture second root (second/site, a coverage root outside QUALIFIED_ROOTS for these cases; the
+        # opfiles.ai root opf/site/ that played this part was removed). Give it one benign, version-token-free
+        # page so the existing site/-driven cases exercise the two-root run() without it contributing a
+        # verdict; its own behaviour is covered by its own legs below.
+        second_site = root / "second" / "site"
+        second_site.mkdir(parents=True)
+        (second_site / "index.html").write_text("<p>coming soon</p>", encoding="utf-8")
         # The declared public Markdown files are required inputs: a benign token-free copy of each, unless
         # `files` overrides it (str/bytes content) or omits it (None).
         files = dict(files or {})
@@ -439,7 +444,7 @@ def _self_test():
             content = files.pop(rel, "# doc\n")
             if content is not None:
                 write(root / rel, content)
-        for rel, content in files.items():  # any other fixture path (e.g. an opf/site page)
+        for rel, content in files.items():  # any other fixture path (e.g. a second/site page)
             if content is None:
                 # An omitted path that is not declared: nothing to write. A case that omits a declared file
                 # then fails by its own assertion (and the declared-set pin below), never by a TypeError.
@@ -457,10 +462,19 @@ def _self_test():
         finally:
             globals()["QUALIFICATION_ENFORCED"] = saved
 
-    def run_quiet(root, enforced=False):
+    live_roots = COVERAGE_ROOTS
+    fixture_roots = ("site", "second/site")
+
+    def run_quiet(root, enforced=False, roots=fixture_roots):
+        # The cases run over the two fixture roots unless they pass the live ones; the live tuple is put
+        # back after every run.
         out = io.StringIO()
-        with mode(enforced), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            return run(root), out.getvalue()
+        globals()["COVERAGE_ROOTS"] = roots
+        try:
+            with mode(enforced), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                return run(root), out.getvalue()
+        finally:
+            globals()["COVERAGE_ROOTS"] = live_roots
 
     # (toml_bytes, pages, expected exit), all in REPORT-ONLY mode, so the currency outcomes below hold
     # whatever mode the module ships in. str page content is UTF-8; bytes is written raw.
@@ -559,8 +573,8 @@ def _self_test():
          {"i.html": "<p>ok</p>"}, {"README.md": "AIQT 9.9.9\n"}, False, 1),
         ("qh: qualified pre-release/4-segment forms stay out of scope (not read as bare) when enforcing",
          {"i.html": "<p>AIQT pack 1.0.0-rc1 and AIQT pack 1.0.0.0</p>"}, None, True, 0),
-        ("qi: a bare token in opf/site (OPF's text) is not a qualification finding when enforcing",
-         {"i.html": "<p>ok</p>"}, {"opf/site/o.html": "<p>AIQT 1.0.0</p>"}, True, 0),
+        ("qi: a bare token in a root outside QUALIFIED_ROOTS is not a qualification finding when enforcing",
+         {"i.html": "<p>ok</p>"}, {"second/site/o.html": "<p>AIQT 1.0.0</p>"}, True, 0),
         ("qj: a missing declared Markdown file cannot be evaluated", {"i.html": "<p>ok</p>"},
          {"ROADMAP.md": None}, False, 2),
         ("qk: a non-UTF-8 declared Markdown file cannot be evaluated", {"i.html": "<p>ok</p>"},
@@ -668,23 +682,36 @@ def _self_test():
         except (OSError, NotImplementedError):
             pass
 
-    # opf/site is a second required coverage root: a stale token in an opf/site page is a finding, and an
-    # absent opf/site root fails closed.
+    # The fixture second root is a required coverage root: a stale token in one of its pages is a finding,
+    # and its absence fails closed.
     with tempfile.TemporaryDirectory() as tmp:
         root = build(tmp, good_toml, {"i.html": "<p>AIQT 1.0.0</p>"})
-        (root / "opf" / "site" / "draft").mkdir(parents=True)
-        (root / "opf" / "site" / "draft" / "stale.html").write_text("<p>AIQT 9.9.9</p>", encoding="utf-8")
+        (root / "second" / "site" / "draft").mkdir(parents=True)
+        (root / "second" / "site" / "draft" / "stale.html").write_text("<p>AIQT 9.9.9</p>", encoding="utf-8")
         if run_quiet(root)[0] != 1:
-            failures.append("bb: a stale token in an opf/site page expected exit 1")
+            failures.append("bb: a stale token in a second root page expected exit 1")
+        # The live roots are site/ alone (opf/site/ was removed from this repository): the same stale page
+        # under opf/site/ is not read, and the tree passes.
+        (root / "opf" / "site" / "draft").mkdir(parents=True)
+        (root / "second" / "site" / "draft" / "stale.html").rename(root / "opf" / "site" / "draft" / "stale.html")
+        if live_roots != ("site",) or run_quiet(root, roots=live_roots)[0] != 0:
+            failures.append("bb-live: the live roots {!r} read a stale token under opf/site/ (expected "
+                            "site alone, exit 0)".format(live_roots))
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "changelog.toml").write_bytes(good_toml)
         (root / "site").mkdir()
-        (root / "site" / "i.html").write_text("<p>AIQT 1.0.0</p>", encoding="utf-8")  # no opf/site
+        (root / "site" / "i.html").write_text("<p>AIQT 1.0.0</p>", encoding="utf-8")  # no second root
         for rel in PUBLIC_TEXT_FILES:
             (root / rel).write_text("# doc\n", encoding="utf-8")
         if run_quiet(root)[0] != 2:
-            failures.append("cc: an absent opf/site coverage root expected exit 2 (fail-closed)")
+            failures.append("cc: an absent second coverage root expected exit 2 (fail-closed)")
+        # With the live roots, the same tree (site/ present, no opf/site/) passes.
+        if run_quiet(root, roots=live_roots)[0] != 0:
+            failures.append("cc-live: a tree with site/ and no opf/site/ expected exit 0 under the live roots")
+        # With no coverage root, the same tree reads no site root, so it fails closed.
+        if run_quiet(root, roots=())[0] != 2:
+            failures.append("cc-empty: no coverage root expected exit 2 (fail-closed), not a pass over nothing")
 
     # a non-iterable in-development allowlist fails closed (guard-input-soundness), not a traceback.
     saved = IN_DEVELOPMENT_VERSIONS
@@ -705,14 +732,15 @@ def _self_test():
           "'the 1.0.0 release', bare '1.0.0 pack', 'CSA AICM v1.1.0', and out-of-scope 4-segment/pre-release/"
           "build-suffixed forms yield no finding; multi-space and tab separators match; malformed/missing/"
           "release-less/version-less/non-SemVer changelog, an in-dev entry not > the release, a non-UTF-8 "
-          "page, a page-less site/, and (where supported) a symlinked page or changelog all fail closed; "
+          "page, a page-less site/, an empty coverage-root set, and (where supported) a symlinked page or "
+          "changelog all fail closed; "
           "qualification: bare 'AIQT X.Y.Z' in site/ or a declared Markdown file is a finding (report-only "
           "exits 0 and prints it with its count, enforcing exits 1), qualified current/in-dev pass, "
-          "qualified stale fails, opf/site is outside the rule, and a missing/non-regular/non-UTF-8/symlinked declared "
+          "qualified stale fails, a root outside QUALIFIED_ROOTS is outside the rule, and a missing/non-regular/non-UTF-8/symlinked declared "
           "file or a non-bool mode cannot be evaluated; development tokens: 'AIQT X.Y.Z-dev' matching [unreleased] "
           "passes (bare form a qualification finding), any other or one after the cut is a finding, suffix "
           "continuations are out of scope, the bare [unreleased] version is valid, and a malformed or not-above "
-          "[unreleased] cannot be evaluated ({}+ cases)".format(len(cases) + len(qcases) + 12))
+          "[unreleased] cannot be evaluated ({}+ cases)".format(len(cases) + len(qcases) + 13))
     return 0
 
 

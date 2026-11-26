@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Offline gate for the published security.txt files (RFC 9116) of aiqt.ai and opfiles.ai.
+"""Offline gate for the published security.txt file (RFC 9116) of aiqt.ai.
 
   check_security_txt.py              exit 0 clean, 1 finding, 2 cannot evaluate
   check_security_txt.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_security_txt.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
 
-Each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) must carry .well-known/security.txt as a
+Each site root (site/ for aiqt.ai; the opfiles.ai root opf/site/ was removed from this repository, and
+the self-test drives a second, fixture root) must carry .well-known/security.txt as a
 regular file whose lines are exactly the owner's 6 fields, in order, each once, with the owner's values
 and the Canonical URL of that root's own domain. A missing file, a non-regular file (a directory, a
 symlink, a FIFO), a missing, duplicated, unknown or out-of-order field, a wrong value and a wrong
-Canonical are findings (exit 1). A file that cannot be stat'ed or read, one over MAX_BYTES, one that is
+Canonical are findings (exit 1). An empty root set (a scan that reads nothing), a file that cannot be
+stat'ed or read, one over MAX_BYTES, one that is
 not UTF-8 (decoded strictly), or one carrying a line that is not a `Name: value` field, a CR anywhere
 (a lone CR included) or a NUL is cannot-evaluate (exit 2), never a pass. The gate reads only the
 repository; it never fetches the live files.
@@ -49,7 +51,12 @@ COMMON_FIELDS = (
 )
 SITE_ROOTS = (
     ("site", "https://aiqt.ai/.well-known/security.txt"),
-    ("opf/site", "https://opfiles.ai/.well-known/security.txt"),
+)
+# The self-test's two roots: site/ and a fixture second root with its own domain, so every per-root rule
+# (a Canonical of another root's domain among them) keeps a second root to hold apart.
+_FIXTURE_ROOTS = (
+    ("site", "https://aiqt.ai/.well-known/security.txt"),
+    ("second/site", "https://second.example/.well-known/security.txt"),
 )
 FIELD_RE = re.compile(r"([A-Za-z][A-Za-z-]*): (\S(?:.*\S)?)")
 
@@ -115,10 +122,13 @@ def judge(pairs, canonical, where):
     return findings
 
 
-def scan(root):
-    """(findings, errors) over every site root under root; errors make the run cannot-evaluate."""
+def scan(root, roots=SITE_ROOTS):
+    """(findings, errors) over every site root (`roots`, SITE_ROOTS by default) under root; errors make the
+    run cannot-evaluate. An empty `roots` is an error too: a scan that reads no root is never a pass."""
     findings, errors = [], []
-    for site, canonical in SITE_ROOTS:
+    if not roots:
+        errors.append("no site root to read; a scan of nothing is never a pass")
+    for site, canonical in roots:
         where = "{}/{}".format(site, REL)
         path = Path(root) / site / REL
         try:
@@ -146,8 +156,11 @@ def scan(root):
     return findings, errors
 
 
-def run_gate(root):
-    findings, errors = scan(root)
+def run_gate(root, roots=None):
+    """The gate over `roots` (SITE_ROOTS when None) under root. A pass names the roots it read: scan() refuses
+    an empty root set and finds a root whose file is missing, so each root named was read."""
+    roots = SITE_ROOTS if roots is None else roots
+    findings, errors = scan(root, roots)
     for line in errors:
         print("CANNOT EVALUATE: " + line, file=sys.stderr)
     for line in findings:
@@ -156,7 +169,8 @@ def run_gate(root):
         return 2
     if findings:
         return 1
-    print("PASS: security.txt is present and exact on {} site roots".format(len(SITE_ROOTS)))
+    print("PASS: security.txt is present and exact on {} site root(s) read: {}".format(
+        len(roots), ", ".join(site + "/" for site, _canonical in roots)))
     return 0
 
 
@@ -181,9 +195,12 @@ def _good_body(canonical):
     return "".join("{}: {}\n".format(name, value) for name, value in expected_fields(canonical))
 
 
-def _fixture(tmp, bodies):
-    """A fixture tree under tmp holding the given body (str, bytes or None for absent) per site root."""
-    for (site, _canonical), body in zip(SITE_ROOTS, bodies):
+def _fixture(tmp, bodies, roots=_FIXTURE_ROOTS):
+    """A fixture tree under tmp holding the given body (str, bytes or None for absent) per fixture root;
+    exactly one body per root, so no body is dropped silently."""
+    if len(bodies) != len(roots):
+        raise ValueError("{} bodies for {} roots".format(len(bodies), len(roots)))
+    for (site, _canonical), body in zip(roots, bodies):
         if body is None:
             continue
         directory = Path(tmp) / site / ".well-known"
@@ -195,12 +212,16 @@ def _fixture(tmp, bodies):
 
 def _scan_case(bodies):
     with tempfile.TemporaryDirectory(prefix="security-txt-selftest-") as tmp:
-        return scan(_fixture(tmp, bodies))
+        return scan(_fixture(tmp, bodies), _FIXTURE_ROOTS)
 
 
 def _self_test():
-    aiqt, opf = (canonical for _site, canonical in SITE_ROOTS)
-    good = (_good_body(aiqt), _good_body(opf))
+    # The live roots are site/ alone (opf/site/ was removed from this repository); the cases below run over
+    # the two fixture roots.
+    check("registry/live-roots", SITE_ROOTS == (("site", "https://aiqt.ai/.well-known/security.txt"),),
+          SITE_ROOTS)
+    aiqt, second = (canonical for _site, canonical in _FIXTURE_ROOTS)
+    good = (_good_body(aiqt), _good_body(second))
 
     findings, errors = _scan_case(good)
     check("pass/both-roots-exact", findings == [] and errors == [], (findings, errors))
@@ -212,7 +233,7 @@ def _self_test():
     with tempfile.TemporaryDirectory(prefix="security-txt-selftest-") as tmp:
         _fixture(tmp, (None, good[1]))
         os.makedirs(Path(tmp) / "site" / REL)
-        findings, errors = scan(tmp)
+        findings, errors = scan(tmp, _FIXTURE_ROOTS)
     check("refuse/not-regular-file", errors == [] and findings == ["site/{}: not a regular file".format(REL)],
           (findings, errors))
 
@@ -290,7 +311,7 @@ def _self_test():
         _fixture(tmp, good)
         os.lstat = _lstat_denied
         try:
-            findings, errors = scan(tmp)
+            findings, errors = scan(tmp, _FIXTURE_ROOTS)
         finally:
             os.lstat = real_lstat
     check("refuse/cannot-stat", findings == [] and len(errors) == 2
@@ -313,6 +334,27 @@ def _self_test():
             got = True
         check(name, got == refused, (len(body), got))
 
+    # A scan given no root reads nothing, so it is cannot-evaluate, never a pass.
+    with tempfile.TemporaryDirectory(prefix="security-txt-selftest-") as tmp:
+        findings, errors = scan(_fixture(tmp, good), ())
+    check("refuse/no-site-root-cannot-evaluate", findings == [] and len(errors) == 1
+          and "no site root" in errors[0], (findings, errors))
+
+    # The live gate reads site/ of the tree it is given: over an empty tree its file is missing (exit 1), and
+    # over a fixture tree its pass names site/ as the root it read.
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(prefix="security-txt-selftest-") as tmp:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            empty = run_gate(tmp)
+    with tempfile.TemporaryDirectory(prefix="security-txt-selftest-") as tmp:
+        _fixture(tmp, good)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            fixture_exit = run_gate(tmp)
+    check("live/gate-reads-site-root", empty == 1 and fixture_exit == 0
+          and "on 1 site root(s) read: site/\n" in out.getvalue(), (empty, fixture_exit, out.getvalue()))
+
     got = run_gate(ROOT)
     check("live/real-tree-passes", got == 0, got)
 
@@ -321,12 +363,14 @@ def _self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: check_security_txt {} checks (both exact files pass; a missing file, a "
+    print("SELF-TEST PASS: check_security_txt {} checks (the live roots are site/ alone; over two fixture "
+          "roots, both exact files pass; a missing file, a "
           "directory in its place, a missing field, a wrong value, a duplicate field, a swapped Canonical, "
           "an unknown field and a reordered pair each fail; a file that cannot be stat'ed or read, a "
           "non-UTF-8 body, a line without the field separator, CRLF line ends, a lone CR, a NUL and a "
           "missing final line feed are cannot-evaluate; an unrecognized argument exits 2; the size bound "
-          "holds one byte under, at and over; the live tree passes)".format(len(EXECUTED)))
+          "holds one byte under, at and over; a scan of no root is cannot-evaluate; the live gate reads site/ "
+          "(an empty tree fails) and names it; the live tree passes)".format(len(EXECUTED)))
     return 0
 
 

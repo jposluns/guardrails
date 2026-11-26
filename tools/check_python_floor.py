@@ -456,16 +456,15 @@ PLAIN_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
 ACTION_FILES = ("action.yml", "action.yaml")
 # Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest; .baseline/
 # is the shared site template's vendored tooling, pinned by SHA-256 and kept byte-identical to the template
-# package, so it cannot carry this repository's guard (the tree holds only its two pins and that tool).
+# package, so it cannot carry this repository's guard (the tree holds only its pin and that tool).
 EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", ".baseline/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 # The git index mode of a gitlink (a submodule's commit), as git ls-files -s prints it.
 GITLINK_MODE = b"160000"
-# The install and adopt pages are generated (tools/gen_draft_site.py), each an index.html under its
-# page directory.
+# The install page is generated (tools/gen_draft_site.py), an index.html under its page directory. The
+# opfiles.ai adoption guide and adopt page (opf/site/) were removed from this repository.
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install/index.html",
-                     "opf/site/adopt.md", "opf/site/adopt/index.html", "opf/spec/OPF-QUICKSTART.md",
-                     ".preview/README.md")
+                     "opf/spec/OPF-QUICKSTART.md", ".preview/README.md")
 # How many times a declaration file states the floor phrase, where that is more than once: each copy is
 # counted, so changing or removing one of them is a finding.
 # .preview/README.md states it once and quotes it once in the hooks' refusal line.
@@ -3937,6 +3936,11 @@ def _self_test_cases(base):
           (1, ["FAIL: {}: documentation-check is false, but its decided value is true "
                "(DOCUMENTATION_CHECK in tools/check_python_floor.py); changing it is a reviewed change "
                "to this gate".format(SOURCE_REL)]))
+    # The declaration files are exactly these six: the opfiles.ai adoption guide and adopt page
+    # (opf/site/) left this repository, and nothing else joined or left.
+    check("documentation/declaration-files-registry", DECLARATION_FILES,
+          ("README.md", "docs/development.md", "site/development.html", "site/install/index.html",
+           "opf/spec/OPF-QUICKSTART.md", ".preview/README.md"))
     code, lines = evaluate(_fixture(base, files={DECLARATION_FILES[0]: "Requires Python.\n"}))
     check("documentation/on-missing-phrase-finding",
           (code, [line for line in lines if "does not state" in line]),

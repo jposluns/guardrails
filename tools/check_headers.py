@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Offline gate for the Cloudflare Pages _headers files of aiqt.ai and opfiles.ai.
+"""Offline gate for the Cloudflare Pages _headers file of aiqt.ai.
 
   check_headers.py              exit 0 clean, 1 finding, 2 cannot evaluate
   check_headers.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_headers.py [--self-test] --execution-report ABS_PATH
   any other argument list is refused with exit 2
 
-Each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) must carry _headers as a regular file holding
+Each site root (site/ for aiqt.ai; the opfiles.ai root opf/site/ was removed from this repository, and the
+self-test drives a second, fixture root) must carry _headers as a regular file holding
 exactly 2 rule blocks, in order. `/*` sets Content-Security-Policy (the site's live policy),
 X-Frame-Options: DENY, Permissions-Policy and Cross-Origin-Opener-Policy: same-origin. `/draft/*` removes
 the live policy with `! Content-Security-Policy`, then sets Content-Security-Policy to the shared draft
@@ -17,7 +18,8 @@ LIVE_CSP_WIDENINGS (a quoted keyword source such as 'self' matches in any case, 
 exactly). X-Content-Type-Options, Referrer-Policy and Strict-Transport-Security are never set
 here (Cloudflare sends them). A missing file, a non-regular file, a missing, duplicated, unknown or
 out-of-order block or header, a forbidden header, a wrong value and a live policy that drops a directive or
-a source, or adds one that is not recorded, are findings (exit 1). A file that cannot be stat'ed or read,
+a source, or adds one that is not recorded, are findings (exit 1). An empty root set (a scan that reads
+nothing) is cannot-evaluate (exit 2), never a pass. A file that cannot be stat'ed or read,
 one over MAX_BYTES, one that is not UTF-8 (decoded strictly), or one carrying a CR (a lone CR included), a
 NUL, no final line feed, or a line that is not blank, a rule path, an indented `Name: value` header or an
 indented `! Name` removal is cannot-evaluate (exit 2), never a pass; cannot-evaluate outranks a finding.
@@ -46,7 +48,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REL = "_headers"
 MAX_BYTES = 8192
-SITE_ROOTS = ("site", "opf/site")
+SITE_ROOTS = ("site",)
+# The self-test's two roots: site/ and a fixture second root, so every case keeps a second root's body to
+# judge beside site/'s (the opfiles.ai root opf/site/ was removed from this repository).
+_FIXTURE_ROOTS = ("site", "second/site")
 
 # Both strings are copied byte for byte from the shared site template, baseline 1.3.1, section 9
 # (Security headers baseline): the shared draft policy and the Permissions-Policy value.
@@ -238,10 +243,13 @@ def judge(blocks, where):
     return findings
 
 
-def scan(root):
-    """(findings, errors) over every site root under root; errors make the run cannot-evaluate."""
+def scan(root, roots=SITE_ROOTS):
+    """(findings, errors) over every site root (`roots`, SITE_ROOTS by default) under root; errors make the
+    run cannot-evaluate. An empty `roots` is an error too: a scan that reads no root is never a pass."""
     findings, errors = [], []
-    for site in SITE_ROOTS:
+    if not roots:
+        errors.append("no site root to read; a scan of nothing is never a pass")
+    for site in roots:
         where = "{}/{}".format(site, REL)
         path = Path(root) / site / REL
         try:
@@ -316,9 +324,13 @@ def _good_body(live_csp=GOOD_LIVE_CSP):
             "  X-Robots-Tag: noindex\n")
 
 
-def _fixture(tmp, bodies):
-    """A fixture tree under tmp holding the given body (str, bytes or None for absent) per site root."""
-    for site, body in zip(SITE_ROOTS, bodies):
+def _fixture(tmp, bodies, roots=None):
+    """A fixture tree under tmp holding the given body (str, bytes or None for absent) per fixture root;
+    exactly one body per root, so no body is dropped silently."""
+    roots = _FIXTURE_ROOTS if roots is None else roots
+    if len(bodies) != len(roots):
+        raise ValueError("{} bodies for {} roots".format(len(bodies), len(roots)))
+    for site, body in zip(roots, bodies):
         if body is None:
             continue
         directory = Path(tmp) / site
@@ -330,7 +342,7 @@ def _fixture(tmp, bodies):
 
 def _scan_case(bodies):
     with tempfile.TemporaryDirectory(prefix="headers-selftest-") as tmp:
-        return scan(_fixture(tmp, bodies))
+        return scan(_fixture(tmp, bodies), _FIXTURE_ROOTS)
 
 
 def _one_finding(body, fragment):
@@ -340,6 +352,9 @@ def _one_finding(body, fragment):
 
 
 def _self_test():
+    # The live roots are site/ alone (opf/site/ was removed from this repository); the cases below run over
+    # the two fixture roots.
+    check("registry/live-roots", SITE_ROOTS == ("site",), SITE_ROOTS)
     good = _good_body()
     live_line = "  Content-Security-Policy: " + GOOD_LIVE_CSP + "\n"
     draft_line = "  Content-Security-Policy: " + DRAFT_CSP + "\n"
@@ -356,7 +371,7 @@ def _self_test():
     with tempfile.TemporaryDirectory(prefix="headers-selftest-") as tmp:
         _fixture(tmp, (None, good))
         os.makedirs(Path(tmp) / "site" / REL)
-        findings, errors = scan(tmp)
+        findings, errors = scan(tmp, _FIXTURE_ROOTS)
     check("refuse/not-regular-file", errors == [] and findings == ["site/_headers: not a regular file"],
           (findings, errors))
 
@@ -510,7 +525,7 @@ def _self_test():
         _fixture(tmp, (good, good))
         os.lstat = _lstat_denied
         try:
-            findings, errors = scan(tmp)
+            findings, errors = scan(tmp, _FIXTURE_ROOTS)
         finally:
             os.lstat = real_lstat
     check("refuse/cannot-stat", findings == [] and len(errors) == 2
@@ -544,6 +559,12 @@ def _self_test():
             got = True
         check(name, got == refused, (len(body), got))
 
+    # A scan given no root reads nothing, so it is cannot-evaluate, never a pass.
+    with tempfile.TemporaryDirectory(prefix="headers-selftest-") as tmp:
+        findings, errors = scan(_fixture(tmp, (good, good)), ())
+    check("refuse/no-site-root-cannot-evaluate", findings == [] and len(errors) == 1
+          and "no site root" in errors[0], (findings, errors))
+
     got = run_gate(ROOT)
     check("live/real-tree-passes", got == 0, got)
 
@@ -561,8 +582,8 @@ def _self_test():
           "repeats a directive each fail; a file that cannot be stat'ed or read, a non-UTF-8 body, CRLF "
           "line ends, a lone CR, a NUL, a missing final line feed and a line outside the _headers grammar "
           "are cannot-evaluate; the gate exits 1 on a finding and 2 on cannot-evaluate; an unrecognized "
-          "argument exits 2; the size bound holds one byte under, at and over; the live tree "
-          "passes)".format(len(EXECUTED)))
+          "argument exits 2; the size bound holds one byte under, at and over; a scan of no root is "
+          "cannot-evaluate; the live tree passes)".format(len(EXECUTED)))
     return 0
 
 

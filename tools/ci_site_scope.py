@@ -3,7 +3,7 @@
 
 The maintainer's recorded decision (2026-11-03) authorizes skipping the Quality workflow's heavy
 jobs when, and only when, the run is a pull request whose head is a merge-train-* branch of this
-repository and every path it changes is in the site allowlist: under site/ or opf/site/, or one
+repository and every path it changes is in the site allowlist: under site/, or one
 of the three files a site-only change regenerates (.aiqt/manifest.toml, .aiqt/release/root.txt,
 .aiqt/release/announce-snippet.txt). This tool makes that decision and nothing else; the scope
 job of .github/workflows/quality.yml runs the base tree's copy of this tool (git
@@ -109,29 +109,28 @@ ROOT = Path(__file__).resolve().parents[1]
 EXIT_OK, EXIT_CANNOT_EVALUATE = 0, 2
 GIT_TIMEOUT = 60
 
-# The site allowlist: the two site trees, strictly below each prefix, and the exact files a
+# The site allowlist: the site tree, strictly below its prefix, and the exact files a
 # site-only change regenerates. Module globals, so the self-test's revert cases can patch each
-# rule out and observe its vector flip.
-SITE_TREES = ("site/", "opf/site/")
+# rule out and observe its vector flip. The opfiles.ai sources (opf/site/) were removed from this
+# repository, so opf/site/ is no longer a site tree: a path under it is outside the allowlist.
+SITE_TREES = ("site/",)
 SITE_REGENERATED = frozenset({
     ".aiqt/manifest.toml",
     ".aiqt/release/root.txt",
     ".aiqt/release/announce-snippet.txt",
 })
 # Site-tree files a suite that can be SKIPPED reads as a verdict input, enumerated by the
-# gate-discipline coverage account recorded with this change: opf/tools/check_opf_homes.py (live
-# gate and self-test, the opf-tooling-a job and the git-fixture-env config lanes) reads the four
-# OPF homes contract files under opf/site/ (the generated adopt, core-files and disclosure pages
-# and the adoption guide opf/site/adopt.md) and has no always-run sibling, so those four
-# exclusions are load-bearing; the opf/site/draft-src/ sources the three pages are generated from
-# are excluded too. tools/check_opf_declaration.py (live gate and self-test) reads no site-tree
+# gate-discipline coverage account recorded with this change. No suite that runs only in skippable
+# jobs reads a site/ file as a verdict input, so the set is empty: the four OPF homes contract files
+# opf/tools/check_opf_homes.py read were under opf/site/, which was removed from this repository
+# (the set is kept, empty, so a future exclusion has its mechanism and the self-test drives it over
+# fixture data). tools/check_opf_declaration.py (live gate and self-test) reads no site-tree
 # declaration surface, but walks the whole tree decoding every .md and .html file
 # (restating_documents), site pages included; because of that whole-tree walk, the
 # opf-declaration live gate and its self-test also run in the always-run site job, so a
 # site-only change that turns them red fails every lane (the execution-reconciled registration
 # stays in the selftest-execution job).
-# tools/check_python_floor.py reads site/development.html, site/install/index.html,
-# opf/site/adopt.md and opf/site/adopt/index.html; its live gate runs in the always-run registry job in every run and in
+# tools/check_python_floor.py reads site/development.html and site/install/index.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
 # combined and system lanes), so those pages need no exclusion either. What the fast lane
 # deliberately gives up for a site-only train is every check in the 51 skipped jobs
@@ -147,15 +146,7 @@ SITE_REGENERATED = frozenset({
 # check_python_host_pin.py beyond the registry job's --jobs-only run. It also gives up the
 # skipped jobs' host, configuration and platform repetitions: the host-patch jobs' exact host
 # Python, the config lanes' hostile git configurations, and byte-canon-matrix's platforms.
-SITE_HEAVY_READ = frozenset({
-    "opf/site/adopt.md",
-    "opf/site/adopt/index.html",
-    "opf/site/core-files/index.html",
-    "opf/site/disclosure/index.html",
-    "opf/site/draft-src/adopt.toml",
-    "opf/site/draft-src/core-files.toml",
-    "opf/site/draft-src/disclosure.toml",
-})
+SITE_HEAVY_READ = frozenset()
 REQUIRE_NONEMPTY = True
 # The merge lane's train branches: the fast lane engages only for a pull request whose head is
 # such a branch of this repository, so a labelled non-train or fork pull request never earns a
@@ -472,12 +463,11 @@ def _fixture_repo(base, env):
     records, and a planted copy of this tool. Returns (repo path, base revision)."""
     repo = base / "repo"
     os.makedirs(repo / "site")
-    os.makedirs(repo / "opf" / "site")
     os.makedirs(repo / ".aiqt" / "release")
     os.makedirs(repo / "tools")
     _plant_tool(repo)
     (repo / "site" / "index.html").write_text("a\n")
-    (repo / "opf" / "site" / "a.css").write_text("a\n")
+    (repo / "site" / "a.css").write_text("a\n")
     (repo / ".aiqt" / "manifest.toml").write_text("a\n")
     (repo / ".aiqt" / "release" / "root.txt").write_text("a\n")
     (repo / ".aiqt" / "release" / "announce-snippet.txt").write_text("a\n")
@@ -672,12 +662,14 @@ def self_test(report_path=None):
     check("decide/not-iterable-false", site_only(None), False)
     check("decide/site-file-true", site_only(["site/index.html"]), True)
     check("decide/site-nested-true", site_only(["site/a/b/c.js"]), True)
-    check("decide/opf-site-file-true", site_only(["opf/site/a.css"]), True)
+    # opf/site/ was removed from this repository and is no longer a site tree
+    check("decide/opf-site-file-false", site_only(["opf/site/a.css"]), False)
+    check("decide/site-trees-registry", SITE_TREES, ("site/",))
     check("decide/regen-manifest-true", site_only([".aiqt/manifest.toml"]), True)
     check("decide/regen-root-true", site_only([".aiqt/release/root.txt"]), True)
     check("decide/regen-announce-true", site_only([".aiqt/release/announce-snippet.txt"]), True)
     check("decide/every-allowlisted-true",
-          site_only(["site/index.html", "opf/site/a.css", ".aiqt/manifest.toml",
+          site_only(["site/index.html", "site/a.css", ".aiqt/manifest.toml",
                      ".aiqt/release/root.txt", ".aiqt/release/announce-snippet.txt"]), True)
     check("decide/non-site-path-false", site_only(["tools/t.py"]), False)
     check("decide/one-outside-poisons-false", site_only(["site/index.html", "tools/t.py"]), False)
@@ -686,15 +678,30 @@ def self_test(report_path=None):
           [site_only(["site/x"]), site_only(["site/"]), site_only(["site"]),
            site_only(["sitex/a"]), site_only(["site.html"])],
           [True, False, False, False, False])
-    check("decide/opf-tree-boundary",
+    # every path shape at the former opf/site/ tree decides false (no tree is there now); the row was
+    # decide/opf-tree-boundary, renamed with its body changed (.aiqt/check-removals.toml), and a second
+    # tree's boundary is held by decide/second-tree-boundary below
+    check("decide/opf-site-paths-false",
           [site_only(["opf/site/x"]), site_only(["opf/site/"]), site_only(["opf/site"]),
            site_only(["opf/sitex/a"])],
-          [True, False, False, False])
-    # the seven site-tree files a heavy suite reads as a verdict input are excluded
-    check("decide/heavy-read-page-false",
-          [site_only([path]) for path in sorted(SITE_HEAVY_READ)], [False] * 7)
-    check("decide/heavy-read-poisons-false",
-          site_only(["site/index.html", "opf/site/core-files/index.html"]), False)
+          [False, False, False, False])
+    # the multi-tree loop over a second, fixture tree: just inside, exactly at, and just outside it
+    with _patched(SITE_TREES=("site/", "second/site/")):
+        check("decide/second-tree-boundary",
+              [site_only(["second/site/x"]), site_only(["second/site/"]),
+               site_only(["second/site"]), site_only(["second/sitex/a"]),
+               site_only(["site/index.html", "second/site/a.css"])],
+              [True, False, False, False, True])
+    # no live site-tree file is excluded: the set is empty, and its mechanism is driven over a
+    # fixture exclusion so it keeps its coverage
+    check("decide/heavy-read-live-empty", SITE_HEAVY_READ, frozenset())
+    _heavy_fixture = frozenset({"site/heavy/a.html", "site/heavy/b.toml"})
+    with _patched(SITE_HEAVY_READ=_heavy_fixture):
+        check("decide/heavy-read-page-false",
+              [site_only([path]) for path in sorted(_heavy_fixture)]
+              + [site_only(["site/heavy/c.html"])], [False, False, True])
+        check("decide/heavy-read-poisons-false",
+              site_only(["site/index.html", "site/heavy/a.html"]), False)
     # the regenerated records match exactly, never as a prefix or a sibling
     check("decide/regen-exact-only",
           [site_only([".aiqt/manifest.toml.bak"]), site_only([".aiqt/release/root.txt2"]),
@@ -737,13 +744,13 @@ def self_test(report_path=None):
         check("revert/nonempty-rule-dropped-red", site_only([]), True)
     with _patched(_plain_relative=lambda path: isinstance(path, str) and bool(path)):
         check("revert/path-shape-rule-dropped-red", site_only(["site/../site/a"]), True)
-    with _patched(SITE_TREES=("site/", "opf/site/", "tools/")):
+    with _patched(SITE_TREES=("site/", "tools/")):
         check("revert/tree-widened-red", site_only(["tools/t.py"]), True)
     with _patched(SITE_REGENERATED=frozenset({".aiqt/manifest.toml", "VERSION"})):
         check("revert/regenerated-widened-red", site_only(["VERSION"]), True)
     with _patched(SITE_HEAVY_READ=frozenset()):
         check("revert/heavy-read-exclusion-dropped-red",
-              site_only(["opf/site/core-files/index.html"]), True)
+              site_only(["site/heavy/a.html"]), True)
     with _patched(TRAIN_PREFIX=""):
         check("revert/train-prefix-dropped-red",
               train_head("pull_request", "feature-x", "o/r", "o/r"), True)
@@ -763,7 +770,7 @@ def self_test(report_path=None):
         with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
             (repo / "site" / "index.html").write_text("b\n")
-            (repo / "opf" / "site" / "a.css").write_text("b\n")
+            (repo / "site" / "a.css").write_text("b\n")
             (repo / ".aiqt" / "manifest.toml").write_text("b\n")
             _fixture_git(repo, "add", "-A", env=env)
             _fixture_git(repo, "commit", "-q", "-m", "site change", env=env)
@@ -897,7 +904,7 @@ def self_test(report_path=None):
             _fixture_git(repo, "commit", "-q", "-m", "train site change", env=env)
             train_tip = _fixture_rev(repo, "HEAD", env)
             _fixture_git(repo, "checkout", "-q", "-b", "side", "main", env=env)
-            (repo / "opf" / "site" / "a.css").write_text("b\n")
+            (repo / "site" / "a.css").write_text("b\n")
             _fixture_git(repo, "add", "-A", env=env)
             _fixture_git(repo, "commit", "-q", "-m", "side site change", env=env)
             _fixture_git(repo, "checkout", "-q", "main", env=env)
@@ -1079,12 +1086,21 @@ def self_test(report_path=None):
             _fixture_git(repo, "commit", "-q", "-m", "rename out", env=env)
             check("cli/rename-out-of-tree-false-exit-0", _cli_outcome(repo, base),
                   (0, "site_only=false"))
-            _fixture_git(repo, "mv", "tools/index.html", "opf/site/index.html", env=env)
+            _fixture_git(repo, "mv", "tools/index.html", "site/moved.html", env=env)
             _fixture_git(repo, "commit", "-q", "-m", "rename within allowlist", env=env)
             head_minus_one = subprocess.run(
                 ["git", "-C", str(repo), "rev-parse", "HEAD^"], check=True, capture_output=True,
                 text=True, timeout=GIT_TIMEOUT, env=env).stdout.strip()
             check("cli/rename-into-tree-false-exit-0", _cli_outcome(repo, head_minus_one),
+                  (0, "site_only=false"))
+        with tempfile.TemporaryDirectory() as scratch:
+            # a commit touching only a file under opf/site/, which is no longer a site tree
+            repo, base = _fixture_repo(Path(scratch), env)
+            os.makedirs(repo / "opf" / "site")
+            (repo / "opf" / "site" / "a.css").write_text("a\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "opf/site change", env=env)
+            check("cli/opf-site-change-false-exit-0", _cli_outcome(repo, base),
                   (0, "site_only=false"))
         with tempfile.TemporaryDirectory() as scratch:
             # not a repo at all: the diff read fails, the decision is cannot-evaluate
@@ -1119,7 +1135,7 @@ def self_test(report_path=None):
             print("  - " + failure)
         return 1
     print("PASS: ci_site_scope self-test: {} unique checks executed (the pure decision admits only "
-          "non-empty lists of plain repo-relative paths strictly below site/ or opf/site/ or "
+          "non-empty lists of plain repo-relative paths strictly below site/ or "
           "exactly one of the three regenerated records, each boundary tested just inside, at, and "
           "outside; the train gate admits only a pull_request from a merge-train-* head of this "
           "repository; each rule patched out flips its vector; the CLI decides over synthetic "

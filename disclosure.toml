@@ -137,11 +137,7 @@ label = "the opf enforcement hooks (the pre-commit hook and the Claude Code deny
 
 [[code]]
 prefix = "site/"
-label = "the site HTML pages (inline scripts included) and JavaScript under site/ and opf/site/"
-
-[[code]]
-prefix = "opf/site/"
-label = "the site HTML pages (inline scripts included) and JavaScript under site/ and opf/site/"
+label = "the site HTML pages (inline scripts included) and JavaScript under site/"
 
 [[code]]
 prefix = "docs/_shell.html"
@@ -165,9 +161,6 @@ label = ".baseline/check_palette.py, the palette contrast gate vendored from the
 
 [[noncode]]
 prefix = ".aiqt/"
-
-[[noncode]]
-prefix = ".baseline/opfiles-pin.toml"
 
 [[noncode]]
 prefix = ".baseline/pin.toml"

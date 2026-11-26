@@ -2,10 +2,17 @@
 """Render each site's link-preview card (the og:image tools/gen_draft_site.py names) from its composition in
 tools/og-cards/ with headless Chrome.
 
-  render_og_cards.py    render every card with /usr/bin/google-chrome
+  render_og_cards.py               render every card this repository can render, with /usr/bin/google-chrome
+  render_og_cards.py --self-test   check which cards are rendered and which are skipped (no Chrome is started)
 
 Each card is a 1200 by 627 PNG under its site's live root, below 1 MB; a render that gives another size or a
 larger file is refused (exit 1) and nothing is kept. Exit 2 when Chrome cannot be started.
+
+The opfiles.ai card source, tools/og-cards/opfiles-og.html, is kept here only as source until OPFiles takes
+it. It cannot render in this repository, because its assets (the fonts, palette and logo it loads from
+opf/site/draft/assets/baseline/) now live in OPFiles. Its entry stays in CARDS, but the renderer skips it
+with a message giving that reason, rather than writing its PNG into opf/site/, a tree this repository no
+longer holds. A skipped card is not an error.
 """
 import sys
 
@@ -37,6 +44,13 @@ CARDS = (
     ("aiqt-og.html", "site/assets/aiqt-og.png"),
     ("opfiles-og.html", "opf/site/assets/opfiles-og.png"),
 )
+# Compositions kept only as source, each with the reason it cannot render here. The renderer skips each one
+# and says why, so it never starts Chrome on a page whose assets are gone or writes into a tree this
+# repository no longer holds.
+SOURCE_ONLY = {
+    "opfiles-og.html": ("the opfiles.ai card source is kept here only as source until OPFiles takes it; it "
+                        "cannot render in this repository because its assets now live in OPFiles"),
+}
 
 
 def png_size(data):
@@ -74,22 +88,72 @@ def render(source, target):
     return None
 
 
+def render_cards(render_one, out, err):
+    """Render every card in CARDS through render_one(source, target), skipping each SOURCE_ONLY composition
+    with a message on out that names it, its target and the reason; 1 when a render failed, otherwise 0."""
+    code = 0
+    for composition, target in CARDS:
+        reason = SOURCE_ONLY.get(composition)
+        if reason is not None:
+            print("skipped {}: {}; nothing written to {}".format(composition, reason, target), file=out)
+            continue
+        error = render_one(ROOT / "tools" / "og-cards" / composition, target)
+        if error:
+            print("error: {}".format(error), file=err)
+            code = 1
+    return code
+
+
+def self_test():
+    """Run render_cards with a recording stand-in for render, so no Chrome starts and nothing is written: the
+    opfiles.ai card is skipped with its message and never handed to the renderer, and the aiqt.ai card is
+    still handed to it, so the skip cannot pass by skipping every card. 0 when every row holds, otherwise 1."""
+    import io
+    rendered = []
+
+    def record(source, target):
+        rendered.append((source.name, target))
+        return None
+
+    out, err = io.StringIO(), io.StringIO()
+    code = render_cards(record, out, err)
+    skip_line = ("skipped opfiles-og.html: the opfiles.ai card source is kept here only as source until OPFiles "
+                 "takes it; it cannot render in this repository because its assets now live in OPFiles; "
+                 "nothing written to opf/site/assets/opfiles-og.png\n")
+    rows = (
+        ("entry/opfiles-card-kept", ("opfiles-og.html", "opf/site/assets/opfiles-og.png") in CARDS,
+         "the opfiles.ai card's entry is not in CARDS"),
+        ("skip/opfiles-not-rendered", not any(name == "opfiles-og.html" for name, _target in rendered),
+         "the opfiles.ai card was handed to the renderer: {!r}".format(rendered)),
+        ("skip/opfiles-message", out.getvalue() == skip_line,
+         "the skip message is {!r}, expected {!r}".format(out.getvalue(), skip_line)),
+        ("render/aiqt-rendered", rendered == [("aiqt-og.html", "site/assets/aiqt-og.png")],
+         "the renderer was handed {!r}, expected the aiqt.ai card alone".format(rendered)),
+        ("render/exit-zero", code == 0 and err.getvalue() == "",
+         "render_cards exited {} with {!r} on its error stream".format(code, err.getvalue())),
+    )
+    failed = [(name, why) for name, held, why in rows if not held]
+    for name, why in failed:
+        print("FAIL {}: {}".format(name, why))
+    if failed:
+        print("SELF-TEST FAIL: render_og_cards {} of {} row(s) failed".format(len(failed), len(rows)))
+        return 1
+    print("SELF-TEST PASS: render_og_cards {} rows".format(len(rows)))
+    return 0
+
+
 def main(argv=None):
     if argv is None:
         argv = sys.argv[1:]
+    if argv == ["--self-test"]:
+        return self_test()
     if argv:
         print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
         return 2
     if not os.access(CHROME, os.X_OK):
         print("error: {} is not an executable; nothing rendered".format(CHROME), file=sys.stderr)
         return 2
-    code = 0
-    for composition, target in CARDS:
-        error = render(ROOT / "tools" / "og-cards" / composition, target)
-        if error:
-            print("error: {}".format(error), file=sys.stderr)
-            code = 1
-    return code
+    return render_cards(render, sys.stdout, sys.stderr)
 
 
 # The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which

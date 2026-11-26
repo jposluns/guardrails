@@ -29,11 +29,11 @@ signing. The whole tamper-* family and any FORWARD promise about it are banned o
 is no future-tense exception; integrity is described only in plain validation language).
 
 THREE SURFACE COLLECTORS (VER-CORE 4.4c; replaces the former site-only scan):
-  1. the site HTML surfaces' *.html (SITE_HTML_ROOTS: site/ for aiqt.ai and opf/site/ for opfiles.ai,
-     the latter covering the opf/site/index.html placeholder plus the opf/site/draft staging tree):
+  1. the site HTML surfaces' *.html (SITE_HTML_ROOTS: site/ for aiqt.ai; the opfiles.ai sources under
+     opf/site/ were removed from this repository):
      visible-text + meta scanning, SITE_PATTERNS + RELEASE_PATTERNS. Each is a REQUIRED surface: an absent,
-     unwalkable, or non-directory root is a fail-closed exit 2, never a silent PASS (the 4.4c correction of
-     the old "no site/ directory -> PASS" shape). The enforcement register page (site/enforcement.html) is
+     unwalkable, or non-directory root, or one holding no .html page, is a fail-closed exit 2, never a
+     silent PASS (the 4.4c correction of the old "no site/ directory -> PASS" shape). The enforcement register page (site/enforcement.html) is
      scanned like any other site page, with NO exemption for its verbatim ledger-residual blocks: the
      residues it renders are kept marketing-clean AT THEIR SOURCE (see the source-side residue-cleanliness
      leg below), so no per-page carve-out is needed. This is robust by construction: a plain scan over the
@@ -1070,10 +1070,9 @@ def _scan_with(text, patterns):
     return findings
 
 
-# The site HTML marketing surfaces scanned by Collector 1 with SITE_PATTERNS. site/ is the aiqt.ai site;
-# opf/site is the opfiles.ai site (opf/site/index.html placeholder plus the opf/site/draft staging tree).
-# Both are required; the guarantee-flavoured deny-list applies identically to both public web copies.
-SITE_HTML_ROOTS = ("site", "opf/site")
+# The site HTML marketing surfaces scanned by Collector 1 with SITE_PATTERNS. site/ is the aiqt.ai site and
+# is required; the opfiles.ai site (opf/site/) was removed from this repository and is not scanned here.
+SITE_HTML_ROOTS = ("site",)
 
 
 def scan(text, site=True):
@@ -1131,8 +1130,8 @@ def scan(text, site=True):
 # BODY text (scanned separately, the attribute analogue of the CSS+DOM composition residual). (An otherwise malformed RAWTEXT truncation is handled: a
 # complete-string quoted end-tag is asset-scanned, trailing text Collector-1 scanned, and an UNCLOSED body at
 # EOF is flushed+scanned at parser close().) This CSS content-injection asset scan is anchored to the
-# register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html,
-# opf/site/*.html) is visible-text scanned but not CSS-injection scanned.
+# register page (HTML_REL) alone: a CSS content-injection overclaim on the other public pages (site/*.html)
+# is visible-text scanned but not CSS-injection scanned.
 # Runtime-JS DOM text construction, an encoded payload buried in an arbitrary JS string whose location and
 # encoding are not statically declared, and a genuinely off-site (cross-origin) asset a static gate does not
 # fetch are out of static reach as well.
@@ -2159,8 +2158,8 @@ def _scan_asset_closure(root):
     handled: a quoted </style>/</script> that leaves a COMPLETE string is asset-scanned and any trailing text
     Collector-1 scanned, and an UNCLOSED body at end-of-input is FLUSHED and scanned at parser close(). SCOPE: this CSS
     content-injection asset scan is anchored to the register page (HTML_REL,
-    site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html,
-    opf/site/*.html) is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
+    site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html)
+    is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
     static reach: runtime-JS DOM construction of marketing text (theme.js building strings at run time); an
     ENCODED payload buried in an ARBITRARY JS string whose location and encoding are not statically declared
     (distinct from a data: URL, which IS decoded); and a genuinely off-site (cross-origin) asset a static
@@ -2275,14 +2274,20 @@ def _collect(root, registry, binary_set):
     findings = []
     scanned = set()
 
-    # Collector 1: the site HTML surfaces' visible text + meta (SITE_PATTERNS + RELEASE_PATTERNS). Both
-    # site/ (aiqt.ai) and opf/site/ (opfiles.ai: the index.html placeholder plus the opf/site/draft
-    # staging tree) are REQUIRED marketing surfaces, scanned with the same guarantee-flavoured deny-list.
+    # Collector 1: the site HTML surfaces' visible text + meta (SITE_PATTERNS + RELEASE_PATTERNS). site/
+    # (aiqt.ai) is a REQUIRED marketing surface, scanned with the guarantee-flavoured deny-list. An empty
+    # SITE_HTML_ROOTS, or a root that holds no .html page, is fail-closed too: a collector that reads no site
+    # page is never a pass.
+    if not SITE_HTML_ROOTS:
+        raise _FailClosed("no site HTML root to scan; a scan of nothing is never a pass")
     for subdir in SITE_HTML_ROOTS:
         site = root / subdir
         if not site.is_dir():
             raise _FailClosed("{}/ is a required surface but is absent or not a directory".format(subdir))
-        for f in sorted(walk_files(site, suffixes={".html"})):
+        pages = sorted(walk_files(site, suffixes={".html"}))
+        if not pages:  # a required root that holds no page is a scan of nothing, never a pass
+            raise _FailClosed("{}/ is a required surface but holds no .html page".format(subdir))
+        for f in pages:
             rel = f.relative_to(root)
             # Descriptor-bound read (FIX 1, round 16): open once with no-follow, require a regular file, and
             # cap at the pre-read ceiling on the OPENED descriptor, so a symlinked site page (to a device or
@@ -2773,7 +2778,6 @@ def _single_descriptor_self_test():
         # (b) collector 1 opens each site page EXACTLY ONCE: identity and read are one descriptor, not two.
         r = tmp / "root"
         (r / "site").mkdir(parents=True)
-        (r / "opf" / "site").mkdir(parents=True)
         for f in REPO_PROSE_ROSTER:
             (r / f).parent.mkdir(parents=True, exist_ok=True)
             (r / f).write_text("clean prose.\n", encoding="utf-8")
@@ -2883,7 +2887,6 @@ def _self_closing_meta_self_test():
     try:
         r = tmp / "root"
         (r / "site").mkdir(parents=True)
-        (r / "opf" / "site").mkdir(parents=True)
         for f in REPO_PROSE_ROSTER:
             (r / f).parent.mkdir(parents=True, exist_ok=True)
             (r / f).write_text("clean prose.\n", encoding="utf-8")
@@ -2904,6 +2907,8 @@ def _collector_self_test():
     _FailClosed), a registered file / block / tree finding is reported, a binary target is skipped, and an
     invalid-UTF-8 registered output is a finding. This pins the 4.4c corrected behaviour (site/ absent is
     exit 2, never the old silent PASS)."""
+    global SITE_HTML_ROOTS  # case (a4) rebinds it to a fixture second root, and puts it back
+    import errno
     import shutil
     import tempfile
     failures = []
@@ -2912,12 +2917,13 @@ def _collector_self_test():
     except OSError as exc:
         return ["COLLECTOR: no writable temporary directory: {}".format(exc)]
 
-    def _make_root(name, with_site=True, with_opf_site=True, with_roster=True):
+    def _make_root(name, with_site=True, with_opf_site=False, with_roster=True):
         r = tmp / name
         r.mkdir(parents=True)
-        if with_site:
+        if with_site:  # a required root holds at least one page, so a clean one stands in for the real pages
             (r / "site").mkdir(parents=True)
-        if with_opf_site:  # the second required site HTML surface (opfiles.ai); a dir suffices
+            (r / "site" / "index.html").write_text("<p>Clean page.</p>", encoding="utf-8")
+        if with_opf_site:  # an opf/site/ tree, which is no longer a site HTML surface here; a dir suffices
             (r / "opf" / "site").mkdir(parents=True)
         if with_roster:
             for f in REPO_PROSE_ROSTER:
@@ -2934,31 +2940,92 @@ def _collector_self_test():
         except _FailClosed:
             pass
 
-        # (a2) opf/site absent -> _FailClosed (the second required site HTML surface).
-        r = _make_root("noopfsite", with_opf_site=False)
+        # (a2) opf/site absent passes: it is no longer a required site HTML surface (the opfiles.ai sources
+        # were removed from this repository), so its absence is not a _FailClosed.
+        r = _make_root("noopfsite")
         try:
             _collect(r, [], set())
-            failures.append("COLLECTOR: absent opf/site should fail closed (_FailClosed)")
-        except _FailClosed:
-            pass
+        except _FailClosed as exc:
+            failures.append("COLLECTOR: absent opf/site should not fail closed ({})".format(exc))
+        if SITE_HTML_ROOTS != ("site",):
+            failures.append("COLLECTOR: the site HTML roots are {!r}, expected site alone".format(SITE_HTML_ROOTS))
 
-        # (a3) an overclaim on an opf/site page is a finding (SITE_PATTERNS cover opf/site too).
-        r = _make_root("opfoverclaim")
+        # (a3) an overclaim on an opf/site page is not scanned, while the same text on a site/ page is a
+        # finding (so the case is not vacuous).
+        r = _make_root("opfoverclaim", with_opf_site=True)
         (r / "opf" / "site" / "draft").mkdir(parents=True)
         (r / "opf" / "site" / "draft" / "x.html").write_text(
             "<p>This is unbreakable and guaranteed.</p>", encoding="utf-8")
+        (r / "site" / "x.html").write_text("<p>This is unbreakable and guaranteed.</p>", encoding="utf-8")
         f = _collect(r, [], set())
-        if not any("opf/site/draft/x.html" in x for x in f):
-            failures.append("COLLECTOR: an overclaim on an opf/site page should be a finding")
+        if any("opf/site/draft/x.html" in x for x in f):
+            failures.append("COLLECTOR: an overclaim on an opf/site page should not be scanned")
+        if not any("site/x.html" in x for x in f):
+            failures.append("COLLECTOR: an overclaim on a site/ page should be a finding")
 
-        # (b) a required roster surface absent -> _FailClosed.
+        # (a4) a fixture second root: with SITE_HTML_ROOTS rebound to site/ and second/site/, every root is
+        # read (an overclaim on a page of the first root alone, and on a page of the second root alone, is a
+        # finding) and every root is required (the second root absent fails closed), so the multi-root loop
+        # keeps a second root now that opf/site/ is gone. MUTATION: reading only the first root of
+        # SITE_HTML_ROOTS, or only its last root, fails this case.
+        saved_roots = SITE_HTML_ROOTS
+        SITE_HTML_ROOTS = ("site", "second/site")
+        try:
+            r = _make_root("firstrootonly")
+            (r / "second" / "site").mkdir(parents=True)
+            (r / "second" / "site" / "index.html").write_text("<p>Clean page.</p>", encoding="utf-8")
+            (r / "site" / "y.html").write_text("<p>This is unbreakable and guaranteed.</p>", encoding="utf-8")
+            f = _collect(r, [], set())
+            if not any(x.startswith("site/y.html") for x in f):
+                failures.append("COLLECTOR: an overclaim on a page of the first root alone should be a finding")
+            r = _make_root("secondroot")
+            (r / "second" / "site").mkdir(parents=True)
+            (r / "second" / "site" / "y.html").write_text(
+                "<p>This is unbreakable and guaranteed.</p>", encoding="utf-8")
+            f = _collect(r, [], set())
+            if not any("second/site/y.html" in x for x in f):
+                failures.append("COLLECTOR: an overclaim on a page of the fixture second root should be a finding")
+            r = _make_root("nosecondroot")
+            try:
+                _collect(r, [], set())
+                failures.append("COLLECTOR: an absent fixture second root should fail closed (_FailClosed)")
+            except _FailClosed:
+                pass
+            # (a5) no site HTML root: collector 1 reads nothing, so it fails closed over a tree that passes
+            # with site/ as its root. MUTATION: dropping the empty-roots guard in _collect fails this case.
+            SITE_HTML_ROOTS = ()
+            r = _make_root("noroots")
+            try:
+                _collect(r, [], set())
+                failures.append("COLLECTOR: an empty SITE_HTML_ROOTS should fail closed (_FailClosed)")
+            except _FailClosed:
+                pass
+        finally:
+            SITE_HTML_ROOTS = saved_roots
+
+        # (a6) site/ present but holding no .html page (only a .txt): collector 1 reads nothing, so it fails
+        # closed. MUTATION: dropping the no-page guard in _collect lets it return no finding and no _FailClosed.
+        r = _make_root("pageless")
+        (r / "site" / "index.html").unlink()
+        (r / "site" / "notes.txt").write_text("clean notes.\n", encoding="utf-8")
+        try:
+            _collect(r, [], set())
+            failures.append("COLLECTOR: a site/ holding no .html page should fail closed (_FailClosed)")
+        except _FailClosed:
+            pass
+
+        # (b) a required roster surface absent -> _FailClosed, with the message naming the absent surface, so
+        # a _FailClosed raised for another reason (an earlier surface, a different check) does not satisfy it.
         r = _make_root("noroster")
         (r / "README.md").unlink()
+        expected = "required repo-prose surface README.md is absent"
         try:
             _collect(r, [], set())
             failures.append("COLLECTOR: absent roster surface should fail closed (_FailClosed)")
-        except _FailClosed:
-            pass
+        except _FailClosed as exc:
+            if str(exc) != expected:
+                failures.append("COLLECTOR: absent roster surface failed closed with {!r}, expected {!r}".format(
+                    str(exc), expected))
 
         # (b2) the roster covers INSTRUCTION-BUDGET.md (the budget prose moved out of README.md and
         # must not leave this roster's coverage with it): an overclaim appended to it is a finding.
@@ -3005,13 +3072,17 @@ def _collector_self_test():
         if not any(".aiqt/core/githooks/manifest.toml" in x for x in f):
             failures.append("COLLECTOR: an overclaim appended to .aiqt/core/githooks/manifest.toml must be a finding")
 
-        # (c) a registered file target absent -> _FailClosed.
+        # (c) a registered file target absent -> _FailClosed, with the registered-output message naming the
+        # target (its bounded label), not any other fail-closed reason.
         r = _make_root("absentfile")
+        expected = "registered output 'GONE.md' (7 bytes) is absent or not a file"
         try:
             _collect(r, [{"target": "GONE.md", "kind": "file"}], set())
             failures.append("COLLECTOR: absent registered file should fail closed (_FailClosed)")
-        except _FailClosed:
-            pass
+        except _FailClosed as exc:
+            if str(exc) != expected:
+                failures.append("COLLECTOR: absent registered file failed closed with {!r}, expected {!r}".format(
+                    str(exc), expected))
 
         # (d) a tree target with a nested generated file carrying a positive line -> finding.
         r = _make_root("tree")
@@ -3040,14 +3111,18 @@ def _collector_self_test():
         # _ASSET_MAX_BYTES on the opened descriptor. A sparse file over the ceiling is all-NUL (valid UTF-8),
         # so under the OLD path.read_text() it would read whole and scan clean (no finding, no exception).
         # MUTATION: reverting _scan_surface to path.read_text() makes this return normally -> the test fails.
+        # The row checks the pre-read ceiling message, so a fail-closed for another reason does not satisfy it.
         r = _make_root("oversize-output")
         with (r / "big.txt").open("wb") as fh:
             fh.truncate(_ASSET_MAX_BYTES + 1)
+        expected = "register 'big.txt' (7 bytes) exceeds the {}-byte pre-read ceiling".format(_ASSET_MAX_BYTES)
         try:
             _collect(r, [{"target": "big.txt", "kind": "file"}], set())
             failures.append("COLLECTOR: an over-ceiling registered output must fail closed (FIX 2, round 16)")
-        except _FailClosed:
-            pass
+        except _FailClosed as exc:
+            if str(exc) != expected:
+                failures.append("COLLECTOR: an over-ceiling registered output failed closed with {!r}, expected "
+                                "{!r}".format(str(exc), expected))
 
         # (g) a binary target is skipped (not read, not a finding), even with non-UTF-8 bytes.
         r = _make_root("binary")
@@ -3085,12 +3160,18 @@ def _collector_self_test():
             made = True
         except OSError:
             made = False
+        # The row checks the no-follow open's message with ELOOP, so a fail-closed for another reason (the
+        # target absent, a later read error) does not satisfy it.
         if made:
+            expected = "register 'alias.md' (8 bytes) is absent, a symlink, or unreadable (OSError errno={})".format(
+                errno.ELOOP)
             try:
                 _collect(r, [{"target": "alias.md", "kind": "file"}], set())
                 failures.append("COLLECTOR: a symlinked registered output must fail closed (FIX B, round 17)")
-            except _FailClosed:
-                pass
+            except _FailClosed as exc:
+                if str(exc) != expected:
+                    failures.append("COLLECTOR: a symlinked registered output failed closed with {!r}, expected "
+                                    "{!r}".format(str(exc), expected))
 
         # (k) FIX C (round 17): the registry validator accepts an arbitrarily long canonical target and does
         # not require existence, so a 100,000-char MISSING target must not echo whole into the pre-check
