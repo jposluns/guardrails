@@ -440,6 +440,21 @@
         ]
       },
       {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "-I",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/aiqt_hooks.py",
+              "list_limit_note"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Bash|TaskOutput",
         "hooks": [
           {

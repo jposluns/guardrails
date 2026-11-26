@@ -135,8 +135,8 @@ mechanisms = ["hook:orch-ask-unattended", "hook:orch-stop-guard", "hook:orch-tea
 
 [[rule]]
 corpus-id = "cntprd"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:list-limit-note"]
 
 [[rule]]
 corpus-id = "corrob"
@@ -290,8 +290,8 @@ mechanisms = ["hook:protected-line-guard"]
 
 [[rule]]
 corpus-id = "prtwhl"
-status = "none"
-mechanisms = []
+status = "partial"
+mechanisms = ["hook:list-limit-note"]
 
 [[rule]]
 corpus-id = "rdbchr"
@@ -601,7 +601,7 @@ mechanisms = ["hook:orch-resume-audit", "hook:orch-resume-barrier"]
 [[rule]]
 corpus-id = "setcmp"
 status = "enforced"
-mechanisms = ["hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
+mechanisms = ["hook:list-limit-note", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "slfgrd"

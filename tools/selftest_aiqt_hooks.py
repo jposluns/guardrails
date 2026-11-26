@@ -19406,6 +19406,424 @@ def _clock_parity_mutants(hook):
                        differs.format(name))
 
 
+def _ll_lines(n):
+    """n plain listing rows, each ending in a line feed."""
+    return "".join("{}\tOPEN\tlisting row {}\tfeat-{}\n".format(i, i, i) for i in range(1, n + 1))
+
+
+def _ll_numbers(n):
+    """n per-element jq rows, one number per line."""
+    return "".join("{}\n".format(i) for i in range(1, n + 1))
+
+
+def _ll_array(n):
+    """A JSON array of n objects, as gh --json prints it."""
+    return json.dumps([{"number": i} for i in range(1, n + 1)]) + "\n"
+
+
+# The per-noun tables the list_limit_note handler must hold (ll-table-pin): flags, value options, skip options
+# and single-line per-item fields, pinned to gh 2.103.3. On a gh upgrade the orchestrator re-checks the handler's
+# tables against the new version's help text, and edits this copy and the handler's together.
+_LL_SEARCH_PIN_VALUES = (
+    "--app", "--assignee", "--author", "-B", "--base", "--checks", "--closed", "--commenter", "--comments",
+    "--created", "-H", "--head", "--interactions", "--involves", "--label", "--language", "--match", "--mentions",
+    "--merged-at", "--milestone", "--order", "--owner", "--project", "--reactions", "--review",
+    "--review-requested", "--reviewed-by", "--sort", "--state", "--team-mentions", "--updated", "--visibility")
+_LL_COMMON_PIN = ("-L", "--limit", "-R", "--repo", "--json", "-q", "--jq", "-t", "--template")
+_LL_SEARCH_FIELDS_PIN = ("number", "title", "url", "state", "createdAt", "updatedAt", "author.login",
+                         "repository.nameWithOwner", "authorAssociation", "closedAt", "commentsCount", "id",
+                         "isLocked", "isPullRequest")
+_LL_TABLE_PIN = {
+    "pr": (("-d", "--draft", "-w", "--web", "--help"),
+           _LL_COMMON_PIN + ("-A", "--author", "-a", "--assignee", "-B", "--base", "-H", "--head", "-l", "--label",
+                             "-s", "--state", "-S", "--search", "--app"),
+           ("-w", "--web", "--help"),
+           ("number", "title", "url", "state", "createdAt", "updatedAt", "closedAt", "author.login", "isDraft",
+            "headRefName", "baseRefName", "mergedAt", "additions", "baseRefOid", "changedFiles", "closed",
+            "deletions", "fullDatabaseId", "headRefOid", "id", "isCrossRepository", "maintainerCanModify",
+            "mergeStateStatus", "mergeable", "reviewDecision")),
+    "issue": (("-w", "--web", "--help"),
+              _LL_COMMON_PIN + ("-A", "--author", "-a", "--assignee", "-l", "--label", "-s", "--state", "-S",
+                                "--search", "-m", "--milestone", "--mention", "--app", "--type"),
+              ("-w", "--web", "--help"),
+              ("number", "title", "url", "state", "createdAt", "updatedAt", "closedAt", "author.login", "closed",
+               "id", "isPinned", "stateReason")),
+    "run": (("-a", "--all", "--help"),
+            _LL_COMMON_PIN + ("-b", "--branch", "-c", "--commit", "--created", "-e", "--event", "-s", "--status",
+                              "-u", "--user", "-w", "--workflow"),
+            ("--help",),
+            ("databaseId", "name", "displayTitle", "workflowName", "status", "conclusion", "event", "headBranch",
+             "headSha", "url", "createdAt", "attempt", "number", "startedAt", "updatedAt", "workflowDatabaseId")),
+    "release": (("--exclude-drafts", "--exclude-pre-releases", "--help"),
+                _LL_COMMON_PIN + ("-O", "--order"),
+                ("--help",),
+                ("tagName", "name", "isDraft", "isLatest", "isPrerelease", "publishedAt", "createdAt",
+                 "isImmutable")),
+    "search prs": (("--archived", "--draft", "--locked", "--merged", "--no-assignee", "--no-label",
+                    "--no-milestone", "--no-project", "-w", "--web", "--help"),
+                   _LL_COMMON_PIN + _LL_SEARCH_PIN_VALUES,
+                   ("-w", "--web", "--help"),
+                   _LL_SEARCH_FIELDS_PIN + ("isDraft",)),
+    "search issues": (("--archived", "--include-prs", "--locked", "--no-assignee", "--no-label", "--no-milestone",
+                       "--no-project", "-w", "--web", "--help"),
+                      _LL_COMMON_PIN + (
+                          "--app", "--assignee", "--author", "--closed", "--commenter", "--comments", "--created",
+                          "--interactions", "--involves", "--label", "--language", "--match", "--mentions",
+                          "--milestone", "--order", "--owner", "--project", "--reactions", "--sort", "--state",
+                          "--team-mentions", "--updated", "--visibility", "--search-type"),
+                      ("-w", "--web", "--help"),
+                      _LL_SEARCH_FIELDS_PIN),
+}
+_LL_SEARCH_PRS_ALL = (
+    "gh search prs fix --archived --draft --locked --merged --no-assignee --no-label --no-milestone --no-project "
+    "--app y --assignee me --author me -B main --base main --checks pending --closed 2026-01-01 --commenter me "
+    "--comments 1 --created 2026-01-01 -H feat --head feat --interactions 1 --involves me --label bug --language go "
+    "--match title --mentions me --merged-at 2026-01-01 --milestone v1 --order asc --owner o --project 1 "
+    "--reactions 1 --review approved --review-requested me --reviewed-by me --sort created --state open "
+    "--team-mentions o/t --updated 2026-01-01 --visibility public -R o/r --repo o/r --limit 30 -L 30")
+_LL_SEARCH_ISSUES_ALL = (
+    "gh search issues fix --archived --include-prs --locked --no-assignee --no-label --no-milestone --no-project "
+    "--app y --assignee me --author me --closed 2026-01-01 --commenter me --comments 1 --created 2026-01-01 "
+    "--interactions 1 --involves me --label bug --language go --match title --mentions me --milestone v1 --order asc "
+    "--owner o --project 1 --reactions 1 --sort created --state open --team-mentions o/t --updated 2026-01-01 "
+    "--visibility public --search-type lexical -R o/r --repo o/r --limit 30 -L 30")
+# Every single-line field each noun's table lists (ll-fire-field-*): a per-element jq program on each fires.
+_LL_NOUN_WORDS = {"pr": "pr list", "issue": "issue list", "run": "run list", "release": "release list",
+                  "search prs": "search prs", "search issues": "search issues"}
+
+
+def _ll_field_rows():
+    """One fire row per (noun, field) of the pinned field lists: gh NOUN --json TOP --jq '.[].FIELD' -L 5
+    printing five lines, so dropping a field from the handler's list turns its row red."""
+    rows = []
+    for noun, table in sorted(_LL_TABLE_PIN.items()):
+        for field in table[3]:
+            rows.append(("ll-fire-field-{}-{}".format(noun.replace(" ", "-"), field), "fire", 5,
+                         "gh {} --json {} --jq '.[].{}' -L 5".format(_LL_NOUN_WORDS[noun], field.split(".")[0],
+                                                                    field),
+                         _ll_numbers(5)))
+    return rows
+
+
+def _ll_rows():
+    """The list_limit_note rows: (id, role, limit, command, stdout, response fields, payload fields). role is
+    fire (a note naming the limit), wrong (the wrong-event note), guard (quiet, and a named change to the
+    handler turns it red; the pull request records one scratch-clone run per named change) or scope (quiet,
+    claiming no discrimination)."""
+    lines60, nums60, arr60 = _ll_lines(60), _ll_numbers(60), _ll_array(60)
+    tty30 = "\nShowing 28 of 28 pull requests in o/r\n\nID\tTITLE\tBRANCH\tCREATED AT\n" + _ll_lines(28)
+    pretty ="".join('[\n  "bug"\n]\n' for _ in range(20))
+    rows = [
+        ("ll-fire-limit-space", "fire", 60, "gh pr list --limit 60", lines60),
+        ("ll-fire-limit-eq", "fire", 60, "gh pr list --limit=60", lines60),
+        ("ll-fire-L-space", "fire", 60, "gh pr list -L 60", lines60),
+        ("ll-fire-L-attached", "fire", 60, "gh pr list -L60", lines60),
+        ("ll-fire-no-final-lf", "fire", 60, "gh pr list -L 60", lines60[:-1]),
+        ("ll-fire-json", "fire", 60, "gh pr list --json number -L 60", arr60),
+        ("ll-fire-issue", "fire", 25, "gh issue list --state open -L 25", _ll_lines(25)),
+        ("ll-fire-run", "fire", 20, "gh run list -L 20", _ll_lines(20)),
+        ("ll-fire-search", "fire", 30, "gh search prs --limit 30", _ll_lines(30)),
+        ("ll-fire-repo-flag", "fire", 5, "gh pr list -R o/r --state open --limit 5", _ll_lines(5)),
+        ("ll-fire-last-limit-wins", "fire", 60, "gh pr list --limit 100 --limit 60", lines60),
+        ("ll-fire-jq-length", "fire", 60, "gh pr list --json number --jq length -L 60", "60\n"),
+        ("ll-fire-q-length", "fire", 60, "gh pr list --json number -q length -L 60", "60\n"),
+        ("ll-fire-wc", "fire", 60, "gh pr list -L 60 | wc -l", "60\n"),
+        ("ll-fire-wc-padded", "fire", 60, "gh pr list -L 60 | wc -l", "      60\n"),
+        ("ll-fire-jq-pipe", "fire", 60, "gh pr list --json number -L 60 | jq length", "60\n"),
+        ("ll-fire-stderr-null", "fire", 60, "gh pr list -L 60 2>/dev/null", lines60),
+        ("ll-fire-timeout", "fire", 60, "timeout 60 gh pr list -L 60", lines60),
+        ("ll-fire-env-assign", "fire", 60, "GH_PAGER=cat gh pr list -L 60", lines60),
+        ("ll-fire-env-wrapper", "fire", 60, "env GH_PAGER=cat gh pr list -L 60", lines60),
+        ("ll-fire-command", "fire", 60, "command gh pr list -L 60", lines60),
+        ("ll-fire-abs-path", "fire", 60, "/usr/bin/gh pr list -L 60", lines60),
+        ("ll-fire-limit-two", "fire", 2, "gh pr list -L 2", _ll_lines(2)),
+        ("ll-fire-stderr-file", "fire", 60, "gh pr list -L 60 2>err.log", lines60),
+        ("ll-fire-run-workflow", "fire", 20, "gh run list -w ci.yml -L 20", _ll_lines(20)),
+        ("ll-fire-timeout-kill", "fire", 60, "timeout -k 5 60 gh pr list -L 60", lines60),
+        ("ll-fire-env-unset", "fire", 60, "env -u GH_TOKEN gh pr list -L 60", lines60),
+        ("ll-fire-jq-each", "fire", 60, "gh pr list --json number --jq '.[].number' -L 60", nums60),
+        ("ll-fire-jq-each-pipe", "fire", 60, "gh pr list --json number,title --jq '.[] | .title' -L 60", lines60),
+        ("ll-fire-jq-map", "fire", 60, "gh pr list --json number --jq 'map(.number)' -L 60",
+         json.dumps(list(range(1, 61))) + "\n"),
+        ("ll-fire-q-each", "fire", 60, "gh pr list --json number -q '.[].number' -L 60", nums60),
+        ("ll-fire-jq-collect", "fire", 60, "gh pr list --json number --jq '[.[].number]' -L 60",
+         json.dumps(list(range(1, 61))) + "\n"),
+        ("ll-fire-wc-jq-each", "fire", 60, "gh pr list --json number --jq '.[].number' -L 60 | wc -l", "60\n"),
+        ("ll-fire-jqlen-map", "fire", 60, "gh pr list --json number --jq 'map(.number)' -L 60 | jq length", "60\n"),
+        ("ll-fire-label-attached", "fire", 60, "gh pr list -lquick -L 60", lines60),
+        ("ll-fire-trailing-lf", "fire", 60, "gh pr list -L 60\n", lines60),
+        ("ll-fire-ls", "fire", 60, "gh pr ls -L 60", lines60),
+        ("ll-fire-release", "fire", 30, "gh release list -L 30", _ll_lines(30)),
+        ("ll-fire-search-issues", "fire", 30, "gh search issues bug --limit 30", _ll_lines(30)),
+        ("ll-fire-pr-short", "fire", 60,
+         "gh pr list -A me -a me -B main -H feat -l bug -s open -S 'is:open' -d -R o/r -L 60", lines60),
+        ("ll-fire-pr-long", "fire", 60,
+         "gh pr list --author me --assignee me --base main --head feat --label bug --state open --search x --app y "
+         "--draft --repo o/r --limit 60", lines60),
+        ("ll-fire-issue-options", "fire", 25,
+         "gh issue list -A me -a me -l bug -s open -S x -m v1 --author me --assignee me --label bug --state all "
+         "--search x --milestone v1 --mention me --app y --type Bug -R o/r --repo o/r -L 25", _ll_lines(25)),
+        ("ll-fire-run-options", "fire", 20,
+         "gh run list -a -b main -c abc -e push -s success -u me -w ci.yml --all --branch main --commit abc "
+         "--created '>2026-01-01' --event push --status success --user me --workflow ci.yml -R o/r --repo o/r -L 20",
+         _ll_lines(20)),
+        ("ll-fire-release-options", "fire", 30,
+         "gh release list --exclude-drafts --exclude-pre-releases -O asc --order desc -R o/r --repo o/r -L 30",
+         _ll_lines(30)),
+        ("ll-fire-search-prs-options", "fire", 30, _LL_SEARCH_PRS_ALL, _ll_lines(30)),
+        ("ll-fire-search-issues-options", "fire", 30, _LL_SEARCH_ISSUES_ALL, _ll_lines(30)),
+        ("ll-fire-skip-letter-in-value", "fire", 60, "gh pr list -lw -L 60", lines60),
+        ("ll-fire-skip-word-as-value", "fire", 60, "gh pr list --search --web -L 60", lines60),
+        ("ll-fire-web-false", "fire", 60, "gh pr list --web=false -L 60", lines60),
+        ("ll-fire-short-skip-as-value", "fire", 60, "gh pr list -S -w -L 60", lines60),
+        ("ll-fire-search-query-after-dashdash", "fire", 30, "gh search prs -L 30 -- --web", _ll_lines(30)),
+        ("ll-wrong-event", "wrong", 60, "gh pr list -L 60", lines60, {}, {"hook_event_name": "PreToolUse"}),
+        ("ll-quiet-short", "guard", 60, "gh pr list -L 60", _ll_lines(59)),
+        ("ll-quiet-over", "guard", 60, "gh pr list -L 60", _ll_lines(61)),
+        ("ll-quiet-limit-one", "guard", 1, "gh pr list --head B --limit 1 --json number", '[{"number": 7}]\n'),
+        ("ll-quiet-nonascii-digits", "guard", 60, "gh pr list --limit \u0666\u0660", lines60),
+        ("ll-quiet-pipe-cat", "guard", 60, "gh pr list -L 60 | cat", lines60),
+        ("ll-quiet-and", "guard", 60, "gh pr list -L 60 && true", lines60),
+        ("ll-quiet-merge-stderr", "guard", 60, "gh pr list -L 60 2>&1", lines60),
+        ("ll-quiet-redirect-stdout", "guard", 60, "gh pr list -L 60 >> log", lines60),
+        ("ll-quiet-expansion", "guard", 60, "gh pr list --limit 60 --author $ME", lines60),
+        ("ll-quiet-search-dash-value", "guard", 60, "gh pr list --limit 100 --search -L60", lines60),
+        ("ll-quiet-first-limit", "guard", 60, "gh pr list --limit 60 --limit 100", lines60),
+        ("ll-quiet-noun", "guard", 60, "gh label list --limit 60", lines60),
+        ("ll-quiet-command-word", "guard", 60, "hub pr list -L 60", lines60),
+        ("ll-quiet-sudo", "guard", 60, "sudo gh pr list -L 60", lines60),
+        ("ll-quiet-help", "guard", 60, "gh pr list --help -L 60", lines60),
+        ("ll-quiet-web", "guard", 60, "gh pr list --web -L 60", lines60),
+        ("ll-quiet-jq-scalar", "guard", 60, "gh pr list --json number --jq '.[0].number' -L 60", "60\n"),
+        ("ll-quiet-template-short", "guard", 60,
+         "gh pr list --json number -t '{{range .}}{{.number}}{{\"\\n\"}}{{end}}' -L 60", arr60),
+        ("ll-quiet-template-long", "guard", 60,
+         "gh pr list --json number --template '{{range .}}{{.number}}{{\"\\n\"}}{{end}}' -L 60", arr60),
+        ("ll-quiet-bad-json", "guard", 60, "gh pr list --json number -L 60", lines60),
+        ("ll-quiet-wc-short", "guard", 60, "gh pr list -L 60 | wc -l", "59\n"),
+        ("ll-quiet-interrupted", "guard", 60, "gh pr list -L 60", lines60, {"interrupted": True}),
+        ("ll-quiet-exit-nonzero", "guard", 60, "gh pr list -L 60", lines60, {"exit_code": 1}),
+        ("ll-quiet-nonstring-stdout", "guard", 60, "gh pr list -L 60", ["row\n"] * 60),
+        ("ll-quiet-oversize", "guard", 60, "gh pr list -L 60", ("x" * 280000 + "\n") * 60),
+        ("ll-quiet-wrong-tool", "guard", 60, "gh pr list -L 60", lines60, {}, {"tool_name": "Read"}),
+        ("ll-quiet-pipe-other", "guard", 60, "gh pr list --json number --limit 60 | jq '.[0].number'", "60\n"),
+        ("ll-quiet-pipe-amp", "guard", 60, "gh pr list -L 60 |& wc -l", "60\n"),
+        ("ll-quiet-stderr-devstdout", "guard", 60, "gh pr list -L 60 2>/dev/stdout", lines60),
+        ("ll-quiet-stderr-in-dup", "guard", 60, "gh pr list -L 60 2<&1", lines60),
+        ("ll-quiet-stderr-dup-01", "guard", 60, "gh pr list -L 60 2>&01", lines60),
+        ("ll-quiet-exit-alias", "guard", 60, "gh pr list -L 60", lines60, {"returncode": 1}),
+        ("ll-quiet-jq-field-text", "guard", 60, "gh pr list --json body --jq '.[0].body' -L 60", lines60),
+        ("ll-quiet-jq-nested-iter", "guard", 60, "gh pr list --json labels --jq '.[].labels[].name' -L 60", lines60),
+        ("ll-quiet-jq-inner-array", "guard", 60, "gh pr list --json labels --jq '[.[0].labels[]]' -L 60",
+         json.dumps(["bug"] * 60) + "\n"),
+        ("ll-quiet-jq-pipe-nested", "guard", 60, "gh pr list --json labels --jq '.[] | .labels[].name' -L 60",
+         lines60),
+        ("ll-quiet-pr-web-short", "guard", 60, "gh pr list -w -L 60", lines60),
+        ("ll-quiet-wc-nested-jq", "guard", 60,
+         "gh pr list --json labels --jq '.[].labels[].name' -L 60 | wc -l", "60\n"),
+        ("ll-quiet-jqlen-template", "guard", 60,
+         "gh pr list --json number -t '{{(index . 0).number}}' -L 60 | jq length", "60\n"),
+        ("ll-quiet-wc-json", "guard", 60, "gh pr list --json number -L 60 | wc -l", "60\n"),
+        ("ll-quiet-jqlen-scalar", "guard", 60, "gh pr list --json number --jq '.[0].number' -L 60 | jq length",
+         "60\n"),
+        ("ll-quiet-jqlen-each", "guard", 60, "gh pr list --json number --jq '.[].number' -L 60 | jq length", "60\n"),
+        ("ll-quiet-jqlen-plain", "guard", 60, "gh pr list -L 60 | jq length", "60\n"),
+        ("ll-quiet-stderr-input", "guard", 60, "gh pr list -L 60 2<err.log", lines60),
+        ("ll-quiet-unknown-short", "guard", 60, "gh pr list --limit 100 -xL60", lines60),
+        ("ll-quiet-run-workflow-dash", "guard", 60, "gh run list --limit 100 -w -L60", lines60),
+        ("ll-quiet-oversize-command", "guard", 60, "gh pr list -L 60 --search '" + "x" * 1048577 + "'", lines60),
+        ("ll-quiet-web-in-cluster", "guard", 60, "gh pr list -dwL60", lines60),
+        ("ll-quiet-each-nonscalar", "guard", 60, "gh pr list --json labels --jq '.[].labels' -L 60", pretty),
+        ("ll-quiet-web-true", "guard", 60, "gh pr list --web=true -L 60", lines60),
+        ("ll-quiet-web-other", "guard", 60, "gh pr list --web=maybe -L 60", lines60),
+        ("ll-quiet-web-after-consumed-dashdash", "guard", 60, "gh pr list -S -- --web -L 60", lines60),
+        # Guard rows that each hold one piece of a command or response (how the limit is written, an exit-code
+        # value, the output's row count, the gh word, an option or a wrapper): each guard row below is paired in
+        # _LL_PAIRS with the fire row that differs from it only in that piece, so the pair shows that piece is
+        # what silences the call.
+        ("ll-fire-search-type", "fire", 30, "gh search issues bug --search-type semantic -L 30", _ll_lines(30)),
+        ("ll-fire-issue-type", "fire", 25, "gh issue list --type Bug -L 25", _ll_lines(25)),
+        ("ll-quiet-limit-letter", "guard", 2, "gh pr list -L a", _ll_lines(2)),
+        ("ll-quiet-limit-huge", "guard", 60, "gh pr list -L " + "9" * 5000, lines60),
+        ("ll-quiet-limit-leading-zero", "guard", 60, "gh pr list -L 060", lines60),
+        ("ll-quiet-limit-zeros", "guard", 60, "gh pr list --limit 0060", lines60),
+        ("ll-quiet-limit-plus", "guard", 60, "gh pr list -L +60", lines60),
+        ("ll-quiet-limit-underscore", "guard", 60, "gh pr list -L 6_0", lines60),
+        ("ll-quiet-limit-blank", "guard", 60, "gh pr list -L ' 60'", lines60),
+        ("ll-quiet-fullwidth-digits", "guard", 60, "gh pr list -L " + chr(0xFF16) + chr(0xFF10), lines60),
+        ("ll-quiet-exit-string", "guard", 60, "gh pr list -L 60", lines60, {"exit_code": "1"}),
+        ("ll-quiet-exit-float", "guard", 60, "gh pr list -L 60", lines60, {"exitCode": 1.0}),
+        ("ll-fire-exit-zero", "fire", 60, "gh pr list -L 60", lines60, {"exit_code": 0}),
+        ("ll-fire-exit-string-zero", "fire", 60, "gh pr list -L 60", lines60, {"exit_code": "0"}),
+        ("ll-fire-exit-float-zero", "fire", 60, "gh pr list -L 60", lines60, {"exitCode": 0.0}),
+        ("ll-fire-exit-null", "fire", 60, "gh pr list -L 60", lines60, {"returnCode": None}),
+        ("ll-quiet-gh-split-quotes", "guard", 60, "g''h pr list -L 60", lines60),
+        ("ll-fire-gh-quoted", "fire", 60, "'gh' pr list -L 60", lines60),
+        ("ll-quiet-unknown-long", "guard", 60, "gh pr list --frobnicate -L 60", lines60),
+        ("ll-quiet-jq-length-short", "guard", 60, "gh pr list --json number --jq length -L 60", "59\n"),
+        ("ll-quiet-env-option", "guard", 60, "env -v gh pr list -L 60", lines60),
+        ("ll-fire-env-ignore", "fire", 60, "env -i gh pr list -L 60", lines60),
+        ("ll-quiet-timeout-bad-duration", "guard", 60, "timeout 1y gh pr list -L 60", lines60),
+        ("ll-quiet-command-v", "guard", 2, "command -v gh pr list -L 2", _ll_lines(2)),
+        ("ll-quiet-command-V", "guard", 2, "command -V gh pr list -L 2", _ll_lines(2)),
+        ("ll-fire-command-p", "fire", 2, "command -p gh pr list -L 2", _ll_lines(2)),
+        # A leading or env assignment of GH_FORCE_TTY silences the call, since gh's TTY header lines (tty30: a
+        # Showing line and a column header before 28 rows, 30 non-empty lines) would be counted as rows. Each
+        # guard row is paired in _LL_PAIRS with a fire row of the same shape that assigns only GH_PAGER.
+        ("ll-quiet-force-tty-header", "guard", 30, "GH_FORCE_TTY=1 gh pr list -L 30", tty30),
+        ("ll-fire-assign-tty-shape", "fire", 30, "GH_PAGER=cat gh pr list -L 30", tty30),
+        ("ll-quiet-force-tty-empty", "guard", 30, "GH_FORCE_TTY= gh pr list -L 30", tty30),
+        ("ll-quiet-force-tty-append", "guard", 30, "GH_FORCE_TTY+=1 gh pr list -L 30", tty30),
+        ("ll-quiet-force-tty-later", "guard", 30, "GH_PAGER=cat GH_FORCE_TTY=120 gh pr list -L 30", tty30),
+        ("ll-quiet-force-tty-env", "guard", 30, "env GH_FORCE_TTY=1 gh pr list -L 30", tty30),
+        ("ll-fire-env-assign-tty-shape", "fire", 30, "env GH_PAGER=cat gh pr list -L 30", tty30),
+        ("ll-quiet-force-tty-wc", "guard", 30, "GH_FORCE_TTY=1 gh pr list -L 30 | wc -l", "30\n"),
+        ("ll-fire-assign-wc", "fire", 30, "GH_PAGER=cat gh pr list -L 30 | wc -l", "30\n"),
+        ("ll-fire-force-tty-longer-name", "fire", 30, "GH_FORCE_TTYX=1 gh pr list -L 30", tty30),
+        ("ll-fire-force-tty-in-query", "fire", 30, "gh pr list --search GH_FORCE_TTY=1 -L 30", _ll_lines(30)),
+        ("ll-fire-env-unset-force-tty", "fire", 30, "env -u GH_FORCE_TTY gh pr list -L 30", _ll_lines(30)),
+        ("ll-scope-h-unlisted", "scope", 60, "gh pr list -h -L 60", lines60),
+        ("ll-scope-view", "scope", 60, "gh pr view 60", lines60),
+        ("ll-scope-git-log", "scope", 60, "git log -n 60", lines60),
+        ("ll-scope-api-paginate", "scope", 60, "gh api --paginate repos/o/r/pulls", lines60),
+        ("ll-scope-limit-in-search", "scope", 60, "gh pr list --search 'limit 60' --limit 100", lines60),
+        ("ll-scope-no-limit", "scope", 30, "gh pr list", _ll_lines(30)),
+        ("ll-scope-force-tty", "scope", 60, "GH_FORCE_TTY=1 gh pr list -L 60", "\nShowing 60 of 200\n\n" + lines60),
+        ("ll-scope-empty-stdout", "scope", 60, "gh pr list -L 60", ""),
+        ("ll-scope-limit-zero", "scope", 0, "gh pr list --limit 0", ""),
+        ("ll-scope-limit-var", "scope", 60, "gh pr list --limit $N", lines60),
+        ("ll-scope-unquoted-jq", "scope", 60, "gh pr list --json number --jq .[].number -L 60", nums60),
+        ("ll-scope-env-split", "scope", 60, "env -S 'gh pr list -L 60'", lines60),
+        ("ll-scope-group-flag", "scope", 60, "gh pr -R o/r list -L 60", lines60),
+        ("ll-scope-trailing-semicolon", "scope", 60, "gh pr list -L 60;", lines60),
+    ] + _ll_field_rows()
+    return [row + ({}, {})[len(row) - 5:] for row in rows]
+
+
+# Each guard row of the two commented groups in _ll_rows, and ll-quiet-nonascii-digits, with its paired flip: the
+# fire row that differs from it only in the piece the guard holds. Not every guard row is paired; ll-pairs checks
+# that both rows exist, with those roles, and differ.
+_LL_PAIRS = {
+    "ll-quiet-limit-letter": "ll-fire-limit-two",
+    "ll-quiet-limit-huge": "ll-fire-L-space",
+    "ll-quiet-limit-leading-zero": "ll-fire-L-space",
+    "ll-quiet-limit-zeros": "ll-fire-limit-space",
+    "ll-quiet-limit-plus": "ll-fire-L-space",
+    "ll-quiet-limit-underscore": "ll-fire-L-space",
+    "ll-quiet-limit-blank": "ll-fire-L-space",
+    "ll-quiet-fullwidth-digits": "ll-fire-L-space",
+    "ll-quiet-nonascii-digits": "ll-fire-limit-space",
+    "ll-quiet-exit-string": "ll-fire-exit-string-zero",
+    "ll-quiet-exit-float": "ll-fire-exit-float-zero",
+    "ll-quiet-gh-split-quotes": "ll-fire-gh-quoted",
+    "ll-quiet-unknown-long": "ll-fire-L-space",
+    "ll-quiet-jq-length-short": "ll-fire-jq-length",
+    "ll-quiet-env-option": "ll-fire-env-ignore",
+    "ll-quiet-timeout-bad-duration": "ll-fire-timeout",
+    "ll-quiet-command-v": "ll-fire-command-p",
+    "ll-quiet-command-V": "ll-fire-command-p",
+    "ll-quiet-force-tty-header": "ll-fire-assign-tty-shape",
+    "ll-quiet-force-tty-empty": "ll-fire-assign-tty-shape",
+    "ll-quiet-force-tty-append": "ll-fire-assign-tty-shape",
+    "ll-quiet-force-tty-later": "ll-fire-assign-tty-shape",
+    "ll-quiet-force-tty-env": "ll-fire-env-assign-tty-shape",
+    "ll-quiet-force-tty-wc": "ll-fire-assign-wc",
+}
+
+
+def _ll_payload(row):
+    """The PostToolUse Bash payload of one list_limit_note row."""
+    _rid, _role, _limit, command, stdout, response, extra = row
+    data = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "session_id": "ll-session",
+            "tool_input": {"command": command, "description": "list"},
+            "tool_response": dict({"stdout": stdout, "stderr": "", "interrupted": False, "isImage": False},
+                                  **response)}
+    data.update(extra)
+    return data
+
+
+def _ll_outcome(handler, row):
+    """One row's outcome under handler: fire (a PostToolUse note whose model context names 'at least N' and
+    whose operator message names N, with no permissionDecision), wrong (an allow note naming PreToolUse),
+    quiet ((0, None, None)), or a description of anything else, a raised exception included."""
+    limit = row[2]
+    try:
+        result = handler(_ll_payload(row))
+    except Exception as exc:  # a crash is a red row, never a pass
+        return "raised {}: {}".format(type(exc).__name__, exc)
+    if result == (0, None, None):
+        return "quiet"
+    code, obj, err = result
+    if code == 0 and err is None and isinstance(obj, dict):
+        if set(obj) == {"systemMessage"} and "'PreToolUse'" in obj["systemMessage"]:
+            return "wrong"
+        hso = obj.get("hookSpecificOutput")
+        if (set(obj) == {"hookSpecificOutput", "systemMessage"} and isinstance(hso, dict)
+                and set(hso) == {"hookEventName", "additionalContext"} and hso["hookEventName"] == "PostToolUse"
+                and "at least {} ".format(limit) in hso["additionalContext"]
+                and " {};".format(limit) in obj["systemMessage"]):
+            return "fire"
+    return "other {!r}".format(result)[:300]
+
+
+def _test_list_limit_note(failures):
+    """(ll-*) list_limit_note, the PostToolUse Bash note for a gh listing whose row count equals its own
+    limit. Every row is judged by its structured result: a fire row must give the note (model context naming
+    'at least N', an operator message naming N, no permissionDecision), the wrong-event row the allow note
+    naming the event, and every guard and scope row exactly (0, None, None). The revert check runs every fire
+    row and the wrong-event row again with the handler replaced by _allow(): each must then go red. ll-table-pin
+    holds the handler's per-noun tables equal to the literal copy above, pinned to gh 2.103.3, and ll-wiring
+    the dispatcher wiring (the fail-open floor literal is held by pf-modes). ll-pairs holds each paired guard
+    row's flip; ll-no-gh-not-lexed holds that a command without the text gh is never lexed (the cost bound)."""
+    rows = _ll_rows()
+    want = {"fire": "fire", "wrong": "wrong", "guard": "quiet", "scope": "quiet"}
+    ids = [row[0] for row in rows]
+    if len(ids) != len(set(ids)):
+        failures.append("(ll-ids) duplicate row ids: {}".format(sorted({rid for rid in ids if ids.count(rid) > 1})))
+    for row in rows:
+        got = _ll_outcome(aiqt_hooks.list_limit_note, row)
+        if got != want[row[1]]:
+            failures.append("({}) expected {}, got {}".format(row[0], want[row[1]], got))
+    by_id = {row[0]: row for row in rows}
+    for guard, flip in sorted(_LL_PAIRS.items()):
+        if (guard not in by_id or flip not in by_id or by_id[guard][1] != "guard" or by_id[flip][1] != "fire"
+                or by_id[guard][3:] == by_id[flip][3:]):
+            failures.append("(ll-pairs) {} must be a guard row paired with the fire row {} and differ from it"
+                            .format(guard, flip))
+    lexed = []
+    real_lex = aiqt_hooks._lex_command
+
+    def _counting_lex(*args, **kwargs):
+        lexed.append(args)
+        return real_lex(*args, **kwargs)
+
+    aiqt_hooks._lex_command = _counting_lex
+    try:
+        no_gh = _ll_outcome(aiqt_hooks.list_limit_note, ("ll-no-gh-not-lexed", "guard", 60,
+                                                         "git log -n 60 " + "$(" * 2000, _ll_lines(60), {}, {}))
+        with_gh = _ll_outcome(aiqt_hooks.list_limit_note, ("ll-no-gh-not-lexed", "fire", 60, "gh pr list -L 60",
+                                                           _ll_lines(60), {}, {}))
+    finally:
+        aiqt_hooks._lex_command = real_lex
+    if no_gh != "quiet" or with_gh != "fire" or len(lexed) != 1:
+        failures.append("(ll-no-gh-not-lexed) a command without the text gh must be quiet and never lexed, and a gh "
+                        "listing lexed once; got {}, {}, {} lexings".format(no_gh, with_gh, len(lexed)))
+    reverted = lambda data: aiqt_hooks._allow()  # noqa: E731
+    for row in rows:
+        if row[1] in ("fire", "wrong") and _ll_outcome(reverted, row) == want[row[1]]:
+            failures.append("({}-revert) the row stays green with the handler replaced by _allow()".format(row[0]))
+    if aiqt_hooks._LL_TABLES != _LL_TABLE_PIN:
+        failures.append("(ll-table-pin) the handler's per-noun tables differ from the pinned copy for {}".format(
+            sorted(noun for noun in set(aiqt_hooks._LL_TABLES) | set(_LL_TABLE_PIN)
+                   if aiqt_hooks._LL_TABLES.get(noun) != _LL_TABLE_PIN.get(noun))))
+    if (aiqt_hooks._LL_GH_VERSION, aiqt_hooks._LL_MIN_LIMIT) != ("2.103.3", 2):
+        failures.append("(ll-version-pin) the tables must be pinned to gh 2.103.3 with a minimum limit of 2, got "
+                        "{!r}".format((aiqt_hooks._LL_GH_VERSION, aiqt_hooks._LL_MIN_LIMIT)))
+    if (aiqt_hooks.HANDLERS.get("list_limit_note") is not aiqt_hooks.list_limit_note
+            or aiqt_hooks.HANDLER_EVENT.get("list_limit_note") != "PostToolUse"):
+        failures.append("(ll-wiring) list_limit_note handler/event wiring is missing or wrong")
+
+
 def _test_clock_hooks(failures, tmp):
     """(fsw-*) The clock-stamp dispatcher handler ported from the former standalone preview script.
     future_stamp_write (PreToolUse, stage bake) WARNS, never denies, on a future-dated literal written into an
@@ -41526,6 +41944,7 @@ def _main_isolated(monitor):
         _test_cmtidn_oracle(failures, tmp)
         _test_clock_inject(failures, tmp)
         _test_clock_hooks(failures, tmp)
+        _test_list_limit_note(failures)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
