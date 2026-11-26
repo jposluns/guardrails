@@ -389,7 +389,7 @@ def _write_tree(root, specs, registry=None, blocks=(), listed=None, write_decl=T
     apexes = [str(fm["corpus-id"]) for _src, fm in pairs if fm.get("apex") is True]
     if write_decl:
         if os.path.lexists(decl):
-            on_disk, _warn, _removals = _must_deliver.read_declared(decl)
+            on_disk = _must_deliver.read_declared(decl).ids
             if listed is not None and list(listed) != on_disk:
                 raise ValueError("fixture: listed={!r} differs from the list on disk {!r}".format(
                     list(listed), on_disk))

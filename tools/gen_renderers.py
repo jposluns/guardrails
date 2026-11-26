@@ -91,11 +91,12 @@ RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rule
 # The lowest semantics-revision each renderer may declare, with the change that set it: a declaration
 # below its floor is refused (exit 2), so a revision bump cannot be reverted while the change it records
 # stays. agents and adapters 2: each `## Detail` split rule's core renders at its place and every detail
-# layer after the last rule (revision 1 dropped a split rule's core). The per-rule renderers (rules,
+# layer after the last rule (revision 1 dropped a split rule's core). agents 3: the AGENTS.md header states
+# the listed-first order (the apex, the must-deliver rules, then the rest). The per-rule renderers (rules,
 # cursor, skill) keep their revisions: their split output changed from core dropped to core then detail, but
 # no shipped source used the split before that change, so no published byte changed meaning. Lowering a
 # floor here is not refused by any check (the disclosed residual above); review judges it.
-SEMANTICS_FLOORS = {"agents": 2, "adapters": 2}
+SEMANTICS_FLOORS = {"agents": 3, "adapters": 2}
 
 
 class GateError(Exception):

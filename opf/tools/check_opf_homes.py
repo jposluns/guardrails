@@ -50,19 +50,16 @@ base defines one implementation model (spec 16.1), so restoring one of its sente
 under the default entry; the rest of 9.1, and additions to it, stay unprotected. Appendix E stays
 untiled, and its sentences that state what section 16.1 makes of its probes are pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red; the
-rest of Appendix E, and additions to it, stay unprotected here. The quickstart's, the adoption
-guide's (opf/site/adopt.md) and the generated opfiles.ai disclosure, adopt and core-files pages'
-(opf/site/<page>/index.html) changed sentences, the record indexes' sentences held on the
-core-files page that carries them, are pinned the same way over tag-stripped text (_SURFACE),
-outside the keyword lint, and the self-test pins the registry's shape, so dropping a _SURFACE
-entry turns the self-test red; each sentence of the disclosure page's retired fresh-only item, the
-quickstart's retired conformance-class sentence, the record indexes' deleted importer-only
-legacy_fragment rows and counts, those three files' wording of the removed section 9.2 remedy
-adoption, and the disclosure page's and the record indexes' description of a store upgrade the
-reference tooling no longer defines, is searched over its whole file's normalized text and is red
-wherever it lands (_SURFACE_RETIRED). The rest of those files, and additions to them, stay unprotected,
-and beyond those registered retired sentences no retired-text check reads them, so any other
-deleted sentence restored there stays green.
+rest of Appendix E, and additions to it, stay unprotected here. The quickstart's changed sentences
+are pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint, and the
+self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test red; each of
+the quickstart's retired sentences (its conformance-class sentence and its wording of the removed
+section 9.2 remedy adoption) is searched over its whole file's normalized text and is red wherever it
+lands (_SURFACE_RETIRED). The rest of that file, and additions to it, stay unprotected, and beyond those
+registered retired sentences no retired-text check reads it, so any other deleted sentence restored
+there stays green. The opfiles.ai adoption guide and its generated disclosure, adopt and core-files
+pages, whose sentences were pinned here too, were removed from this repository with opf/site/; their
+pins are the OPFiles repository's to keep, not this gate's.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
 MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D), and a
@@ -268,13 +265,9 @@ import _opf_store as store  # noqa: E402
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 QUICKSTART = SPEC.parent / "OPF-QUICKSTART.md"
-# The opfiles.ai pages are generated (tools/gen_draft_site.py, from opf/site/draft-src/), each an
-# index.html under its page directory. The core-files page also carries the record indexes that the
-# retired record-indexes page described, so that page's pins and retired sentences are held there.
-DISCLOSURE = SPEC.parents[1] / "site" / "disclosure" / "index.html"
-ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt" / "index.html"
-ADOPT_GUIDE = SPEC.parents[1] / "site" / "adopt.md"
-CORE_FILES = SPEC.parents[1] / "site" / "core-files" / "index.html"
+# The opfiles.ai pages this gate also pinned (opf/site/: the disclosure, adopt and core-files pages and
+# the adoption guide) were removed from this repository; no surface here lies under opf/site/.
+SITE_TREE = SPEC.parents[1] / "site"
 
 
 class _Descriptive(str):
@@ -313,7 +306,7 @@ _CONTRACT = {
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
         _D('Status: this specification is a draft.'),
-        _D("The reference tooling's status in this build is the generated status note that follows, also published in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in opf/tools/opf.py):"),
+        _D("The reference tooling's status in this build is the generated status note that follows, also published in opf/README.md (generated from VERB_STATUS in opf/tools/opf.py):"),
         _D('Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.'),
         _D('Date: 2026-10-24 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
@@ -1444,8 +1437,8 @@ _TOOLING_ONLY_RESERVATIONS = ("imports",)
 # Plain-language surfaces restating the base 2.0.0 contract: sentence pins over tag-stripped,
 # whitespace-normalized text, so deleting or rewording a pinned sentence turns the gate red.
 # They are not specification sentences, so the section 2 keyword lint does not read them. The
-# quickstart, the disclosure page, the adopt page, the adoption guide and the core-files page
-# (with the record indexes it carries) state the one implementation model, the 2.0.0 file baseline, the
+# quickstart (the opfiles.ai pages it shared this registry with left with opf/site/) states the one
+# implementation model, the 2.0.0 file baseline, the
 # reference tooling's grading of a 2.0.0 manifest with homes = 2, that it defines no store
 # upgrade, what its scaffold still writes, and where its 1.2.0 behaviour diverges from the
 # specification. The self-test pins
@@ -1463,85 +1456,17 @@ _SURFACE = {
         'opf adopt is the path for re-adopting any prior ancestry.',
         'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
     ),
-    DISCLOSURE: (
-        "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
-        "That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.",
-        'A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).',
-        'Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.',
-        'The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification.',
-        'The reference tooling\'s opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store.',
-        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
-    ),
-    ADOPT_PAGE: (
-        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
-        "The reference tooling's opf init does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
-        'It declares standard = "opf" (the exact discovery token) in its [opf] table, along with the base spec_version you conform to ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status.',
-        'It holds the clean row and the imported counter row (the quoted key "imported:&lt;NS&gt;", at zero to start) of every enabled type.',
-        'The imported leaves: one &lt;type&gt;.imported.index.toml beside each of those eleven indexes, plus worklog.imported.toml for the worklog, each starting with no records in the same canonical form, never as a zero-byte file. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).',
-        'The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above.',
-        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
-        'spec_version = "2.0.0" # the base spec version this store conforms to homes = 2 # the homes generation; required, and 2 is the only value',
-        'The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with opf render --write for a supported store or your own renderer, and then work records-first.',
-        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
-    ),
-    ADOPT_GUIDE: (
-        "The reference tooling's opf init does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).",
-        'Create the machine store at .working/toml/: manifest.toml (the control document: an [opf] table declaring standard = "opf", the base spec_version ("2.0.0"), the homes generation homes = 2, the storage layout, the enforcement posture, and import_status, plus a [types.] registration for every enabled type, the declared [views], and the other tables the standard defines; see section 9 of OPF-SPEC.md, linked from /standard), counters.toml (the per-namespace ID high-water marks), version.toml (the version and release ledger, numbers, dates, spans, and digests, never release prose), worklog.toml (the durable operational record: one entry per change, correctable before its span is released, frozen afterward, never deleted), and the eleven baseline typed indexes as .index.toml, each starting with no records in the canonical form the reference tooling writes, never as a zero-byte file, plus the imported leaves the standard requires in every store: one .imported.index.toml beside each of those indexes and worklog.imported.toml for the worklog, each starting the same way, with the imported counter row of each enabled type (the quoted key "imported:", at zero) beside its clean row in counters.toml (OPF-SPEC.md sections 4.2 and 8.2).',
-        'It does not yet implement spec 2.0.0, the only base version the standard defines.',
-        'Its opf doctor grades a manifest declaring spec_version = "2.0.0" with homes = 2 under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; opf upgrade and opf record refuse such a store.',
-        "Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path.",
-        'The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.',
-    ),
-    CORE_FILES: (
-        # The record indexes (the retired record-indexes page's pins).
-        "Created by opf init (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by opf render (DONE.md and the mirror) and validated by opf doctor (schema, uniqueness, the one-to-one receipt link).",
-        'Reserved namespace No module toggle: the standard reserves LF unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes legacy_fragment (LF, quarantined &#8594; resolved | ignored) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.',
-        '(none) LF reserved unassigned; the reference tooling still recognizes legacy_fragment (quarantined &#8594; resolved | ignored) in stores holding such records from its retired import path',
-        'The standard reserves the LF namespace unassigned and defines no legacy_fragment type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.',
-        "Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.",
-        'Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates legacy_fragment records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.',
-        "A new store's counters file has no LF namespace; a store scaffolded by earlier reference tooling may carry LF (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.",
-        # The control files.
-        'The base [opf] table carries the exact discovery token standard = "opf", the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:',
-        'standard = "opf" spec_version = "2.0.0" homes = 2 layout = "inline"',
-        'The reference tooling does not yet implement spec 2.0.0: its scaffold still writes spec_version = "1.2.0" with no homes key.',
-        '[opf] standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)',
-    ),
 }
-# Retired surface wording: the disclosure page's fresh-only item, the quickstart's
-# conformance-class sentence, retired with the implementation classes (spec 16.1), the
-# record indexes' deleted importer-only legacy_fragment rows and counts, retired with the reserved
-# unassigned LF namespace (spec 8.1), and the quickstart's, the disclosure page's and the
-# record indexes' wording of the removed section 9.2 remedy adoption, retired with it (spec
-# 9.2 defines no path for a manifest below 2.0.0), and the disclosure page's and the record indexes'
-# description of a store upgrade the reference tooling no longer defines. The record indexes'
-# sentences are held on the core-files page, which carries the record indexes now. Each sentence
-# present in its file's normalized text is a finding.
+# Retired surface wording: the quickstart's conformance-class sentence, retired with the
+# implementation classes (spec 16.1), and the quickstart's wording of the removed section 9.2 remedy
+# adoption, retired with it (spec 9.2 defines no path for a manifest below 2.0.0). (The disclosure
+# page's and the record indexes' retired sentences went with the opfiles.ai pages, removed with
+# opf/site/.) Each sentence present in its file's normalized text is a finding.
 _SURFACE_RETIRED = {
     QUICKSTART: (
         'An implementation declares a conformance class: an upgrade-capable one carries older stores forward',
         "the specification's section 9.2 remedy adoption starts a new store whose counters start at zero, so a number the old tree's records carried can appear again in the new store's own series",
         'under the specification, a tree whose manifest declares a spec_version below 2.0.0 is foreign content for adoption, so adoption over it is a first adoption (specification sections 9.2 and 14.1), never a re-adoption.',
-    ),
-    DISCLOSURE: (
-        'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name an older store or one in which its admission check detects an item on the closed legacy-state list.',
-        "It runs that check once before any write, and a store refused there is left unchanged; only then does it recover, within a bound, its own interrupted writes and reconcile a dead run's leftover lease as the base rules require, and it runs the check again after them, so a store refused, or found cannot-evaluate, only by that second run can carry their effects.",
-        'That check searches only the files section 16.1 permits and the list catches only what it lists, so legacy state the list omits, or that sits where the check does not search, goes undetected; an input it cannot read is cannot-evaluate, never admitted.',
-        "For a partial or complete import status, where it cannot tell whether a file in the adoption evidence area is another implementation's adoption receipt, it reports cannot-evaluate rather than refusing the store as legacy, and it does not see an adoption receipt kept outside that area, so it can refuse as legacy a store whose recorded import status rests on such a receipt.",
-        'It offers no upgrade, repair, or continuity, so a store holding legacy state needs an upgrade-capable implementation.',
-        'The upgrade into base 1.3.0 is still a target that the reference tooling does not yet perform, and the reference-tooling residuals above name stores its current upgrade cannot carry.',
-        'A class claim is self-asserted until validation tooling ships.',
-        'a 1.2.0 store is one the section 9.2 validation refusals refuse, so an adoption over it is a first adoption under section 14.1, never a re-adoption.',
-        "An older store has no upgrade into 2.0.0; its remedy is a fresh 2.0.0 store whose adoption takes the old store's files as foreign content.",
-        'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
-    ),
-    CORE_FILES: (
-        'Importer-only (no module toggle)',
-        'legacy_fragment LF quarantined &#8594; resolved | ignored',
-        '+ 1 importer-only',
-        'one importer-only type, and two reserved names or namespaces',
-        "a 1.2.0 store is one the standard's section 9.2 validation refuses, so an adoption over it is a first adoption under its section 14.1, never a re-adoption.",
-        'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
     ),
 }
 
@@ -5587,19 +5512,17 @@ def _self_test_vectors():
                   nb.count(frag) == 1 and f in surface_findings(m))
     # Emptying or narrowing the surface registry would retire its pins silently: its shape is
     # pinned, so dropping a file or any of its pins turns the self-test red.
-    check("surface-registry", lambda: tuple(_SURFACE) == (
-        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 11))
-    # Each generated page is registered at its root path, an index.html under its page directory,
-    # named by that directory, so the findings tell the pages apart.
-    check("surface-page-paths", lambda: all(
-        path.name == "index.html" and path.parent.parent == SPEC.parents[1] / "site"
-        and _surface_name(path) == path.parent.name + "/index.html"
-        for path in (DISCLOSURE, ADOPT_PAGE, CORE_FILES)))
+    check("surface-registry", lambda: tuple(_SURFACE) == (QUICKSTART,) and
+          tuple(map(len, _SURFACE.values())) == (10,))
+    # No surface lies under the removed opf/site/ tree (its pages' pins are the OPFiles repository's), and a
+    # generated page, were one registered, would still be named by its page directory.
+    check("surface-no-site-pages", lambda: not any(
+        SITE_TREE == path or SITE_TREE in path.parents for path in list(_SURFACE) + list(_SURFACE_RETIRED))
+          and _surface_name(SITE_TREE / "adopt" / "index.html") == "adopt/index.html")
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(_SURFACE_RETIRED) == (QUICKSTART, DISCLOSURE, CORE_FILES) and
-          tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
+    check("surface-retired-registry", lambda: tuple(_SURFACE_RETIRED) == (QUICKSTART,) and
+          tuple(map(len, _SURFACE_RETIRED.values())) == (3,) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])

@@ -63,7 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_rules            # noqa: E402  load_corpus, derive, MAP_KEYS, SEQ_KEYS, _ADOPTER_MODE_CASES
 import gen_agents           # noqa: E402  ordered_bodies, agents_ordered_bodies, AGENTS_REL, HEADER
 import _adapter_compose as adapter_compose  # noqa: E402  load_registry, compose, registry_text
-import _must_deliver        # noqa: E402  read_declared, listed_ids, the error classes (the AGENTS.md order)
+import _must_deliver        # noqa: E402  listed_ids, parse_base_declared, the error classes (the AGENTS.md order)
 import gen_adapters         # noqa: E402  ADAPTERS, TARGETS (GEMINI.md / copilot-instructions.md)
 import gen_cursor           # noqa: E402  render_rule, cursor_rel, OUT_PARTS (Cursor .mdc tree)
 import gen_hooks            # noqa: E402  build_desired, PLUGIN_ROOT_PARTS, HOOKS_SUBTREE_PARTS (hooks plugin)
@@ -245,17 +245,27 @@ def _claude_drift(root, corpus):
 #              installed AGENTS.md has no order to be judged in; conformance refuses it the same way (Q7).
 #   unknown    the list parses but names an id that is not a corpus-id: FAIL, naming the ids (the
 #              generators refuse such a list with exit 2; conformance reports it).
+#   older      an installed list still in exactly the format-version 1 schema (no reserve-bytes), which the
+#              working parser refuses and the base parser (_must_deliver.parse_base_declared) accepts: its
+#              ids order the composition as an "ok" list's do (None: drift decides), and the agents detail
+#              names it an older version with the migration step (_OLDER_NOTE), never MALFORMED. Its ids
+#              are held to the corpus as an "ok" list's are (an unknown id is "unknown").
 #   malformed  a list that is not a regular file (a dangling symlink included: _listed_state's lstat never
 #              reads one as absent), unreadable, not UTF-8, not TOML or outside the schema: MALFORMED.
 # A state outside this table is MALFORMED naming it (_list_status), never a fall-through to drift.
 # GEMINI.md and the Copilot instructions keep AIQT priority order (gen_adapters), so only AGENTS.md reads it.
-_LIST_STATUS = {"ok": None, "absent": MALFORMED, "unknown": FAIL, "malformed": MALFORMED}
+_LIST_STATUS = {"ok": None, "older": None, "absent": MALFORMED, "unknown": FAIL, "malformed": MALFORMED}
+_OLDER_NOTE = ("; {0} is format-version 1, an older version, judged in the order it lists; tools/gen_agents.py "
+               "now reads format-version 2 only, so migrate it: set format-version = 2 and add reserve-bytes = 0 "
+               "(the version 1 behaviour) or a larger reserve, at most warn-margin-bytes".format(
+                   _must_deliver.DECL_REL))
 
 
 def _listed_state(root, corpus):
-    """The must-deliver list at root / DECL_REL against the loaded corpus: ("ok", ids), ("absent", ()),
-    ("unknown", ids not in the corpus) or ("malformed", message). The unknown-id case is told apart by its
-    class (UnknownListedIdError), never by its message text."""
+    """The must-deliver list at root / DECL_REL against the loaded corpus: ("ok", ids), ("older", ids) for a
+    list in exactly the format-version 1 schema, ("absent", ()), ("unknown", ids not in the corpus) or
+    ("malformed", message). The unknown-id case is told apart by its class (UnknownListedIdError), never by
+    its message text; the older case by _older_ids, never by the working parser's message."""
     path = root / _must_deliver.DECL_REL
     try:
         os.lstat(path)
@@ -263,12 +273,40 @@ def _listed_state(root, corpus):
         return ("absent", ())
     except OSError as exc:  # present but not stat-able (a parent without search permission): never absent
         return ("malformed", "cannot stat {} ({})".format(_must_deliver.DECL_REL, exc))
+    corpus_ids = [str(fm.get("corpus-id")) for _s, fm, _r in corpus]
     try:
-        return ("ok", tuple(_must_deliver.listed_ids(path, [str(fm.get("corpus-id")) for _s, fm, _r in corpus])))
+        return ("ok", tuple(_must_deliver.listed_ids(path, corpus_ids)))
     except _must_deliver.UnknownListedIdError as exc:
         return ("unknown", exc.ids)
     except (ValueError, OSError) as exc:
-        return ("malformed", str(exc))
+        older = _older_ids(path)
+        if older is None:
+            return ("malformed", str(exc))
+    known = set(corpus_ids)
+    unknown = [rid for rid in older if rid not in known]
+    if unknown:
+        return ("unknown", tuple(unknown))
+    return ("older", tuple(older))
+
+
+def _older_ids(path):
+    """The listed ids of the list at path when it is a regular file in exactly the format-version 1 schema,
+    else None. Called only after read_declared (format-version 2 only) refused the file: the bytes are read
+    once more and must pass the base parser (exactly version 1 or exactly version 2) and fail the working
+    parser (version 2 only), so only a version 1 list is accepted here. Any read or parse failure is None
+    (the caller keeps the working parser's MALFORMED message)."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        raw = _must_deliver._read_decl_bytes(path)
+        ids = _must_deliver.parse_base_declared(raw, _must_deliver.DECL_REL).ids
+    except (ValueError, OSError):
+        return None
+    try:
+        _must_deliver.parse_declared(raw, _must_deliver.DECL_REL)
+    except ValueError:
+        return ids
+    return None  # a version 2 list here was refused for another reason by read_declared: keep that message
 
 
 def _list_status(listed_state):
@@ -296,14 +334,16 @@ def _agents_drift(root, corpus, listed_state):
     a malformed or unreadable registry or block source, or an AGENTS.md that is not valid UTF-8 ->
     MALFORMED. The must-deliver list (listed_state, from _listed_state, required so no caller can fall back
     to AIQT priority order by omission) orders the composition, and its absent (MALFORMED), unknown-id
-    (FAIL) and malformed (MALFORMED) states map through _LIST_STATUS."""
+    (FAIL) and malformed (MALFORMED) states map through _LIST_STATUS; an "older" (format-version 1) list
+    orders it as an "ok" list does, and every result it reaches carries _OLDER_NOTE."""
     out = root / "AGENTS.md"
     if not out.exists():
         return (NA, "no AGENTS.md surface installed")
     status, detail = _list_status(listed_state)
     if status is not None:
         return (status, detail)
-    listed = listed_state[1]  # only an "ok" list reaches here (_list_status)
+    listed = listed_state[1]  # only an "ok" or "older" list reaches here (_list_status)
+    note = _OLDER_NOTE if listed_state[0] == "older" else ""
     try:
         registry = adapter_compose.load_registry(root, absent_is_legacy=True)
         content = adapter_compose.compose(gen_agents.AGENTS_REL, gen_agents.HEADER,
@@ -311,10 +351,10 @@ def _agents_drift(root, corpus, listed_state):
         current = out.read_bytes()
         current.decode("utf-8")  # an undecodable AGENTS.md is MALFORMED, as before the raw-byte compare
     except (ValueError, OSError) as exc:
-        return (MALFORMED, "cannot render/read AGENTS.md: {}".format(exc))
+        return (MALFORMED, "cannot render/read AGENTS.md: {}{}".format(exc, note))
     if current != content:
-        return (FAIL, "AGENTS.md drift")
-    return (PASS, "AGENTS.md matches regeneration")
+        return (FAIL, "AGENTS.md drift" + note)
+    return (PASS, "AGENTS.md matches regeneration" + note)
 
 
 def _adapter_drift(root, corpus, adapter):
@@ -998,7 +1038,10 @@ def main():
 #      list at all is MALFORMED naming the missing file on a full install (exit 2) and is not read on an
 #      adapter-only one (exit 0); with the corpus a symlink inside the root, the list is still read at the
 #      root (exit 0); R-g a dangling-symlink list is MALFORMED as not a regular file, never read as absent;
-#      R-h a list state outside _LIST_STATUS is MALFORMED naming it; R-i _agents_drift requires listed_state,
+#      R-h a list state outside _LIST_STATUS is MALFORMED naming it; R-i _agents_drift requires listed_state;
+#      R-j an installed format-version 1 list orders AGENTS.md and is named an older version with the
+#      migration step (PASS, or drift FAIL), its ids still held to the corpus, never MALFORMED, while a
+#      version 1 list carrying reserve-bytes is MALFORMED,
 #   16n/16o. gen_skill leaves an adopter tree without the hooks plugin at C5 NOT APPLICABLE, and an installed
 #      plugin's copy of the chat skill is checked (C2 plugin-skill).
 #   16p-16r. CRLF in one download copy only fails C2 skill; a plugin copy with no skill source is MALFORMED with
@@ -1852,6 +1895,51 @@ def self_test_main():
             ri = None
         if ri is not None:
             failures.append("R-i _agents_drift without listed_state: expected a TypeError, got {!r}".format(ri))
+
+        # R-j. An installed list still in the format-version 1 schema (no reserve-bytes) is read for its order and
+        #      named an older version with the migration step, never MALFORMED (red when _listed_state maps it to
+        #      "malformed", the working parser's refusal): R-j1 AGENTS.md written in the order it sets (seci001
+        #      before accur01) is exit 0, agents PASS with the note (red too when it is judged in priority order);
+        #      R-j2 a priority-order AGENTS.md under that list is agents FAIL (drift) with the note, exit 1; R-j3
+        #      a version 1 list naming zzzzz9 is agents FAIL naming it, exit 1 (red when an older list skips the
+        #      corpus check); R-j4 a version 1 list carrying reserve-bytes, in neither schema, is MALFORMED, exit 2.
+        def v1_text(ids):
+            lines = ["format-version = 1", "warn-margin-bytes = 512"]
+            for rid in ids:
+                lines += ["", "[[rule]]", 'id = "{}"'.format(rid), 'reason = "fixture rule"']
+            return "\n".join(lines) + "\n"
+
+        older_want = "{} is format-version 1, an older version".format(_must_deliver.DECL_REL)
+        migrate_want = "set format-version = 2 and add reserve-bytes = 0"
+        rj1 = tmp / "mdl-v1-ordered"
+        rj1.mkdir()
+        rj1_corpus = _build_conformant(rj1)
+        write_list(rj1, _must_deliver.fixture_text(["apex01", "seci001"]))
+        _write_adapters(rj1, rj1_corpus)
+        write_list(rj1, v1_text(["apex01", "seci001"]))
+        code, out = run_capture(rj1)
+        line = c2_line(out)
+        if (code != 0 or status_of(out, "C2") != PASS or "agents: PASS (AGENTS.md matches regeneration; " not in line
+                or older_want not in line or migrate_want not in line or MALFORMED in line):
+            failures.append("R-j1 a version 1 list with AGENTS.md in its order: expected exit 0, agents PASS naming "
+                            "the older version and the migration step, got {}:\n{}".format(code, out))
+        for label, text, want_code, want_status, wants in (
+                ("R-j2 drift", v1_text(["apex01", "seci001"]), 1, FAIL,
+                 ("agents: FAIL (AGENTS.md drift; ", older_want, migrate_want)),
+                ("R-j3 unknown id", v1_text(["apex01", "zzzzz9"]), 1, FAIL,
+                 ("agents: FAIL (must-deliver lists zzzzz9, not in the corpus)",)),
+                ("R-j4 version 1 with reserve-bytes",
+                 v1_text(["apex01"]).replace("warn-margin-bytes = 512\n", "warn-margin-bytes = 512\nreserve-bytes = 0\n"),
+                 2, MALFORMED, ("agents: MALFORMED (cannot read {}: ".format(_must_deliver.DECL_REL),))):
+            rj = tmp / ("mdl-v1-" + label.split()[0].lower())
+            rj.mkdir()
+            _build_conformant(rj)
+            write_list(rj, text)
+            code, out = run_capture(rj)
+            line = c2_line(out)
+            if code != want_code or status_of(out, "C2") != want_status or any(w not in line for w in wants):
+                failures.append("{}: expected exit {}, C2 {}, {!r}, got {}:\n{}".format(
+                    label, want_code, want_status, wants, code, out))
 
         # R-f. The 18a in-root shape (the corpus a symlink to a directory elsewhere inside the root) with the list
         #      (apex01, seci001) and the surfaces written in that order: exit 0, C2 PASS. Red when the list is
@@ -2814,7 +2902,9 @@ def self_test_main():
           "asserted both tight and broad fail; AGENTS.md is judged in the must-deliver list's order, read at "
           "the root (also with the corpus a symlink inside it), an unknown listed id failing and an unparseable "
           "list MALFORMED on that surface alone, no list or a dangling-symlink list MALFORMED there (each named), "
-          "a list state outside the status table MALFORMED, and the list state a required argument; a composed AGENTS.md passes, a local edit or a CRLF "
+          "a list state outside the status table MALFORMED, and the list state a required argument; an installed "
+          "format-version 1 list orders AGENTS.md and is named an older version with the migration step, never "
+          "MALFORMED, while one carrying reserve-bytes is MALFORMED; a composed AGENTS.md passes, a local edit or a CRLF "
           "conversion fails, a missing block source, a wrong-typed registry field, a symlinked registry or "
           "an adapter that is not UTF-8 is MALFORMED, and an absent registry reads as every target legacy "
           "(a composed AGENTS.md then fails, a legacy install passes); the hooks plugin "

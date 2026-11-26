@@ -3,7 +3,7 @@
 # are the rule ids (corpus-id) whose whole core layer (the full text of a rule with no detail
 # layer) lies inside the first 32768 bytes of AGENTS.md;
 # floor-profile-obligations are those plus the apex rule id.
-agents-sha256 = "eb75564b43c09cc6cfc6e4f5817700565610aba4a0b6a401b9b5a5587714490f"
+agents-sha256 = "5f0b3e86b338aa5c450297413e9ff763f7bea5c9c4612199ac102da892555427"
 delivered-prefix-obligations = [
   "prjint1",
   "citint",
@@ -23,13 +23,13 @@ delivered-prefix-obligations = [
   "reprod",
   "tstamp",
   "valinf",
-  "vfxcmt",
   "actbef",
   "attint",
   "artbr1",
   "brnrot",
   "chkfcl",
   "cmtidn",
+  "vfxcmt",
 ]
 floor-profile-obligations = [
   "prjint1",
@@ -50,11 +50,11 @@ floor-profile-obligations = [
   "reprod",
   "tstamp",
   "valinf",
-  "vfxcmt",
   "actbef",
   "attint",
   "artbr1",
   "brnrot",
   "chkfcl",
   "cmtidn",
+  "vfxcmt",
 ]

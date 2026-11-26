@@ -1,4 +1,0 @@
-# opfiles.ai
-User-agent: *
-Disallow:
-Sitemap: https://opfiles.ai/sitemap.xml

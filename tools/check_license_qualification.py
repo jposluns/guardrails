@@ -114,19 +114,20 @@ still flags, and a STALE row (matching no present occurrence) is cannot-evaluate
 not class 3 applies. An absent configuration file means no declaration and no exceptions; a present
 but malformed one is cannot-evaluate (exit 2), never a clean pass.
 
-SCANNED SURFACES (relative to the repo root): every *.html under site/ and under opf/site/ (recursively),
+SCANNED SURFACES (relative to the repo root): every *.html under site/ (recursively; the opfiles.ai sources
+under opf/site/ were removed from this repository and are not scanned),
 every *.md under docs/ and under opf/spec/ (recursively), and the named files disclosure.toml, DISCLOSURE.md,
 README.md. Raw file text is scanned (not visible-text-stripped): a claim in a meta attribute or an SEO
 snippet ships the same overstatement as one in the body, and the qualifier convention holds identically
 there. The EXCLUDED surfaces the brief names (LICENSE, NOTICE, anything under tools/, .aiqt/, licenses/,
 opf/tools/, and the pure first-party site/downloads/*.txt bundles) fall outside the scanned set by
-construction: none is a scanned named file, and none lives under site/, opf/site/, docs/, or opf/spec/
-(opf/tools/ is a sibling of opf/site/, not under it, and the .txt bundles are not *.html), so the scope
+construction: none is a scanned named file, and none lives under site/, docs/, or opf/spec/
+(opf/tools/ is a sibling of opf/spec/, not under it, and the .txt bundles are not *.html), so the scope
 excludes them without a separate skip list. The .txt bundles carry the pure-first-party "Licensed under the
 Apache License 2.0" line correctly and unqualified; the verb `licensed` is in class-1 scope, so those
 bundles stay honest only because they are outside the scanned surfaces, not because the verb is excluded.
 
-FAIL CLOSED (exit 2): each of site/, opf/site/, docs/, opf/spec/, disclosure.toml, DISCLOSURE.md, README.md
+FAIL CLOSED (exit 2): each of site/, docs/, opf/spec/, disclosure.toml, DISCLOSURE.md, README.md
 is a REQUIRED surface; an absent, unwalkable, or wrong-type one is a fail-closed error, never a silent clean
 pass (check-fails-closed-on-unreadable). A UTF-8 decode failure on a scanned file is a FINDING (the surface
 exists but is unreadable as text), not a crash and not a skip. For class 3 the licence file is likewise
@@ -284,9 +285,10 @@ class _FailClosed(Exception):
     """A required surface is absent, unwalkable, or of the wrong type; the caller maps this to exit 2."""
 
 
-# The required public-facing surfaces. site/ (aiqt.ai) and opf/site/ (opfiles.ai) are scanned for *.html;
-# docs/ and opf/spec/ for *.md; the three named files whole. Every one is REQUIRED (absent -> exit 2).
-SITE_HTML_DIRS = ("site", "opf/site")
+# The required public-facing surfaces. site/ (aiqt.ai) is scanned for *.html (the opfiles.ai sources under
+# opf/site/ were removed from this repository); docs/ and opf/spec/ for *.md; the three named files whole.
+# Every one is REQUIRED (absent -> exit 2).
+SITE_HTML_DIRS = ("site",)
 DOCS_MD_DIRS = ("docs", "opf/spec")
 NAMED_FILES = ("disclosure.toml", "DISCLOSURE.md", "README.md")
 
@@ -887,8 +889,8 @@ def _parse_config(data, source):
                 "{} phrase {!r} is not in the closed waiver-phrase list".format(where, row["phrase"]))
         if not _valid_surface_path(row["path"]):
             raise _FailClosed(
-                "{} path {!r} is not a repo-relative scanned-surface path (a named file, a site or "
-                "opf/site *.html, or a docs or opf/spec *.md)".format(where, row["path"]))
+                "{} path {!r} is not a repo-relative scanned-surface path (a named file, a site "
+                "*.html, or a docs or opf/spec *.md)".format(where, row["path"]))
         kind = binders.pop()
         value = row[kind]
         if kind == "line" and (not isinstance(value, str) or not value):
@@ -1715,7 +1717,6 @@ def _self_test_class3():
 # each case below changes exactly the piece it exercises.
 _TREE_BASE = {
     "site/index.html": "<p>hello</p>\n",
-    "opf/site/index.html": "<p>hello</p>\n",
     "docs/index.md": "docs\n",
     "opf/spec/index.md": "spec\n",
     "disclosure.toml": "name = \"fixture\"\n",
@@ -1776,7 +1777,7 @@ def _self_test_files():
     (failures, case count)."""
     import subprocess
     import tempfile
-    global _lstat, _stat, _read_file_text, _load_toml_file
+    global _lstat, _stat, _read_file_text, _load_toml_file, SITE_HTML_DIRS
     failures = []
     cases = []
 
@@ -1838,10 +1839,43 @@ def _self_test_files():
     cfg_row = ("licence = \"Apache-2.0\"\n\n[[exception]]\npath = \"docs/index.md\"\n"
                "phrase = \"copyright waiver\"\noccurrence = 1\nreason = \"the 2019 draft note\"\n")
     with tempfile.TemporaryDirectory() as td:
-        # 1. a clean tree with no configuration: the Apache identity is inferred from the leading text.
+        # 1. a clean tree with no configuration: the Apache identity is inferred from the leading text. The
+        # tree has no opf/site/, which is no longer a required surface (the opfiles.ai sources were removed
+        # from this repository), so its absence does not fail closed.
         got = run_collect("CLEAN", make_tree(td, "clean", {}))
         if got is not None and (got[0], got[2], got[3], got[4]) != ([], "Apache-2.0", True, None):
             failures.append("FILES CLEAN: expected a clean Apache pass, got {!r}".format(got))
+        # 1b. a page under opf/site/ is not scanned (an overstatement there is no finding), and an exception
+        # row on an opf/site/ page is not a scanned-surface path, while the site/ twin is.
+        got = run_collect("OPF SITE NOT SCANNED", make_tree(td, "opfsite", {
+            "opf/site/index.html": "<p>A copyright waiver.</p>\n"}))
+        if got is not None and got[0] != []:
+            failures.append("FILES OPF SITE: an opf/site/ page must not be scanned, got {!r}".format(got))
+        if SITE_HTML_DIRS != ("site",) or _valid_surface_path("opf/site/license/index.html") \
+                or not _valid_surface_path("site/license/index.html"):
+            failures.append("FILES OPF SITE: opf/site/ must not be a scanned surface ({!r})".format(SITE_HTML_DIRS))
+        # 1c. a fixture second root: with SITE_HTML_DIRS rebound to site/ and second/site/, every root is
+        # scanned (the overstatement on a page of the second root alone is a finding, and an exception row may
+        # name that page), and every root is required (the second root absent fails closed), so the multi-root
+        # walk keeps a second root now that opf/site/ is gone. MUTATION: walking only the first root of
+        # SITE_HTML_DIRS fails this case.
+        saved_dirs = SITE_HTML_DIRS
+        SITE_HTML_DIRS = ("site", "second/site")
+        try:
+            got = run_collect("FIXTURE SECOND ROOT", make_tree(td, "secondroot", {
+                "second/site/index.html": "<p>A copyright waiver.</p>\n"}))
+            if got is not None and not (len(got[0]) == 1 and got[0][0].startswith("second/site/index.html:")):
+                failures.append("FILES SECOND ROOT: the second root's page must be scanned, got {!r}".format(got))
+            if not _valid_surface_path("second/site/index.html"):
+                failures.append("FILES SECOND ROOT: a second-root page must be a scanned-surface path")
+            cases.append("FIXTURE SECOND ROOT ABSENT")
+            try:
+                _collect(make_tree(td, "nosecondroot", {}))
+                failures.append("FILES SECOND ROOT ABSENT: an absent second root must fail closed")
+            except _FailClosed:
+                pass
+        finally:
+            SITE_HTML_DIRS = saved_dirs
         # 2. one row, one occurrence, END TO END through real files: two occurrences in one file, the
         # occurrence-1 row excuses the first, and the finding left standing is the SECOND.
         root = make_tree(td, "onerow", {

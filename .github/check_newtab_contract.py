@@ -17,7 +17,7 @@ def main():
         # many-part key under a memory limit with MemoryError: each is exit 2, never a traceback.
         print("error: cannot read NEWTAB repository declaration: {}".format(exc), file=sys.stderr)
         return 2
-    expected = {"roots": ["site", "opf/site"]}
+    expected = {"roots": ["site"]}
     if actual != expected:
         print("FAIL: NEWTAB repository declaration: expected {!r}, got {!r}".format(
             expected, actual), file=sys.stderr)

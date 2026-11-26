@@ -106,6 +106,8 @@ def page_findings(name, text):
 # Recursive HTML coverage: AIQT_NEWTAB_ROOTS (os.pathsep-separated), then
 # .aiqt/newtab.toml (exactly roots = [...]), then present conventional roots.
 # Every selected root is required; configured roots are never presence-filtered.
+# opf/site/ stays a conventional root for an adopter's OPFiles site; this repository has none (its opfiles.ai
+# sources were removed) and declares roots = ["site"] in .aiqt/newtab.toml, so the default is not read here.
 DEFAULT_CANDIDATES = ("site", "opf/site")
 
 

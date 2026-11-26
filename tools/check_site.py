@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Site-integrity gate for site/*.html: en/em dashes, link/anchor resolution, and basic HTML validity.
 
-Link classification uses urlsplit: an absolute URL on the scanned root's own host (aiqt.ai for site/,
-opfiles.ai for opf/site/; ROOT_HOSTS) is internal, so a link to the other site is external; every
+Link classification uses urlsplit: an absolute URL on the scanned root's own host (aiqt.ai for site/;
+ROOT_HOSTS) is internal, so a link to another site (opfiles.ai among them) is external; every
 other scheme (http/https elsewhere, mailto, tel, ftp, javascript, data, ...) and protocol-relative
 //host links are external and skipped. An internal path resolves to an existing file under site/ by
 trying the path as-is, path + ".html", and path + "/index.html"; "/" resolves to index.html; a path
@@ -97,8 +97,12 @@ EN, EM = "–", "—"
 _SITE_HOST = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()
 SITE_HOSTS = {_SITE_HOST, "www." + _SITE_HOST}
 # The own-host set of each coverage root: an absolute URL on the root's own host is internal to that
-# root, and a link to the other site is external. site/ keeps SITE_HOSTS; opf/site/ is opfiles.ai.
-ROOT_HOSTS = {"site": SITE_HOSTS, "opf/site": {"opfiles.ai", "www.opfiles.ai"}}
+# root, and a link to another site is external. site/ keeps SITE_HOSTS (the opfiles.ai sources under
+# opf/site/ were removed from this repository, so opfiles.ai is external everywhere here). The self-test
+# adds a fixture second root (_FIXTURE_ROOT, _FIXTURE_HOSTS) only while its multi-root cases run.
+ROOT_HOSTS = {"site": SITE_HOSTS}
+_FIXTURE_ROOT = "second/site"
+_FIXTURE_HOSTS = {"second.example", "www.second.example"}
 
 # Tags that never take an end tag; never pushed on the open-tag stack.
 VOID_ELEMENTS = {
@@ -523,8 +527,8 @@ _RAW_TAG_RE = re.compile(r"<[A-Za-z]")
 _SECOND_SLASH = ("/", "\\", "\t", "\n", "\r")
 
 # The 404-page structural allowlist, fail closed: every element and attribute name raw_tags finds on a 404 page
-# must be listed here. Derived by running raw_tags over the two live 404 pages (site/404.html and
-# opf/site/404.html) and taking exactly the names, meta attributes, onclick values, SVG presentation values
+# must be listed here. Derived by running raw_tags over the two live 404 pages of the time (site/404.html and
+# opf/site/404.html, the second since removed with opf/site/) and taking exactly the names, meta attributes, onclick values, SVG presentation values
 # and no-src script bodies (sha256 of the UTF-8 text between the start tag and its end tag) they use; a name
 # or value is added only when a live 404 page starts using it.
 NOT_FOUND_ELEMENTS = frozenset((
@@ -566,8 +570,9 @@ NOT_FOUND_INLINE_SCRIPT_SHA256 = frozenset((
 # The draft 404 pages (the 404.html directly under each root's top-level draft/, served at any missing /draft/
 # URL) are
 # built from the site template, not from the live pages, so they are held to their own structural allowlist,
-# fail closed in the same way. Derived by running raw_tags over the two draft 404 pages (site/draft/404.html
-# and opf/site/draft/404.html, rendered by tools/gen_draft_site.py) and taking exactly the names, meta
+# fail closed in the same way. Derived by running raw_tags over the two draft 404 pages of the time
+# (site/draft/404.html and opf/site/draft/404.html, rendered by tools/gen_draft_site.py; the second since removed
+# with opf/site/) and taking exactly the names, meta
 # attributes, onclick values, SVG presentation values and no-src script bodies they use (no onclick and no
 # inline script); a name or value is added only when a draft 404 page starts using it.
 NOT_FOUND_DRAFT_ELEMENTS = frozenset((
@@ -582,8 +587,8 @@ NOT_FOUND_DRAFT_ATTRIBUTES = frozenset((
 ))
 # "property" is the og:description meta the generator writes from each page's description.
 NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name", "property"))
-# The meta values the generated 404 pages write (site/404.html and opf/site/404.html, and in the staged form
-# site/draft/404.html and opf/site/draft/404.html): the charset, the viewport and description names, the
+# The meta values the generated 404 pages write (site/404.html, and in the staged form site/draft/404.html):
+# the charset, the viewport and description names, the
 # robots name (the noindex meta the generator writes on a page under the draft base or folder, so the staged
 # 404 pages carry it), and the link-preview card names and properties (_social_metas).
 NOT_FOUND_DRAFT_META_VALUES = {
@@ -893,9 +898,10 @@ def _self_test():
         if got != want:
             failures.append("SITE_HOSTS {}: expected {} got {}".format(label, sorted(want), sorted(got)))
 
-    # Coverage-root integration: _scan_root treats opf/site as its own link-containment boundary, so a
-    # nested draft page's relative link resolves within opf/site (clean) while a dangling one is a finding;
-    # main() skips absent roots (both absent -> clean pass). Output captured so it does not leak here.
+    # Coverage-root integration: _scan_root treats a nested root (the fixture second root, second/site; the
+    # opfiles.ai root opf/site/ was removed) as its own link-containment boundary, so a nested draft page's
+    # relative link resolves within that root (clean) while a dangling one is a finding; main() skips absent
+    # roots (none present -> clean pass). Output captured so it does not leak here.
     import tempfile
     import contextlib
     import io
@@ -905,10 +911,10 @@ def _self_test():
             return fn(*a)
     with tempfile.TemporaryDirectory() as d:
         r = Path(d)
-        draft = r / "opf" / "site" / "draft"
+        draft = r / "second" / "site" / "draft"
         draft.mkdir(parents=True)
-        (r / "opf" / "site" / "touch.png").write_bytes(b"png")
-        (r / "opf" / "site" / "index.html").write_text(
+        (r / "second" / "site" / "touch.png").write_bytes(b"png")
+        (r / "second" / "site" / "index.html").write_text(
             '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/touch.png"><nav></nav>',
             encoding="utf-8")
         # These pages are not generator targets, so they are live pages and carry the touch icon.
@@ -917,53 +923,62 @@ def _self_test():
                                                encoding="utf-8")
         (draft / "manifest.html").write_text(
             '<!doctype html><title>t</title>' + icon + '<nav><a href="./disclosure">D</a></nav>', encoding="utf-8")
-        if quiet(_scan_root, r, "opf/site") != 0:
-            failures.append("coverage: a clean opf/site tree with relative links did not pass")
+        if quiet(_scan_root, r, _FIXTURE_ROOT) != 0:
+            failures.append("coverage: a clean second/site tree with relative links did not pass")
         (draft / "broken.html").write_text(
             '<!doctype html><title>t</title><a href="./nope">x</a>', encoding="utf-8")
-        if quiet(_scan_root, r, "opf/site") != 1:
-            failures.append("coverage: a dangling relative link under opf/site/draft was not caught")
+        if quiet(_scan_root, r, _FIXTURE_ROOT) != 1:
+            failures.append("coverage: a dangling relative link under second/site/draft was not caught")
 
-    # The opfiles.ai draft under opf/site/draft/: nested pages, an asset, a fragment and an absolute
-    # opfiles.ai URL resolve inside opf/site; a missing target, a missing fragment and an aiqt.ai URL
-    # read as internal there are findings, while an aiqt.ai URL is external on opf/site.
+    # A draft under the fixture second root second/site/draft/, its own hosts (_FIXTURE_HOSTS) registered for
+    # the cases only: nested pages, an asset, a fragment and an absolute own-host URL resolve inside that
+    # root; a missing target, a missing fragment and an own-host missing target are findings, while an
+    # aiqt.ai URL is external there.
     host_findings = []
-    with tempfile.TemporaryDirectory() as d:
-        r = Path(d)
-        draft = r / "opf" / "site" / "draft"
-        (draft / "model").mkdir(parents=True)
-        (draft / "assets" / "baseline").mkdir(parents=True)
-        (draft / "assets" / "baseline" / "baseline.css").write_text("p{}", encoding="utf-8")
-        (draft / "model" / "index.html").write_text(
-            '<!doctype html><title>t</title>' + _card_head("opfiles.ai") + '<h2 id="box">B</h2>', encoding="utf-8")
-        (r / "opf" / "site" / "card.png").write_bytes(_png(1200, 627))
-        (draft / "index.html").write_text(
-            '<!doctype html><title>t</title>' + _card_head("opfiles.ai") +
-            '<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
-            '<a href="/draft/model/">M</a><a href="/draft/model/#box">B</a>'
-            '<a href="https://opfiles.ai/draft/model/">O</a><a href="https://aiqt.ai/no-such-page">A</a>',
-            encoding="utf-8")
-        draft_cases = (
-            ("draft/nested-assets-fragments-and-own-host-pass", None, 0),
-            ("draft/missing-target", '<a href="/draft/core-files/">C</a>', 1),
-            ("draft/missing-fragment", '<a href="/draft/model/#absent">X</a>', 1),
-            ("draft/missing-asset", '<img src="/draft/assets/baseline/logos/absent.svg" alt="">', 1),
-            ("draft/own-host-missing-target", '<a href="https://www.opfiles.ai/draft/absent/">X</a>', 1),
-        )
-        for label, extra, want in draft_cases:
-            probe_page = draft / "probe.html"
-            if extra is None:
-                if probe_page.exists():
-                    probe_page.unlink()
-            else:
-                probe_page.write_text("<!doctype html><title>t</title>" + extra, encoding="utf-8")
-            got = quiet(_scan_root, r, "opf/site")
-            if got != want:
-                host_findings.append("{}: expected exit {}, got {}".format(label, want, got))
+    # The fixture root's two draft pages are generator template pages, as the opfiles.ai draft pages were.
+    draft_targets = _template_pages.template_targets() | {
+        _FIXTURE_ROOT + "/draft/index.html", _FIXTURE_ROOT + "/draft/model/index.html"}
+    ROOT_HOSTS[_FIXTURE_ROOT] = _FIXTURE_HOSTS
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            r = Path(d)
+            draft = r / "second" / "site" / "draft"
+            (draft / "model").mkdir(parents=True)
+            (draft / "assets" / "baseline").mkdir(parents=True)
+            (draft / "assets" / "baseline" / "baseline.css").write_text("p{}", encoding="utf-8")
+            (draft / "model" / "index.html").write_text(
+                '<!doctype html><title>t</title>' + _card_head("second.example") + '<h2 id="box">B</h2>',
+                encoding="utf-8")
+            (r / "second" / "site" / "card.png").write_bytes(_png(1200, 627))
+            (draft / "index.html").write_text(
+                '<!doctype html><title>t</title>' + _card_head("second.example") +
+                '<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
+                '<a href="/draft/model/">M</a><a href="/draft/model/#box">B</a>'
+                '<a href="https://second.example/draft/model/">O</a><a href="https://aiqt.ai/no-such-page">A</a>',
+                encoding="utf-8")
+            draft_cases = (
+                ("draft/nested-assets-fragments-and-own-host-pass", None, 0),
+                ("draft/missing-target", '<a href="/draft/core-files/">C</a>', 1),
+                ("draft/missing-fragment", '<a href="/draft/model/#absent">X</a>', 1),
+                ("draft/missing-asset", '<img src="/draft/assets/baseline/logos/absent.svg" alt="">', 1),
+                ("draft/own-host-missing-target", '<a href="https://www.second.example/draft/absent/">X</a>', 1),
+            )
+            for label, extra, want in draft_cases:
+                probe_page = draft / "probe.html"
+                if extra is None:
+                    if probe_page.exists():
+                        probe_page.unlink()
+                else:
+                    probe_page.write_text("<!doctype html><title>t</title>" + extra, encoding="utf-8")
+                got = quiet(_scan_root, r, _FIXTURE_ROOT, draft_targets)
+                if got != want:
+                    host_findings.append("{}: expected exit {}, got {}".format(label, want, got))
+    finally:
+        del ROOT_HOSTS[_FIXTURE_ROOT]
     for label, value, hosts, want in (
-            ("hosts/opfiles-internal-on-opf-site", "https://opfiles.ai/draft/", ROOT_HOSTS["opf/site"],
+            ("hosts/own-host-internal-on-second-root", "https://second.example/draft/", _FIXTURE_HOSTS,
              ("/draft/", "")),
-            ("hosts/aiqt-external-on-opf-site", "https://aiqt.ai/draft/", ROOT_HOSTS["opf/site"], None),
+            ("hosts/aiqt-external-on-second-root", "https://aiqt.ai/draft/", _FIXTURE_HOSTS, None),
             ("hosts/opfiles-external-on-site", "https://www.opfiles.ai/draft/", ROOT_HOSTS["site"], None),
             ("hosts/aiqt-internal-on-site", "https://www.aiqt.ai/x#y", ROOT_HOSTS["site"], ("/x", "y")),
             ("hosts/default-is-site-hosts", "https://aiqt.ai/x", None, ("/x", ""))):
@@ -978,8 +993,8 @@ def _self_test():
     # stays a finding on a live one, a name neither uses is a finding on both, and a live-only presentation
     # value is a finding on a draft 404 page. Through _scan_root, only a 404.html the generator lists takes
     # the draft list (a nested draft/ directory, and a 404.html in a subdirectory of the top-level draft/,
-    # keep the live list) under both site/ and opf/site/, and the reference rule still holds a draft 404
-    # page to root-absolute URLs.
+    # keep the live list) under both site/ and the fixture second root second/site/ (given its own hosts and
+    # its own listed 404 pages), and the reference rule still holds a draft 404 page to root-absolute URLs.
     draft_404_cases = (
         ("draft-404/draft-name-passes-on-draft", '<img src="/t.png" alt="">', True, ""),
         ("draft-404/draft-name-fails-on-live", '<img src="/t.png" alt="">', False,
@@ -1005,10 +1020,10 @@ def _self_test():
         (r / "site" / "draft").mkdir(parents=True)
         (r / "site" / "sub" / "draft").mkdir(parents=True)
         (r / "site" / "draft" / "x" / "y").mkdir(parents=True)
-        (r / "opf" / "site" / "sub" / "draft").mkdir(parents=True)
-        (r / "opf" / "site" / "draft" / "x" / "y").mkdir(parents=True)
-        card_host = {"site": "aiqt.ai", "opf/site": "opfiles.ai"}
-        for subdir in COVERAGE_ROOTS:
+        (r / "second" / "site" / "sub" / "draft").mkdir(parents=True)
+        (r / "second" / "site" / "draft" / "x" / "y").mkdir(parents=True)
+        card_host = {"site": "aiqt.ai", _FIXTURE_ROOT: "second.example"}
+        for subdir in ("site", _FIXTURE_ROOT):
             (r / subdir / "t.png").write_bytes(b"png")
             (r / subdir / "card.png").write_bytes(_png(1200, 627))
             (r / subdir / "index.html").write_text(
@@ -1026,26 +1041,29 @@ def _self_test():
             ("draft-404/scan-draft-relative-src-fails", "site", "draft/404.html",
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
              "src on a 404 page must be root-absolute"),
-            ("draft-404/opf-scan-top-level-draft-passes", "opf/site", "draft/404.html", draft_page, 0, ""),
-            ("draft-404/opf-scan-nested-draft-keeps-live-list", "opf/site", "sub/draft/404.html", draft_page, 1,
+            ("draft-404/second-scan-top-level-draft-passes", _FIXTURE_ROOT, "draft/404.html", draft_page, 0, ""),
+            ("draft-404/second-scan-nested-draft-keeps-live-list", _FIXTURE_ROOT, "sub/draft/404.html", draft_page,
+             1, "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/second-scan-draft-subdir-keeps-live-list", _FIXTURE_ROOT, "draft/x/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/opf-scan-draft-subdir-keeps-live-list", "opf/site", "draft/x/404.html", draft_page, 1,
-             "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/opf-scan-draft-deep-subdir-keeps-live-list", "opf/site", "draft/x/y/404.html",
+            ("draft-404/second-scan-draft-deep-subdir-keeps-live-list", _FIXTURE_ROOT, "draft/x/y/404.html",
              draft_page, 1, "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/opf-scan-draft-relative-src-fails", "opf/site", "draft/404.html",
+            ("draft-404/second-scan-draft-relative-src-fails", _FIXTURE_ROOT, "draft/404.html",
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
              "src on a 404 page must be root-absolute"),
         )
         # The same rule once the pages are promoted (the generator's own build at base "/"): the root's 404.html
-        # takes the draft list and a 404.html left under draft/ keeps the live list, on both roots.
-        promoted = _promoted_targets()
+        # takes the draft list and a 404.html left under draft/ keeps the live list, on both roots. The fixture
+        # second root's 404 pages are added to the generator's targets: staged under draft/, promoted at its
+        # root.
+        promoted = _promoted_targets() | {_FIXTURE_ROOT + "/404.html"}
+        staged = _template_pages.template_targets() | {_FIXTURE_ROOT + "/draft/404.html"}
         promoted_scan_cases = (
             ("draft-404/promoted-root-404-passes", "site", "404.html", draft_page, 0, ""),
             ("draft-404/promoted-draft-404-keeps-live-list", "site", "draft/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/opf-promoted-root-404-passes", "opf/site", "404.html", draft_page, 0, ""),
-            ("draft-404/opf-promoted-draft-404-keeps-live-list", "opf/site", "draft/404.html", draft_page, 1,
+            ("draft-404/second-promoted-root-404-passes", _FIXTURE_ROOT, "404.html", draft_page, 0, ""),
+            ("draft-404/second-promoted-draft-404-keeps-live-list", _FIXTURE_ROOT, "draft/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
             ("draft-404/promoted-root-relative-src-fails", "site", "404.html",
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
@@ -1054,23 +1072,67 @@ def _self_test():
         staged_scan_cases = (
             ("draft-404/staged-root-404-keeps-live-list", "site", "404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/opf-staged-root-404-keeps-live-list", "opf/site", "404.html", draft_page, 1,
+            ("draft-404/second-staged-root-404-keeps-live-list", _FIXTURE_ROOT, "404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
         )
         scan_cases = scan_cases + staged_scan_cases
-        for label, subdir, page_rel, markup, want, message, targets in (
-                [case + (None,) for case in scan_cases] + [case + (promoted,) for case in promoted_scan_cases]):
-            (r / subdir / page_rel).write_text(markup.replace("CARD-HOST", card_host[subdir]), encoding="utf-8")
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                got = _scan_root(r, subdir, targets)
-            (r / subdir / page_rel).unlink()
-            if got != want or message not in out.getvalue():
+        ROOT_HOSTS[_FIXTURE_ROOT] = _FIXTURE_HOSTS
+        try:
+            runs = [case + (staged,) for case in scan_cases] + [case + (promoted,) for case in promoted_scan_cases]
+            results = []
+            for label, subdir, page_rel, markup, want, message, targets in runs:
+                (r / subdir / page_rel).write_text(markup.replace("CARD-HOST", card_host[subdir]),
+                                                   encoding="utf-8")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    got = _scan_root(r, subdir, targets)
+                (r / subdir / page_rel).unlink()
+                results.append((label, want, message, got, out.getvalue()))
+        finally:
+            del ROOT_HOSTS[_FIXTURE_ROOT]
+        for label, want, message, got, printed in results:
+            if got != want or message not in printed:
                 failures.append("{}: expected exit {} and {!r}, got {} {!r}".format(
-                    label, want, message, got, out.getvalue()))
+                    label, want, message, got, printed))
+    # An absent site/ is skipped by design (a vendored pack without it still passes), while a present site/ that
+    # holds no .html page (here only a .txt) is a scan of nothing, so it fails closed (exit 2). MUTATION: dropping
+    # the empty-page guard in _scan_root lets the page-less root print the full PASS line and exit 0.
     with tempfile.TemporaryDirectory() as d2:
-        if quiet(run, Path(d2)) != 0:
-            failures.append("coverage: neither root present did not pass clean")
+        no_site = quiet(run, Path(d2))
+        (Path(d2) / "site").mkdir()
+        (Path(d2) / "site" / "notes.txt").write_text("x", encoding="utf-8")
+        page_less = quiet(run, Path(d2))
+    check("coverage/page-less-root-fails-closed", no_site == 0 and page_less == 2, (no_site, page_less))
+    # run() reads every coverage root, neither the first nor the last alone: with the fixture second root added
+    # to COVERAGE_ROOTS, a tree clean under both roots passes, and the same tree with a dangling relative link on
+    # a page of the first root alone, or of the second root alone, is a finding. With COVERAGE_ROOTS empty, the
+    # same clean tree (site/ present) reads no root, so run() fails closed (exit 2) instead of passing.
+    live_coverage = COVERAGE_ROOTS
+    with tempfile.TemporaryDirectory() as d3:
+        r = Path(d3)
+        icon = '<link rel="apple-touch-icon" href="/touch.png">'
+        for subdir in ("site", _FIXTURE_ROOT):
+            (r / subdir).mkdir(parents=True)
+            (r / subdir / "touch.png").write_bytes(b"png")
+            (r / subdir / "index.html").write_text("<!doctype html><title>t</title>" + icon + "<nav></nav>",
+                                                   encoding="utf-8")
+        try:
+            globals()["COVERAGE_ROOTS"] = ("site", _FIXTURE_ROOT)
+            both_clean = quiet(run, r)
+            broken = {}
+            for subdir in ("site", _FIXTURE_ROOT):
+                (r / subdir / "broken.html").write_text(
+                    "<!doctype html><title>t</title>" + icon + '<a href="./nope">x</a>', encoding="utf-8")
+                broken[subdir] = quiet(run, r)
+                (r / subdir / "broken.html").unlink()
+            first_broken, second_broken = broken["site"], broken[_FIXTURE_ROOT]
+            globals()["COVERAGE_ROOTS"] = ()
+            no_root = quiet(run, r)
+        finally:
+            globals()["COVERAGE_ROOTS"] = live_coverage
+    check("coverage/run-reads-every-root", both_clean == 0 and first_broken == 1 and second_broken == 1,
+          (both_clean, first_broken, second_broken))
+    check("coverage/no-root-fails-closed", no_root == 2, no_root)
 
     _touch_icon_self_test(quiet)
     _card_self_test(quiet)
@@ -1083,8 +1145,13 @@ def _self_test():
     # The real declaration is the promoted one: the root's 404.html is a template page, a nested draft/ page
     # is not, and turning the staged default back on flips both (fails on purpose).
     real = _template_pages.template_targets()
-    check("declaration/real-is-promoted", "site/404.html" in real and "opf/site/404.html" in real
+    check("declaration/real-is-promoted", "site/404.html" in real and "opf/site/404.html" not in real
           and "site/draft/404.html" not in real and "site/draft/index.html" in real, sorted(real))
+    # The coverage roots are site/ alone (opf/site/ was removed from this repository), and every coverage root
+    # has its own-host set, with no other entry left in ROOT_HOSTS (the fixture second root's is removed
+    # after its cases).
+    check("coverage/roots-registry", COVERAGE_ROOTS == ("site",) and set(ROOT_HOSTS) == {"site"},
+          (COVERAGE_ROOTS, sorted(ROOT_HOSTS)))
     _use_staged_declaration(True)
     flipped = _template_pages.template_targets()
     _use_staged_declaration(False)
@@ -1098,7 +1165,7 @@ def _self_test():
             print("  - " + x)
         return 1
     print("PASS: check_site self-test ({} logo cases + {} 404-page logo cases + {} SITE_HOSTS env cases + "
-          "coverage-root legs + {} opfiles draft cases + 5 per-root host cases + {} draft 404 cases + {} "
+          "coverage-root legs + {} second-root draft cases + 5 per-root host cases + {} draft 404 cases + {} "
           "registered checks)".format(len(cases), len(not_found_cases), len(host_cases), len(draft_cases),
                                       len(draft_404_cases) + len(scan_cases) + len(promoted_scan_cases),
                                       len(EXECUTED)))
@@ -1699,12 +1766,18 @@ def _touch_icon_self_test(quiet):
         check("touch-icon/promoted-unlisted-draft-page-checked", len(got) == 1 and "missing <link" in got[0], got)
         got = findings("index.html", [])
         check("touch-icon/staged-root-page-checked", len(got) == 1 and "missing <link" in got[0], got)
-        got = findings("draft/model/index.html", [], staged, "opf/site")
-        check("touch-icon/opf-template-page-exempt", got == [], got)
-        got = findings("model/index.html", [], promoted, "opf/site")
-        check("touch-icon/opf-promoted-template-page-exempt", got == [], got)
-        got = findings("draft/model/index.html", [], staged, "site")
-        check("touch-icon/other-site-template-page-checked", len(got) == 1, got)
+        # A second root's template page (the fixture second/site, its model page added to the generator's
+        # targets; no live root has a model page since opf/site/ was removed) is exempt under that root, and the
+        # same page path under site/, which the targets do not list, is checked: the root is part of the test.
+        second_staged = staged | {_FIXTURE_ROOT + "/draft/model/index.html"}
+        second_promoted = promoted | {_FIXTURE_ROOT + "/model/index.html"}
+        got = findings("draft/model/index.html", [], second_staged, _FIXTURE_ROOT)
+        check("touch-icon/second-root-template-page-exempt", got == [], got)
+        got = findings("model/index.html", [], second_promoted, _FIXTURE_ROOT)
+        check("touch-icon/second-root-promoted-template-page-exempt", got == [], got)
+        got = findings("draft/model/index.html", [], second_staged, "site")
+        check("touch-icon/other-site-template-page-checked",
+              len(got) == 1 and "site/draft/model/index.html" not in second_staged, got)
         got = findings("draft.html", [])
         check("touch-icon/page-named-draft-checked", len(got) == 1, got)
         got = findings("drafts/a.html", [])
@@ -2091,12 +2164,12 @@ def _not_found_links_self_test():
         got = [(target, robots in text, not_found_structure_findings(target, text, draft=True))
                for target, text in staged_404]
         check("404-structure/staged-generated-404-pages-pass",
-              [target for target, _text in staged_404] == ["opf/site/draft/404.html", "site/draft/404.html"]
+              [target for target, _text in staged_404] == ["site/draft/404.html"]
               and all(has_robots and found == [] for _target, has_robots, found in got), got)
         got = [not_found_structure_findings(target, text.replace('name="robots"', 'name="googlebot"', 1),
                                             draft=True) for target, text in staged_404]
         check("404-structure/staged-generated-404-unpinned-robots-name-fails",
-              len(got) == 2 and all(len(found) == 1 and found[0].endswith(
+              len(got) == 1 and all(len(found) == 1 and found[0].endswith(
                   ": name value on <meta> is not one the draft 404 pages use -> 'googlebot'") for found in got), got)
 
         # A 404 page the parser rejects still gets both raw-markup rules (the parse failure is simulated: no
@@ -2117,20 +2190,25 @@ def _not_found_links_self_test():
               and "attribute ping on <b> is not in the 404-page attribute allowlist" in got[1], got)
 
 
-# Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the served site pages). Matching this gate's
-# existing site/ idiom, each root is OPTIONAL: an absent root is skipped (not fail-closed), so a vendored
-# pack with neither still passes; a present root is scanned, and an unreadable present root fails closed.
-# Each root is its own link-containment boundary, so a page's relative links (./manifest, ./disclosure)
-# resolve within opf/site and never escape.
-COVERAGE_ROOTS = ("site", "opf/site")
+# Coverage roots: site/ (aiqt.ai) alone; the opfiles.ai sources under opf/site/ were removed from this
+# repository, so opf/site/ is not scanned here. Matching this gate's existing site/ idiom, each root is
+# OPTIONAL: an absent root is skipped (not fail-closed), so a vendored pack without it still passes; a present
+# root is scanned, and an unreadable present root, or one that holds no .html page, fails closed. Each root is its own link-containment
+# boundary, so a page's relative links (./manifest, ./disclosure) resolve within that root and never escape.
+COVERAGE_ROOTS = ("site",)
 
 
 def run(root):
     """Scan every present coverage root under `root`. Return the worst per-root exit code; roots are
-    optional (absent is skipped), a present root is scanned, and an unreadable present root fails closed."""
+    optional (absent is skipped), a present root is scanned, and an unreadable present root, or one that holds
+    no .html page, fails closed. An
+    empty COVERAGE_ROOTS fails closed too (exit 2): with no root to read, the run could never scan anything."""
+    if not COVERAGE_ROOTS:
+        print("error: no coverage root to read; a scan of nothing is never a pass; fail-closed", file=sys.stderr)
+        return 2
     present = [sub for sub in COVERAGE_ROOTS if (root / sub).is_dir()]
     if not present:
-        print("PASS: no site/ or opf/site/ directory")
+        print("PASS: no site/ directory")
         return 0
     worst = 0
     for sub in present:
@@ -2161,6 +2239,11 @@ def _scan_root(root, subdir, targets=None):
         # an unreadable directory under the root is a read error, not a clean skip: fail closed (exit 2)
         # so the site gate never reports clean without having scanned an unreadable subtree.
         print("error: cannot scan {}/ ({}); fail-closed".format(subdir, exc), file=sys.stderr)
+        return 2
+    if not html_files:
+        # a present root with no page is a scan of nothing: fail closed (exit 2), never the full PASS line.
+        print("error: {}/ holds no .html page; a scan of nothing is never a pass; fail-closed".format(subdir),
+              file=sys.stderr)
         return 2
     for f in html_files:
         rel = f.relative_to(root)

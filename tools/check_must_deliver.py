@@ -47,8 +47,10 @@ not exist is exit 2. Every git read runs with replace objects, grafts and the co
 tools/run_all_checks.sh runs the bare form, so a
 local run compares with that default; CI passes --base (the pull request's target branch, a push's
 before SHA, or HEAD^ for any other event when it resolves). The
-base file is read from the base commit through the same strict parser as the working file; a base
-commit without it, or with it as a symlink or malformed, is exit 2. A rule listed at the base and no
+base file is read from the base commit by the base parser (_must_deliver.parse_base_declared), which
+accepts exactly the format-version 1 schema or exactly the format-version 2 schema, so a base written
+before version 2 still compares; a base commit without it, or with it as a symlink or malformed (any
+other version, a version 1 file carrying reserve-bytes, a version 2 file without it), is exit 2. A rule listed at the base and no
 longer listed is exit 1 naming it, unless a [[removal]] row (exactly id and reason) names it; each
 such removal is printed with its reason. A [[removal]] row that is duplicated, also listed in [[rule]],
 has an empty reason or carries an unknown key is exit 2. Removal rows may stay after the merge.
@@ -86,14 +88,21 @@ still read; the base sources are read from the object store with the same git re
 a base without the rule directory, or a source there that is not UTF-8, carries no corpus-id or title, or
 repeats another's corpus-id, is exit 2.
 
-The declared file carries exactly format-version, warn-margin-bytes and [[rule]] rows of exactly id and
-reason, and optionally [[removal]] rows of exactly id and reason; every listed id must be a corpus-id
-with a measured span. Its one strict reader is tools/_must_deliver.py, shared with gen_agents (which puts
+The declared file carries exactly format-version (the integer 2), warn-margin-bytes, reserve-bytes and
+[[rule]] rows of exactly id and reason, and optionally [[removal]] rows of exactly id and reason; every
+listed id must be a corpus-id with a measured span. RESERVE. reserve-bytes (an integer of at least 0 and
+at most warn-margin-bytes, never a bool or a float) is enforced: a listed rule whose core layer ends
+fewer than reserve-bytes bytes inside the cap (margin = cap - end below reserve-bytes) is exit 1 naming
+the tightest margin and its rule, so the margin is held, not only reported; a margin equal to
+reserve-bytes passes. The reserve protects listed rules only, never an unlisted one. RESERVE RATCHET.
+The list ratchet also compares reserve-bytes with the reserve-bytes listed at the same comparison base (a
+format-version 1 base, which has none, counts as 0): a working reserve lower than the base's is exit 1
+naming both, and a reserve kept or raised passes. The list's one strict reader is tools/_must_deliver.py, shared with gen_agents (which puts
 the listed rules first in AGENTS.md, after the apex), gen_first_pin_demo.measure and conformance. An absent, unreadable, symlinked, non-UTF-8,
 malformed or EMPTY list is exit 2 (a missing input is a failure, never "nothing to check"), per the
-check-fails-closed-on-unreadable rule. The gate prints every listed rule's end offset and margin on every
-run, and a WARNING (still exit 0) when the tightest margin drops under warn-margin-bytes, so growth is
-visible before a listed rule falls out.
+check-fails-closed-on-unreadable rule. The gate prints every listed rule's end offset and margin and the
+reserve on every run, and a WARNING (still exit 0) when the tightest margin is at least reserve-bytes but
+under warn-margin-bytes, so growth is visible before the reserve fails it.
 
 DISCLOSED RESIDUAL (disclose-guard-residuals): a PR that removes a rule from the list AND adds a
 [[removal]] row for it passes this gate (the row turns a silent deletion into a named, reasoned record the
@@ -109,7 +118,11 @@ and the commit-graph file are off, but any write into the git directory can stil
 the list read at it: a .git/shallow file, which also cuts a commit's parents, is read as git reads
 it, an object written into the object store under the id of the base list's blob or of a commit is
 read as git reads it, and a rewritten ref (refs/remotes/origin/main, HEAD) moves the base it names);
-a
+the reserve ratchet is as good as the same base (a lowering already present at the base is not seen),
+a deliberate lowering has no declared path like a [[removal]] row, so it takes a reviewed change to this
+gate, and a pull request that edits this gate or its self-test rows (T63, T65) together with the list
+passes CI with a lowered reserve, so only review sees that; warn-margin-bytes is not compared with the
+base; a
 listed rule cut down to a stub still passes (content is not judged); the core-move check sees only text
 that reaches a detail layer as written, as a whole sentence or as a piece of one sentence of at least
 MIN_PIECE_BYTES bytes, so a moved piece of one sentence shorter than MIN_PIECE_BYTES (a parenthetical of a
@@ -134,8 +147,9 @@ AGENTS.md to eol=lf).
                                       refs/remotes/origin/main)
   check_must_deliver.py --self-test   build synthetic trees and assert each vector is discriminated
 
-Exit convention: 0 every listed rule's core layer is delivered, no rule left the list undeclared and no
-listed core layer shrank into a detail layer; 1 a listed rule's core layer ends past the cap, a rule
+Exit convention: 0 every listed rule's core layer ends at least reserve-bytes inside the cap, no rule left
+the list undeclared and no listed core layer shrank into a detail layer; 1 a listed rule's core layer ends
+past the cap or fewer than reserve-bytes inside it, a rule
 listed at the base is no longer listed with no [[removal]] row, or a listed rule's core text moved into a
 detail layer or its core layer is empty beside a detail layer (CORE MOVES); 2 an
 unreadable, malformed or ambiguous input, or a comparison base that does not resolve (fail-closed).
@@ -168,7 +182,7 @@ import check_release_build  # noqa: E402  the cap, read as check_release_build.C
 # The list's one strict reader, shared with gen_agents, gen_first_pin_demo and conformance; its read,
 # _must_deliver._read_decl_bytes, is a module attribute there, where the self-test injects its read error.
 import _must_deliver  # noqa: E402
-from _must_deliver import DECL_REL, parse_declared, read_declared  # noqa: E402
+from _must_deliver import DECL_REL, parse_base_declared, read_declared  # noqa: E402
 
 DEFAULT_BASE_REMOTE = "origin/main"
 REMOTE_REF_PREFIX = "refs/remotes/"
@@ -463,7 +477,8 @@ def resolve_base(root, base):
 
 
 def read_base_declared(root, commit, label):
-    """The declaration as listed at the base commit, read through parse_declared. A base commit without
+    """The declaration as listed at the base commit, read through parse_base_declared (exactly format-version
+    1 or exactly 2, so a base written before version 2 still compares). A base commit without
     the file, or with it as anything but a regular blob (a symlink, a tree, a submodule), is a DemoError
     (exit 2): the base list is the ratchet's whole reference, so its absence is never an empty list."""
     where = "{} at the base {}".format(DECL_REL, label)
@@ -481,20 +496,32 @@ def read_base_declared(root, commit, label):
     proc = _git(root, ["cat-file", "blob", fields[2].decode("ascii", "replace")])
     if proc.returncode != 0:
         raise DemoError("{} is unreadable ({})".format(where, _git_err(proc)))
-    return parse_declared(proc.stdout, where)
+    return parse_base_declared(proc.stdout, where)
 
 
 def ratchet(root, base):
     """Compare the working list with the list at the comparison base. Exit 0 when every rule listed at
-    the base is still listed or named by a [[removal]] row, 1 when one is neither (named), 2 when the
-    base does not resolve or either list cannot be read. Additions are free."""
+    the base is still listed or named by a [[removal]] row and the working reserve-bytes is at least the
+    reserve at the base (a format-version 1 base has none and counts as 0), 1 when a rule is neither
+    listed nor removed (named) or the reserve was lowered (both reserves named), 2 when the base does not
+    resolve or either list cannot be read. Additions and a raised reserve are free."""
     try:
-        ids, _warn, removals = read_declared(root / DECL_REL)
+        working = read_declared(root / DECL_REL)
+        ids, removals = working.ids, working.removals
         commit, label = resolve_base(root, base)
-        base_ids, _base_warn, _base_removals = read_base_declared(root, commit, label)
+        base_decl = read_base_declared(root, commit, label)
+        base_ids = base_decl.ids
     except (ValueError, OSError, UnicodeError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
+    # parse_base_declared reads a format-version 1 base, which has no reserve-bytes, as reserve 0.
+    lowered = working.reserve < base_decl.reserve
+    print("must-deliver: reserve ratchet against base {}: reserve-bytes {} there (0 for a format-version 1 "
+          "base), {} now".format(label, base_decl.reserve, working.reserve))
+    if lowered:
+        print("must-deliver: FAIL: reserve-bytes {} is lower than the reserve-bytes {} listed at the base {}; "
+              "the reserve may be kept or raised, never lowered".format(working.reserve, base_decl.reserve,
+                                                                         label))
     dropped = [rid for rid in base_ids if rid not in ids]
     undeclared = [rid for rid in dropped if rid not in removals]
     added = [rid for rid in ids if rid not in base_ids]
@@ -511,7 +538,7 @@ def ratchet(root, base):
     for rid in undeclared:
         print("must-deliver: FAIL: rule {} is listed at the base {} and is no longer listed, with no "
               "[[removal]] row naming it".format(rid, label))
-    return 1 if undeclared else 0
+    return 1 if undeclared or lowered else 0
 
 
 # --- the core-move check (CORE MOVES in the module docstring) -------------------------------------------
@@ -664,7 +691,7 @@ def core_moves(root, base):
     otherwise; 2 when the base, the list or a source cannot be read. A rule not present at the base has
     nothing moved, and nothing is moved while no rule has a detail layer."""
     try:
-        ids, _warn, _removals = read_declared(root / DECL_REL)
+        ids = read_declared(root / DECL_REL).ids
         working = _working_layers(root)
         commit, label = resolve_base(root, base)
         base_cores = _base_layers(root, commit, label)
@@ -703,12 +730,13 @@ def gate(root, base):
 
 
 def run(root):
-    """Check the tree at root. Exit 0 when every listed rule's whole span (its whole core layer) lies inside
-    the cap, 1 when a
-    listed rule's core layer ends past it, 2 on an unreadable, malformed or ambiguous input. Parameterized on root so
+    """Check the tree at root. Exit 0 when every listed rule's whole span (its whole core layer) ends at least
+    reserve-bytes inside the cap, 1 when a listed rule's core layer ends past it or fewer than reserve-bytes
+    inside it, 2 on an unreadable, malformed or ambiguous input. Parameterized on root so
     the self-test drives it against synthetic trees, never the real repo."""
     try:
-        ids, warn, _removals = read_declared(root / DECL_REL)
+        declared = read_declared(root / DECL_REL)
+        ids, warn, reserve = declared.ids, declared.warn, declared.reserve
         agents, spans, _apex_id = measure(root)
     except (ValueError, OSError, UnicodeError) as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
@@ -743,9 +771,15 @@ def run(root):
             rid, end, end - cap))
     else:
         print("must-deliver: no unlisted rule ends past the cap")
-    if not over and tightest_margin < warn:
+    print("must-deliver: reserve-bytes {}: every listed rule must end at least that many bytes inside the "
+          "cap".format(reserve))
+    under = not over and tightest_margin < reserve
+    if under:
+        print("must-deliver: FAIL: tightest margin {} ({}) is below reserve-bytes {}".format(
+            tightest_margin, tightest_rid, reserve))
+    elif not over and tightest_margin < warn:
         print("WARNING: tightest margin {} is below warn-margin-bytes {}".format(tightest_margin, warn))
-    return 1 if over else 0
+    return 1 if over or under else 0
 
 
 def main():
@@ -768,8 +802,10 @@ def main():
 
 
 # --- self-test ------------------------------------------------------------------------------------
-# Synthetic temp trees only, never the real tree, built with gen_first_pin_demo's fixture helpers
-# (_write_tree, _tuned) against the real CAP_BYTES. Each vector is a discriminating fixture: it fails
+# The vectors run the gate against synthetic temp trees, built with gen_first_pin_demo's fixture helpers
+# (_write_tree, _tuned) against the real CAP_BYTES, never against the real tree. Three vectors read files
+# of the real tree, without running the gate on it: T49 reads the real gates manifest residue and the real
+# list's whole text, T64 reads that same residue, and T63 reads the real list's reserve-bytes. Each vector is a discriminating fixture: it fails
 # against a mutant that removes the check it covers (named per vector). Vectors:
 #   T1  positive control: a listed rule ending 10 bytes inside the cap is exit 0, its margin line and the
 #       tightest-margin summary printed exactly (a mutant with inverted exits, or margin computed as
@@ -797,10 +833,15 @@ def main():
 #       list as "nothing to check" returns 0);
 #   T9  an unknown row key, an integer id, an empty reason, and a duplicate id are each exit 2 (a mutant
 #       ignoring unknown keys or deduplicating silently passes). The top-level values: format-version
-#       1.0, 0, 2 and "1", and warn-margin-bytes 0 and -1, are each exit 2 naming the key, while
-#       warn-margin-bytes 1 passes (a mutant comparing format-version by value alone passes 1.0, one
-#       coercing it with int() passes "1" and 1.0, one without the value check passes 0 and 2, one
-#       without the lower bound on warn-margin-bytes passes 0 and -1, and one testing warn < 2 fails 1).
+#       2.0, 0, 1 (with and without a reserve line: a version 1 working file is refused), 3 and "2", and
+#       warn-margin-bytes 0 and -1, are each exit 2 naming the key, while warn-margin-bytes 1 passes (a
+#       mutant comparing format-version by value alone passes 2.0, one coercing it with int() passes "2"
+#       and 2.0, one without the value check passes 0, 1 and 3, one reading the working file with the base
+#       parser passes 1, one without the lower bound on warn-margin-bytes passes 0 and -1, and one testing
+#       warn < 2 fails 1). T59, in the same loop: reserve-bytes true, -1, 1.0 and "0", the key missing,
+#       and 513 under warn-margin-bytes 512 are each exit 2 naming the reserve (a mutant without the type
+#       check passes true and 1.0, one without the lower bound -1, one defaulting a missing reserve to 0
+#       passes the missing key, one without the warn bound passes 513).
 #       An id written "prjint1\n" is exit 2 naming it not a well-formed corpus-id (a mutant testing
 #       CID_RE with match, whose $ accepts one trailing newline, reaches the missing-span check instead);
 #   T10 a symlinked list, a directory, invalid UTF-8, bad TOML, an injected PermissionError at the
@@ -991,6 +1032,29 @@ def main():
 #       leg then reads the list and exits 0);
 #   T57 a stand-in measure returning the real spans without ruleaa's is exit 2 naming the list's missing
 #       span (a mutant without run's missing-span check raises a KeyError outside its try).
+# The reserve and the format-version 2 migration (T58 to T63; T59 is in T9's loop, and T62, restoring a
+# rule while keeping its [[removal]] row, is T16's "also in [[rule]]" row):
+#   T58 with reserve-bytes 512, a listed rule ending exactly 512 bytes inside the cap is exit 0 reporting
+#       the reserve, and one ending 511 bytes inside it is exit 1 naming the margin, the rule and the
+#       reserve; under reserve-bytes 0 the same 511-byte margin is exit 0 with the warning (a warning-only
+#       gate exits 0 at 511, and one testing margin <= reserve fails at 512);
+#   T60 against a base written in format-version 1, an unchanged working list is exit 0, a drop with no
+#       [[removal]] row exit 1 naming it and the drop with a row exit 0 printing it (a single strict
+#       parser reading the base as the working file is exit 2 on all three);
+#   T61 a base in format-version 3 or 1.0, a version 1 base carrying reserve-bytes, a version 2 base
+#       without it, and a version 2 base whose reserve-bytes is false, -1 or 1.0, are each exit 2 naming
+#       the defect at the base (a lenient base parser accepts them);
+#   T63 the real list's reserve-bytes is 512, the reserve the maintainer set, so the gate run on this
+#       tree enforces it (a list whose reserve was lowered or reset to 0 fails this row);
+#   T64 the module docstring and the manifest residue state the enforced reserve, the base parser's two
+#       accepted schemas and the reserve ratchet with its residual as pinned (the text, not its truth);
+#   T65 the reserve ratchet: against a version 2 base with reserve-bytes 9 (the tightest fixture margin is
+#       10, so a working reserve up to 10 passes the prefix check), a working reserve of 8 is exit 1 naming
+#       both reserves, alone and together with an undeclared drop, while 9 (kept) and 10 (raised) are exit
+#       0; against a version 1 base a working reserve of 10 is exit 0, the base read as reserve 0 (a
+#       ratchet that never compares the reserve exits 0 on the lowering, one testing <= fails the kept
+#       reserve, one testing != fails the raise, and one reading a version 1 base as a reserve above 10
+#       fails the last row).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -999,11 +1063,13 @@ class _FixtureError(Exception):
     """A self-test fixture's own git command failed: the vector cannot run (exit 2, never a pass)."""
 
 
-def _decl(root, rows, warn=512, raw=None):
+def _decl(root, rows, warn=512, raw=None, reserve=0):
+    """Write a format-version 2 list of rows (reserve-bytes 0 by default, so a vector judges its margin
+    against the cap alone unless it passes reserve=), or raw as given."""
     path = root / Path(DECL_REL)
     path.parent.mkdir(parents=True, exist_ok=True)
     if raw is None:
-        lines = ["format-version = 1", "warn-margin-bytes = {}".format(warn)]
+        lines = ["format-version = 2", "warn-margin-bytes = {}".format(warn), "reserve-bytes = {}".format(reserve)]
         for rid, reason in rows:
             lines += ["", "[[rule]]", 'id = {!r}'.format(rid).replace("'", '"'),
                       'reason = {!r}'.format(reason).replace("'", '"')]
@@ -1067,8 +1133,12 @@ def _self_test_main_isolated():
         fixture_git(root, "commit", "-q", "-m", "fixture base")
         return fixture_git(root, "rev-parse", "HEAD")
 
-    def raw_decl(rules, removals=(), extra=""):
-        lines = ["format-version = 1", "warn-margin-bytes = 512"]
+    def raw_decl(rules, removals=(), extra="", version=2, reserve=0):
+        """A list's text in format-version 2 (reserve-bytes = reserve), or with version=1 the exact version 1
+        schema, which has no reserve-bytes line, so a comparison base can be written as version 1 on purpose."""
+        lines = ["format-version = {}".format(version), "warn-margin-bytes = 512"]
+        if version != 1:
+            lines.append("reserve-bytes = {}".format(reserve))
         for rid in rules:
             lines += ["", "[[rule]]", 'id = "{}"'.format(rid), 'reason = "fixture rule"']
         for rid, reason in removals:
@@ -1194,12 +1264,13 @@ def _self_test_main_isolated():
         code, out = capture(t8)  # no must-deliver.toml written
         if code != 2 or "does not exist" not in out:
             failures.append("T8: an absent list must be exit 2, got {}\n{}".format(code, out))
-        _decl(t8, [], raw="format-version = 1\nwarn-margin-bytes = 512\nrule = []\n")
+        # The format-version 2 header the raw literals below share, so each tests only the defect it names.
+        v2 = "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = 0\n"
+        _decl(t8, [], raw=v2 + "rule = []\n")
         code, out = capture(t8)
         if code != 2 or "non-empty" not in out:
             failures.append("T8: an empty rule array must be exit 2, got {}\n{}".format(code, out))
-        _decl(t8, [], raw='format-version = 1\nwarn-margin-bytes = 512\n[[rules]]\nid = "prjint1"\n'
-                          'reason = "x"\n')
+        _decl(t8, [], raw=v2 + '[[rules]]\nid = "prjint1"\nreason = "x"\n')
         code, out = capture(t8)
         if code != 2:
             failures.append("T8: a misspelt [[rules]] table must be exit 2, got {}\n{}".format(code, out))
@@ -1209,34 +1280,48 @@ def _self_test_main_isolated():
         t9 = tmp / "t9"
         gfpd._tuned(t9, base_specs, "ruleaa", CAP - 10)
         bad_rows = (
-            ("unknown key", 'format-version = 1\nwarn-margin-bytes = 512\n[[rule]]\nid = "prjint1"\n'
-                            'reason = "x"\nextra = 1\n'),
-            ("integer id", 'format-version = 1\nwarn-margin-bytes = 512\n[[rule]]\nid = 1\nreason = "x"\n'),
-            ("empty reason", 'format-version = 1\nwarn-margin-bytes = 512\n[[rule]]\nid = "prjint1"\n'
-                             'reason = " "\n'),
-            ("duplicate id", 'format-version = 1\nwarn-margin-bytes = 512\n[[rule]]\nid = "prjint1"\n'
-                             'reason = "x"\n[[rule]]\nid = "prjint1"\nreason = "y"\n'),
-            ("unknown top-level key", 'format-version = 1\nwarn-margin-bytes = 512\ncap = 1\n[[rule]]\n'
-                                      'id = "prjint1"\nreason = "x"\n'),
-            ("boolean format-version", 'format-version = true\nwarn-margin-bytes = 512\n[[rule]]\n'
-                                       'id = "prjint1"\nreason = "x"\n'),
-            ("boolean warn margin", 'format-version = 1\nwarn-margin-bytes = true\n[[rule]]\n'
-                                    'id = "prjint1"\nreason = "x"\n'),
+            ("unknown key", v2 + '[[rule]]\nid = "prjint1"\nreason = "x"\nextra = 1\n'),
+            ("integer id", v2 + '[[rule]]\nid = 1\nreason = "x"\n'),
+            ("empty reason", v2 + '[[rule]]\nid = "prjint1"\nreason = " "\n'),
+            ("duplicate id", v2 + '[[rule]]\nid = "prjint1"\nreason = "x"\n[[rule]]\nid = "prjint1"\nreason = "y"\n'),
+            ("unknown top-level key", v2 + 'cap = 1\n[[rule]]\nid = "prjint1"\nreason = "x"\n'),
+            ("boolean format-version", 'format-version = true\nwarn-margin-bytes = 512\nreserve-bytes = 0\n'
+                                       '[[rule]]\nid = "prjint1"\nreason = "x"\n'),
+            ("boolean warn margin", 'format-version = 2\nwarn-margin-bytes = true\nreserve-bytes = 0\n'
+                                    '[[rule]]\nid = "prjint1"\nreason = "x"\n'),
         )
         for label, raw in bad_rows:
             _decl(t9, [], raw=raw)
             code, out = capture(t9)
             if code != 2:
                 failures.append("T9 {}: expected exit 2, got {}\n{}".format(label, code, out))
-        version_msg = "format-version must be the integer 1"
+        version_msg = "format-version must be the integer 2"
         warn_msg = "warn-margin-bytes must be a positive integer"
+        reserve_msg = "reserve-bytes must be an integer of at least 0"
+        keys_msg = "(format-version 2) must carry exactly the keys"
         value_rows = (
-            ("float format-version 1.0", "format-version = 1.0\nwarn-margin-bytes = 512\n", version_msg),
-            ("format-version 0", "format-version = 0\nwarn-margin-bytes = 512\n", version_msg),
-            ("format-version 2", "format-version = 2\nwarn-margin-bytes = 512\n", version_msg),
-            ("string format-version", 'format-version = "1"\nwarn-margin-bytes = 512\n', version_msg),
-            ("warn margin 0", "format-version = 1\nwarn-margin-bytes = 0\n", warn_msg),
-            ("warn margin -1", "format-version = 1\nwarn-margin-bytes = -1\n", warn_msg),
+            ("float format-version 2.0", "format-version = 2.0\nwarn-margin-bytes = 512\nreserve-bytes = 0\n",
+             version_msg),
+            ("format-version 0", "format-version = 0\nwarn-margin-bytes = 512\nreserve-bytes = 0\n", version_msg),
+            # A version 1 working file is refused, with or without a reserve line: only a base may be version 1.
+            ("format-version 1", "format-version = 1\nwarn-margin-bytes = 512\n", version_msg),
+            ("format-version 1 with a reserve", "format-version = 1\nwarn-margin-bytes = 512\nreserve-bytes = 0\n",
+             version_msg),
+            ("format-version 3", "format-version = 3\nwarn-margin-bytes = 512\nreserve-bytes = 0\n", version_msg),
+            ("string format-version", 'format-version = "2"\nwarn-margin-bytes = 512\nreserve-bytes = 0\n',
+             version_msg),
+            ("warn margin 0", "format-version = 2\nwarn-margin-bytes = 0\nreserve-bytes = 0\n", warn_msg),
+            ("warn margin -1", "format-version = 2\nwarn-margin-bytes = -1\nreserve-bytes = 0\n", warn_msg),
+            # T59. A reserve outside its schema fails closed (exit 2 naming the key), never read as 0 or as a
+            # number it is not: a bool, a negative, a float, a string, a missing key, and a reserve above
+            # warn-margin-bytes.
+            ("reserve boolean", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = true\n", reserve_msg),
+            ("reserve -1", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = -1\n", reserve_msg),
+            ("reserve float 1.0", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = 1.0\n", reserve_msg),
+            ("reserve string", 'format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = "0"\n', reserve_msg),
+            ("reserve missing", "format-version = 2\nwarn-margin-bytes = 512\n", keys_msg),
+            ("reserve above the warn margin", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = 513\n",
+             "reserve-bytes 513 is above warn-margin-bytes 512"),
         )
         for label, head, want in value_rows:
             _decl(t9, [], raw=head + '[[rule]]\nid = "prjint1"\nreason = "x"\n')
@@ -1244,8 +1329,7 @@ def _self_test_main_isolated():
             if code != 2 or want not in out:
                 failures.append("T9 {}: expected exit 2 with {!r}, got {}\n{}".format(label, want, code, out))
         # An id with one trailing newline (the TOML escape \n) fails the corpus-id shape check itself.
-        _decl(t9, [], raw='format-version = 1\nwarn-margin-bytes = 512\n[[rule]]\nid = "prjint1\\n"\n'
-                          'reason = "x"\n')
+        _decl(t9, [], raw=v2 + '[[rule]]\nid = "prjint1\\n"\nreason = "x"\n')
         code, out = capture(t9)
         if code != 2 or "not a well-formed corpus-id" not in out:
             failures.append("T9 id with a trailing newline: expected exit 2 naming it not a well-formed "
@@ -1417,10 +1501,10 @@ def _self_test_main_isolated():
         # then edits the working list; the base is passed as its full object id unless stated.
         drop_msg = "FAIL: rule ruleaa is listed at the base"
 
-        def ratchet_fixture(name, base_rules=("prjint1", "ruleaa")):
+        def ratchet_fixture(name, base_rules=("prjint1", "ruleaa"), base_version=2):
             root = tmp / name
             gfpd._tuned(root, base_specs, "ruleaa", CAP - 10)
-            _decl(root, [], raw=raw_decl(base_rules))
+            _decl(root, [], raw=raw_decl(base_rules, version=base_version))
             return root, commit_base(root)
 
         # T14. Dropped with no [[removal]] row: exit 1 naming ruleaa.
@@ -2352,6 +2436,134 @@ def _self_test_main_isolated():
         if code != 2 or "with no measured rule span" not in out:
             failures.append("T57: a listed rule with no measured span must be exit 2 naming it, got {}\n{}"
                             .format(code, out))
+
+        # T58. The reserve is enforced: with reserve-bytes 512, ruleaa ending exactly 512 bytes inside the cap
+        # is exit 0 with no FAIL line, and ending 511 bytes inside it is exit 1 naming the margin, the rule and
+        # the reserve; the same 511-byte margin under reserve-bytes 0 is exit 0, so the failure is the
+        # reserve's own.
+        t58 = tmp / "t58"
+        reserve58 = 512
+        sp = gfpd._tuned(t58, base_specs, "ruleaa", CAP - reserve58)
+        _decl(t58, both, reserve=reserve58)
+        code, out = capture(t58)
+        if (sp["ruleaa"][1] != CAP - reserve58 or code != 0 or "FAIL" in out
+                or "reserve-bytes {}:".format(reserve58) not in out):
+            failures.append("T58: a margin equal to reserve-bytes must be exit 0 reporting the reserve "
+                            "(fixture end {}), got {}\n{}".format(sp["ruleaa"][1], code, out))
+        sp = gfpd._tuned(t58, base_specs, "ruleaa", CAP - reserve58 + 1)
+        code, out = capture(t58)
+        want58 = "FAIL: tightest margin {} (ruleaa) is below reserve-bytes {}".format(reserve58 - 1, reserve58)
+        if sp["ruleaa"][1] != CAP - reserve58 + 1 or code != 1 or want58 not in out:
+            failures.append("T58: a margin one byte below reserve-bytes must be exit 1 with {!r} (fixture end "
+                            "{}), got {}\n{}".format(want58, sp["ruleaa"][1], code, out))
+        _decl(t58, both, reserve=0)
+        code, out = capture(t58)
+        if (code != 0 or "FAIL" in out
+                or "WARNING: tightest margin {} is below warn-margin-bytes 512".format(reserve58 - 1) not in out):
+            failures.append("T58: the same margin under reserve-bytes 0 must be exit 0 with the warning, got "
+                            "{}\n{}".format(code, out))
+
+        # T60. A comparison base written in format-version 1 still compares (the migration): against a
+        # version 1 base listing prjint1 and ruleaa, an unchanged version 2 working list is exit 0, a drop
+        # with no [[removal]] row is exit 1 naming ruleaa, and the drop with a row is exit 0 printing it.
+        for label, rules, removals, want_code, want in (
+                ("unchanged", ["prjint1", "ruleaa"], (), 0, "(0 added, 0 removed)"),
+                ("a drop with no row", ["prjint1"], (), 1, drop_msg),
+                ("a drop with a row", ["prjint1"], (("ruleaa", "fixture removal reason"),), 0,
+                 "[[removal]] reason: fixture removal reason")):
+            t60, base60 = ratchet_fixture("t60-" + label.replace(" ", "-"), base_version=1)
+            base_text60 = fixture_git(t60, "show", "{}:{}".format(base60, DECL_REL))
+            if "format-version = 1\n" not in base_text60 or "reserve-bytes" in base_text60:
+                raise _FixtureError("T60 precondition: the base list is not in the version 1 schema")
+            _decl(t60, [], raw=raw_decl(rules, removals))
+            code, out = capture_gate(t60, base60)
+            if code != want_code or want not in out:
+                failures.append("T60 {} against a version 1 base: expected exit {} with {!r}, got {}\n{}".format(
+                    label, want_code, want, code, out))
+
+        # T61. The base parser accepts exactly version 1 or exactly version 2: a base in format-version 3 or
+        # 1.0, a version 1 base carrying reserve-bytes, a version 2 base without it, and a version 2 base whose
+        # reserve-bytes is a bool, -1 or 1.0, are each exit 2 naming the defect at the base.
+        t61, _base61 = ratchet_fixture("t61")
+        rule61 = '[[rule]]\nid = "prjint1"\nreason = "x"\n[[rule]]\nid = "ruleaa"\nreason = "x"\n'
+        base_msg61 = "format-version must be the integer 1 or 2"
+        for label, head, want in (
+                ("format-version 3", "format-version = 3\nwarn-margin-bytes = 512\nreserve-bytes = 0\n", base_msg61),
+                ("format-version 1.0", "format-version = 1.0\nwarn-margin-bytes = 512\n", base_msg61),
+                ("version 1 with reserve-bytes", "format-version = 1\nwarn-margin-bytes = 512\nreserve-bytes = 0\n",
+                 "(format-version 1) must carry exactly the keys"),
+                ("version 2 without reserve-bytes", "format-version = 2\nwarn-margin-bytes = 512\n",
+                 "(format-version 2) must carry exactly the keys"),
+                ("reserve boolean", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = false\n", reserve_msg),
+                ("reserve -1", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = -1\n", reserve_msg),
+                ("reserve float", "format-version = 2\nwarn-margin-bytes = 512\nreserve-bytes = 1.0\n", reserve_msg)):
+            _decl(t61, [], raw=head + rule61)
+            fixture_git(t61, "add", "-A")
+            fixture_git(t61, "commit", "-q", "-m", "fixture base: " + label)
+            base61 = fixture_git(t61, "rev-parse", "HEAD")
+            _decl(t61, [], raw=raw_decl(["prjint1", "ruleaa"]))
+            code, out = capture_gate(t61, base61)
+            if code != 2 or "at the base" not in out or want not in out:
+                failures.append("T61 base {}: expected exit 2 with {!r} at the base, got {}\n{}".format(
+                    label, want, code, out))
+
+        # T63. The real list holds the reserve the maintainer set (512 bytes), so the gate run on this tree
+        # enforces it; lowering or dropping it is a reviewed edit of this row too.
+        try:
+            real63 = read_declared(repo_root() / DECL_REL)
+        except (ValueError, OSError) as exc:
+            failures.append("T63: the real {} cannot be read ({})".format(DECL_REL, exc))
+        else:
+            if real63.reserve != 512:
+                failures.append("T63: the real {} declares reserve-bytes {}, not the 512 the maintainer "
+                                "set".format(DECL_REL, real63.reserve))
+
+        # T64. The reserve and the base parser are stated as pinned (the text, not its truth: T58 to T61 pin
+        #      the behaviour): in the module docstring and in the manifest residue.
+        pinned64 = (
+            ("the module docstring", __doc__, (
+                "RESERVE. reserve-bytes (an integer of at least 0 and at most warn-margin-bytes, never a bool "
+                "or a float) is enforced",
+                "accepts exactly the format-version 1 schema or exactly the format-version 2 schema")),
+            ("the module docstring", __doc__, (
+                "The list ratchet also compares reserve-bytes with the reserve-bytes listed at the same "
+                "comparison base (a format-version 1 base, which has none, counts as 0)",
+                "a deliberate lowering has no declared path like a [[removal]] row")),
+            ("the manifest residue", residue, (
+                "The list's reserve-bytes (format-version 2) is enforced",
+                "accepts exactly format-version 1 (no reserve-bytes) or exactly format-version 2",
+                "The list ratchet also compares reserve-bytes with the reserve-bytes listed at the same "
+                "comparison base (a format-version 1 base, which has none, counts as 0)",
+                "a deliberate lowering has no declared path like a [[removal]] row")))
+        for where, text, phrases in pinned64:
+            flat = " ".join((text or "").split())
+            for phrase in phrases:
+                if phrase not in flat:
+                    failures.append("T64: {} must state {!r}".format(where, phrase))
+
+        # T65. The reserve ratchet. Each fixture commits a base listing prjint1 and ruleaa (ruleaa CAP - 10,
+        # so the tightest margin is 10 and a working reserve up to 10 passes the prefix check), in format-
+        # version 2 with reserve-bytes 9 or in format-version 1, then writes the working list.
+        lower65 = "FAIL: reserve-bytes 8 is lower than the reserve-bytes 9 listed at the base"
+        for label, base_version, rules, reserve, want_code, wants in (
+                ("lowered", 2, ["prjint1", "ruleaa"], 8, 1, (lower65,)),
+                ("lowered with an undeclared drop", 2, ["prjint1"], 8, 1, (lower65, drop_msg)),
+                ("kept", 2, ["prjint1", "ruleaa"], 9, 0, ("reserve-bytes 9 there (0 for a format-version 1 "
+                                                          "base), 9 now",)),
+                ("raised", 2, ["prjint1", "ruleaa"], 10, 0, ("reserve-bytes 9 there (0 for a format-version 1 "
+                                                             "base), 10 now",)),
+                ("raised over a version 1 base", 1, ["prjint1", "ruleaa"], 10, 0,
+                 ("reserve-bytes 0 there (0 for a format-version 1 base), 10 now",))):
+            t65 = tmp / ("t65-" + label.replace(" ", "-"))
+            gfpd._tuned(t65, base_specs, "ruleaa", CAP - 10)
+            _decl(t65, [], raw=raw_decl(["prjint1", "ruleaa"], version=base_version, reserve=9))
+            base65 = commit_base(t65)
+            _decl(t65, [], raw=raw_decl(rules, reserve=reserve))
+            code, out = capture_gate(t65, base65)
+            if (code != want_code or any(w not in out for w in wants)
+                    or (want_code == 0 and "FAIL" in out)):
+                failures.append("T65 {}: expected exit {} with {!r}{}, got {}\n{}".format(
+                    label, want_code, wants, " and no FAIL line" if want_code == 0 else "", code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -2384,7 +2596,9 @@ def _self_test_verdict(fixture_error, t49_error, failures, skipped):
         return 1
     print("SELF-TEST PASS: a listed rule ending at the cap passes and one ending one byte past, "
           "straddling it, or byte-measured past it fails naming the rule; a stale AGENTS.md and every "
-          "malformed (a non-integer or unsupported format-version, a warn margin below 1), absent, empty, "
+          "malformed (a non-integer or unsupported format-version, a version 1 working file, a warn margin "
+          "below 1, a reserve that is not an integer of at least 0, missing or above the warn margin), "
+          "absent, empty, "
           "symlinked, unreadable (an injected read error) or unparseable list fail closed (exit 2); the "
           "demonstration's own lists are never read; an unknown or clause id fails closed naming it, and "
           "a listed rule with no measured span still does behind the membership check; the listed rules "
@@ -2393,7 +2607,12 @@ def _self_test_verdict(fixture_error, t49_error, failures, skipped):
           "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
           "(still exit 0) are printed exactly; a listed split rule is measured on its core layer, its "
           "detail after the last rule (a mutant placing it at the rule changes that), and a straddling core "
-          "fails; and against a committed base, a rule dropped from the list "
+          "fails; a listed rule ending exactly reserve-bytes inside the cap passes and one byte less fails "
+          "naming the margin, and the real list holds the reserve the maintainer set; a reserve lowered "
+          "below the base's fails naming both while a kept or raised one passes (a version 1 base read as "
+          "reserve 0); and against a "
+          "committed base, written in format-version 1 or 2 (any other base schema fails closed), a rule "
+          "dropped from the list "
           "with no [[removal]] row fails naming it (also with the demonstration regenerated without it, "
           "and with HEAD past the base, the list read at the base), "
           "a declared removal passes and is printed, an addition passes, and a malformed removal row, an "

@@ -2773,7 +2773,8 @@ expected-check-ids = [
   "decide/not-iterable-false",
   "decide/site-file-true",
   "decide/site-nested-true",
-  "decide/opf-site-file-true",
+  "decide/opf-site-file-false",
+  "decide/site-trees-registry",
   "decide/regen-manifest-true",
   "decide/regen-root-true",
   "decide/regen-announce-true",
@@ -2781,7 +2782,9 @@ expected-check-ids = [
   "decide/non-site-path-false",
   "decide/one-outside-poisons-false",
   "decide/tree-boundary",
-  "decide/opf-tree-boundary",
+  "decide/opf-site-paths-false",
+  "decide/second-tree-boundary",
+  "decide/heavy-read-live-empty",
   "decide/heavy-read-page-false",
   "decide/heavy-read-poisons-false",
   "decide/regen-exact-only",
@@ -2818,6 +2821,7 @@ expected-check-ids = [
   "cli/mixed-change-false-exit-0",
   "cli/rename-out-of-tree-false-exit-0",
   "cli/rename-into-tree-false-exit-0",
+  "cli/opf-site-change-false-exit-0",
   "cli/outside-repo-exit-2",
   # ---------- the --ci-decide entry the scope job runs ----------
   "cidecide/linear-head-no-second-parent-false",
@@ -4063,6 +4067,7 @@ expected-check-ids = [
   "completeness/ambient-git-dir-ignored",
   "completeness/nested-in-outer-repository-cannot-evaluate",
   "switch/off-finding",
+  "documentation/declaration-files-registry",
   "documentation/on-missing-phrase-finding",
   "documentation/on-present-passes",
   "documentation/on-absent-file-cannot-evaluate",
@@ -6603,6 +6608,7 @@ expected-check-ids = [
   "bound/pin-size-at",
   "bound/pin-size-over",
   "registry/live-pairs",
+  "registry/fixture-second-pair-not-live",
   "registry/two-pairs-pass",
   "registry/second-copy-differing",
   "registry/second-copy-stray",
@@ -6846,6 +6852,7 @@ expected-check-ids = [
 id = "security-txt-selftest"
 runner = "tools/check_security_txt.py"
 expected-check-ids = [
+  "registry/live-roots",
   "pass/both-roots-exact",
   "refuse/missing-file",
   "refuse/not-regular-file",
@@ -6869,6 +6876,8 @@ expected-check-ids = [
   "bound/size-under",
   "bound/size-at",
   "bound/size-over",
+  "refuse/no-site-root-cannot-evaluate",
+  "live/gate-reads-site-root",
   "live/real-tree-passes",
 ]
 
@@ -7263,6 +7272,7 @@ expected-check-ids = [
 id = "sitemap-selftest"
 runner = "tools/check_sitemap.py"
 expected-check-ids = [
+  "registry/live-roots",
   "pass/both-roots-exact",
   "pages/url-path-mapping",
   "pages/excludes-404-draft-downloads",
@@ -7305,6 +7315,8 @@ expected-check-ids = [
   "bound/size-at",
   "bound/size-over",
   "refuse/unrecognized-argument",
+  "refuse/no-site-root-cannot-evaluate",
+  "live/gate-reads-site-root",
   "live/real-tree-passes",
 ]
 
@@ -7333,8 +7345,8 @@ expected-check-ids = [
   "touch-icon/promoted-draft-placeholder-template-exempt",
   "touch-icon/promoted-unlisted-draft-page-checked",
   "touch-icon/staged-root-page-checked",
-  "touch-icon/opf-template-page-exempt",
-  "touch-icon/opf-promoted-template-page-exempt",
+  "touch-icon/second-root-template-page-exempt",
+  "touch-icon/second-root-promoted-template-page-exempt",
   "touch-icon/other-site-template-page-checked",
   "touch-icon/page-named-draft-checked",
   "touch-icon/drafts-directory-checked",
@@ -7348,6 +7360,9 @@ expected-check-ids = [
   "touch-icon/scan-reports-missing-link",
   "touch-icon/scan-passes-when-linked",
   "live/real-tree-passes",
+  "coverage/page-less-root-fails-closed",
+  "coverage/run-reads-every-root",
+  "coverage/no-root-fails-closed",
   "card/complete-passes",
   "card/missing-og-type-fails",
   "card/missing-og-title-fails",
@@ -7543,6 +7558,7 @@ expected-check-ids = [
   "declaration/well-formed-scan-not-refused",
   "declaration/block-entry-not-a-page",
   "declaration/real-is-promoted",
+  "coverage/roots-registry",
   "declaration/staged-flip-differs",
   "declaration/entry-without-target-refused",
   "declaration/entry-without-target-scan-exits-2",
@@ -7572,6 +7588,7 @@ expected-check-ids = [
 id = "headers-selftest"
 runner = "tools/check_headers.py"
 expected-check-ids = [
+  "registry/live-roots",
   "pass/both-roots-exact",
   "pass/live-equal-to-draft",
   "refuse/missing-file",
@@ -7635,6 +7652,7 @@ expected-check-ids = [
   "bound/size-under",
   "bound/size-at",
   "bound/size-over",
+  "refuse/no-site-root-cannot-evaluate",
   "live/real-tree-passes",
 ]
 

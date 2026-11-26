@@ -9,7 +9,7 @@ A declaration that cannot be read or evaluated, or holds an entry gen_gensrc's o
 (not a dict, a missing or non-string target, a missing source), raises OSError or ValueError; each caller
 fails closed.
 
-A page path is named by its coverage root ("site" or "opf/site") and its path under that root. The
+A page path is named by its coverage root (such as "site") and its path under that root. The
 template base of a root is the folder, relative to the root, that holds every generated page of that root
 ("draft/" while staged, "" once promoted); the landing page and the disclosure URL derive from it.
 """

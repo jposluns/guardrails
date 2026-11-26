@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.29** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.30** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -125,11 +125,9 @@ the checked-out HEAD is the documented two-parent test merge (HEAD's raw commit 
 with `git --no-replace-objects cat-file commit HEAD`, must record exactly two parents, the second
 equal to the event's head SHA; GitHub-documented behaviour, not verified live here), and every
 path it changes, read with replacement objects disabled against `HEAD^1` (the first parent that
-object records), is in the site allowlist: under `site/` or `opf/site/`, or exactly one of the
-three files a site-only change regenerates (`.aiqt/manifest.toml`, `.aiqt/release/root.txt`,
-`.aiqt/release/announce-snippet.txt`), except seven excluded site-tree files: the four OPF homes
-contract files `opf/site/adopt/index.html`, `opf/site/adopt.md`, `opf/site/core-files/index.html`
-and `opf/site/disclosure/index.html`, and the three `opf/site/draft-src/` sources of those pages.
+object records), is in the site allowlist: under `site/`, or exactly one of the three files a
+site-only change regenerates (`.aiqt/manifest.toml`, `.aiqt/release/root.txt`,
+`.aiqt/release/announce-snippet.txt`). The list of excluded site-tree files is empty.
 A HEAD with any other parent count, a git failure, or an unparseable commit header decides
 false. The decision reads HEAD's raw parents and ignores both `info/grafts` and replace refs;
 the extraction (`git --no-replace-objects show HEAD^1:...`) disables replace refs only, and git
@@ -139,13 +137,18 @@ the base tree's copy first means an ordinary train cannot repoint the decision b
 same-repository train can still edit the workflow itself, which no pull_request workflow covers,
 so this ordering is merge-lane discipline, not isolation from a hostile train.
 
-Checks kept for a site-only train: every always-run job still runs. The four OPF homes contract
-files are excluded from the allowlist because `opf/tools/check_opf_homes.py`, which reads them,
-runs only in skippable jobs; `tools/check_opf_declaration.py`, which decodes every `.md` and
-`.html` file in the tree, also runs (live gate and self-test) in the always-run `site` job; and
-`tools/check_python_floor.py` (which reads `site/development.html`, `site/install/index.html`,
-`opf/site/adopt.md` and `opf/site/adopt/index.html`) runs live in the always-run registry job in
-every run. What the fast lane deliberately gives up for a site-only train is every check in the 51
+Checks kept for a site-only train: every always-run job still runs. No suite that runs only in
+skippable jobs reads a `site/` file as a verdict input, so no site-tree file is excluded from the
+allowlist (the opfiles.ai sources under `opf/site/`, including the four OPF homes contract files
+`opf/tools/check_opf_homes.py` read, were removed from this repository; the removal rests on a
+maintainer decision of 2026-11-16, which requires that everything removed is first validated as
+present in the OPFiles repository; for `opf/site/` that validation was an export check of 83 paths
+on 2026-11-25; and the maintainer stated on 2026-11-25 that the opfiles.ai site builds from the
+OPFiles repository).
+`tools/check_opf_declaration.py`, which decodes every `.md` and `.html` file in the tree, also runs
+(live gate and self-test) in the always-run `site` job, and `tools/check_python_floor.py` (which
+reads `site/development.html` and `site/install/index.html`) runs live in the always-run registry
+job in every run. What the fast lane deliberately gives up for a site-only train is every check in the 51
 heavy jobs named above: every step of those jobs is skipped. Of their commands, only the
 child-status probe (`opf/tools/_child_status.py`), the opf-declaration live gate and its
 `selftest-execution` suite, and `tools/check_byte_canon.py` (live gate and self-test) also run,

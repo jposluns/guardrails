@@ -22,6 +22,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   future_stamp_write  PreToolUse  tstamp  WARN (never deny) on a future-dated time written into a declared store
   citation_read_recorder PostToolUse citint record (never block) the line spans a Read, Grep, plain Bash read, Write or Edit returned
   citation_read_check PreToolUse  citint  allow+note (BAKE, never deny) a cited path:line range in a commit message or PR body that no recorded read covers
+  list_limit_note     PostToolUse prtwhl  note (never block) a gh listing whose row count equals its own limit (option tables pinned to gh 2.103.3)
 
 Contract (doc-confirmed 2026-08-17 against code.claude.com/docs/en/hooks): the hook payload arrives
 as JSON on stdin. A PreToolUse handler that decides emits, on exit 0,
@@ -290,7 +291,7 @@ import sys
 # os._exit discards no other buffered output; the warning itself is flushed before the exit.
 FLOOR_FAIL_OPEN_MODES = ("citation_read_recorder", "clock_inject_failure", "clock_inject_post",
                          "console_prefix_pretool", "diff_wall_stop", "future_stamp_write", "inline_errexit",
-                         "orch_dispatch_ledger",
+                         "list_limit_note", "orch_dispatch_ledger",
                          "orch_lease_heartbeat_post", "orch_lease_heartbeat_stop", "orch_prompt_stamp",
                          "orch_resume_audit", "orch_stop_guard", "orch_teammate_idle")
 
@@ -50376,6 +50377,349 @@ def console_prefix_pretool(data):
     return _allow_note(reason + setting)
 
 
+# --- list limit note (cntprd/prtwhl/setcmp) ----------------------------------------------------------
+# PostToolUse Bash, warn only: a gh listing that prints exactly as many rows as its own limit may have been
+# cut at that limit, so a count, an "all" or a "none remain" read from it states a lower bound as a total.
+# The note never blocks (the command has already run) and does not read any later claim; R equal to N is
+# evidence that the list was cut, not proof of it. The per-noun option tables below are pinned to gh
+# 2.103.3: their options and the fields the help names were compared with the --help text of each of the
+# six commands in that version (FLAGS, INHERITED FLAGS and JSON FIELDS); -h is not listed, since that help
+# lists only --help. On a gh upgrade the orchestrator re-checks these tables against the new version's help
+# text, and edits them and the literal copy the hooks self-test keeps (ll-table-pin) together.
+_LL_GH_VERSION = "2.103.3"
+_LL_MIN_LIMIT = 2
+_LL_EXIT_FIELDS = ("exit_code", "exitCode", "returncode", "returnCode")
+_LL_FALSE_SPELLINGS = ("0", "f", "F", "false", "FALSE", "False")
+_LL_DURATION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?[smhd]?")
+_LL_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+# A leading or env assignment of GH_FORCE_TTY (any value, empty included, = or +=): gh then prints its TTY
+# layout, whose header lines would be counted as rows, so the call is silent.
+_LL_FORCE_TTY_RE = re.compile(r"GH_FORCE_TTY\+?=")
+# A per-element jq program: .[].a.b, or .[] | .a.b (group 1 or group 2 is the field path).
+_LL_EACH_RE = re.compile(r"\.\[\]((?:\.{0})+)|\.\[\]\s*\|\s*\.({0}(?:\.{0})*)".format(_LL_IDENT), re.ASCII)
+# An array jq program: map(.a.b), or [.[].a.b].
+_LL_ARRAY_RE = re.compile(r"map\(\.{0}(?:\.{0})*\)|\[\.\[\](?:\.{0})+\]".format(_LL_IDENT), re.ASCII)
+_LL_COUNTERS = (("wc", "-l"), ("jq", "length"))
+_LL_LIST_NOUNS = ("pr", "issue", "run", "release")
+_LL_COMMON_VALUES = ("-L", "--limit", "-R", "--repo", "--json", "-q", "--jq", "-t", "--template")
+_LL_SEARCH_FIELDS = ("number", "title", "url", "state", "createdAt", "updatedAt", "author.login",
+                     "repository.nameWithOwner", "authorAssociation", "closedAt", "commentsCount", "id", "isLocked",
+                     "isPullRequest")
+_LL_SEARCH_PRS_VALUES = (
+    "--app", "--assignee", "--author", "-B", "--base", "--checks", "--closed", "--commenter", "--comments",
+    "--created", "-H", "--head", "--interactions", "--involves", "--label", "--language", "--match", "--mentions",
+    "--merged-at", "--milestone", "--order", "--owner", "--project", "--reactions", "--review",
+    "--review-requested", "--reviewed-by", "--sort", "--state", "--team-mentions", "--updated", "--visibility")
+# noun -> (flags, value options, skip options, single-line per-item fields). A skip option is also a flag;
+# when one is present the call is silent (the output is a browser hand-off or help text, not a listing). The
+# common value options apply to every noun. A per-item jq program counts rows only on a listed field. The
+# field lists hold every field the help names whose value is a string, number or boolean that prints on one
+# line, plus the paths author.login and repository.nameWithOwner (the help names only author and
+# repository). Left out: body (a text that can span lines), and every array or object field (assignees,
+# labels, author, milestone, mergedBy and the like), since how gh prints an array or object a jq program
+# yields is not pinned here; which fields are scalars is general knowledge of gh, not read from the help.
+_LL_TABLES = {
+    "pr": (("-d", "--draft", "-w", "--web", "--help"),
+           _LL_COMMON_VALUES + ("-A", "--author", "-a", "--assignee", "-B", "--base", "-H", "--head", "-l",
+                                "--label", "-s", "--state", "-S", "--search", "--app"),
+           ("-w", "--web", "--help"),
+           ("number", "title", "url", "state", "createdAt", "updatedAt", "closedAt", "author.login", "isDraft",
+            "headRefName", "baseRefName", "mergedAt", "additions", "baseRefOid", "changedFiles", "closed",
+            "deletions", "fullDatabaseId", "headRefOid", "id", "isCrossRepository", "maintainerCanModify",
+            "mergeStateStatus", "mergeable", "reviewDecision")),
+    "issue": (("-w", "--web", "--help"),
+              _LL_COMMON_VALUES + ("-A", "--author", "-a", "--assignee", "-l", "--label", "-s", "--state", "-S",
+                                   "--search", "-m", "--milestone", "--mention", "--app", "--type"),
+              ("-w", "--web", "--help"),
+              ("number", "title", "url", "state", "createdAt", "updatedAt", "closedAt", "author.login", "closed",
+               "id", "isPinned", "stateReason")),
+    "run": (("-a", "--all", "--help"),
+            _LL_COMMON_VALUES + ("-b", "--branch", "-c", "--commit", "--created", "-e", "--event", "-s", "--status",
+                                 "-u", "--user", "-w", "--workflow"),
+            ("--help",),
+            ("databaseId", "name", "displayTitle", "workflowName", "status", "conclusion", "event", "headBranch",
+             "headSha", "url", "createdAt", "attempt", "number", "startedAt", "updatedAt", "workflowDatabaseId")),
+    "release": (("--exclude-drafts", "--exclude-pre-releases", "--help"),
+                _LL_COMMON_VALUES + ("-O", "--order"),
+                ("--help",),
+                ("tagName", "name", "isDraft", "isLatest", "isPrerelease", "publishedAt", "createdAt",
+                 "isImmutable")),
+    "search prs": (("--archived", "--draft", "--locked", "--merged", "--no-assignee", "--no-label", "--no-milestone",
+                    "--no-project", "-w", "--web", "--help"),
+                   _LL_COMMON_VALUES + _LL_SEARCH_PRS_VALUES,
+                   ("-w", "--web", "--help"),
+                   _LL_SEARCH_FIELDS + ("isDraft",)),
+    "search issues": (("--archived", "--include-prs", "--locked", "--no-assignee", "--no-label", "--no-milestone",
+                       "--no-project", "-w", "--web", "--help"),
+                      _LL_COMMON_VALUES + tuple(
+                          name for name in _LL_SEARCH_PRS_VALUES
+                          if name not in ("-B", "--base", "-H", "--head", "--checks", "--merged-at", "--review",
+                                          "--review-requested", "--reviewed-by")) + ("--search-type",),
+                      ("-w", "--web", "--help"),
+                      _LL_SEARCH_FIELDS),
+}
+
+
+def _ll_gh_at(argv):
+    """(the index in argv of the gh word, the NAME=value words passed over), or None: leading NAME=value words
+    are passed over, then at most one wrapper with only its pinned options (env: -i, -, --ignore-environment,
+    -u NAME, -uNAME, --unset=NAME, then NAME=value words; timeout: --foreground, --preserve-status, -v,
+    --verbose, -k or -s with an attached or next-word value, --kill-after=, --signal=, then one duration;
+    command: -p), and the next word's basename must be gh. Any other wrapper option, and command -v or -V,
+    gives None. The words passed over are the leading ones and env's, never an option's value."""
+    i = 0
+    assigns = []
+    while i < len(argv) and _ENV_ASSIGN_RE.match(argv[i]):
+        assigns.append(argv[i])
+        i += 1
+    head = posixpath.basename(argv[i]) if i < len(argv) else ""
+    if head == "env":
+        i += 1
+        while i < len(argv) and argv[i].startswith("-"):
+            word = argv[i]
+            if word in ("-i", "-", "--ignore-environment"):
+                i += 1
+            elif word == "-u":
+                i += 2
+            elif word.startswith(("-u", "--unset=")):
+                i += 1
+            else:
+                return None
+        while i < len(argv) and _ENV_ASSIGN_RE.match(argv[i]):
+            assigns.append(argv[i])
+            i += 1
+    elif head == "timeout":
+        i += 1
+        while i < len(argv) and argv[i].startswith("-"):
+            word = argv[i]
+            if word in ("--foreground", "--preserve-status", "-v", "--verbose"):
+                i += 1
+            elif word in ("-k", "-s"):
+                i += 2
+            elif word.startswith(("-k", "-s", "--kill-after=", "--signal=")):
+                i += 1
+            else:
+                return None
+        if i >= len(argv) or not _LL_DURATION_RE.fullmatch(argv[i]):
+            return None
+        i += 1
+    elif head == "command":
+        i += 1
+        while i < len(argv) and argv[i].startswith("-"):
+            if argv[i] != "-p":
+                return None
+            i += 1
+    if i < len(argv) and posixpath.basename(argv[i]) == "gh":
+        return i, assigns
+    return None
+
+
+def _ll_kind(opts, fields):
+    """The output kind of a gh listing from its parsed value options: TEMPLATE for any -t or --template;
+    otherwise, for the last -q or --jq program, LENGTH (exactly length), EACH (a per-element program whose
+    field path is one of fields), ARRAY (an array program) or OTHER; otherwise JSON with --json, else PLAIN."""
+    names = [name for name, _value, _at in opts]
+    if "-t" in names or "--template" in names:
+        return "TEMPLATE"
+    programs = [value for name, value, _at in opts if name in ("-q", "--jq")]
+    if programs:
+        program = programs[-1]
+        if not isinstance(program, str):
+            return "OTHER"
+        program = program.strip()
+        if program == "length":
+            return "LENGTH"
+        match = _LL_EACH_RE.fullmatch(program)
+        if match is not None:
+            path = match.group(1)[1:] if match.group(1) else match.group(2)
+            return "EACH" if path in fields else "OTHER"
+        if _LL_ARRAY_RE.fullmatch(program):
+            return "ARRAY"
+        return "OTHER"
+    return "JSON" if "--json" in names else "PLAIN"
+
+
+def _ll_saturated(kind, counter, stdout, limit):
+    """How the output reached the limit (limit is its text, ASCII decimal digits with no leading zero, so a
+    row count or printed count is compared with it as text): "rows" when the listing itself shows exactly
+    limit rows, "count" when a printed count equals it, None otherwise. A plain or per-element listing counts
+    its non-empty lines after one final line feed is dropped; a JSON or array listing counts the elements of
+    its top-level JSON array; a jq length program, or a pipe into wc -l (after a plain or per-element
+    listing) or jq length (after a JSON or array listing), prints a count, compared with its outer whitespace
+    stripped."""
+    if counter is None:
+        if kind in ("PLAIN", "EACH"):
+            text = stdout[:-1] if stdout.endswith("\n") else stdout
+            rows = sum(1 for line in text.split("\n") if line)
+            return "rows" if str(rows) == limit else None
+        if kind in ("JSON", "ARRAY"):
+            try:
+                value = json.loads(stdout)
+            except (ValueError, RecursionError):
+                return None
+            return "rows" if isinstance(value, list) and str(len(value)) == limit else None
+        if kind == "LENGTH" and stdout.strip() == limit:
+            return "count"
+        return None
+    admitted = ("PLAIN", "EACH") if counter == ("wc", "-l") else ("JSON", "ARRAY")
+    if kind in admitted and stdout.strip() == limit:
+        return "count"
+    return None
+
+
+def list_limit_note(data):
+    """cntprd/prtwhl/setcmp, PostToolUse Bash (a note, never blocks): when a gh listing prints exactly as
+    many rows as its own limit, tell the model the output may be cut there, so its size is a lower bound and
+    not a total (model context), and tell the operator the same (systemMessage). A payload naming another
+    event gets a note and no check. Silent unless every condition below holds.
+
+    Response: tool_response is an object whose stdout is a non-empty string of at most _CITE_MAX_TEXT
+    characters, whose interrupted is not true, and each of whose exit_code, exitCode, returncode and
+    returnCode is absent, null, 0 (or equal to it: 0.0, false) or the string "0" (any other value, "1" or
+    1.0 included, is silent); the command is a string of at most _CITE_MAX_COMMAND characters that contains
+    the text gh (checked before any lexing, so a gh word that quotes or a backslash split, such as g''h, is
+    silent).
+    Shape: the command lexes (_lex_command, default arguments); records with no words, no redirects and no
+    separator are dropped, and a remaining record with no words is silent; then either one record with no
+    separator, or two records joined by | (never |&) whose second is exactly wc -l or jq length with no
+    separator. No record is opaque (an unquoted expansion, substitution, glob, brace or tilde), and every
+    redirect sends fd 2 with > or >> to /dev/null or a plain file, with no effect on stdout.
+    Command: leading NAME=value words, then at most one env, timeout or command wrapper with its pinned
+    options (_ll_gh_at), then a word whose basename is gh, then pr, issue, run or release with list or ls, or
+    search with prs or issues. A leading or env NAME=value word that assigns GH_FORCE_TTY (with = or +=, any
+    value, empty included) silences the call, since gh's TTY header lines would be counted as rows; a
+    GH_FORCE_TTY the command inherits is not seen.
+    Options (pinned to gh 2.103.3, _LL_TABLES, compared with that version's help text): parsed by
+    _citechk_options. Before the first -- that is not an option's value, every word starting with - is a
+    value word an option consumed, a known long name (with or without =), or a short cluster whose every
+    letter before the first value letter is a known flag; any other option word is silent, -h included (the
+    help lists only --help). A skip option (--help for every noun, --web or -w for pr, issue and search)
+    silences the call when present: the exact long word, --NAME=V unless V is a false spelling (0 f F false
+    FALSE False), or the letter before the first value letter of a short cluster; a word an option consumed
+    as its value is passed over.
+    Limit: the last -L or --limit value, which must read as an integer of at least _LL_MIN_LIMIT and be
+    written exactly as that integer's ASCII decimal digits; a value int() cannot read is silent, never an
+    error, and so is a leading zero, a sign, an underscore, a blank or a non-ASCII digit (how gh's parser reads
+    those is not pinned).
+    Count (_ll_kind, _ll_saturated): a template is silent, and so is any jq program except length, a
+    per-element program on a listed single-line field, and an array program, which are counted; R greater
+    or smaller than the limit is silent; no limit is silent."""
+    event = data.get("hook_event_name")
+    if event != "PostToolUse":
+        return _allow_note("AIQT guardrail: the list_limit_note check is bound to PostToolUse but its payload "
+                           "names the event {!r}, so no listing was checked (a non-blocking note).".format(event))
+    if data.get("tool_name") != "Bash":
+        return _allow()
+    tool_input, response = data.get("tool_input"), data.get("tool_response")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str) or len(command) > _CITE_MAX_COMMAND or not isinstance(response, dict):
+        return _allow()
+    if "gh" not in command:
+        return _allow()
+    stdout = response.get("stdout")
+    if not isinstance(stdout, str) or not stdout or len(stdout) > _CITE_MAX_TEXT:
+        return _allow()
+    if response.get("interrupted") is True:
+        return _allow()
+    if any(response.get(key) not in (None, 0, "0") for key in _LL_EXIT_FIELDS):
+        return _allow()
+    try:
+        segments = _lex_command(command)
+    except ValueError:
+        return _allow()
+    records = [seg for seg in segments if seg.argv or seg.redirects or seg.sep_after != ""]
+    if not records or any(not seg.argv for seg in records):
+        return _allow()
+    counter = None
+    if (len(records) == 2 and records[0].sep_after == "|" and records[1].sep_after == ""
+            and tuple(records[1].argv) in _LL_COUNTERS):
+        counter = tuple(records[1].argv)
+    elif not (len(records) == 1 and records[0].sep_after == ""):
+        return _allow()
+    if any(seg.opaque_shell for seg in records):
+        return _allow()
+    for seg in records:
+        for red in seg.redirects:
+            if (red.op not in (">", ">>") or red.src_fd != 2 or red.stdout_effect
+                    or not (red.target == "/dev/null" or red.target_class == "file-real")):
+                return _allow()
+    argv = records[0].argv
+    found = _ll_gh_at(argv)
+    if found is None:
+        return _allow()
+    at, assigns = found
+    if any(_LL_FORCE_TTY_RE.match(word) for word in assigns):
+        return _allow()
+    words = argv[at + 1:]
+    noun = None
+    if len(words) >= 2 and words[0] == "search" and words[1] in ("prs", "issues"):
+        noun = "search " + words[1]
+    elif len(words) >= 2 and words[0] in _LL_LIST_NOUNS and words[1] in ("list", "ls"):
+        noun = words[0]
+    if noun is None:
+        return _allow()
+    flags, values, skips, fields = _LL_TABLES[noun]
+    rest = words[2:]
+    short = "".join(name[1] for name in values if len(name) == 2)
+    opts = _citechk_options(rest, short, "", tuple(name for name in values if name.startswith("--")), indexed=True)
+    consumed = {at for _name, value, at in opts if at is not None and rest[at] == value}
+    stop = next((k for k, word in enumerate(rest) if word == "--" and k not in consumed), len(rest))
+    known_long = {name for name in flags + values if name.startswith("--")}
+    flag_letters = {name[1] for name in flags if len(name) == 2}
+    skip_letters = {name[1] for name in skips if len(name) == 2}
+    present = False
+    for k in range(stop):
+        word = rest[k]
+        if k in consumed:
+            continue
+        if word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if name not in known_long:
+                return _allow()
+            if name in skips and not (eq and value in _LL_FALSE_SPELLINGS):
+                present = True
+        elif word.startswith("-") and len(word) > 1:
+            for letter in word[1:]:
+                if letter in short:
+                    break
+                if letter not in flag_letters:
+                    return _allow()
+                if letter in skip_letters:
+                    present = True
+    if present:
+        return _allow()
+    limits = [(name, value) for name, value, _at in opts if name in ("-L", "--limit")]
+    if not limits:
+        return _allow()
+    limit_name, limit_text = limits[-1]
+    if not isinstance(limit_text, str):
+        return _allow()
+    try:
+        value = int(limit_text)
+    except ValueError:
+        return _allow()
+    limit = str(value)
+    if limit != limit_text or value < _LL_MIN_LIMIT:
+        return _allow()
+    kind = _ll_kind(opts, fields)
+    how = _ll_saturated(kind, counter, stdout, limit)
+    if how is None:
+        return _allow()
+    listing = "gh " + " ".join(words[:2])
+    if how == "rows":
+        first = "`{}` output reached its limit ({} {}): {} rows.".format(listing, limit_name, limit, limit)
+    else:
+        first = "the count printed ({}) equals the limit of `{}` ({} {}).".format(limit, listing, limit_name, limit)
+    return _context_note(
+        "PostToolUse",
+        "[aiqt cntprd/prtwhl/setcmp] {} The output may be cut at the limit, so the full set has at least {} "
+        "members and its true size is unknown. Do not report {}, any other count, or 'all' / 'none remain' as "
+        "the total. Say 'at least {}', or re-run with a higher limit and confirm the result is below it, or "
+        "count with a paginated API read (gh api ... --paginate).".format(first, limit, limit, limit),
+        "AIQT guardrail (rules cntprd/prtwhl/setcmp): {} output reached its {} {}; any total read from it is a "
+        "lower bound.".format(listing, limit_name, limit))
+
+
 # --- dispatcher ---------------------------------------------------------------------------------------
 HANDLERS = {
     "diff_wall_stop": diff_wall_stop,
@@ -50417,6 +50761,7 @@ HANDLERS = {
     "console_prefix_pretool": console_prefix_pretool,
     "citation_read_recorder": citation_read_recorder,
     "citation_read_check": citation_read_check,
+    "list_limit_note": list_limit_note,
 }
 
 # Handler -> event class, so the dispatcher can decide its ERROR posture from the argv MODE alone,
@@ -50468,6 +50813,7 @@ HANDLER_EVENT = {
     "console_prefix_pretool": PRETOOL,
     "citation_read_recorder": "PostToolUse",
     "citation_read_check": PRETOOL,
+    "list_limit_note": "PostToolUse",
 }
 
 

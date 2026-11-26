@@ -54,7 +54,8 @@ Two kinds of target are checked:
    fragment, or a source shaped other than its generator reads, is malformed: exit 2. An href key
    elsewhere in a source is not rendered and is not read. The host picks the site tree that serves it
    (SITE_ROOTS, the same host model as tools/check_site.py: aiqt.ai and www.aiqt.ai, or the
-   AIQT_SITE_HOST host and its www., serve site/; opfiles.ai and www.opfiles.ai serve opf/site/; a host
+   AIQT_SITE_HOST host and its www., serve site/; opfiles.ai is external here, since its sources under
+   opf/site/ were removed from this repository, so its links are not checked; a host
    written with its trailing root-label dot, such as aiqt.ai., is the same host, and a percent-encoded
    host such as %61iqt.ai is decoded first, as a browser decodes it), and the URL path must reach a page
    of that tree. The path is first read as a browser sends it: dot segments (. and .., or a spelling
@@ -197,13 +198,15 @@ _DEFINITION = re.compile(r"^ {0,3}\[((?:[^\[\]\\]|\\.){1,999})\]:(.*)$")
 
 # The hosts this project's sites are served at, each mapped to the tree that serves it. The site/ host
 # follows tools/check_site.py (AIQT_SITE_HOST, default and empty-value fallback aiqt.ai, lowercased); the
-# canonical and og:url tags of site/ name aiqt.ai and those of opf/site/ name opfiles.ai.
+# canonical and og:url tags of site/ name aiqt.ai. opfiles.ai is not mapped: its sources (opf/site/) were
+# removed from this repository, so an opfiles.ai link is external and unchecked here. A residual of that:
+# the install prompt (site/draft-src/install.toml, rendered on site/install/) and opf/README.md tell the reader
+# to fetch https://opfiles.ai/llms.txt, and opf/README.md also tells the reader to fetch
+# https://opfiles.ai/adopt.md; nothing in this repository checks either file.
 _SITE_HOST = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()
 SITE_ROOTS = {
     _SITE_HOST: "site",
     "www." + _SITE_HOST: "site",
-    "opfiles.ai": "opf/site",
-    "www.opfiles.ai": "opf/site",
 }
 
 # _redirects statuses (Cloudflare Pages): a rule with no status is a 302.
@@ -1084,10 +1087,12 @@ SELF_TEST_VECTORS = (
     ("external/not-checked", {**_SITE, "README.md": "[a](https://example.com/missing) "
      "[b](https://notaiqt.ai/missing) [c](https://aiqt.ai.example.com/missing) [d](mailto:x@example.com) "
      "<https://example.com/missing> https://example.com/missing <x@example.com>\n"}, 0, ()),
-    ("opfiles/served-by-opf-site-only-fails", {**_SITE, "site/model.html": "m", "opf/site/index.html": "i",
-     "README.md": "[a](https://opfiles.ai/model)\n"}, 1, ("no page for /model under opf/site/",)),
-    ("opfiles/present-in-opf-site-passes", {**_SITE, "opf/site/model/index.html": "m", "README.md":
-     "[a](https://opfiles.ai/model/) [b](https://www.opfiles.ai/model)\n"}, 0, ()),
+    # opfiles.ai is external (its sources left with opf/site/): not resolved against an opf/site tree, absent or
+    # present without the page.
+    ("opfiles/external-not-resolved", {**_SITE, "README.md":
+     "[a](https://opfiles.ai/model) [b](https://www.opfiles.ai/model)\n"}, 0, ()),
+    ("opfiles/external-not-resolved-beside-opf-site-tree", {**_SITE, "opf/site/index.html": "i", "README.md":
+     "[a](https://opfiles.ai/model) [b](https://www.opfiles.ai/model)\n"}, 0, ()),
     ("tree-absent/not-checked", {"README.md": "[a](https://aiqt.ai/missing) [b](https://opfiles.ai/x)\n"},
      0, ()),
     # (1) a destination is read as CommonMark reads it: balanced parentheses, <...>, escapes and a title.
@@ -1106,10 +1111,10 @@ SELF_TEST_VECTORS = (
      "README.md": "[a](https://aiqt.ai/old) [b](https://aiqt.ai/blog/x/y) [c](https://aiqt.ai/u/7) "
      "[d](https://aiqt.ai/r) [e](https://aiqt.ai/two) [f](https://aiqt.ai/ext) [g](https://aiqt.ai/plain) "
      "[h](https://aiqt.ai/frag) [i](https://aiqt.ai/abs)\n"}, 0, ()),
-    ("redirects/rewrite-to-absolute-own-site-fails", {**_SITE, "opf/site/model.html": "m", "site/_redirects":
-     "/m https://opfiles.ai/model 200\n/n https://aiqt.ai/index.html 200\n", "README.md":
+    ("redirects/rewrite-to-absolute-own-site-fails", {**_SITE, "site/model.html": "m", "site/_redirects":
+     "/m https://www.aiqt.ai/model 200\n/n https://aiqt.ai/index.html 200\n", "README.md":
      "[a](https://aiqt.ai/m) [b](https://aiqt.ai/n)\n"}, 1,
-     ("(/m https://opfiles.ai/model 200) rewrites to an absolute URL",
+     ("(/m https://www.aiqt.ai/model 200) rewrites to an absolute URL",
       "(/n https://aiqt.ai/index.html 200) rewrites to an absolute URL", "FAIL: 2 broken link(s)")),
     ("redirects/dangling-symlink-cannot-evaluate", {**_SITE, "site/_redirects": ("symlink", "nowhere"),
      "README.md": "[a](https://aiqt.ai/)\n"}, 2, ("_redirects is not a regular file", "fail-closed")),
@@ -1191,10 +1196,10 @@ SELF_TEST_VECTORS = (
       "FAIL: 2 broken link(s)")),
     # (10) a protocol-relative redirect destination names a host: an own-site one is checked.
     ("redirects/protocol-relative-destination-missing-fails", {**_SITE, "site/_redirects":
-     "/r //aiqt.ai/missing 301\n/s //opfiles.ai/gone 302\n", "opf/site/index.html": "i", "README.md":
-     "[r](https://aiqt.ai/r) [s](https://aiqt.ai/s)\n"}, 1,
+     "/r //aiqt.ai/missing 301\n/s //www.aiqt.ai/gone 302\n/t //opfiles.ai/gone 302\n", "README.md":
+     "[r](https://aiqt.ai/r) [s](https://aiqt.ai/s) [t](https://aiqt.ai/t)\n"}, 1,
      ("(/r //aiqt.ai/missing 301) leads to //aiqt.ai/missing, which is missing",
-      "(/s //opfiles.ai/gone 302) leads to //opfiles.ai/gone, which is missing", "FAIL: 2 broken link(s)")),
+      "(/s //www.aiqt.ai/gone 302) leads to //www.aiqt.ai/gone, which is missing", "FAIL: 2 broken link(s)")),
     ("redirects/protocol-relative-destination-present-passes", {**_SITE, "site/present.html": "p",
      "site/_redirects": "/r //aiqt.ai/present 301\n/x //example.com/y 301\n", "README.md":
      "[r](https://aiqt.ai/r) [x](https://aiqt.ai/x)\n"}, 0, ()),
@@ -1351,12 +1356,12 @@ SELF_TEST_VECTORS = (
      1, ("-> https://aiqt.ai/pre&#115;ent (no page for /pre& under", "-> https://aiqt.ai/pre&#115ent (",
          "-> https://aiqt.ai/pre&nosuch; (", "FAIL: 3 broken link(s)")),
     # (6) an a element's href and an img element's src in raw HTML are read; only an own-site URL is checked.
-    ("html/missing-fails", {**_SITE, "opf/site/index.html": "i", "README.md":
+    ("html/missing-fails", {**_SITE, "README.md":
      "<a href=\"https://aiqt.ai/nope\">x</a> <img alt='i' src='https://aiqt.ai/nope.png'>\n"
-     "<A CLASS=x HREF=https://opfiles.ai/gone>y</A> <a href=\"https://aiqt&#46;ai/enc\">z</a>\n"}, 1,
+     "<A CLASS=x HREF=https://www.aiqt.ai/gone>y</A> <a href=\"https://aiqt&#46;ai/enc\">z</a>\n"}, 1,
      ("README.md:1: broken own-site link -> https://aiqt.ai/nope (",
       "README.md:1: broken own-site link -> https://aiqt.ai/nope.png (",
-      "README.md:2: broken own-site link -> https://opfiles.ai/gone (",
+      "README.md:2: broken own-site link -> https://www.aiqt.ai/gone (",
       "README.md:2: broken own-site link -> https://aiqt.ai/enc (", "FAIL: 4 broken link(s)")),
     ("html/present-passes", {**_SITE, "site/present.html": "p", "site/i.png": "i", "site/a&b.html": "a",
      "README.md": "<a class=\"btn\" href=\"https://aiqt.ai/present\">p</a> <img alt=\"i\" src=\"https://aiqt.ai/i.png\" />"
@@ -1419,8 +1424,43 @@ SELF_TEST_VECTORS = (
 )
 
 
+# The host-to-tree choice over two trees. The live SITE_ROOTS maps only to site/ (opf/site/ was removed from
+# this repository), so no fixture vector, which runs the production constants, can tell one tree from
+# another; this row runs scan() in process with a fixture SITE_ROOTS of two trees: each host's link must
+# resolve against its own tree, a page only the other tree holds is missing, and the finding names the tree.
+_HOST_TREE_ROOTS = {"aiqt.ai": "site", "www.aiqt.ai": "site", "second.example": "second/site",
+                    "www.second.example": "second/site"}
+_HOST_TREE_FILES = {
+    "site/index.html": "i", "site/a.html": "a", "second/site/index.html": "i", "second/site/b.html": "b",
+    "README.md": "[a](https://aiqt.ai/a) [b](https://second.example/b) [c](https://www.second.example/b)\n"
+                 "[d](https://second.example/a) [e](https://www.aiqt.ai/b) <a href=\"//second.example/a\">f</a>\n",
+}
+
+
+def _host_tree_failures():
+    """The failures of the host-tree/each-host-own-tree row ([] when it holds)."""
+    import tempfile
+    name = "host-tree/each-host-own-tree"
+    with tempfile.TemporaryDirectory(prefix="check_links_selftest_") as tmp:
+        root = Path(tmp)
+        for rel, content in _HOST_TREE_FILES.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(content, encoding="utf-8")
+        try:
+            findings, notes = scan(root, site_roots=_HOST_TREE_ROOTS, sources={}, allowlist={})
+        except (OSError, ScanError) as exc:
+            return ["{}: scan raised {}: {}".format(name, type(exc).__name__, exc)]
+    want = ["README.md:2: broken own-site link -> https://second.example/a (no page for /a under second/site/",
+            "README.md:2: broken own-site link -> https://www.aiqt.ai/b (no page for /b under site/",
+            "README.md:2: broken own-site link -> //second.example/a (no page for /a under second/site/"]
+    if len(findings) != len(want) or notes or not all(any(f.startswith(w) for f in findings) for w in want):
+        return ["{}: expected {} got {} (notes {})".format(name, want, findings, notes)]
+    return []
+
+
 def self_test(script=None):
-    """Run SELF_TEST_VECTORS against script (default: this file). Returns the process exit code."""
+    """Run SELF_TEST_VECTORS against script (default: this file), then the in-process host-tree row.
+    Returns the process exit code."""
     import shutil
     import subprocess
     import tempfile
@@ -1461,6 +1501,7 @@ def self_test(script=None):
             if proc.returncode != want_exit or missing:
                 failures.append("{}: expected exit {} got {}; missing {}; output {!r}".format(
                     name, want_exit, proc.returncode, missing, out))
+    failures.extend(_host_tree_failures())
     if PENDING_DECISION_ALLOWLIST != {}:
         failures.append("allowlist/pinned: PENDING_DECISION_ALLOWLIST changed without updating the self-test")
     if failures:
@@ -1468,7 +1509,7 @@ def self_test(script=None):
         for failure in failures:
             print("  " + failure)
         return 1
-    print("PASS: check_links self-test ({} fixture vectors)".format(len(SELF_TEST_VECTORS)))
+    print("PASS: check_links self-test ({} fixture vectors and the host-tree row)".format(len(SELF_TEST_VECTORS)))
     return 0
 
 

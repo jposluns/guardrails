@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Nav-coverage gate: every live site/ and opf/site/ page carries exactly one disclosure link INSIDE its <nav>.
+"""Nav-coverage gate: every live site/ page carries exactly one disclosure link INSIDE its <nav>.
 
 The disclosure matrix is the site's standing "what we claim, and what we do not" page; every live public
 page (every page that is not a generated template page) must point to it from its primary navigation so a reader is
@@ -18,17 +18,20 @@ rule covers them instead (stated beside check_draft_pages): exactly one link to 
 in the template landing page's "About this project" region, none required on the other template pages. The
 landing page and that link follow the root's template base: draft/index.html and /draft/disclosure/ while
 the pages are staged under draft/, index.html and /disclosure/ once promoted to the root. The same
-partition applies to opf/site/ (the opfiles.ai template pages): its live pages keep the ./disclosure nav rule.
+partition applies to every coverage root.
 
-Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
-opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
-resolves within opf/site). Neither root allowlists a page, so every page that is not a template page must
-carry its nav link (a page under draft/ that the generator does not list included); the template pages are
-exempt from the nav rule and are held to the draft rule instead (the same absolute href on both roots). A
-live 404 page (any page named 404.html that is not a template page, in either root) is the one exception to the per-root form: it is served
+Coverage spans one required root: site/ (the aiqt.ai site, absolute /disclosure). The opfiles.ai sources
+under opf/site/ (served as their own root, with a relative ./disclosure link) were removed from this
+repository; the per-root machinery (COVERAGE_ROOTS, each root's own href) is kept, and the self-test drives a
+second, fixture root with the relative form. No root allowlists a page, so every page that is not a
+template page must carry its nav link (a page under draft/ that the generator does not list included); the
+template pages are exempt from the nav rule and are held to the draft rule instead (the same absolute href on
+every root). A live 404 page (any page named 404.html that is not a template page, in any root) is the one
+exception to the per-root form: it is served
 at whatever missing URL was requested, so a relative link would resolve against that URL, and it must carry
 the root-absolute /disclosure instead; a relative ./disclosure on a 404 page is a missing link. Each tree is a REQUIRED
-coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
+coverage input: if a root is absent, unreadable, or carries no .html pages, or no coverage root is declared at
+all, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
 TOCTOU on the final path component is closed (the fd type-checked is the fd read). THREAT-MODEL BOUNDARY
@@ -40,7 +43,7 @@ git-tracking are gen_manifest's concern). Those are out of a trusted-input cover
 no live page is exempt (the template pages are partitioned out by the draft rule, not allowlisted). It stays an EXPLICIT mechanism, not a silent skip:
 an allowlisted page that is missing, or that starts carrying the link, is allowlist drift and fails.
 
-  check_footer.py             scan every .html page under site/ and opf/site/
+  check_footer.py             scan every .html page under site/
   check_footer.py --self-test  assert the present/missing/drift and fail-closed paths each resolve
 
 Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed) and on
@@ -74,17 +77,15 @@ DISCLOSURE_HREF = "/disclosure"
 # that is not a template page, which the draft rule below covers instead) carries the nav.
 ALLOWLIST = frozenset()
 
-# Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
+# Coverage roots, each (subdir, disclosure_href, allowlist). Each is a REQUIRED input (an absent,
 # unreadable, or page-less root is fail-closed exit 2, never a clean pass over nothing). site/ is the
 # aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure/ (the disclosure page
-# is the folder page site/disclosure/index.html). A live 404 page still carries DISCLOSURE_HREF. opf/site is the
-# opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
-# link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
-# mount point. Every live opf/site page (every page that is not a template page, which the draft rule below
-# covers instead) carries the nav, so the allowlist is empty (like site/).
+# is the folder page site/disclosure/index.html). A live 404 page still carries DISCLOSURE_HREF. The opfiles.ai
+# root opf/site/ (its own root, linking the disclosure page RELATIVE, ./disclosure) was removed from this
+# repository, so it is no coverage root here; a root served as its own mount keeps that relative form, which
+# the self-test holds over a fixture second root.
 COVERAGE_ROOTS = (
     ("site", "/disclosure/", frozenset()),
-    ("opf/site", "./disclosure", frozenset()),
 )
 # A 404 page is served at any missing URL, however deep, so its links must not depend on the request
 # path: on a page with this file name the root-absolute DISCLOSURE_HREF replaces the root's own form.
@@ -104,8 +105,8 @@ def required_href(name, href):
 # template disclosure page inside the About region of the template landing page, and none required
 # elsewhere. Both follow the root's template base (_template_pages.template_base): draft/index.html and
 # /draft/disclosure/ while the pages are staged under draft/, index.html and /disclosure/ once promoted, so
-# the draft rule replaces the live rule for those pages at promotion with no change here. The opfiles.ai
-# template pages take the same partition: its live pages keep the relative ./disclosure nav rule.
+# the draft rule replaces the live rule for those pages at promotion with no change here. A root whose live
+# pages use the relative ./disclosure nav link takes the same partition.
 
 
 class _Anchors(HTMLParser):
@@ -328,7 +329,7 @@ def check_draft_pages(pages, template_base="draft/"):
 
 
 def check_site_pages(pages, allowlist, href=DISCLOSURE_HREF, subdir="site", targets=None):
-    """One coverage root (`subdir`, site/ or opf/site/): the live rule (check_pages, with the root's own
+    """One coverage root (`subdir`, such as site/): the live rule (check_pages, with the root's own
     href) over every page that is not a template page and the draft rule (check_draft_pages) over the
     template pages. `targets` (a fixture's GENSRC_OUTPUTS targets) defaults to the generator's declaration;
     OSError or ValueError when it cannot be read."""
@@ -343,7 +344,7 @@ def check_site_pages(pages, allowlist, href=DISCLOSURE_HREF, subdir="site", targ
 
 def disclosure_link_count(text, href=DISCLOSURE_HREF):
     """Number of <a href="{href}"> links nested inside a <nav> in one page's HTML. The href is
-    tree-appropriate: absolute /disclosure for site/, relative ./disclosure for the opf/site tree."""
+    tree-appropriate: absolute /disclosure for site/, relative ./disclosure for a root served as its own mount."""
     parser = _Anchors()
     parser.feed(text)
     return sum(1 for h in parser.hrefs if h == href)
@@ -455,8 +456,8 @@ def _run_one(root, subdir, href, allowlist):
             print("error: cannot load {} ({}); a symlink, non-regular, unreadable, or undecodable page is "
                   "fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-    # The live/template partition applies to every coverage root: the template pages of site/ (aiqt.ai) and
-    # opf/site/ (opfiles.ai) both follow the shared site template, and each root's live pages keep their href.
+    # The live/template partition applies to every coverage root: a root's template pages follow the shared
+    # site template, and its live pages keep their href.
     try:
         targets = _template_pages.template_targets()
     except (OSError, ValueError) as exc:
@@ -485,8 +486,12 @@ def _run_one(root, subdir, href, allowlist):
 
 
 def run(root):
-    """Scan every coverage root (site/ and opf/site/). Return the worst per-root exit code: 0 clean, 1 a
-    coverage finding, 2 a missing/unreadable/empty required input (fail-closed). Each root is required."""
+    """Scan every coverage root (site/). Return the worst per-root exit code: 0 clean, 1 a
+    coverage finding, 2 a missing/unreadable/empty required input (fail-closed). Each root is required, and an
+    empty COVERAGE_ROOTS is fail-closed too (exit 2): a run that reads no root is never a pass."""
+    if not COVERAGE_ROOTS:
+        print("error: no coverage root to read; a scan of nothing is never a pass; fail-closed", file=sys.stderr)
+        return 2
     worst = 0
     for subdir, href, allowlist in COVERAGE_ROOTS:
         worst = max(worst, _run_one(root, subdir, href, allowlist))
@@ -1135,32 +1140,38 @@ def _self_test_cases():
         parser.feed(text)
         if parser.hrefs != expected:
             failures.append("{}: expected {} got {}".format(label, expected, parser.hrefs))
-    # The same partition on the opf/site root: live opfiles.ai pages keep the relative ./disclosure nav
-    # rule, and opf/site/draft/ follows the draft rule (the landing page's About link, none elsewhere).
+    # The same partition on a second root served as its own mount (the fixture root second/site, its template
+    # pages added to the generator's targets; the opfiles.ai root opf/site/ that took this form was removed):
+    # its live pages keep the relative ./disclosure nav rule, and its draft/ follows the draft rule (the
+    # landing page's About link, none elsewhere).
+    second_root = "second/site"
+    second_staged = staged | {second_root + "/draft/index.html", second_root + "/draft/model/index.html"}
+    second_promoted = promoted | {second_root + "/index.html", second_root + "/model/index.html",
+                                  second_root + "/draft/index.html"}
     opf_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
     opf_draft_nav = '<nav><a href="/draft/model/">The model</a></nav>'
     opf_cases = [
-        ("opfiles: good live pages and a good draft pass",
+        ("second root: good live pages and a good draft pass",
          {"index.html": opf_nav, "draft/index.html": opf_draft_nav + about,
           "draft/model/index.html": opf_draft_nav}, []),
-        ("opfiles: draft pages without the draft landing page fail",
+        ("second root: draft pages without the draft landing page fail",
          {"index.html": opf_nav, "draft/model/index.html": opf_draft_nav},
          ["draft/index.html: missing; the draft rule needs the draft landing page"]),
-        ("opfiles: draft landing without the About link fails",
+        ("second root: draft landing without the About link fails",
          {"index.html": opf_nav, "draft/index.html": opf_draft_nav},
          ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
-        ("opfiles: draft landing with 2 About links fails",
+        ("second root: draft landing with 2 About links fails",
          {"index.html": opf_nav, "draft/index.html": about + about},
          ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
-        ("opfiles: live page without the ./disclosure nav link still fails beside a good draft",
+        ("second root: live page without the ./disclosure nav link still fails beside a good draft",
          {"index.html": opf_nav, "manifest.html": "<nav></nav>", "draft/index.html": opf_draft_nav + about},
          ["manifest.html: missing the ./disclosure nav link"]),
-        ("opfiles: live page carrying only the absolute /disclosure link still fails",
+        ("second root: live page carrying only the absolute /disclosure link still fails",
          {"index.html": nav, "draft/index.html": opf_draft_nav + about},
          ["index.html: missing the ./disclosure nav link"]),
     ]
     for label, pages, expected in opf_cases:
-        got = check_site_pages(pages, frozenset(), "./disclosure", "opf/site", staged)
+        got = check_site_pages(pages, frozenset(), "./disclosure", second_root, second_staged)
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # The same rules once promoted: the template pages sit at the root, the landing page is index.html with
@@ -1199,24 +1210,24 @@ def _self_test_cases():
         ("promoted: landing with the About link before a nested block passes", DISCLOSURE_HREF, "site",
          {"about.html": nav, "index.html": root_nav + '<p class="about"><a href="/disclosure/">Disclosure</a>'
           '<div><a href="/x">x</a>'}, []),
-        ("opfiles promoted: good kept pages and a good landing pass", "./disclosure", "opf/site",
+        ("second root promoted: good kept pages and a good landing pass", "./disclosure", second_root,
          {"manifest.html": opf_nav, "index.html": opf_root_nav + root_about, "model/index.html": opf_root_nav},
          []),
-        ("opfiles promoted: inner pages without the landing page fail", "./disclosure", "opf/site",
+        ("second root promoted: inner pages without the landing page fail", "./disclosure", second_root,
          {"manifest.html": opf_nav, "model/index.html": opf_root_nav},
          ["index.html: missing; the draft rule needs the draft landing page"]),
-        ("opfiles promoted: landing without the About link fails", "./disclosure", "opf/site",
+        ("second root promoted: landing without the About link fails", "./disclosure", second_root,
          {"manifest.html": opf_nav, "index.html": opf_root_nav},
          ["index.html: missing the /disclosure/ link in its About region"]),
-        ("opfiles promoted: landing with 2 About links fails", "./disclosure", "opf/site",
+        ("second root promoted: landing with 2 About links fails", "./disclosure", second_root,
          {"manifest.html": opf_nav, "index.html": root_about + root_about},
          ["index.html: carries 2 /disclosure/ links in its About region (expected exactly one)"]),
-        ("opfiles promoted: kept page without the ./disclosure nav link fails beside a good landing",
-         "./disclosure", "opf/site",
+        ("second root promoted: kept page without the ./disclosure nav link fails beside a good landing",
+         "./disclosure", second_root,
          {"manifest.html": "<nav></nav>", "index.html": opf_root_nav + root_about},
          ["manifest.html: missing the ./disclosure nav link"]),
-        ("opfiles promoted: kept page carrying only the absolute /disclosure link still fails",
-         "./disclosure", "opf/site", {"manifest.html": nav, "index.html": opf_root_nav + root_about},
+        ("second root promoted: kept page carrying only the absolute /disclosure link still fails",
+         "./disclosure", second_root, {"manifest.html": nav, "index.html": opf_root_nav + root_about},
          ["manifest.html: missing the ./disclosure nav link"]),
     ]
     for label, body, want in region_rows:
@@ -1224,7 +1235,7 @@ def _self_test_cases():
         promoted_cases.append(("promoted: landing: " + label, DISCLOSURE_HREF, "site",
                                {"about.html": nav, "index.html": root_nav + page}, expected))
     for label, root_href, subdir, pages, expected in promoted_cases:
-        got = check_site_pages(pages, frozenset(), root_href, subdir, promoted)
+        got = check_site_pages(pages, frozenset(), root_href, subdir, second_promoted)
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # The template pages as the generator builds them, staged (the declared build) and promoted (the same
@@ -1235,8 +1246,7 @@ def _self_test_cases():
     promoted_out = gen_draft_site.build(sites=gen_draft_site.promoted_sites(), registered=False)
     s_home, s_inner = staged_out["site/draft/index.html"], staged_out["site/draft/install/index.html"]
     p_home, p_inner = promoted_out["site/index.html"], promoted_out["site/install/index.html"]
-    o_home, o_inner = promoted_out["opf/site/index.html"], promoted_out["opf/site/model/index.html"]
-    p_holder, o_holder = promoted_out["site/draft/index.html"], promoted_out["opf/site/draft/index.html"]
+    p_holder = promoted_out["site/draft/index.html"]
     state_cases = [
         ("staged: the generator's draft pages pass", "/disclosure", "site", staged,
          {"about.html": nav, "draft/index.html": s_home, "draft/install/index.html": s_inner}, []),
@@ -1267,12 +1277,6 @@ def _self_test_cases():
         ("promoted: the /draft/ placeholder without the landing page fails", "/disclosure", "site", promoted,
          {"about.html": nav, "draft/index.html": p_holder},
          ["index.html: missing; the draft rule needs the draft landing page"]),
-        ("opfiles promoted: the /draft/ placeholder is a generated page (no nav link needed)", "./disclosure",
-         "opf/site", promoted, {"manifest.html": opf_nav, "index.html": o_home, "draft/index.html": o_holder}, []),
-        ("opfiles promoted: landing and inner page pass", "./disclosure", "opf/site", promoted,
-         {"manifest.html": opf_nav, "index.html": o_home, "model/index.html": o_inner}, []),
-        ("opfiles promoted: landing without its About link fails", "./disclosure", "opf/site", promoted,
-         {"index.html": o_inner}, ["index.html: missing the /disclosure/ link in its About region"]),
     ]
     for label, root_href, subdir, targets, pages, expected in state_cases:
         got = check_site_pages(pages, frozenset(), root_href, subdir, targets)
@@ -1285,8 +1289,8 @@ def _self_test_cases():
 
     def quiet_one(r, subdir="site", href=DISCLOSURE_HREF, allow=frozenset()):
         # Exercise the single-root engine directly, so the site/-tree exit-code legs stay independent of
-        # the opf/site coverage root (which run() also requires). run() itself is exercised by the
-        # two-root legs below.
+        # any other coverage root run() requires. run() itself is exercised by the legs below, over the live
+        # roots and over two roots (the fixture second root added).
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return _run_one(r, subdir, href, allow)
 
@@ -1342,82 +1346,122 @@ def _self_test_cases():
         os.symlink(str(root3 / "realsite"), str(root3 / "site"))  # site/ itself a symlink -> rejected
         if quiet_one(root3) != 2:
             failures.append("a symlinked site/ root did not fail closed (expected exit 2)")
-    # opf/site coverage: the relative ./disclosure nav link is tree-appropriate (opf/site is served as its
-    # own root), every live page carries the nav (empty allowlist), a page missing the link is a finding, and an
-    # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
+    # The live coverage roots are site/ alone (opf/site/ was removed from this repository), and run() over a
+    # tree holding site/ and no opf/site/ passes (it required opf/site/ before, exit 2).
     rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
     # run() holds each site/ page to the site/ root's own href in COVERAGE_ROOTS.
     site_nav = '<nav><a href="{}">Disclosure</a></nav>'.format(dict((s, h) for s, h, _a in COVERAGE_ROOTS)["site"])
+    if [subdir for subdir, _href, _allow in COVERAGE_ROOTS] != ["site"]:
+        failures.append("coverage/roots-registry: the coverage roots are {!r}, expected site alone".format(
+            COVERAGE_ROOTS))
     with tempfile.TemporaryDirectory() as d4:
         root4 = Path(d4)
         (root4 / "site").mkdir()
         (root4 / "site" / "about.html").write_text(site_nav, encoding="utf-8")
-        if quiet_run(root4) != 2:
-            failures.append("run() with site/ present but opf/site absent did not fail closed (expected 2)")
-        (root4 / "opf" / "site").mkdir(parents=True)
-        (root4 / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
-        (root4 / "opf" / "site" / "manifest.html").write_text(rel_nav, encoding="utf-8")
         if quiet_run(root4) != 0:
-            failures.append("a covered two-root tree (opf/site pages carry the relative ./disclosure) did not pass")
-        # the relative-href engine rejects a page that carries only the absolute /disclosure link
-        (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
-        if quiet_run(root4) != 1:
-            failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
-        os.remove(str(root4 / "opf" / "site" / "stale.html"))
-        # the opfiles.ai draft through the real two-root run(): a good draft passes, a draft landing page
-        # without its About link is a finding, and draft pages without a landing page are a finding.
-        (root4 / "opf" / "site" / "draft" / "model").mkdir(parents=True)
-        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav + about, encoding="utf-8")
-        (root4 / "opf" / "site" / "draft" / "model" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
-        if quiet_run(root4) != 0:
-            failures.append("a two-root tree with a good opf/site/draft/ did not pass (expected exit 0)")
-        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
-        if quiet_run(root4) != 1:
-            failures.append("an opf/site/draft/ landing page without its About link was not reported (expected 1)")
-        os.remove(str(root4 / "opf" / "site" / "draft" / "index.html"))
-        if quiet_run(root4) != 1:
-            failures.append("opf/site/draft/ pages without the landing page were not reported (expected 1)")
-    # A 404 page carries the root-absolute /disclosure on either root: it passes there, and the relative
-    # ./disclosure (which a nested missing URL would resolve below the root) is a missing link.
-    with tempfile.TemporaryDirectory() as d4b:
-        root4b = Path(d4b)
-        (root4b / "site").mkdir()
-        (root4b / "site" / "about.html").write_text(site_nav, encoding="utf-8")
-        (root4b / "opf" / "site").mkdir(parents=True)
-        (root4b / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
-        (root4b / "opf" / "site" / "404.html").write_text(nav, encoding="utf-8")
-        if quiet_run(root4b) != 0:
-            failures.append("an opf/site 404 page carrying the root-absolute /disclosure did not pass")
-        (root4b / "opf" / "site" / "404.html").write_text(rel_nav, encoding="utf-8")
-        if quiet_run(root4b) != 1:
-            failures.append("an opf/site 404 page carrying the relative ./disclosure was not reported (expected 1)")
-    # The promoted layout through the real two-root run(): the generated pages at each root and the /draft/
-    # placeholder pass beside kept pages carrying the nav link; a landing page without its About link, a kept
-    # page without the nav link, and the placeholder's text at an unlisted path under draft/ are findings.
-    _use_declaration(promoted)
-    with tempfile.TemporaryDirectory() as d4c:
-        root4c = Path(d4c)
-        pages4c = {"site/about.html": site_nav, "site/index.html": root_nav + root_about,
-                   "site/install/index.html": root_nav, "site/draft/index.html": p_holder,
-                   "opf/site/manifest.html": rel_nav, "opf/site/index.html": opf_root_nav + root_about,
-                   "opf/site/model/index.html": opf_root_nav, "opf/site/draft/index.html": o_holder}
-        for rel, text in pages4c.items():
-            (root4c / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root4c / rel).write_text(text, encoding="utf-8")
-        if quiet_run(root4c) != 0:
-            failures.append("a promoted two-root tree with its /draft/ placeholders did not pass (expected exit 0)")
-        for rel, text, label in (
-                ("site/index.html", root_nav, "a promoted landing page without its About link"),
-                ("opf/site/index.html", opf_root_nav, "a promoted opf/site landing page without its About link"),
-                ("site/about.html", "<nav></nav>", "a kept promoted page without the nav link"),
-                ("opf/site/manifest.html", nav, "a kept promoted opf/site page without the ./disclosure link")):
-            (root4c / rel).write_text(text, encoding="utf-8")
+            failures.append("run/site-only-passes: run() with site/ present and no opf/site/ did not pass "
+                            "(expected 0)")
+        # run() with no coverage root reads nothing, so it fails closed (exit 2) over the same passing tree.
+        saved_roots = COVERAGE_ROOTS
+        globals()["COVERAGE_ROOTS"] = ()
+        try:
+            got = quiet_run(root4)
+        finally:
+            globals()["COVERAGE_ROOTS"] = saved_roots
+        if got != 2:
+            failures.append("run/no-root-fails-closed: run() with no coverage root did not fail closed (expected 2, "
+                            "got {})".format(got))
+    # A second root served as its own mount (the fixture second/site, added to COVERAGE_ROOTS for these legs
+    # only, its template pages added to the declaration): the relative ./disclosure nav link is
+    # tree-appropriate, every live page carries the nav (empty allowlist), a page missing the link is a
+    # finding, and an absent second root fails closed. run() requires every root, so it is exercised over a
+    # two-root tree.
+    live_roots = COVERAGE_ROOTS
+    globals()["COVERAGE_ROOTS"] = live_roots + ((second_root, "./disclosure", frozenset()),)
+    _use_declaration(second_staged)
+    try:
+        with tempfile.TemporaryDirectory() as d4:
+            root4 = Path(d4)
+            second4 = root4 / second_root
+            (root4 / "site").mkdir()
+            (root4 / "site" / "about.html").write_text(site_nav, encoding="utf-8")
+            if quiet_run(root4) != 2:
+                failures.append("run() with site/ present but the second root absent did not fail closed (expected 2)")
+            second4.mkdir(parents=True)
+            (second4 / "index.html").write_text(rel_nav, encoding="utf-8")
+            (second4 / "manifest.html").write_text(rel_nav, encoding="utf-8")
+            if quiet_run(root4) != 0:
+                failures.append("a covered two-root tree (second root pages carry the relative ./disclosure) did "
+                                "not pass")
+            # the relative-href engine rejects a page that carries only the absolute /disclosure link
+            (second4 / "stale.html").write_text(nav, encoding="utf-8")
+            if quiet_run(root4) != 1:
+                failures.append("a second root page missing the ./disclosure nav link was not reported (expected 1)")
+            os.remove(str(second4 / "stale.html"))
+            # a second root's draft through the real two-root run(): a good draft passes, a draft landing page
+            # without its About link is a finding, and draft pages without a landing page are a finding.
+            (second4 / "draft" / "model").mkdir(parents=True)
+            (second4 / "draft" / "index.html").write_text(opf_draft_nav + about, encoding="utf-8")
+            (second4 / "draft" / "model" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+            if quiet_run(root4) != 0:
+                failures.append("a two-root tree with a good second root draft/ did not pass (expected exit 0)")
+            (second4 / "draft" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+            if quiet_run(root4) != 1:
+                failures.append("a second root draft/ landing page without its About link was not reported "
+                                "(expected 1)")
+            os.remove(str(second4 / "draft" / "index.html"))
+            if quiet_run(root4) != 1:
+                failures.append("second root draft/ pages without the landing page were not reported (expected 1)")
+        # A 404 page carries the root-absolute /disclosure on either root: it passes there, and the relative
+        # ./disclosure (which a nested missing URL would resolve below the root) is a missing link.
+        with tempfile.TemporaryDirectory() as d4b:
+            root4b = Path(d4b)
+            second4b = root4b / second_root
+            (root4b / "site").mkdir()
+            (root4b / "site" / "about.html").write_text(site_nav, encoding="utf-8")
+            second4b.mkdir(parents=True)
+            (second4b / "index.html").write_text(rel_nav, encoding="utf-8")
+            (second4b / "404.html").write_text(nav, encoding="utf-8")
+            if quiet_run(root4b) != 0:
+                failures.append("a second root 404 page carrying the root-absolute /disclosure did not pass")
+            (second4b / "404.html").write_text(rel_nav, encoding="utf-8")
+            if quiet_run(root4b) != 1:
+                failures.append("a second root 404 page carrying the relative ./disclosure was not reported "
+                                "(expected 1)")
+        # The promoted layout through the real two-root run(): the generated pages at each root and the /draft/
+        # placeholder pass beside kept pages carrying the nav link; a landing page without its About link, a
+        # kept page without the nav link, and the placeholder's text at an unlisted path under draft/ are
+        # findings.
+        _use_declaration(second_promoted)
+        with tempfile.TemporaryDirectory() as d4c:
+            root4c = Path(d4c)
+            pages4c = {"site/about.html": site_nav, "site/index.html": root_nav + root_about,
+                       "site/install/index.html": root_nav, "site/draft/index.html": p_holder,
+                       second_root + "/manifest.html": rel_nav,
+                       second_root + "/index.html": opf_root_nav + root_about,
+                       second_root + "/model/index.html": opf_root_nav, second_root + "/draft/index.html": p_holder}
+            for rel, text in pages4c.items():
+                (root4c / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root4c / rel).write_text(text, encoding="utf-8")
+            if quiet_run(root4c) != 0:
+                failures.append("a promoted two-root tree with its /draft/ placeholders did not pass (expected exit 0)")
+            for rel, text, label in (
+                    ("site/index.html", root_nav, "a promoted landing page without its About link"),
+                    (second_root + "/index.html", opf_root_nav,
+                     "a promoted second root landing page without its About link"),
+                    ("site/about.html", "<nav></nav>", "a kept promoted page without the nav link"),
+                    (second_root + "/manifest.html", nav,
+                     "a kept promoted second root page without the ./disclosure link")):
+                (root4c / rel).write_text(text, encoding="utf-8")
+                if quiet_run(root4c) != 1:
+                    failures.append("{} was not reported (expected 1)".format(label))
+                (root4c / rel).write_text(pages4c[rel], encoding="utf-8")
+            (root4c / "site" / "draft" / "old.html").write_text(p_holder, encoding="utf-8")
             if quiet_run(root4c) != 1:
-                failures.append("{} was not reported (expected 1)".format(label))
-            (root4c / rel).write_text(pages4c[rel], encoding="utf-8")
-        (root4c / "site" / "draft" / "old.html").write_text(p_holder, encoding="utf-8")
-        if quiet_run(root4c) != 1:
-            failures.append("the placeholder's text at an unlisted promoted draft/ path was not reported (expected 1)")
+                failures.append("the placeholder's text at an unlisted promoted draft/ path was not reported "
+                                "(expected 1)")
+    finally:
+        globals()["COVERAGE_ROOTS"] = live_roots
     # The real tree under the real declaration (promoted) passes.
     _use_declaration(None)
     got = quiet_run(Path(__file__).resolve().parents[1])
@@ -1484,7 +1528,7 @@ def _self_test_cases():
             print("  " + f)
         return 1
     print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} About parser cases + "
-          "{} opfiles draft-rule cases + {} promoted draft-rule cases + {} staged and promoted template cases + "
+          "{} second-root draft-rule cases + {} promoted draft-rule cases + {} staged and promoted template cases + "
           "run() exit-code legs + 7 declaration cases + {} #378 close-vector runs + "
           "{} close-vector guard cases + {} argument cases)".format(
               len(cases), len(site_cases), len(parser_cases), len(opf_cases), len(promoted_cases),
