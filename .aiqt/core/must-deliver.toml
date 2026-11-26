@@ -21,11 +21,23 @@
 # A removal must be declared: a rule listed at the comparison base (--base, by default
 # the merge base with origin/main) and dropped from [[rule]] fails the gate unless a
 # [[removal]] row (exactly id and reason) names it; review still judges the removal.
+# reserve-bytes: enforced. The gate fails (exit 1) when any listed rule's core layer ends
+# fewer than this many bytes inside the cap (a margin equal to it passes), so the margin is
+# held, not only reported. It protects listed rules only, never an unlisted one. It must be
+# an integer of at least 0 and at most warn-margin-bytes; anything else is exit 2. It may
+# be kept or raised, never lowered: a reserve-bytes lower than the one listed at the
+# comparison base fails the gate (exit 1; a format-version 1 base counts as 0).
 # warn-margin-bytes: the gate prints a WARNING (still exit 0) when the tightest listed
-# margin drops under this figure. 512 is kept so a tight margin stays visible rather than
-# being tuned away; run tools/check_must_deliver.py for the live margins it prints.
-format-version = 1
+# margin is at least reserve-bytes but under this figure. Both are 512 today, so the
+# warning band is empty: a margin either passes cleanly or fails, and the WARNING gives no
+# early notice; only the margins the gate prints do. Run tools/check_must_deliver.py for
+# the live margins. format-version 2 is the only version this file may carry; a comparison
+# base still written in format-version 1 (no reserve-bytes) is read as such by the gate's
+# base parser, and tools/conformance.py reads an installed format-version 1 list for its
+# order and reports it as an older version, with the migration step.
+format-version = 2
 warn-margin-bytes = 512
+reserve-bytes = 512
 
 [[rule]]
 id = "prjint1"
@@ -100,10 +112,6 @@ id = "valinf"
 reason = "Validate an inferred premise before acting."
 
 [[rule]]
-id = "vfxcmt"
-reason = "Verify a fix is in its commit."
-
-[[rule]]
 id = "actbef"
 reason = "Anything wrong is fixed first."
 
@@ -126,3 +134,7 @@ reason = "A check fails closed on input it cannot read; restored to the delivere
 [[rule]]
 id = "cmtidn"
 reason = "Commit identity (no AI listed as author); restored to the delivered prefix after it fell past the cap."
+
+[[removal]]
+id = "vfxcmt"
+reason = "Taken off the list to give every listed rule, cmtidn included, a margin of at least 512 bytes. It was still delivered whole when removed, as the first rule after the listed ones, but is no longer guaranteed: growth in the header, the blocks before the rules, any rule ahead of it or its own text can push its end past the cap, and the gate only reports that."

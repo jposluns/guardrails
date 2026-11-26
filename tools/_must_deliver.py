@@ -8,9 +8,17 @@ tools/gen_first_pin_demo.py (the span algorithm, which composes in that same ord
 tools/conformance.py (C2, which judges an installed AGENTS.md against that order) import it. It imports
 none of them, so no import cycle can form.
 
-The declared file carries exactly format-version, warn-margin-bytes and [[rule]] rows of exactly id and
-reason, and optionally [[removal]] rows of exactly id and reason. An absent, unreadable, symlinked,
-non-UTF-8, malformed or EMPTY list is a MustDeliverError (a ValueError, so every caller maps it to exit 2).
+The declared file (format-version 2) carries exactly format-version, warn-margin-bytes, reserve-bytes and
+[[rule]] rows of exactly id and reason, and optionally [[removal]] rows of exactly id and reason.
+reserve-bytes is an integer of at least 0 (never a bool or a float) and at most warn-margin-bytes; the gate
+fails (exit 1) when a listed rule ends fewer than reserve-bytes bytes inside the cap. The working file is
+read by parse_declared, which accepts format-version 2 only. The file at a comparison base is read by
+parse_base_declared, which accepts exactly the version 1 schema (format-version 1, warn-margin-bytes,
+[[rule]], optional [[removal]], and no reserve-bytes; read as reserve 0) or exactly the version 2 schema,
+so the ratchet still compares against a base written before version 2; anything else at the base (an
+unknown version, a version 1 file carrying reserve-bytes, a version 2 file without it) is a
+MustDeliverError. An absent, unreadable, symlinked, non-UTF-8, malformed or EMPTY list is a
+MustDeliverError (a ValueError, so every caller maps it to exit 2).
 listed_ids adds the corpus membership check: a listed id that is not a corpus-id in the loaded corpus is an
 UnknownListedIdError (a MustDeliverError carrying the ids), which conformance tells apart by its class,
 never by its message text. Removal ids are history and are not checked against the corpus.
@@ -18,14 +26,25 @@ never by its message text. Removal ids are history and are not checked against t
 import os
 import stat
 import tomllib
+from collections import namedtuple
 
 from gen_rules import CID_RE
 
 DECL_REL = ".aiqt/core/must-deliver.toml"
-TOP_KEYS = frozenset({"format-version", "warn-margin-bytes", "rule"})
+FORMAT_VERSION = 2  # the only version a working file may carry
+# The exact top-level key set of each schema version parse_base_declared accepts at a comparison base.
+TOP_KEYS_BY_VERSION = {
+    1: frozenset({"format-version", "warn-margin-bytes", "rule"}),
+    2: frozenset({"format-version", "warn-margin-bytes", "reserve-bytes", "rule"}),
+}
+TOP_KEYS = TOP_KEYS_BY_VERSION[FORMAT_VERSION]
 OPTIONAL_TOP_KEYS = frozenset({"removal"})
 ROW_KEYS = frozenset({"id", "reason"})
 REMOVAL_KEYS = frozenset({"id", "reason"})
+
+# A parsed declaration: the listed ids in list order, warn-margin-bytes, reserve-bytes (0 for a version 1
+# base, which has no reserve) and {removed id: reason}.
+Declared = namedtuple("Declared", ("ids", "warn", "reserve", "removals"))
 
 
 class MustDeliverError(ValueError):
@@ -48,8 +67,8 @@ def _read_decl_bytes(path):
 
 
 def read_declared(path):
-    """The validated must-deliver list: ([rule ids], warn_margin_bytes, {removed id: reason}). Absent, a
-    symlink or non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a
+    """The validated working must-deliver list, a Declared (parse_declared: format-version 2 only). Absent,
+    a symlink or non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a
     MustDeliverError (exit 2): the list is the gate's whole policy input, so nothing else may stand in for it."""
     try:
         st = os.lstat(path)
@@ -67,9 +86,22 @@ def read_declared(path):
 
 
 def parse_declared(raw, label):
-    """The one strict parser of the declaration's bytes, shared by the working file and the file at the
-    comparison base (label names which in every message). Returns ([rule ids], warn_margin_bytes,
-    {removed id: reason}); anything outside the exact schema is a MustDeliverError (exit 2)."""
+    """The strict parser of the WORKING declaration's bytes: format-version 2 only (label names the file
+    in every message). Returns a Declared; anything outside the exact schema is a MustDeliverError (exit 2)."""
+    return _parse(raw, label, (FORMAT_VERSION,))
+
+
+def parse_base_declared(raw, label):
+    """The strict parser of the declaration as listed at a COMPARISON BASE: exactly the version 1 schema
+    (no reserve-bytes; its Declared carries reserve 0) or exactly the version 2 schema, so a base written
+    before version 2 still compares. Any other version, a version 1 file carrying reserve-bytes or a
+    version 2 file without it is a MustDeliverError (exit 2), as is anything parse_declared refuses."""
+    return _parse(raw, label, tuple(sorted(TOP_KEYS_BY_VERSION)))
+
+
+def _parse(raw, label, versions):
+    """The one parse of the declaration's bytes, accepting the schema versions in versions (each an exact
+    key set in TOP_KEYS_BY_VERSION). Returns a Declared; anything outside the schema is a MustDeliverError."""
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -81,17 +113,33 @@ def parse_declared(raw, label):
     # on a deeply nested array or inline table; neither is a TOMLDecodeError.
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise MustDeliverError("{} does not parse ({})".format(label, exc))
-    if not TOP_KEYS <= set(data) or not set(data) <= TOP_KEYS | OPTIONAL_TOP_KEYS:
-        raise MustDeliverError("{} must carry exactly the keys {} (and optionally {}), found {}".format(
-            label, sorted(TOP_KEYS), sorted(OPTIONAL_TOP_KEYS), sorted(data)))
+    wanted = " or ".join(str(v) for v in versions)
+    if "format-version" not in data:
+        raise MustDeliverError("{} must carry format-version (the integer {}), found the keys {}".format(
+            label, wanted, sorted(data)))
     version = data["format-version"]
     # The type is checked before the value: TOML 1.0 parses to a float that compares equal to 1, and a
     # bool is an int subclass.
-    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        raise MustDeliverError("{}: format-version must be the integer 1, found {!r}".format(label, version))
+    if isinstance(version, bool) or not isinstance(version, int) or version not in versions:
+        raise MustDeliverError("{}: format-version must be the integer {}, found {!r}".format(
+            label, wanted, version))
+    top_keys = TOP_KEYS_BY_VERSION[version]
+    if not top_keys <= set(data) or not set(data) <= top_keys | OPTIONAL_TOP_KEYS:
+        raise MustDeliverError("{} (format-version {}) must carry exactly the keys {} (and optionally {}), "
+                               "found {}".format(label, version, sorted(top_keys), sorted(OPTIONAL_TOP_KEYS),
+                                                 sorted(data)))
     warn = data["warn-margin-bytes"]
     if isinstance(warn, bool) or not isinstance(warn, int) or warn < 1:
         raise MustDeliverError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(label, warn))
+    reserve = 0
+    if "reserve-bytes" in top_keys:
+        reserve = data["reserve-bytes"]
+        if isinstance(reserve, bool) or not isinstance(reserve, int) or reserve < 0:
+            raise MustDeliverError("{}: reserve-bytes must be an integer of at least 0, found {!r}".format(
+                label, reserve))
+        if reserve > warn:
+            raise MustDeliverError("{}: reserve-bytes {} is above warn-margin-bytes {}; the reserve may not "
+                                   "exceed the warning margin".format(label, reserve, warn))
     rows = data["rule"]
     if not isinstance(rows, list) or not rows:
         raise MustDeliverError("{}: rule must be a non-empty array of [[rule]] tables; an empty list is a "
@@ -130,14 +178,14 @@ def parse_declared(raw, label):
                 raise MustDeliverError("{}: removal {} is also listed in [[rule]]; a rule is either listed or "
                                        "removed".format(label, rid))
             removals[rid] = reason
-    return ids, warn, removals
+    return Declared(ids, warn, reserve, removals)
 
 
 def listed_ids(decl_path, corpus_ids):
     """The listed ids of the declaration at decl_path (read_declared), each required to be a corpus-id in
     corpus_ids, the ids of the loaded corpus. A listed id outside it is an UnknownListedIdError naming every
     such id; removal ids are history and are not checked. Returns the listed ids in list order."""
-    ids, _warn, _removals = read_declared(decl_path)
+    ids = read_declared(decl_path).ids
     known = set(corpus_ids)
     unknown = [rid for rid in ids if rid not in known]
     if unknown:
@@ -148,8 +196,9 @@ def listed_ids(decl_path, corpus_ids):
 
 def fixture_text(ids):
     """A schema-valid declaration listing ids, for the self-test fixtures of the tools that read the list
-    (one writer, so a later schema change moves every fixture list at once)."""
-    lines = ["format-version = 1", "warn-margin-bytes = 512"]
+    (one writer, so a later schema change moves every fixture list at once). Its reserve-bytes is 0, so a
+    fixture's margin is judged against the cap alone unless the fixture writes its own reserve."""
+    lines = ["format-version = {}".format(FORMAT_VERSION), "warn-margin-bytes = 512", "reserve-bytes = 0"]
     for rid in ids:
         lines += ["", "[[rule]]", 'id = "{}"'.format(rid), 'reason = "fixture rule"']
     return "\n".join(lines) + "\n"
