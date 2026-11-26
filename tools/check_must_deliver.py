@@ -88,7 +88,8 @@ repeats another's corpus-id, is exit 2.
 
 The declared file carries exactly format-version, warn-margin-bytes and [[rule]] rows of exactly id and
 reason, and optionally [[removal]] rows of exactly id and reason; every listed id must be a corpus-id
-with a measured span. An absent, unreadable, symlinked, non-UTF-8,
+with a measured span. Its one strict reader is tools/_must_deliver.py, shared with gen_agents (which puts
+the listed rules first in AGENTS.md, after the apex), gen_first_pin_demo.measure and conformance. An absent, unreadable, symlinked, non-UTF-8,
 malformed or EMPTY list is exit 2 (a missing input is a failure, never "nothing to check"), per the
 check-fails-closed-on-unreadable rule. The gate prints every listed rule's end offset and margin on every
 run, and a WARNING (still exit 0) when the tightest margin drops under warn-margin-bytes, so growth is
@@ -155,7 +156,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import re
-import stat
 import subprocess
 import tomllib
 from pathlib import Path
@@ -165,110 +165,17 @@ from _gen_common import repo_root  # noqa: E402
 from gen_rules import CID_RE, DETAIL_HEADING, load_corpus, read_rule_source  # noqa: E402
 from gen_first_pin_demo import measure, DemoError  # noqa: E402  the ONE span algorithm, shared
 import check_release_build  # noqa: E402  the cap, read as check_release_build.CAP_BYTES at call time
+# The list's one strict reader, shared with gen_agents, gen_first_pin_demo and conformance; its read,
+# _must_deliver._read_decl_bytes, is a module attribute there, where the self-test injects its read error.
+import _must_deliver  # noqa: E402
+from _must_deliver import DECL_REL, parse_declared, read_declared  # noqa: E402
 
-DECL_REL = ".aiqt/core/must-deliver.toml"
-TOP_KEYS = frozenset({"format-version", "warn-margin-bytes", "rule"})
-OPTIONAL_TOP_KEYS = frozenset({"removal"})
-ROW_KEYS = frozenset({"id", "reason"})
-REMOVAL_KEYS = frozenset({"id", "reason"})
 DEFAULT_BASE_REMOTE = "origin/main"
 REMOTE_REF_PREFIX = "refs/remotes/"
 GIT_TIMEOUT = 60  # seconds per git call; a call that does not finish is exit 2, never a pass
 # GIT_GRAFT_FILE for every git read: a path below the null device, which is not a directory, so it can
 # never exist and git reads no grafts at all.
 NO_GRAFT_FILE = os.path.join(os.devnull, "aiqt-no-graft-file")
-
-
-def _read_decl_bytes(path):
-    """The one read of the declaration's bytes, a module attribute so the self-test can inject a
-    PermissionError here on every runner, including one where a mode-000 file stays readable."""
-    return path.read_bytes()
-
-
-def read_declared(path):
-    """The validated must-deliver list: ([rule ids], warn_margin_bytes, {removed id: reason}). Absent, a
-    symlink or non-regular entry, unreadable, not UTF-8, not TOML, or outside the exact schema is a
-    DemoError (exit 2): the list is the gate's whole policy input, so nothing else may stand in for it."""
-    try:
-        st = os.lstat(path)
-    except FileNotFoundError:
-        raise DemoError("{} does not exist; the must-deliver policy cannot be read".format(DECL_REL))
-    except OSError as exc:
-        raise DemoError("cannot stat {} ({})".format(DECL_REL, exc))
-    if not stat.S_ISREG(st.st_mode):
-        raise DemoError("{} is not a regular file (a symlink, directory or special entry)".format(DECL_REL))
-    try:
-        raw = _read_decl_bytes(path)
-    except OSError as exc:
-        raise DemoError("{} is unreadable ({})".format(DECL_REL, exc))
-    return parse_declared(raw, DECL_REL)
-
-
-def parse_declared(raw, label):
-    """The one strict parser of the declaration's bytes, shared by the working file and the file at the
-    comparison base (label names which in every message). Returns ([rule ids], warn_margin_bytes,
-    {removed id: reason}); anything outside the exact schema is a DemoError (exit 2)."""
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise DemoError("{} is not valid UTF-8 ({})".format(label, exc))
-    try:
-        data = tomllib.loads(text)
-    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError) on an
-    # integer literal past CPython's 4300-digit int-string limit, and a RecursionError (a RuntimeError)
-    # on a deeply nested array or inline table; neither is a TOMLDecodeError.
-    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
-        raise DemoError("{} does not parse ({})".format(label, exc))
-    if not TOP_KEYS <= set(data) or not set(data) <= TOP_KEYS | OPTIONAL_TOP_KEYS:
-        raise DemoError("{} must carry exactly the keys {} (and optionally {}), found {}".format(
-            label, sorted(TOP_KEYS), sorted(OPTIONAL_TOP_KEYS), sorted(data)))
-    version = data["format-version"]
-    # The type is checked before the value: TOML 1.0 parses to a float that compares equal to 1, and a
-    # bool is an int subclass.
-    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        raise DemoError("{}: format-version must be the integer 1, found {!r}".format(label, version))
-    warn = data["warn-margin-bytes"]
-    if isinstance(warn, bool) or not isinstance(warn, int) or warn < 1:
-        raise DemoError("{}: warn-margin-bytes must be a positive integer, found {!r}".format(label, warn))
-    rows = data["rule"]
-    if not isinstance(rows, list) or not rows:
-        raise DemoError("{}: rule must be a non-empty array of [[rule]] tables; an empty list is a "
-                        "failure, never \"nothing to check\"".format(label))
-    ids = []
-    for row in rows:
-        if not isinstance(row, dict) or set(row) != ROW_KEYS:
-            raise DemoError("{}: each [[rule]] row must carry exactly the keys {}, found {!r}".format(
-                label, sorted(ROW_KEYS), row))
-        rid, reason = row["id"], row["reason"]
-        if not isinstance(rid, str) or not CID_RE.fullmatch(rid):
-            raise DemoError("{}: id {!r} is not a well-formed corpus-id".format(label, rid))
-        if not isinstance(reason, str) or not reason.strip():
-            raise DemoError("{}: rule {} must carry a non-empty reason string".format(label, rid))
-        if rid in ids:
-            raise DemoError("{}: rule {} is listed more than once".format(label, rid))
-        ids.append(rid)
-    removals = {}
-    if "removal" in data:
-        removal_rows = data["removal"]
-        if not isinstance(removal_rows, list) or not removal_rows:
-            raise DemoError("{}: removal must be a non-empty array of [[removal]] tables (omit the key "
-                            "when no removal is recorded)".format(label))
-        for row in removal_rows:
-            if not isinstance(row, dict) or set(row) != REMOVAL_KEYS:
-                raise DemoError("{}: each [[removal]] row must carry exactly the keys {}, found {!r}".format(
-                    label, sorted(REMOVAL_KEYS), row))
-            rid, reason = row["id"], row["reason"]
-            if not isinstance(rid, str) or not CID_RE.fullmatch(rid):
-                raise DemoError("{}: removal id {!r} is not a well-formed corpus-id".format(label, rid))
-            if not isinstance(reason, str) or not reason.strip():
-                raise DemoError("{}: removal {} must carry a non-empty reason string".format(label, rid))
-            if rid in removals:
-                raise DemoError("{}: removal {} is recorded more than once".format(label, rid))
-            if rid in ids:
-                raise DemoError("{}: removal {} is also listed in [[rule]]; a rule is either listed or "
-                                "removed".format(label, rid))
-            removals[rid] = reason
-    return ids, warn, removals
 
 
 # --- the comparison base (every git return code is checked; a nonzero exit is never an empty result) --
@@ -880,12 +787,14 @@ def main():
 #   T6  a committed demonstration listing the rule as delivered while the fresh spans put it past the cap
 #       is exit 1 (a mutant reading delivered-prefix-obligations from the file passes);
 #   T7  an id with no span (zzzzzz) and a clause-id (prjint1.1) are each exit 2 naming the id. zzzzzz is
-#       well-formed and is refused by run's missing-span check (a mutant that silently skips unknown ids
-#       passes it). prjint1.1 is refused earlier, by read_declared's corpus-id shape check (CID_RE); with
-#       that check removed the missing-span check still refuses it, so this half fails only when both
-#       checks are removed;
-#   T8  an absent list, rule = [], and a misspelt [[rules]] table are each exit 2 (a mutant treating an
-#       absent or empty list as "nothing to check" returns 0);
+#       well-formed and is refused by measure's corpus membership check (_must_deliver.listed_ids, read
+#       before the sort, since the list sets the AGENTS.md order); run's missing-span check stays as
+#       defence in depth, and T57 tests it on its own. prjint1.1 is refused earlier, by read_declared's
+#       corpus-id shape check (CID_RE); with that check removed the membership check still refuses it, so
+#       this half fails only when both checks are removed;
+#   T8  an absent list (the fixture written with write_decl=False, its absence checked before the leg),
+#       rule = [], and a misspelt [[rules]] table are each exit 2 (a mutant treating an absent or empty
+#       list as "nothing to check" returns 0);
 #   T9  an unknown row key, an integer id, an empty reason, and a duplicate id are each exit 2 (a mutant
 #       ignoring unknown keys or deduplicating silently passes). The top-level values: format-version
 #       1.0, 0, 2 and "1", and warn-margin-bytes 0 and -1, are each exit 2 naming the key, while
@@ -1073,6 +982,15 @@ def main():
 #       cannot-evaluate naming MemoryError (a mutant whose handler drops MemoryError raises it); and a
 #       gate that is a table, a gate that is an integer and a residue that is not a string are each
 #       cannot-evaluate, never a T49 failure or a traceback.
+# The list's order and its one reader (T55 to T57):
+#   T55 the listed rules come first: an unlisted rule sorting between two listed ones in AIQT priority
+#       order, padded so that in that order the last listed rule would end past the cap, is exit 0 with
+#       that rule's measured margin (a mutant composing in priority order alone exits 1);
+#   T56 the injected PermissionError of T10 is made at _must_deliver._read_decl_bytes, the list's one read,
+#       and the vector asserts it was reached (an injection left on this module never fires, and T10's
+#       leg then reads the list and exits 0);
+#   T57 a stand-in measure returning the real spans without ruleaa's is exit 2 naming the list's missing
+#       span (a mutant without run's missing-span check raises a KeyError outside its try).
 
 import gen_first_pin_demo as gfpd  # noqa: E402  fixture helpers (_write_tree, _tuned) and CAP_BYTES
 
@@ -1270,8 +1188,10 @@ def _self_test_main_isolated():
 
         # T8. Absent list, empty rule array, misspelt table: each exit 2.
         t8 = tmp / "t8"
-        gfpd._tuned(t8, base_specs, "ruleaa", CAP - 10)
-        code, out = capture(t8)  # no must-deliver.toml written yet
+        gfpd._tuned(t8, base_specs, "ruleaa", CAP - 10, write_decl=False)
+        if os.path.lexists(t8 / DECL_REL):
+            raise _FixtureError("T8 precondition: a list exists before the absent-list leg")
+        code, out = capture(t8)  # no must-deliver.toml written
         if code != 2 or "does not exist" not in out:
             failures.append("T8: an absent list must be exit 2, got {}\n{}".format(code, out))
         _decl(t8, [], raw="format-version = 1\nwarn-margin-bytes = 512\nrule = []\n")
@@ -1361,21 +1281,26 @@ def _self_test_main_isolated():
         if code != 2 or "does not parse" not in out:
             failures.append("T10: a non-TOML list must be exit 2, got {}\n{}".format(code, out))
         _decl(t10, both)
-        # The injected PermissionError at the declaration read runs on every runner.
-        this = sys.modules[__name__]
-        real_read = this._read_decl_bytes
+        # The injected PermissionError at the declaration read runs on every runner. T56: the read is
+        # _must_deliver._read_decl_bytes (the list's one reader moved there), so the injection goes there
+        # and the vector asserts it was reached; an injection left on this module would never fire.
+        real_read = _must_deliver._read_decl_bytes
+        denied_calls = []
 
         def denied(path):
+            denied_calls.append(path)
             raise PermissionError(13, "Permission denied (injected by the self-test)", str(path))
 
-        this._read_decl_bytes = denied
+        _must_deliver._read_decl_bytes = denied
         try:
             code, out = capture(t10)
         finally:
-            this._read_decl_bytes = real_read
+            _must_deliver._read_decl_bytes = real_read
         if code != 2 or "is unreadable" not in out or "injected by the self-test" not in out:
             failures.append("T10: an injected PermissionError at the declaration read must be exit 2 "
                             "reporting the list unreadable, got {}\n{}".format(code, out))
+        if not denied_calls:
+            failures.append("T56: the injected read at _must_deliver._read_decl_bytes was never reached")
         os.chmod(decl, 0)
         try:
             if os.access(decl, os.R_OK):  # root or a DAC bypass: mode 000 is still readable
@@ -1551,8 +1476,12 @@ def _self_test_main_isolated():
 
         # T18. A base commit without the list, and one whose list is malformed: each exit 2.
         t18 = tmp / "t18"
-        gfpd._tuned(t18, base_specs, "ruleaa", CAP - 10)
+        gfpd._tuned(t18, base_specs, "ruleaa", CAP - 10, write_decl=False)
+        if os.path.lexists(t18 / DECL_REL):
+            raise _FixtureError("T18 precondition: a list exists before the base commit")
         base18 = commit_base(t18)  # no must-deliver.toml at the base
+        if fixture_git(t18, "ls-tree", "--name-only", base18, "--", DECL_REL):
+            raise _FixtureError("T18 precondition: the base commit carries a list")
         _decl(t18, [], raw=raw_decl(["prjint1", "ruleaa"]))
         code, out = capture_gate(t18, base18)
         if code != 2 or "at the base" not in out or "does not exist" not in out:
@@ -2038,11 +1967,13 @@ def _self_test_main_isolated():
         empty_msg = "FAIL: rule ruleaa has an empty core layer"
 
         def put_source(root, text):
-            """Write text as ruleaa's source and recompose AGENTS.md from the corpus, as gen_agents does."""
+            """Write text as ruleaa's source and recompose AGENTS.md from the corpus, as gen_agents does: in
+            agents_key order under the list on disk (gfpd._write_tree always leaves one)."""
             rdir = root.joinpath(*gfpd.RULES_PARTS)
             (rdir / "ruleaa.md").write_text(text, encoding="utf-8")
+            listed = read_declared(root / DECL_REL)[0]
             pairs = sorted(((src, fm) for src, fm, _ in gfpd.load_corpus(rdir)),
-                           key=lambda pf: gfpd.gen_agents.sort_key(pf[1]))
+                           key=lambda pf: gfpd.gen_agents.agents_key(pf[1], listed))
             (root / "AGENTS.md").write_bytes(gfpd.adapter_compose.compose(
                 "AGENTS.md", gfpd.gen_agents.HEADER, gfpd.gen_agents.bodies_of_pairs(pairs),
                 gfpd.adapter_compose.load_registry(root)).data)
@@ -2385,6 +2316,42 @@ def _self_test_main_isolated():
             if got[0] is not None or not got[1] or want not in got[1] or sink54:
                 failures.append("T54 {}: must be cannot-evaluate naming {} with no T49 failure, got {!r} "
                                 "{!r}".format(label, want, got, sink54))
+
+        # T55. Listed rules come first: the unlisted ruleaa sorts between the listed prjint1 and rulebb in
+        # AIQT priority order and is padded past the cap, so under priority order rulebb would end past it.
+        # In the listed-first order rulebb ends inside the cap: exit 0 with its measured margin.
+        t55 = tmp / "t55"
+        sp = gfpd._write_tree(t55, [("prjint1", True, 0), ("ruleaa", False, CAP), ("rulebb", False, 400)],
+                              listed=("prjint1", "rulebb"))
+        if not sp["prjint1"][1] <= sp["rulebb"][0] < sp["rulebb"][1] <= sp["ruleaa"][0]:
+            raise _FixtureError("T55 precondition: the fixture did not place rulebb between prjint1 and "
+                                "ruleaa: {}".format(sp))
+        code, out = capture(t55)
+        if code != 0 or "rulebb  end {:6d}  margin {}".format(sp["rulebb"][1], CAP - sp["rulebb"][1]) not in out:
+            failures.append("T55: a listed rule must come before an unlisted rule of higher priority (exit 0 "
+                            "with rulebb's margin), got {}\n{}".format(code, out))
+
+        # T57. The missing-span check in run() stays as defence in depth behind measure's own membership
+        # check: a stand-in measure returning the real spans without ruleaa's is exit 2 naming the list.
+        t57 = tmp / "t57"
+        gfpd._tuned(t57, base_specs, "ruleaa", CAP - 10)
+        _decl(t57, both)
+        real_measure = globals()["measure"]
+
+        def measure_without_ruleaa(root):
+            agents57, spans57, apex57 = real_measure(root)
+            return agents57, [s for s in spans57 if s[0] != "ruleaa"], apex57
+
+        globals()["measure"] = measure_without_ruleaa
+        try:
+            code, out = capture(t57)
+        except Exception as exc:  # a removed check raises KeyError outside run()'s try
+            code, out = "raised {!r}".format(exc), ""
+        finally:
+            globals()["measure"] = real_measure
+        if code != 2 or "with no measured rule span" not in out:
+            failures.append("T57: a listed rule with no measured span must be exit 2 naming it, got {}\n{}"
+                            .format(code, out))
     except _FixtureError as exc:
         fixture_error = str(exc)
     finally:
@@ -2419,7 +2386,9 @@ def _self_test_verdict(fixture_error, t49_error, failures, skipped):
           "straddling it, or byte-measured past it fails naming the rule; a stale AGENTS.md and every "
           "malformed (a non-integer or unsupported format-version, a warn margin below 1), absent, empty, "
           "symlinked, unreadable (an injected read error) or unparseable list fail closed (exit 2); the "
-          "demonstration's own lists are never read; an unknown or clause id fails closed naming it; the "
+          "demonstration's own lists are never read; an unknown or clause id fails closed naming it, and "
+          "a listed rule with no measured span still does behind the membership check; the listed rules "
+          "come before an unlisted rule of higher priority; the "
           "cap is read from check_release_build.CAP_BYTES at call time; a before-rules block moves the "
           "spans it measures; the margin report, the unlisted-rule line and the warn-margin WARNING "
           "(still exit 0) are printed exactly; a listed split rule is measured on its core layer, its "
